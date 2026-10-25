@@ -10,6 +10,9 @@ fn selected75_native(
         &HostSourceBinding,
         &str,
         &Connection,
+        &Fixture,
+        &mut EventCache,
+        &crate::Input,
     ),
 ) {
     use std::io::Write;
@@ -41,8 +44,8 @@ fn selected75_native(
         transcripts: Some(&prepared.transcripts),
     }, prepared.base_generation.as_deref()).unwrap();
     let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
-    check(&lease, options, &host, key, &db);
     cache.finish_semantic_stage(batch.epoch).unwrap();
+    check(&lease, options, &host, key, &db, &f, &mut cache, input);
 }
 
 fn selected75_json_oracle(
@@ -60,7 +63,11 @@ fn selected75_json_oracle(
     assert_eq!(snapshot.publication_generation, lease.snapshot().publication_generation);
     assert_eq!(snapshot.proof_generation, lease.snapshot().proof_generation);
     assert_eq!(snapshot.consumed_prefix, lease.snapshot().consumed_prefix);
-    let expected = crate::session_transcript_range_with_mode(options, &host.source_key, query, None, SessionSourceReadMode::LocalOrPinnedProvider);
+    let expected = if query.contains("&field_chunk=") || query.contains("&part=") {
+        crate::session_entry_field_with_mode(options, &host.source_key, query, None, SessionSourceReadMode::LocalOrPinnedProvider)
+    } else {
+        crate::session_transcript_range_with_mode(options, &host.source_key, query, None, SessionSourceReadMode::LocalOrPinnedProvider)
+    };
     assert_eq!(actual.status, status, "{}", String::from_utf8_lossy(&actual.body));
     assert_eq!(actual.status, expected.status);
     assert_eq!(actual.content_type, expected.content_type);
@@ -83,7 +90,7 @@ fn configured_semantic_selected75_native_long_output_walks_every_scalar_chunk() 
     selected75_native(&[
         record("2026-10-01T00:02:00Z", json!({"type":"function_call","call_id":"selected75-long","name":"selected75_long_output","arguments":"{}"})),
         record("2026-10-01T00:02:01Z", json!({"type":"function_call_output","call_id":"selected75-long","output":text})),
-    ], |lease, options, host, key, db| {
+    ], |lease, options, host, key, db, _, _, _| {
         let page = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&after=0&limit=32"), 200);
         let entry = page["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "selected75_long_output").unwrap();
         let slot = entry["slot"].as_u64().unwrap();
@@ -97,6 +104,7 @@ fn configured_semantic_selected75_native_long_output_walks_every_scalar_chunk() 
             assert_eq!(reply["slot"], slot);
             assert_eq!(reply["field"]["chunk"], chunk);
             assert_eq!(reply["field"]["name"], "out");
+            assert!(reply["observation"]["source_bytes"].as_u64().unwrap() <= crate::json_string::JSON_STRING_CHECKPOINT_BYTES + 11);
             joined.push_str(reply["text"].as_str().unwrap());
             chunks += 1;
             if reply["field"]["complete"] == true {
@@ -125,7 +133,7 @@ fn configured_semantic_selected75_native_script_output_and_image_parts() {
         record("2026-10-01T00:02:01Z", "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"selected75-item","command":["/bin/zsh","-lc","printf selected75"],"cwd":"file:///sanitized","exit_code":0,"duration":{"secs":1,"nanos":0},"aggregated_output":output}})),
         record("2026-10-01T00:02:02Z", "response_item", json!({"type":"custom_tool_call_output","call_id":"selected75-script","output":[{"type":"input_text","text":"Script completed"}]})),
         record("2026-10-01T00:03:00Z", "response_item", json!({"type":"message","role":"user","content":[{"type":"input_text","text":"recorded image"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}]})),
-    ], |lease, options, host, key, db| {
+    ], |lease, options, host, key, db, _, _, _| {
         let page = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&after=0&limit=32"), 200);
         let entries = page["entries"].as_array().unwrap();
         let command = entries.iter().find(|entry| entry["arg"] == "printf selected75").unwrap();
@@ -149,7 +157,7 @@ fn configured_semantic_selected75_native_script_output_and_image_parts() {
             let (snapshot, actual) = read_bound(lease, options, host, &query, None, SessionSourceReadMode::LocalOrPinnedProvider, &crate::SelectedReadControl::default()).unwrap();
             assert_eq!(snapshot.proof_generation, lease.snapshot().proof_generation);
             assert_eq!(snapshot.publication_generation, lease.snapshot().publication_generation);
-            let expected = crate::session_transcript_range_with_mode(options, &host.source_key, &query, None, SessionSourceReadMode::LocalOrPinnedProvider);
+            let expected = crate::session_entry_field_with_mode(options, &host.source_key, &query, None, SessionSourceReadMode::LocalOrPinnedProvider);
             assert_eq!(actual.status, 200);
             assert_eq!(actual.status, expected.status);
             assert_eq!(actual.content_type, "image/png");
@@ -158,6 +166,34 @@ fn configured_semantic_selected75_native_script_output_and_image_parts() {
             assert_eq!(actual.body, expected.body);
             assert_eq!(actual.body, png.as_slice());
         }
+    });
+}
+
+#[test]
+fn configured_semantic_selected75_replaced_prefix_refuses_old_lease_bytes() {
+    selected75_native(&[], |lease, options, host, key, db, f, cache, input| {
+        let page = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&after=0&limit=32"), 200);
+        let slot = page["entries"][0]["slot"].as_u64().unwrap();
+        let generation = page["projection"]["generation"].as_str().unwrap();
+        let query = format!("sid={key}&generation={generation}&after={slot}&limit=1&field_chunk=0");
+        let before = selected75_json_oracle(lease, options, host, db, &query, 200);
+        assert_eq!(before["text"], "sanitized model fixture");
+        let path = input.full_path(options);
+        let original = fs::read_to_string(&path).unwrap();
+        let replacement = original.replacen("sanitized model fixture", "rewritten model fixture", 1);
+        assert_ne!(replacement, original);
+        assert_eq!(replacement.len(), original.len());
+        fs::write(&path, replacement).unwrap();
+        cache.ingest(&"b".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(f, cache, options, input, "selected75-replacement");
+        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+        let current: String = db.query_row("SELECT value FROM main.meta WHERE namespace='source-a' AND key='catalog_generation'", [], |row| row.get(0)).unwrap();
+        assert_ne!(current, lease.snapshot().publication_generation);
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        // read_inner always calls Records::finish after presentation. The
+        // incompatible consumed-prefix proof must refuse the whole read,
+        // rather than return replacement bytes under A's authenticated identity.
+        assert!(read_bound(lease, options, host, &query, None, SessionSourceReadMode::LocalOrPinnedProvider, &crate::SelectedReadControl::default()).is_err());
     });
 }
 
