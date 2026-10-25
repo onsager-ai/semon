@@ -13,6 +13,16 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "source_mutations",
+        columns: "source_path bytea,evidence bytea",
+        key: "source_path",
+    },
+    Table {
+        name: "relocation_candidates",
+        columns: "old_path bytea,new_path bytea",
+        key: "old_path",
+    },
+    Table {
         name: "files",
         columns: "file_id bigint,path bytea,dev numeric,ino numeric,size numeric,mtime_ns bytea,ctime_ns bytea?,resume_at numeric,head_sha256 bytea,tail_sha256 bytea,entrypoint bytea?,title bytea?,agent_name bytea?,last_model bytea?,failed boolean,first_ms bigint?,last_ms bigint?,cwd bytea?,branch bytea?,pending bytea,tool_ids bytea,yields bytea,busy bytea,links bytea,codex_tokens bytea,codex_tokens_by_model bytea,rate_limits bytea?,codex_native_usage bytea?,codex_pricing_fingerprint bytea?,copilot bytea?",
         key: "file_id",
