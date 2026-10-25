@@ -807,7 +807,10 @@ fn validate_presentation(
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
     let entry = proof_codec::presentation_entry(&metadata, &slots, &text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest.entries.iter().any(|(k, d)| k == key && *d == entry)
+        || !manifest
+            .entries
+            .iter()
+            .any(|(k, d)| k == key && *d == entry)
     {
         return Err(StorageError::ScopeChanged);
     }
