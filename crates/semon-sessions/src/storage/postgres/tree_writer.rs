@@ -186,7 +186,7 @@ fn persisted_witness(tx: &mut PgTxn<'_>, projection: i64) -> Result<String, Stor
             _ => writer.tools(),
         }
         let predicate = format!(
-            "FROM semon_pg_native_tree_{family} WHERE namespace=$1 AND projection_id=$2 AND ($3::bytea IS NULL OR {key}>$3){filter} ORDER BY {key} LIMIT 1"
+            "FROM semon_pg_native_tree_{family} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND ($3::bytea IS NULL OR {key}>$3){filter} ORDER BY {key} LIMIT 1"
         );
         let sizes = columns
             .split(',')
