@@ -1,6 +1,8 @@
 //! SQLite physical native-commit stages. The semantic sequence is shared.
 use super::*;
-use crate::events::native_commit::{self as shared, Effects, Input, RelationshipGroup, Relationships};
+use crate::events::native_commit::{
+    self as shared, Effects, Input, RelationshipGroup, Relationships,
+};
 
 pub(super) struct Writer<'a, 'tx, 'conn> {
     pub(super) transaction: &'tx Transaction<'conn>,
@@ -9,6 +11,7 @@ pub(super) struct Writer<'a, 'tx, 'conn> {
     pub(super) usage_deletes: &'a mut UsageDeletes<'tx>,
     pub(super) relationship_started: Option<Instant>,
     pub(super) relationship_rows_before: Option<u64>,
+    pub(super) dirty_started: Option<Instant>,
 }
 
 impl Relationships for Writer<'_, '_, '_> {
@@ -18,7 +21,9 @@ impl Relationships for Writer<'_, '_, '_> {
     }
     fn clear(&mut self, path: &str, group: RelationshipGroup) -> rusqlite::Result<()> {
         self.relationship_started = self.measurements.start();
-        self.relationship_rows_before = self.relationship_started.map(|_| self.transaction.total_changes());
+        self.relationship_rows_before = self
+            .relationship_started
+            .map(|_| self.transaction.total_changes());
         let (singleton, composite) = match group {
             RelationshipGroup::Lineage => (
                 "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
@@ -29,7 +34,10 @@ impl Relationships for Writer<'_, '_, '_> {
                 "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
             ),
         };
-        self.transaction.execute(semantic_stage::support_sql(self.transaction, singleton, composite)?, [path])?;
+        self.transaction.execute(
+            semantic_stage::support_sql(self.transaction, singleton, composite)?,
+            [path],
+        )?;
         Ok(())
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> rusqlite::Result<()> {
@@ -41,10 +49,19 @@ impl Relationships for Writer<'_, '_, '_> {
     fn finished(&mut self, group: RelationshipGroup) -> rusqlite::Result<()> {
         let (label, rows) = match group {
             RelationshipGroup::Lineage => ("dependencies", "dependencies_written_rows"),
-            RelationshipGroup::Semantic => ("semantic_dependencies", "semantic_dependencies_written_rows"),
+            RelationshipGroup::Semantic => (
+                "semantic_dependencies",
+                "semantic_dependencies_written_rows",
+            ),
         };
-        self.measurements.record(label, self.relationship_started, 1);
-        record_writer_rows(self.transaction, self.measurements, rows, self.relationship_rows_before);
+        self.measurements
+            .record(label, self.relationship_started, 1);
+        record_writer_rows(
+            self.transaction,
+            self.measurements,
+            rows,
+            self.relationship_rows_before,
+        );
         #[cfg(test)]
         configured::effect(label)?;
         Ok(())
@@ -53,47 +70,73 @@ impl Relationships for Writer<'_, '_, '_> {
 
 impl Effects for Writer<'_, '_, '_> {
     type Error = rusqlite::Error;
+    fn planning_started(&mut self) {
+        self.dirty_started = self.measurements.start();
+    }
+    fn planning_finished(&mut self) {
+        self.measurements.record("dirty_rows", self.dirty_started, 1);
+    }
     fn begin(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
-        let Input { path, ledger, changes, expected, .. } = *input;
+        let Input {
+            path,
+            ledger,
+            changes,
+            expected,
+            ..
+        } = *input;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
-    relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
-    native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
-    measurements.record("relocation", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "relocation_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("relocation")?;
+        relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
+        native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
+        measurements.record("relocation", started, 1);
+        record_writer_rows(
+            transaction,
+            measurements,
+            "relocation_written_rows",
+            rows_before,
+        );
+        #[cfg(test)]
+        configured::effect("relocation")?;
         Ok(())
     }
-    fn file(&mut self, input: &Input<'_>, changes: &super::super::DirtyRows) -> rusqlite::Result<()> {
+    fn file(
+        &mut self,
+        input: &Input<'_>,
+        changes: &super::super::DirtyRows,
+    ) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
-        let Input { path, ledger, index, .. } = *input;
+        let Input {
+            path,
+            ledger,
+            index,
+            ..
+        } = *input;
         let usage_deletes = &mut *self.usage_deletes;
-    write_file_with_usage_deletes(
-        transaction,
-        path,
-        ledger,
-        changes,
-        index,
-        measurements,
-        usage_deletes,
-    )?;
+        write_file_with_usage_deletes(
+            transaction,
+            path,
+            ledger,
+            changes,
+            index,
+            measurements,
+            usage_deletes,
+        )?;
         Ok(())
     }
     fn usage(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
-        let Input { path, ledger, index, .. } = *input;
+        let Input {
+            path,
+            ledger,
+            index,
+            ..
+        } = *input;
         let transaction = self.transaction;
-    native_usage::write(transaction, path, ledger, index)?;
-    #[cfg(test)]
-    configured::effect("native_usage")?;
+        native_usage::write(transaction, path, ledger, index)?;
+        #[cfg(test)]
+        configured::effect("native_usage")?;
         Ok(())
     }
     fn relationships(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
@@ -102,56 +145,56 @@ impl Effects for Writer<'_, '_, '_> {
     fn archive(&mut self, path: &str) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
-    let started = measurements.start();
-    transaction.execute(
-        native_metadata_delete(transaction)?,
-        [archive_index_key(path)],
-    )?;
-    measurements.record("archive_metadata", started, 1);
-    #[cfg(test)]
-    configured::effect("archive_metadata")?;
+        let started = measurements.start();
+        transaction.execute(
+            native_metadata_delete(transaction)?,
+            [archive_index_key(path)],
+        )?;
+        measurements.record("archive_metadata", started, 1);
+        #[cfg(test)]
+        configured::effect("archive_metadata")?;
         Ok(())
     }
     fn invalidate(&mut self, path: &str, semantic_change: bool) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
         let namespace = self.namespace;
-    let started = measurements.start();
-    if semantic_change {
-        crate::storage::sqlite::source_journal::invalidate(
-            transaction,
-            namespace,
-            path,
-            "changed",
-        )?;
-        measurements.record("invalidation", started, 1);
-        #[cfg(test)]
-        configured::effect("invalidation")?;
-    } else {
-        measurements.record("representation_repair", started, 1);
-    }
+        let started = measurements.start();
+        if semantic_change {
+            crate::storage::sqlite::source_journal::invalidate(
+                transaction,
+                namespace,
+                path,
+                "changed",
+            )?;
+            measurements.record("invalidation", started, 1);
+            #[cfg(test)]
+            configured::effect("invalidation")?;
+        } else {
+            measurements.record("representation_repair", started, 1);
+        }
         Ok(())
     }
     fn retire_mutation(&mut self, path: &str) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(
+        let started = measurements.start();
+        let rows_before = started.map(|_| transaction.total_changes());
+        transaction.execute(
         semantic_stage::support_sql(transaction,
             "DELETE FROM session_source_mutations WHERE source_path=?1",
             "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,
         [path],
     )?;
-    measurements.record("mutation_retirement", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "mutation_retirement_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("mutation_retirement")?;
+        measurements.record("mutation_retirement", started, 1);
+        record_writer_rows(
+            transaction,
+            measurements,
+            "mutation_retirement_written_rows",
+            rows_before,
+        );
+        #[cfg(test)]
+        configured::effect("mutation_retirement")?;
         Ok(())
     }
 }
@@ -170,6 +213,12 @@ pub(crate) fn parser_oracle(
     drop(cache);
     let connection = Connection::open(super::super::EventCache::path(cache_path)).unwrap();
     let mut statement = connection.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE source_path=?1 ORDER BY harness COLLATE BINARY,native_id COLLATE BINARY").unwrap();
-    let rows = statement.query_map([source.to_str().unwrap()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let rows = statement
+        .query_map([source.to_str().unwrap()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
     ((*index).clone(), rows)
 }
