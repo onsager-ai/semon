@@ -1,5 +1,5 @@
 diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
-index 8bcd9ed7..0f65ad9b 100644
+index 8bcd9ed7..98c2f14c 100644
 --- a/crates/semon-sessions/src/events/store/configured.rs
 +++ b/crates/semon-sessions/src/events/store/configured.rs
 @@ -8396,13 +8396,22 @@ mod tests {
@@ -36,21 +36,25 @@ index 8bcd9ed7..0f65ad9b 100644
                  let path = input.full_path(options);
                  fs::create_dir_all(path.parent().unwrap()).unwrap();
                  fs::rename(old, path).unwrap();
-@@ -8454,7 +8463,12 @@ mod tests {
+@@ -8454,7 +8463,16 @@ mod tests {
                          break;
                      }
                      Ok(Some(batch)) => {
 -                        paged |= f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
 +                        let cursor = f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
 +                        if cursor {
-+                            assert_eq!(batch.paths.len(), 64, "the real filename frontier returns one full bounded page");
++                            assert_eq!(
++                                batch.paths.len(),
++                                64,
++                                "the real filename frontier returns one full bounded page"
++                            );
 +                            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'", [], |r| r.get::<_,i64>(0)).unwrap(), 65, "seed plus exactly 64 discovered candidates precede the component refusal");
 +                        }
 +                        paged |= cursor;
                          if !batch.paths.is_empty() {
                              let selected = inputs
                                  .iter()
-@@ -8472,7 +8486,9 @@ mod tests {
+@@ -8472,7 +8490,9 @@ mod tests {
                                      &batch,
                                      1_790_000_000_000,
                                  )
@@ -61,7 +65,7 @@ index 8bcd9ed7..0f65ad9b 100644
                          }
                      }
                      Ok(None) => panic!("native frontier stage disappeared"),
-@@ -8523,6 +8539,123 @@ mod tests {
+@@ -8523,6 +8543,124 @@ mod tests {
              );
          }
  
@@ -147,7 +151,8 @@ index 8bcd9ed7..0f65ad9b 100644
 +                        } else {
 +                            format!("/unrelated/session-state/noise-{i}/events.jsonl")
 +                        };
-+                        db.execute(&insert, params![namespace, 10000 + i, path]).unwrap();
++                        db.execute(&insert, params![namespace, 10000 + i, path])
++                            .unwrap();
 +                        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'bounded-work-noise',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
 +                        db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
 +                    }
