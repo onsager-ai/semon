@@ -115,7 +115,7 @@ pub(super) fn write(tx: &mut PgTxn<'_>, path: &str, expected: Option<&Ledger>, l
     // refresh stage, not overwritten by a core file write.
     r.add("copilot",file.copilot.as_ref().map(json).transpose()?);
     r.put(tx,"files","file_id")?;
-    let full = native_rows::full_changes(index);
+    let full = if changes.is_none() { native_rows::full_changes(index) } else { DirtyRows::default() };
     let changes = changes.unwrap_or(&full);
     let plan = NativeRowPlan::new(index, changes);
     for (extra,rows) in [(false,&plan.events),(true,&plan.extras)] {
