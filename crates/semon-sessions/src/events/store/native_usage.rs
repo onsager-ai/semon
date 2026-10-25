@@ -6,14 +6,19 @@ pub(crate) mod algorithm;
 
 #[cfg(test)]
 pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex {
-    let mut file = crate::sealed::LogFile::open(path).unwrap();
     let mut index = FileIndex::default();
     if harness == "codex" {
         index.native_usage_observations = Some(Vec::new());
     }
-    super::super::parse(&mut file, 0, harness, &mut index, None, None,
-        &mut crate::native_timing::Measurements::default()).unwrap();
+    parser_append_fixture(path, harness, &mut index, 0);
     index
+}
+
+#[cfg(test)]
+pub(crate) fn parser_append_fixture(path: &std::path::Path, harness: &str, index: &mut FileIndex, from: u64) {
+    let mut file = crate::sealed::LogFile::open(path).unwrap();
+    super::super::parse(&mut file, from, harness, index, None, None,
+        &mut crate::native_timing::Measurements::default()).unwrap();
 }
 
 #[cfg(test)]
