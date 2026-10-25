@@ -111,6 +111,13 @@ pub(super) fn stage(
     if files.len() != 1 {
         return Err(StorageError::Conflict);
     }
+    // An earlier unacknowledged staged family must be reconciled through its
+    // exact operation identity, never replayed as another generation. This
+    // check is serialized by the same namespace lock as the first writer.
+    let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_generations WHERE namespace=$1 AND source_id=$2 AND NOT complete)", &[&ns,&expected_source]).map_err(sqlstate::error)?.get(0);
+    if pending {
+        return Err(StorageError::Conflict);
+    }
     let file: i64 = files[0].get(0);
     let previous_receipt = expected_header.map(header_ledger);
     // An existing header must match the explicitly captured previous ledger.
