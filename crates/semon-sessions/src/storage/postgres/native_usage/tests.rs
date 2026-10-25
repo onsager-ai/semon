@@ -29,10 +29,10 @@ fn ledger(offset: u64) -> Ledger {
 fn rows(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
     let mut result = Vec::new();
     for query in [
-        "SELECT source_id::text,encode(source_path,'hex'),convert_from(receipt,'UTF8'),checkpoint::text,parser_version::text,usage_ready::int::text FROM semon_pg_native_usage_sources ORDER BY source_id",
-        "SELECT source_id::text,native_offset::text,encode(identity,'hex'),encode(payload,'hex'),encode(record,'hex'),encode(outcome,'hex'),encode(model_outcome,'hex') FROM semon_pg_native_usage_facts ORDER BY source_id,native_offset",
-        "SELECT source_id::text,encode(scope,'hex'),encode(identity,'hex'),native_offset::text FROM semon_pg_native_usage_identities ORDER BY source_id,scope,identity",
-        "SELECT source_id::text,encode(kind,'hex'),encode(dimension,'hex'),encode(value,'hex') FROM semon_pg_native_usage_dimensions ORDER BY source_id,kind,dimension",
+        "SELECT source_id::text,encode(source_path,'hex'),convert_from(receipt,'UTF8'),checkpoint::text,parser_version::text,usage_ready::int::text FROM semon_pg_native_usage_sources ORDER BY semon_pg_native_usage_sources.source_id",
+        "SELECT source_id::text,native_offset::text,encode(identity,'hex'),encode(payload,'hex'),encode(record,'hex'),encode(outcome,'hex'),encode(model_outcome,'hex') FROM semon_pg_native_usage_facts ORDER BY semon_pg_native_usage_facts.source_id,semon_pg_native_usage_facts.native_offset",
+        "SELECT source_id::text,encode(scope,'hex'),encode(identity,'hex'),native_offset::text FROM semon_pg_native_usage_identities ORDER BY semon_pg_native_usage_identities.source_id,scope,identity",
+        "SELECT source_id::text,encode(kind,'hex'),encode(dimension,'hex'),encode(value,'hex') FROM semon_pg_native_usage_dimensions ORDER BY semon_pg_native_usage_dimensions.source_id,kind,dimension",
     ] {
         for row in tx.driver.query(query, &[]).map_err(sqlstate::error)? {
             result.push((0..row.len()).map(|i| row.get(i)).collect());
