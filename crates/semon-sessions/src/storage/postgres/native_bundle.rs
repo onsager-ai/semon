@@ -189,7 +189,7 @@ impl Effects for Writer<'_, '_> {
 /// families. This partial result must never acknowledge Raw or native ingest.
 #[allow(dead_code)] // Complete IndexStore remains closed pending the named families.
 pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile, StorageError> {
-    if input.index.tree_summary.is_none() {
+    if input.index.tree_summary.is_none() && input.index.copilot.is_none() {
         return Err(StorageError::NamespaceUpgradePending);
     }
     shared::write(&mut Writer { tx, source: 0 }, input)?;
