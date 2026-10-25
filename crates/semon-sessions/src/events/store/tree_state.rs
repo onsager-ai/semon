@@ -490,48 +490,44 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    // Typed rows in BINARY order feed the backend-neutral production recipe.
-    let mut labels = Vec::<(String, String)>::new();
-    let mut models = Vec::<String>::new();
-    let mut tools = Vec::<(String, String)>::new();
+    // Keep the physical SQLite query and its admission charge identical to the
+    // original witness.  `row` inspects the one encoded json_array cell before
+    // `get` allocates it; the shared writer then frames that canonical value
+    // while the cursor is still streaming.
+    let mut writer = crate::events::tree_rows::witness::Writer::new();
     for (family, (plain, scoped)) in [
         (
-            "SELECT label,value FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-            "SELECT label,value FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
         ),
         (
-            "SELECT model,NULL FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-            "SELECT model,NULL FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
         ),
         (
-            "SELECT tool_id,name FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-            "SELECT tool_id,name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
         ),
     ]
     .into_iter()
     .enumerate()
     {
+        match family {
+            0 => writer.labels(),
+            1 => writer.models(),
+            _ => writer.tools(),
+        }
         let mut statement = c.prepare(sql(c, plain, scoped)?)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
             crate::selected_read::checkpoint("tree_witness")
                 .map_err(crate::selected_read::sql_error)?;
-            let key: String = row.get(0)?;
-            match family {
-                0 => labels.push((key, row.get(1)?)),
-                1 => models.push(key),
-                _ => tools.push((key, row.get(1)?)),
-            }
+            let value: String = row.get(0)?;
+            writer.encoded(&value);
         }
     }
-    Ok(Some(crate::events::tree_rows::witness::digest(
-        labels
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-        models.iter().map(String::as_str),
-        tools.iter().map(|(id, name)| (id.as_str(), name.as_str())),
-    )))
+    Ok(Some(writer.finish()))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
@@ -737,5 +733,35 @@ mod namespace_tests {
         models.sort_unstable();
         let actual = digest(labels, models, [("t\0", odd), ("t🦀", "n")]);
         assert_eq!(actual, format!("{:x}", oracle.finalize()));
+    }
+
+    #[test]
+    fn tree_witness_budgets_escaped_sqlite_json_before_decode() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        let escaped = "a\0b\u{1}\"\\🦀";
+        let encoded: String = c
+            .query_row("SELECT json_array(?1,?2)", ["label", escaped], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let cost = 64 + encoded.len() * 8;
+
+        let too_small = crate::SelectedReadControl::default().with_limits(1, cost - 1);
+        let mut statement = c.prepare("SELECT json_array(?1,?2)").unwrap();
+        {
+            let _scope = crate::selected_read::Scope::enter(&too_small);
+            let mut rows = statement.query(["label", escaped]).unwrap();
+            let row = rows.next().unwrap().unwrap();
+            assert!(crate::selected_read::row(row, 64).is_err());
+        }
+
+        let exact = crate::SelectedReadControl::default().with_limits(1, cost);
+        {
+            let _scope = crate::selected_read::Scope::enter(&exact);
+            let mut rows = statement.query(["label", escaped]).unwrap();
+            let row = rows.next().unwrap().unwrap();
+            crate::selected_read::row(row, 64).unwrap();
+            assert_eq!(row.get::<_, String>(0).unwrap(), encoded);
+        }
     }
 }
