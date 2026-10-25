@@ -2613,6 +2613,8 @@ impl IndexStore for SqliteStore {
         complete: bool,
     ) -> Result<(), StoreError> {
         let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
         let cached = self.discovery.publication.take();
         if !self.connection.is_autocommit() {
             self.discovery.recovery = None;
@@ -2621,11 +2623,15 @@ impl IndexStore for SqliteStore {
             ));
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
+        let started = measurements.start();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        measurements.record("immediate_transaction", started, 1);
+        let started = measurements.start();
         let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_before", started, 1);
         if cached.as_ref().is_some_and(|(old, inputs, done)| {
             *old == witness && inputs == paths && *done == complete
         }) {
@@ -2634,26 +2640,44 @@ impl IndexStore for SqliteStore {
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
             return Ok(());
         }
+        let started = measurements.start();
         if self.discovery.recovery != Some(witness) {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("qualification", started, 1);
         let before = tx.total_changes();
+        let started = measurements.start();
         crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
             .map_err(failure)?;
+        measurements.record("source_journal_inclusive", started, paths.len());
+        let started = measurements.start();
         let recovery_still_complete = if self.discovery.recovery == Some(witness) {
             crate::native_timing::discovery_count(|counts| counts.statements += 1);
             tx.query_row(configured::metadata_sql(&tx,"SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')","SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after')").map_err(failure)?,[],|r|r.get::<_,bool>(0)).map_err(failure)?
         } else {
             false
         };
+        measurements.record("recovery_marker", started, 1);
+        let started = measurements.start();
         let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_after", started, 1);
+        let started = measurements.start();
         if committed.contract != witness.contract
             || committed.main_schema != witness.main_schema
             || committed.temp_schema != witness.temp_schema
         {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("contract_requalification", started, 1);
+        let started = measurements.start();
         tx.commit().map_err(failure)?;
+        measurements.record("commit", started, 1);
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&self.path),
+                "discovery_publication_work",
+            );
+        }
         // Only advance after rechecking the durable marker under this same
         // lock, including effects of authored or fault-injected triggers.
         if recovery_still_complete {

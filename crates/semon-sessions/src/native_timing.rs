@@ -1085,6 +1085,56 @@ pub(crate) mod cleanup_tests {
     }
 }
 
+/// Disjoint candidate-page and between-page intervals. Between-page time also
+/// includes producer wrapper work; it must never be called scheduler idle time.
+#[derive(Default)]
+pub(crate) struct ColdDiscoveryProgress {
+    pages: usize,
+    examined: usize,
+    candidates: usize,
+    active_us: u128,
+    between_pages_us: u128,
+    previous_end: Option<Instant>,
+}
+
+impl ColdDiscoveryProgress {
+    fn record(&mut self, start: Instant, end: Instant, examined: usize, candidates: usize) {
+        if let Some(previous_end) = self.previous_end {
+            self.between_pages_us += start.saturating_duration_since(previous_end).as_micros();
+        }
+        self.active_us += end.saturating_duration_since(start).as_micros();
+        self.pages += 1;
+        self.examined += examined;
+        self.candidates += candidates;
+        self.previous_end = Some(end);
+    }
+
+    pub(crate) fn page(
+        &mut self,
+        cache: &Path,
+        start: Option<Instant>,
+        examined: usize,
+        candidates: usize,
+        complete: (bool, bool),
+    ) {
+        let Some(start) = start else {
+            return;
+        };
+        self.record(start, Instant::now(), examined, candidates);
+        let producer = id(&crate::events::EventCache::path(cache));
+        eprintln!(
+            "semon sessions native: producer={producer} cold_discovery_progress pages={} examined={} candidates={} active_us={} between_pages_us={} paths_complete={} recovery_complete={}",
+            self.pages,
+            self.examined,
+            self.candidates,
+            self.active_us,
+            self.between_pages_us,
+            complete.0,
+            complete.1,
+        );
+    }
+}
+
 pub(crate) struct Phase(Option<(String, &'static str, Instant)>);
 
 impl Phase {
@@ -1113,6 +1163,33 @@ impl Drop for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_discovery_progress_separates_active_pages_from_continuation_gaps() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut progress = ColdDiscoveryProgress::default();
+        progress.record(start, start + Duration::from_micros(10), 64, 64);
+        progress.record(
+            start + Duration::from_micros(13),
+            start + Duration::from_micros(20),
+            512,
+            0,
+        );
+        progress.record(
+            start + Duration::from_micros(25),
+            start + Duration::from_micros(30),
+            60,
+            60,
+        );
+        assert_eq!(progress.pages, 3);
+        assert_eq!(progress.examined, 636);
+        assert_eq!(progress.candidates, 124);
+        assert_eq!(progress.active_us, 22);
+        assert_eq!(progress.between_pages_us, 8);
+        assert_eq!(progress.active_us + progress.between_pages_us, 30);
+    }
 
     #[test]
     fn cleanup_vm_work_distinguishes_unavailable_from_valid_zero() {
