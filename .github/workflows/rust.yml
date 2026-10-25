@@ -62,7 +62,7 @@ jobs:
 
       # Diagnostic only: leave both normal isolated and full-parallel gates
       # below unchanged, and retain counters even if this diagnostic fails.
-      - name: Cold Index writer diagnostic (not qualification)
+      - name: Cold Catalog page diagnostic (not qualification)
         continue-on-error: true
         env:
           SEMON_BUILD_TIMING: "1"
