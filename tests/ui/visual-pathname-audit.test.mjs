@@ -3,10 +3,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { audit, qualifyCandidateEvidence } from './visual-pathname-audit.mjs';
+import { fileURLToPath } from 'node:url';
+import {
+  audit,
+  createBindingProposal,
+  qualifyCandidateEvidence,
+} from './visual-pathname-audit.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const fingerprint = 'a'.repeat(64);
+const previousFingerprint = 'b'.repeat(64);
+const sourceSha = 'c'.repeat(40);
 const previousBytes = Buffer.from(
   JSON.stringify({ pathname: '/s/claude/harbor', selectors: { text: 'same', box: [0, 1] } }),
 );
@@ -40,13 +49,17 @@ function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
     ...state,
     reference: 'source-pin',
     referenceHub: 'hub-pin',
+    candidateFingerprint: previousFingerprint,
     artifactDigests: digests,
     reviewedCandidate: 'reviewed-head',
   };
   const baseReport = {
     scope,
+    candidateFingerprint: fingerprint,
     reference: 'source-pin',
     referenceHub: 'hub-pin',
+    errors: [],
+    coverageFailures: null,
     results: [
       {
         key: state.key,
@@ -71,7 +84,15 @@ function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
     fs.writeFileSync(reportPath, JSON.stringify(currentReport));
     return audit({ root, registry: { acceptances } });
   };
-  return { run, accepted, baseReport };
+  return { run, accepted, baseReport, root };
+}
+
+function proposalFixture(t, options = {}) {
+  const current = fixture(t, options);
+  const result = current.run();
+  const registry = { version: 1, acceptances: [structuredClone(current.accepted)] };
+  const registryText = JSON.stringify(registry, null, 2) + '\n';
+  return { root: current.root, result, registry, registryText };
 }
 
 test('accepts only the exact pathname restoration or an identical accepted evidence hash', (t) => {
@@ -130,6 +151,149 @@ test('refuses changed PNG digests and reference pins', (t) => {
   const changedReference = structuredClone(baseReport);
   changedReference.reference = 'different-source-pin';
   assert.match(run({ report: changedReference }).refused[0].reason, /Reference pins changed/);
+});
+
+test('refuses a duplicated current row and duplicate accepted registry record', (t) => {
+  const duplicateCurrent = fixture(t);
+  const report = structuredClone(duplicateCurrent.baseReport);
+  report.results.push(structuredClone(report.results[0]));
+  assert.match(duplicateCurrent.run({ report }).refused[0].reason, /duplicated/);
+
+  const duplicateRegistry = fixture(t);
+  assert.match(
+    duplicateRegistry.run({
+      acceptances: [duplicateRegistry.accepted, structuredClone(duplicateRegistry.accepted)],
+    }).refused[0].reason,
+    /one accepted state/,
+  );
+});
+
+test('refuses changed reference and diff evidence digests independently of PNG digests', (t) => {
+  const { run, baseReport } = fixture(t);
+  for (const [side, type] of [
+    ['reference', 'evidence'],
+    ['diff', 'evidence'],
+  ]) {
+    const changed = structuredClone(baseReport);
+    changed.results[0].artifactDigests[side][type] = hash(Buffer.from(`changed ${side} evidence`));
+    assert.match(run({ report: changed }).refused[0].reason, new RegExp(`${side}\\.evidence`));
+  }
+});
+
+test('proposal patch changes only the two candidate binding fields and is deterministic', (t) => {
+  const input = proposalFixture(t);
+  const proposal = createBindingProposal({ ...input, sourceSha });
+  const repeated = createBindingProposal({ ...input, sourceSha });
+  assert.equal(proposal.status, 'proposed');
+  assert.equal(proposal.patch, repeated.patch);
+  assert.match(proposal.patch, new RegExp(`# source_sha: ${sourceSha}`));
+  assert.match(proposal.patch, new RegExp(`# runtime_fingerprint: ${fingerprint}`));
+  assert.match(proposal.patch, /# report_sha256: \{"pixels\/report\.json":"[a-f0-9]{64}"\}/);
+  assert.match(proposal.patch, /# qualified_count: 1\n# refused_count: 0/);
+
+  const before = input.registryText.split('\n');
+  const after = proposal.proposedRegistryText.split('\n');
+  const changed = before.flatMap((line, index) =>
+    line === after[index] ? [] : [line, after[index]],
+  );
+  assert.equal(changed.length, 4);
+  assert.match(changed[0], /"candidateFingerprint"/);
+  assert.match(changed[0], new RegExp(previousFingerprint));
+  assert.match(changed[1], new RegExp(fingerprint));
+  assert.match(changed[2], /"evidence"/);
+  assert.match(changed[2], new RegExp(hash(previousBytes)));
+  assert.match(changed[3], new RegExp(hash(canonicalBytes)));
+  assert.equal(JSON.stringify(input.registry, null, 2) + '\n', input.registryText);
+  assert.equal(proposal.proposedRegistryText.endsWith('\n'), true);
+});
+
+test('proposal refuses audit rows, report errors and non-null coverage failures without a patch', (t) => {
+  const refusedCurrent = fixture(t);
+  const duplicate = structuredClone(refusedCurrent.baseReport);
+  duplicate.results.push(structuredClone(duplicate.results[0]));
+  const refusedAudit = refusedCurrent.run({ report: duplicate });
+  const refusedRegistry = {
+    version: 1,
+    acceptances: [structuredClone(refusedCurrent.accepted)],
+  };
+  const refused = createBindingProposal({
+    root: refusedCurrent.root,
+    registry: refusedRegistry,
+    registryText: JSON.stringify(refusedRegistry, null, 2) + '\n',
+    result: refusedAudit,
+    sourceSha,
+  });
+  assert.equal(refused.status, 'refused');
+  assert.equal(refused.patch, '');
+
+  for (const field of ['errors', 'coverageFailures']) {
+    const current = fixture(t);
+    const report = structuredClone(current.baseReport);
+    if (field === 'errors') report.errors = ['render failed'];
+    else report.coverageFailures = 1;
+    const result = current.run({ report });
+    const registry = { version: 1, acceptances: [structuredClone(current.accepted)] };
+    const proposal = createBindingProposal({
+      root: current.root,
+      registry,
+      registryText: JSON.stringify(registry, null, 2) + '\n',
+      result,
+      sourceSha,
+    });
+    assert.equal(proposal.status, 'refused');
+    assert.equal(proposal.patch, '');
+  }
+});
+
+test('proposal CLI exits nonzero and writes no patch when rows or report gates fail', (t) => {
+  const reports = [
+    {
+      scope: 'main',
+      candidateFingerprint: fingerprint,
+      reference: 'source-pin',
+      referenceHub: 'hub-pin',
+      errors: [],
+      coverageFailures: null,
+      results: [{ key: 'no-accepted-record', pass: false }],
+    },
+    {
+      scope: 'main',
+      candidateFingerprint: fingerprint,
+      errors: ['render error'],
+      coverageFailures: null,
+      results: [],
+    },
+    {
+      scope: 'main',
+      candidateFingerprint: fingerprint,
+      errors: [],
+      coverageFailures: 1,
+      results: [],
+    },
+  ];
+  for (const [index, report] of reports.entries()) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visual-audit-cli-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const root = path.join(dir, 'current');
+    fs.mkdirSync(path.join(root, 'pixels'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'pixels/report.json'), JSON.stringify(report));
+    const proposalPath = path.join(dir, `proposal-${index}.patch`);
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL('./visual-pathname-audit.mjs', import.meta.url)), '--propose'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          SEMON_UI_OUT: root,
+          GITHUB_SHA: sourceSha,
+          SEMON_VISUAL_PROPOSAL_PATH: proposalPath,
+        },
+      },
+    );
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.equal(fs.existsSync(proposalPath), false);
+  }
 });
 
 test('resolves nested transport evidence from each report capture root', (t) => {

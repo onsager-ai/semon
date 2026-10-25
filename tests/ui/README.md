@@ -75,6 +75,14 @@ its completion witness is the native-publication success message in the CI log.
   excuses missing coverage/execution errors. A follow-up may refresh only
   justified exact bindings while preserving original review/decision/provenance/
   history; final CI and independent review still apply.
+  `visual-pathname-audit.mjs --propose` emits a CI-only patch only when every
+  report has `errorCount` 0 and `coverageFailures` null, with no refused rows.
+  The patch changes only candidate fingerprints and candidate-evidence digests
+  for existing qualified records, and records the Source SHA, runtime fingerprint
+  and report digests in a Runner temporary artifact; it does not edit the registry
+  or approve appearance. Root may
+  adopt it only after independent qualification of final-candidate CI confirms
+  the same image digests and runtime fingerprint; otherwise the bindings are redone.
 - The exact visual binding maintenance from CI run 40113982012 uses artifact
   12568435116 and updates 155 existing records: all 155 candidate fingerprints,
   123 pathname-restored candidate evidence digests, and 32 fingerprint-only
