@@ -7742,6 +7742,7 @@ mod tests {
             oracle(&cache, options, &inputs, model.prepared());
             publish(&mut cache, &f, &batch, &model);
             cache.finish_semantic_stage(batch.epoch).unwrap();
+            let original_rows = model.prepared().rows.clone();
             let original_current = model
                 .prepared()
                 .rows
@@ -7751,6 +7752,7 @@ mod tests {
                         row.key.clone(),
                         rows(&f, "session_catalog", &row.key),
                         rows(&f, "session_slot_projections", &row.key),
+                        rows(&f, "session_slots", &row.key),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -7804,7 +7806,7 @@ mod tests {
                             FAIL_EFFECT.with(|p| p.get()),
                             Some("semantic_publish_owners")
                         );
-                        for (key, current, recipe) in &original_current {
+                        for (key, current, recipe, _) in &original_current {
                             assert_eq!(rows(&f, "session_catalog", key), *current);
                             assert_eq!(rows(&f, "session_slot_projections", key), *recipe);
                         }
@@ -7833,6 +7835,29 @@ mod tests {
             drop(cache);
             let cache = open(&f.config);
             oracle(&cache, options, &inputs, model.prepared());
+            for mut row in original_rows {
+                row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                let metadata: String = f
+                    .db()
+                    .query_row(
+                        "SELECT metadata FROM session_history_catalog WHERE namespace='source-a' AND session_key=?1",
+                        [&row.key],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+                    serde_json::to_value(row).unwrap()
+                );
+            }
+            for (key, _, recipe, slots) in &original_current {
+                let mut retained = rows(&f, "session_history_projections", key);
+                for header in &mut retained {
+                    assert_eq!(header.pop(), Some(rusqlite::types::Value::Integer(0)));
+                }
+                assert_eq!(retained, *recipe, "original recipe header");
+                assert_eq!(rows(&f, "session_history_slots", key), *slots);
+            }
         }
 
         fn named_claude_inputs(options: &crate::Options, copies: usize) -> Vec<crate::Input> {
