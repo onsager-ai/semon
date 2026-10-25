@@ -862,8 +862,22 @@ fn pg_tree_publish_every_effect_rollback_and_pricing_epoch_changes_interpretatio
         );
         assert!(baseline("foreign") == foreign, "foreign bytes unchanged");
     }
-    let dimensions:usize=data.rows.iter().filter(|(family,_)| matches!(*family,"tree_labels"|"tree_models"|"tree_tools"|"tree_usage_models")).map(|(_,rows)|rows.len()).sum();
-    assert_eq!(count, dimensions+5,"each independent oracle dimension plus generation/scalar/marker/complete/header fault");
+    let dimensions: usize = data
+        .rows
+        .iter()
+        .filter(|(family, _)| {
+            matches!(
+                *family,
+                "tree_labels" | "tree_models" | "tree_tools" | "tree_usage_models"
+            )
+        })
+        .map(|(_, rows)| rows.len())
+        .sum();
+    assert_eq!(
+        count,
+        dimensions + 5,
+        "each independent oracle dimension plus generation/scalar/marker/complete/header fault"
+    );
     let before = pool
         .transaction(
             &ns("tree\0🦀"),
@@ -950,28 +964,84 @@ fn pg_tree_publish_real_append_and_replacement_complete_without_seeded_headers()
 
 #[test]
 fn pg_tree_publish_oversize_scalar_is_unreadable_and_exact_receipt_repairs() {
-    let data=parser_fixture("codex");
-    let (pool,_) =fixture(|_|{});
-    interpretation_inputs(&pool,&data);
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
-        install_without_tree(tx,&data)?;
-        let id=source(tx,&data.path)?;
-        let mut big=input(&data).clone();
-        big.codex_turn.last=Some(crate::codex_lifecycle::TurnLifecycle {
-            thread_id:"x".repeat(1048576),turn_id:"oversize".into(),phase:crate::codex_lifecycle::TurnPhase::Completed,offset:0,source_generation:String::new()
-        });
-        assert!(!publish(tx,&data.path,&data.ledger,None,id,&big,true)?);
-        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_headers",&[]).unwrap().get::<_,i64>(0),0);
-        assert_eq!(metadata(tx,format!("native_tree_failure:{}",data.path).as_bytes())?,Some(header_ledger(&data.ledger)));
-        Ok(())
-    }).unwrap();
-    assert!(Snapshot::restore(pool.clone(),ns("tree\0🦀"),&data.path,&data.ledger,PgCancellation::default()).is_err());
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
-        assert!(stage_fixture(tx,&data).is_err(),"ordinary duplicate stage remains refused");
-        assert!(publish_fixture(tx,&data,None)?);
-        assert!(metadata(tx,format!("native_tree_failure:{}",data.path).as_bytes())?.is_none());
-        Ok(())
-    }).unwrap();
-    assert!(Snapshot::restore(pool,ns("tree\0🦀"),&data.path,&data.ledger,PgCancellation::default()).is_ok());
+    let data = parser_fixture("codex");
+    let (pool, _) = fixture(|_| {});
+    interpretation_inputs(&pool, &data);
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            install_without_tree(tx, &data)?;
+            let id = source(tx, &data.path)?;
+            let mut big = input(&data).clone();
+            big.codex_turn.last = Some(crate::codex_lifecycle::TurnLifecycle {
+                thread_id: "x".repeat(1048576),
+                turn_id: "oversize".into(),
+                phase: crate::codex_lifecycle::TurnPhase::Completed,
+                offset: 0,
+                source_generation: String::new(),
+            });
+            assert!(!publish(
+                tx,
+                &data.path,
+                &data.ledger,
+                None,
+                id,
+                &big,
+                true
+            )?);
+            assert_eq!(
+                tx.driver
+                    .query_one("SELECT count(*) FROM semon_pg_native_tree_headers", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                0
+            );
+            assert_eq!(
+                metadata(tx, format!("native_tree_failure:{}", data.path).as_bytes())?,
+                Some(header_ledger(&data.ledger))
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(
+        Snapshot::restore(
+            pool.clone(),
+            ns("tree\0🦀"),
+            &data.path,
+            &data.ledger,
+            PgCancellation::default()
+        )
+        .is_err()
+    );
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            assert!(
+                stage_fixture(tx, &data).is_err(),
+                "ordinary duplicate stage remains refused"
+            );
+            assert!(publish_fixture(tx, &data, None)?);
+            assert!(
+                metadata(tx, format!("native_tree_failure:{}", data.path).as_bytes())?.is_none()
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(
+        Snapshot::restore(
+            pool,
+            ns("tree\0🦀"),
+            &data.path,
+            &data.ledger,
+            PgCancellation::default()
+        )
+        .is_ok()
+    );
     std::fs::remove_dir_all(data.root).unwrap();
 }
