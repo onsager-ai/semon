@@ -3,7 +3,9 @@
 use super::{catalog_namespace, failed};
 use crate::storage::{
     NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
-    source_observations::{SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation},
+    source_observations::{
+        SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+    },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::path::PathBuf;
@@ -83,7 +85,10 @@ fn invalidate_prepared<'a>(
     let statements = statements.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
     work.executions += 1;
     if let Some(namespace) = namespace {
-        let rows = statements.revision.execute([namespace]).map_err(|error| diagnose_sql("revision-write", error))?;
+        let rows = statements
+            .revision
+            .execute([namespace])
+            .map_err(|error| diagnose_sql("revision-write", error))?;
         work.revision_rows += rows;
         if rows != 1 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -186,7 +191,9 @@ fn discover_prepared(
         let membership = membership.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
         work.executions += 1;
         let inserted = if let Some(namespace) = namespace {
-            membership.execute(params![namespace, path]).map_err(|error| diagnose_sql("membership-write", error))?
+            membership
+                .execute(params![namespace, path])
+                .map_err(|error| diagnose_sql("membership-write", error))?
         } else {
             membership.execute([path])?
         };
@@ -435,7 +442,9 @@ impl SourceJournal {
 impl SourceObservationStore for SourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         self.validate(&tx)?;
         persist_intent_sql(&tx, Some(self.namespace()), intent)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
@@ -450,7 +459,9 @@ impl SourceObservationStore for SourceJournal {
 
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         self.validate(&tx)?;
         acknowledge_intent_sql(&tx, Some(self.namespace()), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
@@ -480,7 +491,8 @@ impl SourceObservationStore for SourceJournal {
         if let Some(receipt) = stored_receipt(&tx, Some(expected_namespace), operation)? {
             return Ok(receipt);
         }
-        discover(&tx, Some(expected_namespace), paths, complete).map_err(|error| phase_failed("discover-effect", error))?;
+        discover(&tx, Some(expected_namespace), paths, complete)
+            .map_err(|error| phase_failed("discover-effect", error))?;
         insert_receipt(&tx, Some(expected_namespace), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(SourceMutationReceipt::Applied)
@@ -666,7 +678,9 @@ impl LegacySourceJournal {
 impl SourceObservationStore for LegacySourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
         persist_intent_sql(&tx, None, intent)?;
@@ -683,7 +697,9 @@ impl SourceObservationStore for LegacySourceJournal {
 
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
         acknowledge_intent_sql(&tx, None, operation)?;
@@ -712,7 +728,8 @@ impl SourceObservationStore for LegacySourceJournal {
         if let Some(receipt) = stored_receipt(&tx, None, operation)? {
             return Ok(receipt);
         }
-        discover(&tx, None, paths, complete).map_err(|error| phase_failed("discover-effect", error))?;
+        discover(&tx, None, paths, complete)
+            .map_err(|error| phase_failed("discover-effect", error))?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
         insert_receipt(&tx, None, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -882,7 +899,10 @@ pub(crate) fn operation_replay(
 
 fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error {
     #[cfg(test)]
-    eprintln!("source-journal phase={phase} sqlite_extended_code={:?}", error.sqlite_error().map(|code| code.extended_code));
+    eprintln!(
+        "source-journal phase={phase} sqlite_extended_code={:?}",
+        error.sqlite_error().map(|code| code.extended_code)
+    );
     #[cfg(not(test))]
     let _ = phase;
     error
@@ -894,10 +914,13 @@ fn phase_failed(phase: &'static str, error: rusqlite::Error) -> StorageError {
 
 fn register_backfill_writer(db: &Connection, enabled: bool) -> Result<(), StorageError> {
     db.create_scalar_function(
-        "semon_source_backfill_writer", 0,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        "semon_source_backfill_writer",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
         move |_| Ok(i64::from(enabled)),
-    ).map_err(failed)
+    )
+    .map_err(failed)
 }
 
 /// The current admitted singleton metadata profile has no Catalog consumer
@@ -914,7 +937,9 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
     if fences.len() != 3 {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let composite = crate::events::store::configured::metadata_sql(db, "", "namespace").map_err(failed)? == "namespace";
+    let composite = crate::events::store::configured::metadata_sql(db, "", "namespace")
+        .map_err(failed)?
+        == "namespace";
     for name in fences {
         let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
             ("INSERT", &["NEW"])
@@ -929,7 +954,9 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
         for row in rows {
             predicate.push_str(&format!(" OR {row}.key NOT IN ('catalog_backfill_state','catalog_completeness','search_backfill_complete','catalog_recovery_reason')"));
             if composite {
-                predicate.push_str(&format!(" OR {row}.namespace IS NOT semon_meta_scope({row}.key)"));
+                predicate.push_str(&format!(
+                    " OR {row}.namespace IS NOT semon_meta_scope({row}.key)"
+                ));
             }
         }
         let quoted = name.replace('"', "\"\"");
@@ -946,7 +973,10 @@ fn qualify_operation_tables(db: &Connection) -> Result<(), StorageError> {
         // Install the scoped replacement before removing any admission fence.
         for (action, predicate) in [
             ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-            ("UPDATE", "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),
+            (
+                "UPDATE",
+                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
+            ),
             ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
         ] {
             db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS storage_source_guard_{table}_{action} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END;")).map_err(failed)?;
@@ -958,9 +988,14 @@ fn qualify_operation_tables(db: &Connection) -> Result<(), StorageError> {
             return Err(StorageError::NamespaceUpgradePending);
         }
         for name in fences {
-            db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\""))).map_err(failed)?;
+            db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+                .map_err(failed)?;
         }
-        db.execute("UPDATE storage_writer_inventory SET qualified_version=1 WHERE table_name=?1", [table]).map_err(failed)?;
+        db.execute(
+            "UPDATE storage_writer_inventory SET qualified_version=1 WHERE table_name=?1",
+            [table],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
@@ -975,7 +1010,10 @@ pub(crate) fn stored_receipt(
         "SELECT payload_digest FROM main.source_observation_intents WHERE namespace=?1 AND operation_id=?2",
         params![namespace.unwrap_or(""), operation.id], |row| row.get(0),
     ).optional().map_err(|error| phase_failed("intent-binding-read", error))?;
-    if captured_digest.as_ref().is_some_and(|digest| digest != &operation.payload_digest) {
+    if captured_digest
+        .as_ref()
+        .is_some_and(|digest| digest != &operation.payload_digest)
+    {
         return Ok(Some(SourceMutationReceipt::Conflict));
     }
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
@@ -1020,20 +1058,36 @@ fn insert_terminal_receipt(
 
 fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) -> Result<(), StorageError> {
     let (kind, payload) = match intent {
-        SourceIntent::Discover { paths, complete, .. } => {
+        SourceIntent::Discover {
+            paths, complete, ..
+        } => {
             validate_paths(paths)?;
             ("discover", serde_json::to_vec(&(paths, complete)))
         }
         SourceIntent::Invalidate { expected, .. } => {
-            let paths = expected.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+            let paths = expected
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
             validate_paths(&paths)?;
-            if paths.iter().collect::<std::collections::BTreeSet<_>>().len() != paths.len() {
+            if paths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != paths.len()
+            {
                 return Err(StorageError::InvalidArguments);
             }
             ("invalidate", serde_json::to_vec(expected))
         }
-        SourceIntent::FinishBackfill { expected_generation, .. } => {
-            if expected_generation.as_ref().is_some_and(|value| value.len() > 4096) {
+        SourceIntent::FinishBackfill {
+            expected_generation,
+            ..
+        } => {
+            if expected_generation
+                .as_ref()
+                .is_some_and(|value| value.len() > 4096)
+            {
                 return Err(StorageError::InvalidArguments);
             }
             ("finish_backfill", serde_json::to_vec(expected_generation))
@@ -1046,7 +1100,11 @@ fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) -> Result<(),
     Ok(())
 }
 
-fn persist_intent_sql(db: &Connection, namespace: Option<&str>, intent: &SourceIntent) -> Result<(), StorageError> {
+fn persist_intent_sql(
+    db: &Connection,
+    namespace: Option<&str>,
+    intent: &SourceIntent,
+) -> Result<(), StorageError> {
     validate_intent(namespace, intent)?;
     let operation = intent.operation();
     let payload = serde_json::to_string(intent).map_err(|_| StorageError::InvalidArguments)?;
@@ -1058,13 +1116,20 @@ fn persist_intent_sql(db: &Connection, namespace: Option<&str>, intent: &SourceI
         params![namespace.unwrap_or(""), operation.id], |row| row.get(0),
     ).optional().map_err(failed)?;
     if let Some(existing) = existing {
-        return if existing == payload { Ok(()) } else { Err(StorageError::Conflict) };
+        return if existing == payload {
+            Ok(())
+        } else {
+            Err(StorageError::Conflict)
+        };
     }
     let count: i64 = db.query_row("SELECT count(*) FROM (SELECT 1 FROM source_observation_intents WHERE namespace=?1 LIMIT 256)", [namespace.unwrap_or("")], |row| row.get(0)).map_err(failed)?;
     if count >= 256 {
         return Err(StorageError::Busy);
     }
-    if matches!(stored_receipt(db, namespace, operation)?, Some(SourceMutationReceipt::Conflict)) {
+    if matches!(
+        stored_receipt(db, namespace, operation)?,
+        Some(SourceMutationReceipt::Conflict)
+    ) {
         let same_payload: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
         if !same_payload {
             return Err(StorageError::Conflict);
@@ -1074,16 +1139,28 @@ fn persist_intent_sql(db: &Connection, namespace: Option<&str>, intent: &SourceI
     Ok(())
 }
 
-fn load_intents(db: &Connection, namespace: Option<&str>) -> Result<Vec<SourceIntent>, StorageError> {
+fn load_intents(
+    db: &Connection,
+    namespace: Option<&str>,
+) -> Result<Vec<SourceIntent>, StorageError> {
     let mut statement = db.prepare("SELECT operation_id,payload_digest,CASE WHEN octet_length(payload)<=2097152 THEN payload END FROM source_observation_intents WHERE namespace=?1 ORDER BY sequence LIMIT 257").map_err(failed)?;
-    let rows = statement.query_map([namespace.unwrap_or("")], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).map_err(failed)?;
+    let rows = statement
+        .query_map([namespace.unwrap_or("")], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(failed)?;
     let mut intents = Vec::new();
     for row in rows {
         if intents.len() == 256 {
             return Err(StorageError::Unavailable);
         }
         let (id, digest, payload) = row.map_err(failed)?;
-        let intent: SourceIntent = serde_json::from_str(&payload.ok_or(StorageError::Unavailable)?).map_err(|_| StorageError::Unavailable)?;
+        let intent: SourceIntent = serde_json::from_str(&payload.ok_or(StorageError::Unavailable)?)
+            .map_err(|_| StorageError::Unavailable)?;
         validate_intent(namespace, &intent)?;
         if intent.operation().id != id || intent.operation().payload_digest != digest {
             return Err(StorageError::Conflict);
@@ -1093,7 +1170,11 @@ fn load_intents(db: &Connection, namespace: Option<&str>) -> Result<Vec<SourceIn
     Ok(intents)
 }
 
-fn acknowledge_intent_sql(db: &Connection, namespace: Option<&str>, operation: &SourceOperation) -> Result<(), StorageError> {
+fn acknowledge_intent_sql(
+    db: &Connection,
+    namespace: Option<&str>,
+    operation: &SourceOperation,
+) -> Result<(), StorageError> {
     if operation.namespace != namespace.unwrap_or("") {
         return Err(StorageError::Conflict);
     }
@@ -1438,7 +1519,12 @@ mod tests {
             drop(native);
             let database = EventCache::path(&cache_path);
             let mut consumer = EventCache::open_scoped(&cache_path).unwrap();
-            assert!(matches!(consumer.acknowledge_source_for_test("acknowledged").unwrap(), crate::events::Outcome::Written));
+            assert!(matches!(
+                consumer
+                    .acknowledge_source_for_test("acknowledged")
+                    .unwrap(),
+                crate::events::Outcome::Written
+            ));
             drop(consumer);
             let db = Connection::open(&database).unwrap();
             let epoch = db
@@ -1524,11 +1610,21 @@ mod tests {
         fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
             self.inner.acknowledge_intent(operation)
         }
-        fn discover(&mut self, operation: &SourceOperation, paths: &[String], complete: bool) -> Result<SourceMutationReceipt, StorageError> {
+        fn discover(
+            &mut self,
+            operation: &SourceOperation,
+            paths: &[String],
+            complete: bool,
+        ) -> Result<SourceMutationReceipt, StorageError> {
             if self.block_replay.load(Ordering::Relaxed) {
                 return Err(StorageError::Busy);
             }
-            assert!(self.inner.pending_intents()?.iter().any(|intent| intent.operation() == operation));
+            assert!(
+                self.inner
+                    .pending_intents()?
+                    .iter()
+                    .any(|intent| intent.operation() == operation)
+            );
             let receipt = self.inner.discover(operation, paths, complete)?;
             if self.first && receipt == SourceMutationReceipt::Applied {
                 self.first = false;
@@ -1537,10 +1633,17 @@ mod tests {
             }
             Ok(receipt)
         }
-        fn invalidate(&mut self, operation: &SourceOperation, expected: &[(String, Option<i64>)]) -> Result<SourceMutationReceipt, StorageError> {
+        fn invalidate(
+            &mut self,
+            operation: &SourceOperation,
+            expected: &[(String, Option<i64>)],
+        ) -> Result<SourceMutationReceipt, StorageError> {
             self.inner.invalidate(operation, expected)
         }
-        fn claims(&self, paths: &[String]) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
+        fn claims(
+            &self,
+            paths: &[String],
+        ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
             self.inner.claims(paths)
         }
         fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
@@ -1549,7 +1652,11 @@ mod tests {
         fn backfill_state(&self) -> Result<Option<String>, StorageError> {
             self.inner.backfill_state()
         }
-        fn finish_backfill(&mut self, operation: &SourceOperation, generation: Option<&str>) -> Result<SourceMutationReceipt, StorageError> {
+        fn finish_backfill(
+            &mut self,
+            operation: &SourceOperation,
+            generation: Option<&str>,
+        ) -> Result<SourceMutationReceipt, StorageError> {
             self.inner.finish_backfill(operation, generation)
         }
     }
@@ -1567,55 +1674,128 @@ mod tests {
             cache: root.join("index.json"),
             ..crate::Options::default()
         };
-        let first = crate::Input { root: crate::InputRoot::Claude, path: "projects/project/first.jsonl".into() };
-        let later = crate::Input { root: crate::InputRoot::Claude, path: "projects/project/later.jsonl".into() };
+        let first = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/first.jsonl".into(),
+        };
+        let later = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/later.jsonl".into(),
+        };
         let first_path = first.full_path(&options).to_string_lossy().into_owned();
         let later_path = later.full_path(&options).to_string_lossy().into_owned();
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut cache = open_cache();
         let block_replay = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         cache.inject_source_observations(Box::new(LoseDiscoverAck {
-            inner: open_store(), first: true, block_replay: block_replay.clone(), captured: captured.clone(),
+            inner: open_store(),
+            first: true,
+            block_replay: block_replay.clone(),
+            captured: captured.clone(),
         }));
-        assert!(cache.discover_catalog_sources(&options, &[first], false).is_err());
+        assert!(
+            cache
+                .discover_catalog_sources(&options, &[first], false)
+                .is_err()
+        );
         let operation = captured.lock().unwrap().clone().unwrap();
-        let before = open_store().claims(std::slice::from_ref(&first_path)).unwrap();
+        let before = open_store()
+            .claims(std::slice::from_ref(&first_path))
+            .unwrap();
         assert!(before[0].1.is_some());
         let pending = open_store().pending_intents().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].operation(), &operation);
         // Reopening the backend proves the terminal receipt, but does not ACK
         // the producer intent. The actual EventCache replay below does that.
-        assert_eq!(pending[0].apply(open_store().as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
+        assert_eq!(
+            pending[0].apply(open_store().as_mut()).unwrap(),
+            SourceMutationReceipt::AlreadyApplied
+        );
         assert_eq!(open_store().pending_intents().unwrap(), pending);
         block_replay.store(true, Ordering::Relaxed);
-        assert!(cache.discover_catalog_sources(&options, std::slice::from_ref(&later), true).is_err());
+        assert!(
+            cache
+                .discover_catalog_sources(&options, std::slice::from_ref(&later), true)
+                .is_err()
+        );
         assert_eq!(open_store().pending_intents().unwrap(), pending);
-        assert_eq!(open_store().claims(std::slice::from_ref(&later_path)).unwrap(), vec![(later_path.clone(), None)]);
+        assert_eq!(
+            open_store()
+                .claims(std::slice::from_ref(&later_path))
+                .unwrap(),
+            vec![(later_path.clone(), None)]
+        );
         block_replay.store(false, Ordering::Relaxed);
         if restart {
             drop(cache);
             cache = open_cache();
             assert!(open_store().pending_intents().unwrap().is_empty());
         }
-        cache.discover_catalog_sources(&options, &[later], true).unwrap();
+        cache
+            .discover_catalog_sources(&options, &[later], true)
+            .unwrap();
         assert!(open_store().pending_intents().unwrap().is_empty());
-        assert_eq!(open_store().claims(std::slice::from_ref(&first_path)).unwrap(), before);
-        assert!(open_store().claims(std::slice::from_ref(&later_path)).unwrap()[0].1.is_some());
+        assert_eq!(
+            open_store()
+                .claims(std::slice::from_ref(&first_path))
+                .unwrap(),
+            before
+        );
+        assert!(
+            open_store()
+                .claims(std::slice::from_ref(&later_path))
+                .unwrap()[0]
+                .1
+                .is_some()
+        );
         let db = Connection::open(database).unwrap();
         let count: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND outcome='applied'", params![namespace, operation.id], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
         let applied: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied'", [namespace], |row| row.get(0)).unwrap();
-        assert_eq!(applied, 2, "one original operation plus the later operation");
-        assert_eq!(stored_receipt(&db, Some(namespace), &operation).unwrap(), Some(SourceMutationReceipt::AlreadyApplied));
+        assert_eq!(
+            applied, 2,
+            "one original operation plus the later operation"
+        );
+        assert_eq!(
+            stored_receipt(&db, Some(namespace), &operation).unwrap(),
+            Some(SourceMutationReceipt::AlreadyApplied)
+        );
         // Foreign intent capture and dispatch both refuse before any effects.
         let foreign_paths = vec!["foreign.jsonl".into()];
-        let foreign = SourceIntent::Discover { operation: discover_operation("foreign", &foreign_paths, true), paths: foreign_paths.clone(), complete: true };
-        let rows_before: i64 = db.query_row("SELECT count(*) FROM source_observation_intents", [], |row| row.get(0)).unwrap();
-        assert_eq!(open_store().persist_intent(&foreign), Err(StorageError::Conflict));
-        assert_eq!(foreign.apply(open_store().as_mut()).unwrap(), SourceMutationReceipt::Conflict);
-        assert_eq!(open_store().claims(&foreign_paths).unwrap(), vec![(foreign_paths[0].clone(), None)]);
-        assert_eq!(db.query_row("SELECT count(*) FROM source_observation_intents", [], |row| row.get::<_, i64>(0)).unwrap(), rows_before);
+        let foreign = SourceIntent::Discover {
+            operation: discover_operation("foreign", &foreign_paths, true),
+            paths: foreign_paths.clone(),
+            complete: true,
+        };
+        let rows_before: i64 = db
+            .query_row(
+                "SELECT count(*) FROM source_observation_intents",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            open_store().persist_intent(&foreign),
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(
+            foreign.apply(open_store().as_mut()).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(
+            open_store().claims(&foreign_paths).unwrap(),
+            vec![(foreign_paths[0].clone(), None)]
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM source_observation_intents",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            rows_before
+        );
     }
 
     #[test]
@@ -1625,7 +1805,10 @@ mod tests {
             producer_restart_conformance(
                 || EventCache::open_scoped(&unbound.cache_path).unwrap(),
                 || unbound.open(),
-                &EventCache::path(&unbound.cache_path), &unbound.root, "", restart,
+                &EventCache::path(&unbound.cache_path),
+                &unbound.root,
+                "",
+                restart,
             );
             let configured = Fixture::new_with_namespace("configured\0source");
             configured.assign();
@@ -1633,7 +1816,10 @@ mod tests {
             producer_restart_conformance(
                 || EventCache::open_configured(&configured.config).unwrap(),
                 || configured.config.source_observations().unwrap(),
-                database, &configured.root, "configured\0source", restart,
+                database,
+                &configured.root,
+                "configured\0source",
+                restart,
             );
         }
     }
@@ -1643,15 +1829,34 @@ mod tests {
         for configured in [false, true] {
             let fixture = LegacyFixture::new();
             let mut cache = EventCache::open_scoped(&fixture.cache_path).unwrap();
-            let generation = cache.publish_catalog_projection_fenced(
-                &crate::slot_projection::Publication { rows: &[], transcripts: None }, None,
-            ).unwrap().expect("real publisher generation");
+            let generation = cache
+                .publish_catalog_projection_fenced(
+                    &crate::slot_projection::Publication {
+                        rows: &[],
+                        transcripts: None,
+                    },
+                    None,
+                )
+                .unwrap()
+                .expect("real publisher generation");
             drop(cache);
             let database = EventCache::path(&fixture.cache_path);
             let config = if configured {
                 let db = Connection::open(&database).unwrap();
-                let epoch = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |row| row.get(0)).unwrap();
-                let config = StoreConfig { backend: StoreBackend::Sqlite { database: database.clone() }, namespace: LogicalSourceNamespace::new("finish\0source").unwrap(), expected_stream_epoch: Some(epoch) };
+                let epoch = db
+                    .query_row(
+                        "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let config = StoreConfig {
+                    backend: StoreBackend::Sqlite {
+                        database: database.clone(),
+                    },
+                    namespace: LogicalSourceNamespace::new("finish\0source").unwrap(),
+                    expected_stream_epoch: Some(epoch),
+                };
                 config.admit_namespace().unwrap();
                 let mut complete = false;
                 for _ in 0..128 {
@@ -1662,25 +1867,43 @@ mod tests {
                 }
                 assert!(complete);
                 Some(config)
-            } else { None };
+            } else {
+                None
+            };
             let open = || match &config {
                 Some(config) => config.source_observations().unwrap(),
                 None => fixture.open(),
             };
-            let namespace = config.as_ref().map_or("", |config| config.namespace.as_str());
+            let namespace = config
+                .as_ref()
+                .map_or("", |config| config.namespace.as_str());
             let mut store = open();
             let discovery = discover_operation(namespace, &[], true);
             store.discover(&discovery, &[], true).unwrap();
             let wrong = finish_operation(namespace, Some("wrong-generation"));
-            assert_eq!(store.finish_backfill(&wrong, Some("wrong-generation")).unwrap(), SourceMutationReceipt::Conflict);
+            assert_eq!(
+                store
+                    .finish_backfill(&wrong, Some("wrong-generation"))
+                    .unwrap(),
+                SourceMutationReceipt::Conflict
+            );
             assert_eq!(store.backfill_state().unwrap().as_deref(), Some("draining"));
             let operation = finish_operation(namespace, Some(&generation));
-            let intent = SourceIntent::FinishBackfill { operation: operation.clone(), expected_generation: Some(generation) };
+            let intent = SourceIntent::FinishBackfill {
+                operation: operation.clone(),
+                expected_generation: Some(generation),
+            };
             store.persist_intent(&intent).unwrap();
-            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
+            assert_eq!(
+                intent.apply(store.as_mut()).unwrap(),
+                SourceMutationReceipt::Applied
+            );
             drop(store);
             let mut store = open();
-            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
+            assert_eq!(
+                intent.apply(store.as_mut()).unwrap(),
+                SourceMutationReceipt::AlreadyApplied
+            );
             store.acknowledge_intent(&operation).unwrap();
             assert_eq!(store.backfill_state().unwrap().as_deref(), Some("complete"));
             assert!(store.pending_intents().unwrap().is_empty());
@@ -1689,8 +1912,20 @@ mod tests {
                 let db = journal.connection().unwrap();
                 journal.validate(&db).unwrap();
                 // The backfill-specific guard does not qualify other metadata.
-                assert!(db.execute("INSERT INTO meta(key,value) VALUES('native_forbidden','x')", []).is_err());
-                assert!(db.execute("INSERT INTO meta(key,value) VALUES('catalog_backfill_state','draining')", []).is_err());
+                assert!(
+                    db.execute(
+                        "INSERT INTO meta(key,value) VALUES('native_forbidden','x')",
+                        []
+                    )
+                    .is_err()
+                );
+                assert!(
+                    db.execute(
+                        "INSERT INTO meta(key,value) VALUES('catalog_backfill_state','draining')",
+                        []
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -1702,15 +1937,31 @@ mod tests {
         for index in 0..256 {
             let paths = vec![format!("source-{index}")];
             let operation = discover_operation("", &paths, false);
-            store.persist_intent(&SourceIntent::Discover { operation, paths, complete: false }).unwrap();
+            store
+                .persist_intent(&SourceIntent::Discover {
+                    operation,
+                    paths,
+                    complete: false,
+                })
+                .unwrap();
         }
         let before = store.pending_intents().unwrap();
         assert_eq!(before.len(), 256);
         let paths = vec!["overflow".into()];
         let operation = discover_operation("", &paths, false);
-        assert_eq!(store.persist_intent(&SourceIntent::Discover { operation, paths, complete: false }), Err(StorageError::Busy));
+        assert_eq!(
+            store.persist_intent(&SourceIntent::Discover {
+                operation,
+                paths,
+                complete: false
+            }),
+            Err(StorageError::Busy)
+        );
         assert_eq!(store.pending_intents().unwrap(), before);
-        assert_eq!(store.claims(&["overflow".into()]).unwrap(), vec![("overflow".into(), None)]);
+        assert_eq!(
+            store.claims(&["overflow".into()]).unwrap(),
+            vec![("overflow".into(), None)]
+        );
     }
 
     #[test]
@@ -1719,19 +1970,42 @@ mod tests {
         let mut store = fixture.open();
         let paths = vec!["first".into()];
         let operation = discover_operation("", &paths, true);
-        let intent = SourceIntent::Discover { operation: operation.clone(), paths, complete: true };
+        let intent = SourceIntent::Discover {
+            operation: operation.clone(),
+            paths,
+            complete: true,
+        };
         store.persist_intent(&intent).unwrap();
-        assert_eq!(store.acknowledge_intent(&operation), Err(StorageError::Conflict));
+        assert_eq!(
+            store.acknowledge_intent(&operation),
+            Err(StorageError::Conflict)
+        );
         let changed_paths = vec!["changed".into()];
         let mut changed_operation = discover_operation("", &changed_paths, true);
         changed_operation.id = operation.id.clone();
-        let changed = SourceIntent::Discover { operation: changed_operation.clone(), paths: changed_paths, complete: true };
+        let changed = SourceIntent::Discover {
+            operation: changed_operation.clone(),
+            paths: changed_paths,
+            complete: true,
+        };
         assert_eq!(store.persist_intent(&changed), Err(StorageError::Conflict));
-        assert_eq!(changed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
-        assert_eq!(store.claims(&["changed".into()]).unwrap(), vec![("changed".into(), None)]);
+        assert_eq!(
+            changed.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(
+            store.claims(&["changed".into()]).unwrap(),
+            vec![("changed".into(), None)]
+        );
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-        assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
-        assert_eq!(store.acknowledge_intent(&changed_operation), Err(StorageError::Conflict));
+        assert_eq!(
+            intent.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        assert_eq!(
+            store.acknowledge_intent(&changed_operation),
+            Err(StorageError::Conflict)
+        );
         store.acknowledge_intent(&operation).unwrap();
         assert!(store.pending_intents().unwrap().is_empty());
     }
@@ -1815,10 +2089,18 @@ mod tests {
         // profile may manufacture a successful consumer acknowledgement here.
         let before = store.backfill_state().unwrap();
         let finish = finish_operation(namespace, None);
-        assert_eq!(store.finish_backfill(&finish, None).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(
+            store.finish_backfill(&finish, None).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
         assert_eq!(store.backfill_state().unwrap(), before);
         let wrong_generation = finish_operation(namespace, Some("wrong-generation"));
-        assert_eq!(store.finish_backfill(&wrong_generation, Some("wrong-generation")).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(
+            store
+                .finish_backfill(&wrong_generation, Some("wrong-generation"))
+                .unwrap(),
+            SourceMutationReceipt::Conflict
+        );
         assert_eq!(store.backfill_state().unwrap(), before);
     }
 
@@ -1828,7 +2110,10 @@ mod tests {
         shared_source_observation_conformance(|| legacy.open(), "");
         let configured = Fixture::new_with_namespace("configured\0source");
         configured.assign();
-        shared_source_observation_conformance(|| configured.config.source_observations().unwrap(), "configured\0source");
+        shared_source_observation_conformance(
+            || configured.config.source_observations().unwrap(),
+            "configured\0source",
+        );
     }
 
     #[test]
