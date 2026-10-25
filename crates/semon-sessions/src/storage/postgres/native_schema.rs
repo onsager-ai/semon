@@ -231,6 +231,10 @@ fn contract_hash() -> Vec<u8> {
         hash.update(format!("{index:?}"));
     }
     hash.update(POLICY);
+    for body in super::super::native_usage_identity::contract() {
+        hash.update((body.len() as u64).to_be_bytes());
+        hash.update(body.as_bytes());
+    }
     hash.finalize().to_vec()
 }
 
@@ -259,7 +263,8 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         let unique = if *unique { "UNIQUE" } else { "" };
         ddl.push_str(&format!("CREATE {unique} INDEX semon_pg_native_{name} ON semon_pg_native_{table}(namespace_digest,{columns});"));
     }
-    tx.driver.batch_execute(&ddl).map_err(sqlstate::error)
+    tx.driver.batch_execute(&ddl).map_err(sqlstate::error)?;
+    super::super::native_usage_identity::install(tx)
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
@@ -356,7 +361,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             return Err(StorageError::ScopeChanged);
         }
     }
-    Ok(())
+    super::super::native_usage_identity::verify(tx)
 }
 
 #[cfg(test)]

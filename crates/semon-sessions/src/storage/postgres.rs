@@ -3,6 +3,7 @@
 //! Credentials, connect deadlines and TLS (including cancellation TLS) belong to
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
+mod native_usage_identity;
 mod operations;
 mod pool;
 mod schema;
