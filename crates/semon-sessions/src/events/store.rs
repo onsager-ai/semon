@@ -7109,6 +7109,7 @@ fn write_file_with_usage_deletes<'tx>(
         usage_by_id,
         codex_usage_events,
         codex_native_usage: _,
+        ..
     } = index;
     let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
