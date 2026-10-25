@@ -3,11 +3,11 @@
 use super::{catalog_namespace, failed};
 use crate::storage::{
     NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
-    source_observations::{SourceMutationReceipt, SourceOperation, SourceObservationStore},
+    source_observations::{SourceMutationReceipt, SourceObservationStore, SourceOperation},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use std::time::Duration;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub(crate) const SOURCE_JOURNAL_QUALIFICATION_VERSION: u32 = 1;
 const MAX_PATHS: usize = 256;
@@ -264,9 +264,7 @@ pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
     }
 }
 
-pub(crate) fn open(
-    config: &StoreConfig,
-) -> Result<Box<dyn SourceObservationStore>, StorageError> {
+pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn SourceObservationStore>, StorageError> {
     crate::events::store::configured::validate_semantic_schema(config)?;
     let journal = SourceJournal(config.clone());
     journal.prepare()?;
@@ -449,9 +447,12 @@ impl SourceObservationStore for SourceJournal {
         complete: bool,
     ) -> Result<SourceMutationReceipt, StorageError> {
         validate_paths(paths)?;
-        let payload = serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
+        let payload =
+            serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
         let expected_namespace = self.config.namespace.as_str();
-        if let Some(receipt) = operation_replay(operation, Some(expected_namespace), "discover", &payload)? {
+        if let Some(receipt) =
+            operation_replay(operation, Some(expected_namespace), "discover", &payload)?
+        {
             return Ok(receipt);
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2);
@@ -489,7 +490,9 @@ impl SourceObservationStore for SourceJournal {
         }
         let expected_namespace = self.config.namespace.as_str();
         let payload = serde_json::to_vec(expected).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, Some(expected_namespace), "invalidate", &payload)? {
+        if let Some(receipt) =
+            operation_replay(operation, Some(expected_namespace), "invalidate", &payload)?
+        {
             return Ok(receipt);
         }
         let mut db = self.connection()?;
@@ -551,8 +554,14 @@ impl SourceObservationStore for SourceJournal {
         operation: &SourceOperation,
         expected_generation: Option<&str>,
     ) -> Result<SourceMutationReceipt, StorageError> {
-        let payload = serde_json::to_vec(&expected_generation).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, Some(self.config.namespace.as_str()), "finish_backfill", &payload)? {
+        let payload =
+            serde_json::to_vec(&expected_generation).map_err(|_| StorageError::InvalidArguments)?;
+        if let Some(receipt) = operation_replay(
+            operation,
+            Some(self.config.namespace.as_str()),
+            "finish_backfill",
+            &payload,
+        )? {
             return Ok(receipt);
         }
         let mut db = self.connection()?;
@@ -560,7 +569,8 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, Some(self.config.namespace.as_str()), operation)? {
+        if let Some(receipt) = stored_receipt(&tx, Some(self.config.namespace.as_str()), operation)?
+        {
             return Ok(receipt);
         }
         let generation: Option<String> = tx
@@ -613,7 +623,9 @@ pub(crate) struct LegacySourceJournal {
 
 impl LegacySourceJournal {
     pub(crate) fn new(database: impl Into<PathBuf>) -> Self {
-        Self { database: database.into() }
+        Self {
+            database: database.into(),
+        }
     }
 
     pub(crate) fn operation(&self, kind: &str, payload: &[u8]) -> SourceOperation {
@@ -628,7 +640,8 @@ impl LegacySourceJournal {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
-        db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
+        db.busy_timeout(Duration::from_millis(100))
+            .map_err(failed)?;
         Ok(db)
     }
 }
@@ -641,13 +654,16 @@ impl SourceObservationStore for LegacySourceJournal {
         complete: bool,
     ) -> Result<SourceMutationReceipt, StorageError> {
         validate_paths(paths)?;
-        let payload = serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
+        let payload =
+            serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
         if let Some(receipt) = operation_replay(operation, None, "discover", &payload)? {
             return Ok(receipt);
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2);
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
         if let Some(receipt) = stored_receipt(&tx, None, operation)? {
@@ -665,9 +681,17 @@ impl SourceObservationStore for LegacySourceJournal {
         operation: &SourceOperation,
         expected: &[(String, Option<i64>)],
     ) -> Result<SourceMutationReceipt, StorageError> {
-        let paths = expected.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+        let paths = expected
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         validate_paths(&paths)?;
-        if paths.iter().collect::<std::collections::BTreeSet<_>>().len() != paths.len() {
+        if paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != paths.len()
+        {
             return Err(StorageError::InvalidArguments);
         }
         let payload = serde_json::to_vec(expected).map_err(|_| StorageError::InvalidArguments)?;
@@ -675,7 +699,9 @@ impl SourceObservationStore for LegacySourceJournal {
             return Ok(receipt);
         }
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
         if let Some(receipt) = stored_receipt(&tx, None, operation)? {
@@ -692,7 +718,10 @@ impl SourceObservationStore for LegacySourceJournal {
         Ok(SourceMutationReceipt::Applied)
     }
 
-    fn claims(&self, paths: &[String]) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
+    fn claims(
+        &self,
+        paths: &[String],
+    ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
         validate_paths(paths)?;
         let db = self.connection()?;
         refuse_bound(&db, None, &mut JournalWork::default()).map_err(failed)?;
@@ -700,7 +729,9 @@ impl SourceObservationStore for LegacySourceJournal {
     }
 
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        if limit == 0 || limit > MAX_PATHS { return Err(StorageError::InvalidArguments); }
+        if limit == 0 || limit > MAX_PATHS {
+            return Err(StorageError::InvalidArguments);
+        }
         let mut db = self.connection()?;
         let tx = db.unchecked_transaction().map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
@@ -708,10 +739,15 @@ impl SourceObservationStore for LegacySourceJournal {
         let selected: Vec<String> = tx.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failed)?
             .query_map([limit as i64], |row| row.get(0)).map_err(failed)?
             .collect::<rusqlite::Result<_>>().map_err(failed)?;
-        if !selected.is_empty() { return Ok(selected); }
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
         let mut statement = tx.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failed)?;
-        let paths = statement.query_map([limit as i64], |row| row.get(0)).map_err(failed)?
-            .collect::<rusqlite::Result<_>>().map_err(failed)?;
+        let paths = statement
+            .query_map([limit as i64], |row| row.get(0))
+            .map_err(failed)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(failed)?;
         Ok(paths)
     }
 
@@ -719,8 +755,13 @@ impl SourceObservationStore for LegacySourceJournal {
         let db = self.connection()?;
         refuse_bound(&db, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&db).map_err(failed)?;
-        db.query_row("SELECT value FROM meta WHERE key='catalog_backfill_state'", [], |row| row.get(0))
-            .optional().map_err(failed)
+        db.query_row(
+            "SELECT value FROM meta WHERE key='catalog_backfill_state'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)
     }
 
     fn finish_backfill(
@@ -728,13 +769,20 @@ impl SourceObservationStore for LegacySourceJournal {
         operation: &SourceOperation,
         expected_generation: Option<&str>,
     ) -> Result<SourceMutationReceipt, StorageError> {
-        let payload = serde_json::to_vec(&expected_generation).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, None, "finish_backfill", &payload)? { return Ok(receipt); }
+        let payload =
+            serde_json::to_vec(&expected_generation).map_err(|_| StorageError::InvalidArguments)?;
+        if let Some(receipt) = operation_replay(operation, None, "finish_backfill", &payload)? {
+            return Ok(receipt);
+        }
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
         crate::events::store::require_current_sql(&tx).map_err(failed)?;
-        if let Some(receipt) = stored_receipt(&tx, None, operation)? { return Ok(receipt); }
+        if let Some(receipt) = stored_receipt(&tx, None, operation)? {
+            return Ok(receipt);
+        }
         if !finish_catalog_backfill_sql(&tx, None, expected_generation)? {
             return Ok(SourceMutationReceipt::Conflict);
         }
@@ -757,7 +805,10 @@ pub(crate) fn operation_replay(
         || operation.id.len() > 256
         || !operation.id.is_ascii()
         || operation.payload_digest.len() != 64
-        || !operation.payload_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !operation
+            .payload_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(StorageError::InvalidArguments);
     }
@@ -802,10 +853,12 @@ pub(crate) fn stored_receipt(
             |row| row.get(0),
         ).optional().map_err(failed)?
     };
-    Ok(digest.map(|digest| if digest == operation.payload_digest {
-        SourceMutationReceipt::AlreadyApplied
-    } else {
-        SourceMutationReceipt::Conflict
+    Ok(digest.map(|digest| {
+        if digest == operation.payload_digest {
+            SourceMutationReceipt::AlreadyApplied
+        } else {
+            SourceMutationReceipt::Conflict
+        }
     }))
 }
 
@@ -842,7 +895,10 @@ fn finish_catalog_backfill_sql(
     } else {
         "SELECT value FROM meta WHERE key='catalog_generation'"
     };
-    let generation: Option<String> = tx.query_row(generation_sql, [], |row| row.get(0)).optional().map_err(failed)?;
+    let generation: Option<String> = tx
+        .query_row(generation_sql, [], |row| row.get(0))
+        .optional()
+        .map_err(failed)?;
     let pending: bool = if let Some(namespace) = namespace {
         tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
@@ -866,8 +922,15 @@ fn finish_catalog_backfill_sql(
             "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';",
         ).map_err(failed)?;
         tx.execute_batch(&sql).map_err(failed)?;
-        let updated = tx.execute("UPDATE storage_source_journal SET backfill_state='complete' WHERE namespace=?1", [namespace]).map_err(failed)?;
-        if updated != 1 { return Err(StorageError::Unavailable); }
+        let updated = tx
+            .execute(
+                "UPDATE storage_source_journal SET backfill_state='complete' WHERE namespace=?1",
+                [namespace],
+            )
+            .map_err(failed)?;
+        if updated != 1 {
+            return Err(StorageError::Unavailable);
+        }
     } else {
         tx.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';").map_err(failed)?;
     }
@@ -1270,7 +1333,9 @@ mod tests {
         changed_operation.id = discovery.id.clone();
         let before_conflict = store.claims(&changed_paths).unwrap();
         assert_eq!(
-            store.discover(&changed_operation, &changed_paths, false).unwrap(),
+            store
+                .discover(&changed_operation, &changed_paths, false)
+                .unwrap(),
             SourceMutationReceipt::Conflict
         );
         assert_eq!(store.claims(&changed_paths).unwrap(), before_conflict);
@@ -1278,10 +1343,15 @@ mod tests {
         let foreign_paths = vec!["conformance-foreign".to_owned()];
         let foreign_operation = discover_operation("foreign-namespace", &foreign_paths, true);
         assert_eq!(
-            store.discover(&foreign_operation, &foreign_paths, true).unwrap(),
+            store
+                .discover(&foreign_operation, &foreign_paths, true)
+                .unwrap(),
             SourceMutationReceipt::Conflict
         );
-        assert_eq!(store.claims(&foreign_paths).unwrap(), vec![(foreign_paths[0].clone(), None)]);
+        assert_eq!(
+            store.claims(&foreign_paths).unwrap(),
+            vec![(foreign_paths[0].clone(), None)]
+        );
 
         // Namespace bytes are hashed as length-delimited UTF-8; a NUL never
         // enters the SQL identity or becomes a second operation boundary.
@@ -1357,7 +1427,9 @@ mod tests {
         let mut concurrent = f.config.source_observations().unwrap();
         let concurrent_cas = invalidate_operation("A", &captured[1..]);
         assert_eq!(
-            concurrent.invalidate(&concurrent_cas, &captured[1..]).unwrap(),
+            concurrent
+                .invalidate(&concurrent_cas, &captured[1..])
+                .unwrap(),
             SourceMutationReceipt::Applied
         );
         let before_conflict = store.claims(&paths).unwrap();
@@ -1602,7 +1674,11 @@ mod tests {
         .unwrap();
         let next_epoch = vec!["new-epoch".into()];
         assert_eq!(
-            store.discover(&discover_operation("A", &next_epoch, true), &next_epoch, true),
+            store.discover(
+                &discover_operation("A", &next_epoch, true),
+                &next_epoch,
+                true
+            ),
             Err(StorageError::ScopeChanged)
         );
         assert_eq!(
