@@ -31,7 +31,11 @@ pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     // a partial shape.
     // Each authored definition occupies one line. Trigger bodies contain an
     // internal semicolon; keep the complete body when comparing sqlite_schema.
-    for statement in SCHEMA.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for statement in SCHEMA
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let statement = statement
             .strip_suffix(';')
             .ok_or(StorageError::Unavailable)?;
