@@ -56,12 +56,15 @@ pub(crate) fn local_query_catalog(
 pub(crate) enum NativeReaderBinding {
     Admitted(StoreConfig),
     TransitionalUnboundLocal(StoreConfig),
+    /// Private producer custody; never constructed by public configuration.
+    Semantic(crate::events::store::configured::NativeOwnership),
 }
 
 impl NativeReaderBinding {
     pub(crate) fn config(&self) -> &StoreConfig {
         match self {
             Self::Admitted(config) | Self::TransitionalUnboundLocal(config) => config,
+            Self::Semantic(owner) => owner.config(),
         }
     }
 }

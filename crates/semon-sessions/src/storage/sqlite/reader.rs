@@ -12,7 +12,7 @@ impl NativeReaderBinding {
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
             return Err(StorageError::InvalidArguments);
         }
-        if matches!(self, Self::Admitted(_))
+        if !matches!(self, Self::TransitionalUnboundLocal(_))
             && config.expected_stream_epoch.as_ref().is_none_or(|epoch| {
                 epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -35,11 +35,23 @@ impl NativeReaderBinding {
         db: &Connection,
         requested: &LogicalSourceNamespace,
     ) -> Result<bool, StorageError> {
+        if matches!(self, Self::Semantic(_)) {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        self.validate_listing(db, requested)
+    }
+
+    fn validate_listing(
+        &self,
+        db: &Connection,
+        requested: &LogicalSourceNamespace,
+    ) -> Result<bool, StorageError> {
         let config = self.config();
         if requested != &config.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
         match self {
+            Self::Semantic(owner) => owner.validate_ready(db)?,
             Self::Admitted(_) => {
                 namespace::require_admitted(db, requested)?;
             }
@@ -71,7 +83,7 @@ impl NativeReaderBinding {
         {
             return Err(StorageError::ScopeChanged);
         }
-        if matches!(self, Self::Admitted(_)) {
+        if !matches!(self, Self::TransitionalUnboundLocal(_)) {
             return super::catalog_namespace::scope_readers(db);
         }
         Ok(false)
@@ -82,6 +94,9 @@ impl NativeReaderBinding {
     pub(crate) fn proof_snapshot(
         &self,
     ) -> Result<std::sync::Arc<crate::events::store::chunk_proofs::Snapshot>, StorageError> {
+        if matches!(self, Self::Semantic(_)) {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.validate(&db, &self.config().namespace)?;
@@ -98,6 +113,24 @@ impl NativeReaderBinding {
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         let qualified = self.validate(&db, requested)?;
+        Ok(ReadSnapshot(db, qualified))
+    }
+
+    /// Only the private Query listing adapter can consume producer custody.
+    /// General Catalog, navigation, selected and proof factories still refuse.
+    pub(super) fn listing_snapshot(
+        &self,
+        requested: &LogicalSourceNamespace,
+    ) -> Result<ReadSnapshot, StorageError> {
+        if !matches!(self, Self::Semantic(_)) {
+            return self.snapshot(requested);
+        }
+        if requested != &self.config().namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
+        let db = self.connection()?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
+        let qualified = self.validate_listing(&db, requested)?;
         Ok(ReadSnapshot(db, qualified))
     }
 }

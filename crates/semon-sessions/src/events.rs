@@ -2914,6 +2914,51 @@ pub(crate) fn scan_file(
         .transpose()?;
     cache.scan_measurements.record("source_lock", started, 1);
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
+    // Model preparation consumes the committed typed Index/proof binding. It
+    // has no ingestion operation ID and must neither create an intent nor
+    // reparse changed Raw behind the staged claim. load_file validates the
+    // configured current schema, admission and namespace in its read snapshot.
+    if configured && cache.event_operation.is_none() {
+        let (ledger, index) = cache
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+            .load_file(&key)
+            .map_err(store_io_error)?
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Conflict))?;
+        if ledger.stat != Stat::of(path)?
+            || (harness != "copilot" && index.tree_summary.is_none())
+            || !index
+                .source_chunks
+                .as_ref()
+                .is_some_and(|chunks| chunks.valid(ledger.offset))
+            || (harness != "copilot" && index.marker_index.is_none())
+            || index.handoff_index.is_none()
+            || (harness == "codex" && index.codex_header.is_none())
+            || (agent
+                && !index
+                    .claude_sidecar
+                    .as_ref()
+                    .is_some_and(|sidecar| sidecar.current(path)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "committed model source changed or incomplete",
+            ));
+        }
+        cache.require_usage_store(&index)?;
+        let index = Arc::new(index);
+        cache.files.insert(
+            key,
+            CachedFile {
+                ledger,
+                index: Some(Arc::clone(&index)),
+            },
+        );
+        // The existing model captures these exact chunks, verifies every used
+        // range and finishes its source/sidecar fences before record/publish.
+        return Ok(index);
+    }
     if !configured
         && let Some(entry) = cache.files.get(&key)
         && let Some(index) = &entry.index

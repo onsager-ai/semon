@@ -1359,16 +1359,18 @@ selected/proof/repair readers remain pending.
 A private Query listing entrypoint accepts the existing QueryCatalogStore port;
 filtering/rendering/window and post-read validation use the ordinary Query path.
 SQLite uses separately authored namespace selectors for the same cohort algorithm.
-A component becomes a complete metadata cohort only if it has model Query rows
-and recipes and covers every admitted file and Current owner. Other publications
-remain partial and Query refuses them. Public factories still have semantic=None;
+The private listing generation is ready only if the component has model Query
+rows and recipes and covers every admitted file and Current owner. Global
+`catalog_completeness` stays `partial`; general readers cannot consult the
+private listing marker as complete-domain readiness. Public factories have semantic=None;
 all public qualifications remain 0. This is not a usable backend.
 
 The replacement CI oracle remains unchanged. Static tracing identifies begin's
 actual-epoch comparison: after finish, the original handle is quiescent (None),
 while a competitor has created the next epoch. A quiescent same-generation handle
-now observes that successor like a newly opened handle. A handle bound to an old
-epoch or generation still refuses before writes. CI must confirm the diagnosis.
+may take over that successor only by atomically advancing its epoch. Same-runtime
+takeover retains valid reduction/model progress; a different runtime uses the
+existing bounded reset. An old epoch or generation refuses before writes.
 
 Two explicit CI tests exercise real sanitized Codex + Claude ingest/model output,
 nonempty Query metadata and recipes, namespace-bound Query listings, replay,
@@ -1377,3 +1379,38 @@ and a full-model stale publisher with whole-database equality/digests. The froze
 legacy oracle and prior replacement/stale/fault/search tests are retained.
 No local tests, formatting or CPU-bound checks ran; Root owns exact-head CI and
 format adoption. S1C is partial; S2 remains deferred and #380 holds #477 merge.
+
+### Worker38: fenced model preparation and listing custody (unverified WIP)
+
+The observed model publication failure was not an older-schema predicate.
+Configured native scanning required an ingestion operation ID even when the
+model only needed the committed Index. The swallowed scan error became
+`selected source cannot be qualified`. Configured preparation without an ingest
+operation now loads the typed, namespace-bound committed Index/ledger/proofs;
+it refuses changed physical evidence or incomplete metadata and never reparses
+or opens a new ingestion intent. The existing producer verifies captured chunks,
+sidecars and native markers, derives the same model, and retains publication's
+independent Raw/claim/epoch/generation checks. No PreparedSources are fabricated.
+
+A private ownership-backed reader binding serves only the existing Query
+listing algorithm. General Catalog/navigation, selected/proof and search
+factories refuse this binding. Open-question text also refuses before an
+Options-derived selected reader could run. Public single-Source admission and
+all qualification versions remain unchanged at zero.
+
+Current Semon schema/parser versions are required by NativeOwnership, including
+the private reader binding. Non-current schema refuses with the typed
+NamespaceUpgradePending error; no compatibility ladder or fallback was added.
+Frozen original publication parity remains a derivation/effect oracle.
+
+CI registers t1-t5 for fresh same-runtime takeover, different-runtime reset,
+active old-epoch zero-write operations, quiescent post-finish takeover and
+whole-database rollback. The real Codex/Claude tests now compare production
+derivation with the unbound producer and check persisted metadata/recipe/slot
+contents plus exact Query facts, including after replacement/History retention.
+t6 checks listing-specific readiness and unsupported-reader refusals. An
+additional case refuses changed Raw and non-current schema without row writes.
+These are test additions, not execution evidence: exact-head CI, formatting and
+independent review are still required. Full selected readers, incident/owner
+retirement, PID/lineage/relations/withdrawals, S2-S4, PG, Hub313 and #380 remain
+unqualified or pending; #477 merge is held on #380 completion.
