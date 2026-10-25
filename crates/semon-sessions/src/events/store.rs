@@ -889,9 +889,9 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     }
 
     fn ensure_current(&self) -> rusqlite::Result<()> {
-        let observed: i64 =
-            self.transaction
-                .pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let observed: i64 = self
+            .transaction
+            .pragma_query_value(None, "schema_version", |row| row.get(0))?;
         if observed == self.schema_version {
             Ok(())
         } else {
