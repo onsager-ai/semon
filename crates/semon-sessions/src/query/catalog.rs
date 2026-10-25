@@ -240,7 +240,14 @@ impl Query {
         if self.sources.machines.len() != 1 || tool != "list_sessions" {
             return Err(unavailable("Admitted Query selector is not qualified"));
         }
-        self.execute_catalog_store_at(tool, args, None, crate::SessionSourceReadMode::LocalThenProvider, now, Some(store))
+        self.execute_catalog_store_at(
+            tool,
+            args,
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            now,
+            Some(store),
+        )
     }
 
     fn execute_catalog_store_at(
@@ -304,7 +311,9 @@ impl Query {
                 })
                 .map_err(unavailable)?;
             let local;
-            let store = if let Some(store) = bound { store } else {
+            let store = if let Some(store) = bound {
+                store
+            } else {
                 local = crate::storage::local_query_catalog(&source.options, namespace.clone());
                 &*local
             };

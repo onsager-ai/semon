@@ -2758,21 +2758,49 @@ mod tests {
         options: &crate::Options,
         input: &crate::Input,
         runtime: &str,
-    ) -> (crate::model::relation_stage::Batch, crate::model::SemanticModelBatch) {
+    ) -> (
+        crate::model::relation_stage::Batch,
+        crate::model::SemanticModelBatch,
+    ) {
         let paths = vec![input.full_path(options).to_string_lossy().into_owned()];
-        assert_eq!(cache.begin_semantic_stage_with_journal(&paths, runtime, true).unwrap(), Outcome::Written);
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(&paths, runtime, true)
+                .unwrap(),
+            Outcome::Written
+        );
         for _ in 0..128 {
             let batch = cache.semantic_batch(64).unwrap().unwrap();
-            if batch.paths.is_empty() { continue; }
+            if batch.paths.is_empty() {
+                continue;
+            }
             if batch.phase == crate::model::relation_stage::Phase::Publication {
-                let prepared = crate::model::prepare_semantic_batch(options, cache, std::slice::from_ref(input), &batch, 1_790_000_000_000).unwrap();
+                let prepared = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    std::slice::from_ref(input),
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
                 let before = shared_state(fixture);
                 FAIL_EFFECT.with(|point| point.set(Some("semantic_model_record")));
-                assert!(cache.record_semantic_batch(&batch, prepared.prepared()).is_err());
+                assert!(
+                    cache
+                        .record_semantic_batch(&batch, prepared.prepared())
+                        .is_err()
+                );
                 FAIL_EFFECT.with(|point| point.set(None));
                 assert_eq!(shared_state(fixture), before);
             }
-            let model = cache.prepare_semantic_model_batch(options, std::slice::from_ref(input), &batch, 1_790_000_000_000).unwrap();
+            let model = cache
+                .prepare_semantic_model_batch(
+                    options,
+                    std::slice::from_ref(input),
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 return (batch, model);
             }
@@ -2783,22 +2811,46 @@ mod tests {
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {
         let mut a = Fixture::new();
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
-        a.config.backend = StoreBackend::Sqlite { database: a.root.join("model.sqlite3") };
+        a.config.backend = StoreBackend::Sqlite {
+            database: a.root.join("model.sqlite3"),
+        };
         create_semantic_store(&a.config).unwrap();
         let mut b = a.config.clone();
         b.namespace = LogicalSourceNamespace::new("source-b").unwrap();
-        let inputs = [crate::Input { root: crate::InputRoot::Codex, path: "sessions/rollout.jsonl".into() }, crate::Input { root: crate::InputRoot::Claude, path: "projects/sanitized/model-1.jsonl".into() }];
+        let inputs = [
+            crate::Input {
+                root: crate::InputRoot::Codex,
+                path: "sessions/rollout.jsonl".into(),
+            },
+            crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/sanitized/model-1.jsonl".into(),
+            },
+        ];
         let options = std::array::from_fn(|i| {
             let home = a.root.join(format!("source-{i}"));
             fs::create_dir_all(home.join("codex/sessions")).unwrap();
             fs::create_dir_all(home.join("claude/projects/sanitized")).unwrap();
             let facts = home.join("facts.json");
-            crate::facts::write_facts(&facts, &crate::Facts { version: 2, hostname: format!("machine-{i}"), ..Default::default() }).unwrap();
+            crate::facts::write_facts(
+                &facts,
+                &crate::Facts {
+                    version: 2,
+                    hostname: format!("machine-{i}"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let options = crate::Options {
-                claude_home: home.join("claude"), claude_json: home.join("claude.json"),
-                codex_home: home.join("codex"), copilot_home: home.join("copilot"),
-                proc_root: home.join("proc"), cache: home.join("unused-index.json"),
-                all: true, facts: Some(facts), ..Default::default()
+                claude_home: home.join("claude"),
+                claude_json: home.join("claude.json"),
+                codex_home: home.join("codex"),
+                copilot_home: home.join("copilot"),
+                proc_root: home.join("proc"),
+                cache: home.join("unused-index.json"),
+                all: true,
+                facts: Some(facts),
+                ..Default::default()
             };
             fs::write(inputs[i].full_path(&options), format!("{{\"timestamp\":\"2026-10-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"model-{i}\",\"cwd\":\"/sanitized\"}}}}\n{{\"timestamp\":\"2026-10-01T00:01:00Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"sanitized model fixture\"}}]}}}}\n")).unwrap();
             if i == 1 {
@@ -2816,29 +2868,72 @@ mod tests {
     fn configured_semantic_real_model_two_source_query_metadata_and_transcript() {
         use crate::storage::native_events::NativeEventStore;
         let (a, b, options, inputs) = model_sources();
-        let mut caches: Vec<_> = [&a.config, &b].into_iter().map(|config| EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap()).collect();
+        let mut caches: Vec<_> = [&a.config, &b]
+            .into_iter()
+            .map(|config| {
+                EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
         for i in 0..2 {
-            caches[i].ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), inputs[i].root.as_str()).unwrap();
+            caches[i]
+                .ingest(
+                    &"a".repeat(64),
+                    &inputs[i].full_path(&options[i]),
+                    inputs[i].root.as_str(),
+                )
+                .unwrap();
         }
         for i in 0..2 {
             let foreign = if i == 0 { "source-b" } else { "source-a" };
             let before = namespace_state(&a, foreign);
-            let (batch, model) = model_ready(&a, &mut caches[i], &options[i], &inputs[i], "real-model");
+            let (batch, model) =
+                model_ready(&a, &mut caches[i], &options[i], &inputs[i], "real-model");
             assert!(model.prepared().rows[0].query.is_some());
             assert!(!model.prepared().transcripts[0].slots.is_empty());
-            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
             let published = shared_state(&a);
-            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
             assert_eq!(shared_state(&a), published);
             assert_eq!(namespace_state(&a, foreign), before);
             let config = if i == 0 { &a.config } else { &b };
-            let port = crate::storage::sqlite::query::SqliteQueryCatalog { options: options[i].clone(), binding: crate::storage::NativeReaderBinding::Admitted(config.clone()) };
-            let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(config.namespace.as_str().into(), options[i].clone())]));
+            let port = crate::storage::sqlite::query::SqliteQueryCatalog {
+                options: options[i].clone(),
+                binding: crate::storage::NativeReaderBinding::Admitted(config.clone()),
+            };
+            let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
+                config.namespace.as_str().into(),
+                options[i].clone(),
+            )]));
             let mut query = crate::Query::from_sources(sources);
-            let reply = query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1_790_000_000_000, &port).unwrap();
+            let reply = query
+                .call_bound_catalog_at(
+                    "list_sessions",
+                    &serde_json::json!({}),
+                    1_790_000_000_000,
+                    &port,
+                )
+                .unwrap();
             assert_eq!(reply["total"], 1);
             assert_eq!(reply["sessions"][0]["id"], format!("model-{i}"));
-            assert_eq!(caches[i].finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+            assert_eq!(
+                caches[i].finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
         }
     }
 
@@ -2847,13 +2942,41 @@ mod tests {
         use crate::storage::native_events::NativeEventStore;
         use std::io::Write;
         let (a, b, options, inputs) = model_sources();
-        let mut caches: Vec<_> = [&a.config, &b].into_iter().map(|config| EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap()).collect();
+        let mut caches: Vec<_> = [&a.config, &b]
+            .into_iter()
+            .map(|config| {
+                EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
         let mut original = None;
         for i in 0..2 {
-            caches[i].ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), inputs[i].root.as_str()).unwrap();
-            let (batch, model) = model_ready(&a, &mut caches[i], &options[i], &inputs[i], "original-model");
-            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
-            if i == 1 { original = Some(model.prepared().rows[0].clone()); }
+            caches[i]
+                .ingest(
+                    &"a".repeat(64),
+                    &inputs[i].full_path(&options[i]),
+                    inputs[i].root.as_str(),
+                )
+                .unwrap();
+            let (batch, model) = model_ready(
+                &a,
+                &mut caches[i],
+                &options[i],
+                &inputs[i],
+                "original-model",
+            );
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            if i == 1 {
+                original = Some(model.prepared().rows[0].clone());
+            }
             caches[i].finish_semantic_stage(batch.epoch).unwrap();
         }
         let foreign = namespace_state(&a, "source-a");
@@ -2862,17 +2985,46 @@ mod tests {
         writeln!(raw, "{{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"replacement\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"continued Claude replacement\"}}}}").unwrap();
         drop(raw);
         caches[1].ingest(&"b".repeat(64), &path, "claude").unwrap();
-        let mut stale = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap()).unwrap();
-        let (old_batch, old_model) = model_ready(&a, &mut stale, &options[1], &inputs[1], "old-model");
-        let (batch, model) = model_ready(&a, &mut caches[1], &options[1], &inputs[1], "replacement-model");
-        for fault in ["semantic_publish_history", "semantic_publish_slots", "semantic_publish_rows", "semantic_publish_search", "semantic_publish_proof", "semantic_publish_ack", "semantic_publish_head"] {
+        let mut stale = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap(),
+        )
+        .unwrap();
+        let (old_batch, old_model) =
+            model_ready(&a, &mut stale, &options[1], &inputs[1], "old-model");
+        let (batch, model) = model_ready(
+            &a,
+            &mut caches[1],
+            &options[1],
+            &inputs[1],
+            "replacement-model",
+        );
+        for fault in [
+            "semantic_publish_history",
+            "semantic_publish_slots",
+            "semantic_publish_rows",
+            "semantic_publish_search",
+            "semantic_publish_proof",
+            "semantic_publish_ack",
+            "semantic_publish_head",
+        ] {
             let before = shared_state(&a);
             FAIL_EFFECT.with(|point| point.set(Some(fault)));
-            assert!(caches[1].publish_semantic_catalog(&batch, model.prepared()).is_err(), "{fault}");
+            assert!(
+                caches[1]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .is_err(),
+                "{fault}"
+            );
             FAIL_EFFECT.with(|point| point.set(None));
             assert_eq!(shared_state(&a), before, "{fault}");
         }
-        assert_eq!(caches[1].publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+        assert_eq!(
+            caches[1]
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
         let mut expected = original.unwrap();
         expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained: String = a.db().query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-b' AND session_key=?1",[&expected.key],|r|r.get(0)).unwrap();
@@ -2880,7 +3032,13 @@ mod tests {
         assert_eq!(namespace_state(&a, "source-a"), foreign);
         let before = shared_state(&a);
         let digest = publication_snapshot_digest(&a);
-        assert_eq!(stale.publish_semantic_catalog(&old_batch, old_model.prepared()).unwrap().0, Outcome::Conflict);
+        assert_eq!(
+            stale
+                .publish_semantic_catalog(&old_batch, old_model.prepared())
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
         assert_eq!(shared_state(&a), before);
         assert_eq!(publication_snapshot_digest(&a), digest);
     }

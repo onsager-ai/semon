@@ -22,7 +22,16 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         bytes_left: &mut usize,
     ) -> Result<Part, QueryError> {
         let db = self.binding.snapshot(namespace).map_err(storage_error)?;
-        read(&db, &self.options, now, bytes_left, matches!(self.binding, crate::storage::NativeReaderBinding::Admitted(_)))
+        read(
+            &db,
+            &self.options,
+            now,
+            bytes_left,
+            matches!(
+                self.binding,
+                crate::storage::NativeReaderBinding::Admitted(_)
+            ),
+        )
     }
     fn has_search_slots(
         &self,
@@ -31,12 +40,23 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         since: Option<i64>,
     ) -> Result<bool, QueryError> {
         let db = self.binding.snapshot(namespace).map_err(storage_error)?;
-        has_search_slots(&db, key, since, matches!(self.binding, crate::storage::NativeReaderBinding::Admitted(_)))
+        has_search_slots(
+            &db,
+            key,
+            since,
+            matches!(
+                self.binding,
+                crate::storage::NativeReaderBinding::Admitted(_)
+            ),
+        )
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
         let db = self.binding.snapshot(namespace).map_err(storage_error)?;
         let options = &self.options;
-        let scoped = matches!(self.binding, crate::storage::NativeReaderBinding::Admitted(_));
+        let scoped = matches!(
+            self.binding,
+            crate::storage::NativeReaderBinding::Admitted(_)
+        );
         if generation(&db, scoped)? != part.generation
             || crate::native_evidence::query_runtime_generation(options)
                 .map_err(|error| QueryError::io(&error))?
@@ -96,7 +116,11 @@ fn read(
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {
-        if scoped { "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT session_key FROM main.session_history_catalog WHERE namespace=semon_namespace() AND json_extract(metadata,'$.query.last')>=?1" } else { "SELECT session_key FROM session_catalog WHERE last_ms>=?1 UNION SELECT session_key FROM session_catalog WHERE json_extract(metadata,'$.query.last')>=?1 UNION SELECT session_key FROM session_catalog WHERE lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait') UNION SELECT session_key FROM session_history_catalog WHERE json_extract(metadata,'$.query.last')>=?1" }
+        if scoped {
+            "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT session_key FROM main.session_history_catalog WHERE namespace=semon_namespace() AND json_extract(metadata,'$.query.last')>=?1"
+        } else {
+            "SELECT session_key FROM session_catalog WHERE last_ms>=?1 UNION SELECT session_key FROM session_catalog WHERE json_extract(metadata,'$.query.last')>=?1 UNION SELECT session_key FROM session_catalog WHERE lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait') UNION SELECT session_key FROM session_history_catalog WHERE json_extract(metadata,'$.query.last')>=?1"
+        }
     } else if scoped {
         "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"
     } else {
@@ -114,9 +138,15 @@ fn read(
     let mut needed = keep.clone();
     let mut edges = BTreeSet::new();
     let mut turns = BTreeSet::new();
-    let edge_select = if scoped { "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()" } else { "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges" };
+    let edge_select = if scoped {
+        "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()"
+    } else {
+        "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges"
+    };
     let edge_sql = if scoped && cutoff.is_some() {
-        format!("{edge_select} AND (json_extract(metadata,'$.at')>=?1 OR json_extract(metadata,'$.done')>=?1 OR json_extract(metadata,'$.status') IN ('work','wait','new'))")
+        format!(
+            "{edge_select} AND (json_extract(metadata,'$.at')>=?1 OR json_extract(metadata,'$.done')>=?1 OR json_extract(metadata,'$.status') IN ('work','wait','new'))"
+        )
     } else if cutoff.is_some() {
         format!(
             "{edge_select} WHERE json_extract(metadata,'$.at')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.done')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.status') IN ('work','wait','new')"
@@ -152,7 +182,11 @@ fn read(
     measured(0, 0, 0, edge.get_status(rusqlite::StatementStatus::VmStep));
     drop(edge);
     let initially_kept = keep.clone();
-    let turn_select = if scoped { "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1" } else { "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM session_trace_turns WHERE session_key=?1" };
+    let turn_select = if scoped {
+        "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1"
+    } else {
+        "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM session_trace_turns WHERE session_key=?1"
+    };
     let turn_sql = if cutoff.is_some() {
         format!(
             "{turn_select} AND json_extract(metadata,'$.last')=1 UNION {turn_select} AND json_extract(metadata,'$.at')>=?2"
@@ -332,7 +366,12 @@ fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn has_search_slots(db: &Connection, key: &str, since: Option<i64>, scoped: bool) -> Result<bool, QueryError> {
+fn has_search_slots(
+    db: &Connection,
+    key: &str,
+    since: Option<i64>,
+    scoped: bool,
+) -> Result<bool, QueryError> {
     let history: bool = db
         .query_row(
             if scoped { "SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1)" } else { "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1)" },
@@ -345,6 +384,10 @@ fn has_search_slots(db: &Connection, key: &str, since: Option<i64>, scoped: bool
     } else {
         "session_slots"
     };
-    let predicate = if scoped { "namespace=semon_namespace() AND " } else { "" };
+    let predicate = if scoped {
+        "namespace=semon_namespace() AND "
+    } else {
+        ""
+    };
     db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate}session_key=?1 AND (?2 IS NULL OR json_extract(metadata,'$.t')>=?2))"),rusqlite::params![key,since],|r|r.get(0)).map_err(unavailable)
 }

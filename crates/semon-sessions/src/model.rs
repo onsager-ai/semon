@@ -7288,8 +7288,14 @@ pub(crate) struct PreparedSources {
 impl PreparedSources {
     /// Exact content-free publication witness shared by staging and publish.
     pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
-        serde_json::to_string(&self.transcripts.iter().map(|p| (&p.key, &p.slots, p.repair)).collect::<Vec<_>>())
-            .map_err(io::Error::other)
+        serde_json::to_string(
+            &self
+                .transcripts
+                .iter()
+                .map(|p| (&p.key, &p.slots, p.repair))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(io::Error::other)
     }
     /// Header/path parent references exist before a selected cohort can resolve
     /// them. Keep them as native identities rather than dropping an absent end.
@@ -7344,14 +7350,25 @@ pub(crate) fn prepare_semantic_batch(
     batch: &relation_stage::Batch,
     now: i64,
 ) -> io::Result<SemanticModelBatch> {
-    let paths: BTreeSet<_> = inputs.iter().map(|input| input.full_path(options).to_string_lossy().into_owned()).collect();
+    let paths: BTreeSet<_> = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect();
     if paths != batch.paths.iter().cloned().collect() {
-        return Err(io::Error::other("semantic model inputs differ from staged batch"));
+        return Err(io::Error::other(
+            "semantic model inputs differ from staged batch",
+        ));
     }
     let prepared = match batch.phase {
-        relation_stage::Phase::Indexing => prepare_semantic_index_sources(options, cache, inputs, now)?,
-        relation_stage::Phase::Identity => prepare_semantic_identity_sources(options, cache, inputs, &batch.context, now)?,
-        relation_stage::Phase::Relations | relation_stage::Phase::Publication => prepare_staged_sources(options, cache, inputs, &batch.context, false, now)?,
+        relation_stage::Phase::Indexing => {
+            prepare_semantic_index_sources(options, cache, inputs, now)?
+        }
+        relation_stage::Phase::Identity => {
+            prepare_semantic_identity_sources(options, cache, inputs, &batch.context, now)?
+        }
+        relation_stage::Phase::Relations | relation_stage::Phase::Publication => {
+            prepare_staged_sources(options, cache, inputs, &batch.context, false, now)?
+        }
     };
     if prepared.base_generation != batch.base_generation {
         return Err(io::Error::other("semantic model generation changed"));
