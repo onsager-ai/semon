@@ -1381,6 +1381,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 }
 @media (any-pointer: coarse) {
   .catalog-filters .search, .catalog-scope summary, .catalog-result-header .link, .catalog-back { min-height: 44px; }
+  .session-list > .nrow { min-height: 44px; }
 }
 @media (max-width: 760px), (any-pointer: coarse) {
   .catalog-note > .link { min-width: 44px; min-height: 44px; }

@@ -6,9 +6,9 @@
 //   SEMON_UI_OUT where reports, screenshots and diffs go (default: ./out)
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
+import { launchOptions } from './launch-options.mjs';
 
 export const ENV = {
   base: (process.env.SEMON_BASE ?? '').replace(/\/$/, ''),
@@ -24,34 +24,7 @@ export const ENV = {
 fs.mkdirSync(ENV.out, { recursive: true });
 
 export const launch = ({ baselineRaster = false } = {}) =>
-  chromium.launch({
-    args: [
-      '--disable-gpu',
-      '--font-render-hinting=none',
-      // Deterministic rendering stages, while Playwright keeps normal frame
-      // scheduling (enable-begin-frame-control requires a separate CDP driver).
-      ...(baselineRaster
-        ? [
-            '--disable-skia-runtime-opts',
-            '--run-all-compositor-stages-before-draw',
-            '--disable-new-content-rendering-timeout',
-            '--disable-threaded-animation',
-            '--disable-threaded-scrolling',
-            '--disable-checker-imaging',
-            '--disable-image-animation-resync',
-            '--disable-partial-raster',
-          ]
-        : []),
-    ],
-    ...(process.platform === 'linux'
-      ? {
-          env: {
-            ...process.env,
-            FONTCONFIG_FILE: fileURLToPath(new URL('./fontconfig.conf', import.meta.url)),
-          },
-        }
-      : {}),
-  });
+  chromium.launch(launchOptions({ baselineRaster }));
 
 // The three screens every check and comparison covers.
 export const VIEWPORTS = {
