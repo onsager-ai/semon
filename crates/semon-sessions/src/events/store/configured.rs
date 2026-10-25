@@ -8569,6 +8569,16 @@ mod tests {
                 )
                 .unwrap();
             let db = f.db();
+            // Native metadata writes still compile the complete ownership
+            // trigger. Register the denied publisher role; these noise rows
+            // are native keys and must not gain publication authority.
+            db.create_scalar_function(
+                "semon_semantic_publisher",
+                0,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(0_i64),
+            )
+            .unwrap();
             for name in ["semon_event_writer", "semon_semantic_writer"] {
                 db.create_scalar_function(
                     name,

@@ -12,10 +12,27 @@ index 31bfef08..f5a6fee5 100644
          run: |
            cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
 diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
-index 98c2f14c..e19c4053 100644
+index 98c2f14c..cd2e10f3 100644
 --- a/crates/semon-sessions/src/events/store/configured.rs
 +++ b/crates/semon-sessions/src/events/store/configured.rs
-@@ -8627,7 +8627,7 @@ mod tests {
+@@ -8569,6 +8569,16 @@ mod tests {
+                 )
+                 .unwrap();
+             let db = f.db();
++            // Native metadata writes still compile the complete ownership
++            // trigger. Register the denied publisher role; these noise rows
++            // are native keys and must not gain publication authority.
++            db.create_scalar_function(
++                "semon_semantic_publisher",
++                0,
++                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
++                |_| Ok(0_i64),
++            )
++            .unwrap();
+             for name in ["semon_event_writer", "semon_semantic_writer"] {
+                 db.create_scalar_function(
+                     name,
+@@ -8627,7 +8637,7 @@ mod tests {
                          };
                          db.execute(&insert, params![namespace, 10000 + i, path])
                              .unwrap();
@@ -24,7 +41,7 @@ index 98c2f14c..e19c4053 100644
                          db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
                      }
                  }
-@@ -8655,6 +8655,7 @@ mod tests {
+@@ -8655,6 +8665,7 @@ mod tests {
                  assert!(
                      measured
                          .iter()
