@@ -35,6 +35,10 @@ impl Writer<'_, '_> {
         {
             return Err(StorageError::Conflict);
         }
+        self.boundary()
+    }
+
+    fn boundary(&self) -> Result<(), StorageError> {
         #[cfg(test)]
         if FAIL_AFTER.with(|point| match point.get() {
             Some(1) => {
@@ -240,7 +244,7 @@ pub(super) fn publish(
         if changed > 1 {
             return Err(StorageError::Conflict);
         }
-        writer.tx.check()?;
+        writer.boundary()?;
         return Ok(false);
     }
     let key = format!("native_tree_summary:{path}");
@@ -256,6 +260,7 @@ pub(super) fn publish(
     if changed > 1 {
         return Err(StorageError::Conflict);
     }
+    writer.boundary()?;
     // SourceState is still locked and the exact file/Usage fences were matched
     // before the first generation effect. Publish header last in this txn.
     writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
