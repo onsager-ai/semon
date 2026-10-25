@@ -2432,6 +2432,18 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
+            // A new native member can change a previously complete name
+            // lookup without changing any already staged source claim.
+            let revision: i64 = tx
+                .query_row(
+                    "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            if revision != batch.source_revision {
+                return Ok(Outcome::Conflict);
+            }
             if !lifecycle_current(prepared) {
                 #[cfg(test)]
                 eprintln!("semantic_record_conflict: publication_lifecycle");

@@ -28,6 +28,13 @@ existing domain94 CI filter and in writer-inventory.json:
   publication must refuse without partial writes. Reopening produces a new
   epoch and a verified unique match equal to ordinary native preparation.
 
+Actual CI at 8a1aecd8 exposed a stale model-record defect: recording the old
+publication model returned Written after a new native source advanced the
+journal. Existing claim checks cover staged paths only. The publication-phase
+model record now checks the current namespace journal revision against the
+batch, as final publication already does, inside its existing fenced owner
+transaction and before any writes. The original Conflict assertion remains.
+
 The existing member-hint replay test additionally inspects the actual durable
 member keysets across reopening and retains its unchanged native-event counts,
 fault rollback, stale publication and ordinary preparation oracle assertions.
