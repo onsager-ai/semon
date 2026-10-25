@@ -6,6 +6,7 @@ use std::time::Instant;
 pub(super) enum TxnKind {
     ReadSnapshot,
     Write,
+    StoreWrite,
 }
 
 /// No driver values escape this adapter; callbacks are synchronous, borrowed,
@@ -65,7 +66,7 @@ impl PgPool {
                 .batch_execute(match kind {
                     TxnKind::ReadSnapshot => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
                     // Future effects require explicit locks/fences/unique keys.
-                    TxnKind::Write => "BEGIN ISOLATION LEVEL READ COMMITTED",
+                    TxnKind::Write | TxnKind::StoreWrite => "BEGIN ISOLATION LEVEL READ COMMITTED",
                 })
                 .map_err(sqlstate::error)?;
             phase = Phase::InTxn;
@@ -97,6 +98,7 @@ impl PgPool {
             tx.check()?;
             if verify_schema {
                 schema::verify(&mut tx)?;
+                super::store_metadata::lock(&mut tx, matches!(kind, TxnKind::StoreWrite))?;
             }
             let value = operation(&mut tx)?;
             tx.check()?;

@@ -1,6 +1,5 @@
-//! Private, incomplete Tree generation writer. Scalar completion is deliberately
-//! closed: the current PG contract has no store-owned pricing metadata owner.
-//! Staging never publishes a header, a complete generation, or an ingest ACK.
+//! Private Tree family writer. Publication is atomic inside the caller's
+//! existing transaction; it is not an ingest ACK or a complete IndexStore.
 use super::{sqlstate, txn::PgTxn};
 use crate::{
     events::{
@@ -90,16 +89,9 @@ impl Writer<'_, '_> {
     }
 }
 
-/// Stage real persisted dimensions, returning their generation and canonical
-/// witness to the future complete bundle. The caller MUST propagate errors to
-/// its existing WriteTxn. No header or scalar is published here. In particular,
-/// this is not a successful partial IndexStore or an ingest receipt.
-///
-/// Missing prerequisite: a verified store-owned `pricing_recompute_target`
-/// metadata port/lock alongside source-owned `catalog_semantic_recipe`. PG's
-/// present source-only meta RLS cannot represent the first owner. Until that
-/// exists there is intentionally no scalar/completion constructor to call.
-#[allow(dead_code)] // Narrow private family entry, awaiting that complete bundle.
+/// Stage real dimensions in the existing transaction. A staged family remains
+/// unreadable until the connected publication below has qualified its scalar.
+
 pub(super) fn stage(
     tx: &mut PgTxn<'_>,
     path: &str,
@@ -164,6 +156,73 @@ pub(super) fn stage(
     let digest = persisted_witness(writer.tx, projection)?;
     writer.tx.check()?;
     Ok((projection, digest))
+}
+
+/// Only the complete bundle may call this private family operation. No file
+/// ledger, Raw acknowledgement or Source revision is advanced here. The sealed
+/// stage values never leave this call, so they cannot be reused across txns.
+#[allow(dead_code)] // Complete native ingest bundle is still independently pending.
+pub(super) fn publish(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    ledger: &Ledger,
+    expected_header: Option<&Ledger>,
+    expected_source: i64,
+    summary: &Summary,
+    normalized_usage: bool,
+) -> Result<bool, StorageError> {
+    let _scope = selected_read::Scope::ensure();
+    // Admission already holds the shared store lock, before SourceState. The
+    // host exclusive lock cannot change pricing until this transaction ends.
+    let (_, pricing) = super::store_metadata::read(tx)?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let recipe = metadata(tx, b"catalog_semantic_recipe")?;
+    let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    if fingerprint_rows.len()!=1 { return Err(StorageError::Conflict); }
+    let bytes=fingerprint_rows[0].get::<_,Option<i64>>(0);
+    if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) { return Err(StorageError::ScopeChanged); }
+    selected_read::charge(64,bytes.unwrap_or(0) as usize).map_err(|_|StorageError::Busy)?;
+    let fingerprint:Option<Vec<u8>>=tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let fingerprint=fingerprint.map(String::from_utf8).transpose().map_err(|_|StorageError::ScopeChanged)?;
+    let interpretation=crate::events::tree_rows::interpretation(&[pricing,recipe,fingerprint]).map_err(|_|StorageError::Unavailable)?;
+    let (projection, digest)=stage(tx,path,ledger,expected_header,expected_source,summary)?;
+    // The persisted witness is reverified after staging. This covers retained
+    // rows and never substitutes a digest of the input Summary.
+    if persisted_witness(tx,projection)?!=digest { return Err(StorageError::Conflict); }
+    let receipt=header_ledger(ledger);
+    let record=crate::events::tree_rows::TreeSummaryRecord::new(receipt.clone(),Some(digest),interpretation,summary,normalized_usage);
+    let encoded=serde_json::to_vec(&record).map_err(|_|StorageError::Unavailable)?;
+    let mut writer=Writer{tx};
+    let put="INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value";
+    let failure=format!("native_tree_failure:{path}");
+    if encoded.len()>1048576 {
+        writer.effect(put,&[&ns,&failure.as_bytes(),&receipt.as_bytes()])?;
+        // Generation remains incomplete and cannot be returned by readers.
+        let changed=writer.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$3 WHERE namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes(),&b"blocked_metadata".as_slice()]).map_err(sqlstate::error)?;
+        if changed>1 { return Err(StorageError::Conflict); }
+        writer.tx.check()?;
+        return Ok(false);
+    }
+    let key=format!("native_tree_summary:{path}");
+    writer.effect(put,&[&ns,&key.as_bytes(),&encoded])?;
+    let changed=writer.tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&failure.as_bytes()]).map_err(sqlstate::error)?;
+    if changed>1 { return Err(StorageError::Conflict); }
+    // SourceState is still locked and the exact file/Usage fences were matched
+    // before the first generation effect. Publish header last in this txn.
+    writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
+    writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace=$1 AND path=$2 ON CONFLICT(namespace_digest,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
+    Ok(true)
+}
+
+fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>,StorageError> {
+    let ns=tx.namespace.as_str().as_bytes();
+    let rows=tx.driver.query("SELECT octet_length(value)::bigint FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key]).map_err(sqlstate::error)?;
+    let Some(row)=rows.first() else { return Ok(None); };
+    let bytes:i64=row.get(0);
+    if !(0..=1048576).contains(&bytes) { return Err(StorageError::ScopeChanged); }
+    selected_read::charge(64,bytes as usize).map_err(|_|StorageError::Busy)?;
+    let value:Vec<u8>=tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key]).map_err(sqlstate::error)?.get(0);
+    String::from_utf8(value).map(Some).map_err(|_|StorageError::ScopeChanged)
 }
 
 // Read only persisted rows, bytea keyset order, one admitted row at a time.
