@@ -250,14 +250,22 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
         let mut statement = sqlite.prepare(sql).unwrap();
         statement
             .query_map([projection], |r| {
-                (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<_>>()
+                (0..columns)
+                    .map(|i| r.get(i))
+                    .collect::<rusqlite::Result<_>>()
             })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    let labels = strings("SELECT label,value FROM native_tree_labels WHERE projection_id=?1", 2);
-    let models = strings("SELECT model FROM native_tree_models WHERE projection_id=?1", 1);
+    let labels = strings(
+        "SELECT label,value FROM native_tree_labels WHERE projection_id=?1",
+        2,
+    );
+    let models = strings(
+        "SELECT model FROM native_tree_models WHERE projection_id=?1",
+        1,
+    );
     let tools: Vec<(String, Option<String>, bool)> = sqlite
         .prepare("SELECT tool_id,name,closed FROM native_tree_tools WHERE projection_id=?1")
         .unwrap()
@@ -265,7 +273,10 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(labels.iter().any(|l| l[1] == "/w\0🦀"), "fixture must execute actual cwd label");
+    assert!(
+        labels.iter().any(|l| l[1] == "/w\0🦀"),
+        "fixture must execute actual cwd label"
+    );
     assert!(models.iter().any(|m| m[0] == "claude-🦀"));
     assert!(tools.iter().any(|t| t.0 == "toolu\0🦀"));
     // Independent oracle: the original SQLite json_array witness bytes.
@@ -316,12 +327,11 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
                 }
                 families.push(rows);
             }
-            witness::digest(
+            Ok(witness::digest(
                 families[0].iter().map(|(k, v)| (k.as_str(), v.as_str())),
                 families[1].iter().map(|(m, _)| m.as_str()),
                 families[2].iter().map(|(k, v)| (k.as_str(), v.as_str())),
-            )
-            .map_err(|_| StorageError::Unavailable)
+            ))
         })
     };
     assert_eq!(pg_witness(&namespace), Ok(oracle.clone()));
