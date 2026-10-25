@@ -487,78 +487,193 @@ fn pg_tree_writer_warm_schema_drift_refuses_before_family_callback() {
 
 #[test]
 fn pg_tree_writer_lost_family_ack_reconciles_without_ingest_receipt() {
-    use crate::storage::postgres::{OperationIdentity,Reconciliation,tests::LOSE_ACK};
+    use crate::storage::postgres::{OperationIdentity, Reconciliation, tests::LOSE_ACK};
     let data = parser_fixture("codex");
-    let (pool,_) = fixture(|_|{});
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install_without_tree(tx,&data)).unwrap();
+    let (pool, _) = fixture(|_| {});
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| install_without_tree(tx, &data),
+    )
+    .unwrap();
     let identity = OperationIdentity {
-        operation_id:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        kind:"stage-tree-family-only",
-        request_digest:&[19;32],
+        operation_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        kind: "stage-tree-family-only",
+        request_digest: &[19; 32],
     };
-    LOSE_ACK.with(|p|p.set(true));
+    LOSE_ACK.with(|p| p.set(true));
     let result = pool.apply_operation(&ns("tree\0🦀"),&identity,&PgCancellation::default(),|tx| {
         let (projection,witness) = stage_fixture(tx,&data)?;
         Ok(serde_json::json!({"staged_projection":projection,"witness":witness,"complete":false}))
     });
-    assert_eq!(result,Err(StorageError::CommitUncertain));
-    let Reconciliation::Committed(receipt) = pool.reconcile(&ns("tree\0🦀"),&identity,&PgCancellation::default()).unwrap() else {panic!("family must reconcile");};
-    assert_eq!(receipt["complete"],false);
-    assert_eq!(pool.apply_operation(&ns("tree\0🦀"),&identity,&PgCancellation::default(),|_|panic!("must not repeat family effects")).unwrap(),receipt);
-    assert!(pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data)).is_err());
-    pool.transaction(&ns("tree\0🦀"),TxnKind::ReadSnapshot,&PgCancellation::default(),|tx| {
-        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_generations",&[]).unwrap().get::<_,i64>(0),1);
-        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_source_receipts",&[]).unwrap().get::<_,i64>(0),0);
-        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_headers",&[]).unwrap().get::<_,i64>(0),0);
-        Ok(())
-    }).unwrap();
+    assert_eq!(result, Err(StorageError::CommitUncertain));
+    let Reconciliation::Committed(receipt) = pool
+        .reconcile(&ns("tree\0🦀"), &identity, &PgCancellation::default())
+        .unwrap()
+    else {
+        panic!("family must reconcile");
+    };
+    assert_eq!(receipt["complete"], false);
+    assert_eq!(
+        pool.apply_operation(
+            &ns("tree\0🦀"),
+            &identity,
+            &PgCancellation::default(),
+            |_| panic!("must not repeat family effects")
+        )
+        .unwrap(),
+        receipt
+    );
+    assert!(
+        pool.transaction(
+            &ns("tree\0🦀"),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| stage_fixture(tx, &data)
+        )
+        .is_err()
+    );
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            assert_eq!(
+                tx.driver
+                    .query_one("SELECT count(*) FROM semon_pg_native_tree_generations", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                1
+            );
+            assert_eq!(
+                tx.driver
+                    .query_one("SELECT count(*) FROM semon_pg_source_receipts", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                0
+            );
+            assert_eq!(
+                tx.driver
+                    .query_one("SELECT count(*) FROM semon_pg_native_tree_headers", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                0
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
 #[test]
 fn pg_tree_writer_competing_family_writers_stage_once() {
     let data = parser_fixture("claude");
-    let (pool,_) = fixture(|_|{});
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install_without_tree(tx,&data)).unwrap();
+    let (pool, _) = fixture(|_| {});
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| install_without_tree(tx, &data),
+    )
+    .unwrap();
     let barrier = std::sync::Barrier::new(2);
     let outcomes = std::thread::scope(|scope| {
-        let first = scope.spawn(|| {barrier.wait();pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data))});
-        let second = scope.spawn(|| {barrier.wait();pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data))});
-        [first.join().unwrap(),second.join().unwrap()]
+        let first = scope.spawn(|| {
+            barrier.wait();
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| stage_fixture(tx, &data),
+            )
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| stage_fixture(tx, &data),
+            )
+        });
+        [first.join().unwrap(), second.join().unwrap()]
     });
-    assert_eq!(outcomes.iter().filter(|result|result.is_ok()).count(),1);
-    assert_eq!(outcomes.iter().filter(|result|matches!(result,Err(StorageError::Conflict))).count(),1);
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(StorageError::Conflict)))
+            .count(),
+        1
+    );
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
 #[test]
 fn pg_tree_writer_witness_budget_and_mid_write_cancel_rollback_before_decode() {
     let data = parser_fixture("claude");
-    let (pool,_) = fixture(|_|{});
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install_without_tree(tx,&data)).unwrap();
-    let baseline = ||pool.transaction(&ns("tree\0🦀"),TxnKind::ReadSnapshot,&PgCancellation::default(),|tx|Ok(state(tx))).unwrap();
+    let (pool, _) = fixture(|_| {});
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| install_without_tree(tx, &data),
+    )
+    .unwrap();
+    let baseline = || {
+        pool.transaction(
+            &ns("tree\0🦀"),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            |tx| Ok(state(tx)),
+        )
+        .unwrap()
+    };
     let before = baseline();
-    for (rows,bytes) in [(0,usize::MAX),(usize::MAX,0)] {
-        DECODED.with(|p|p.set(0));
+    for (rows, bytes) in [(0, usize::MAX), (usize::MAX, 0)] {
+        DECODED.with(|p| p.set(0));
         {
-            let control = selected_read::SelectedReadControl::default().with_limits(rows,bytes);
+            let control = selected_read::SelectedReadControl::default().with_limits(rows, bytes);
             let _scope = selected_read::Scope::enter(&control);
-            assert!(pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data)).is_err());
+            assert!(
+                pool.transaction(
+                    &ns("tree\0🦀"),
+                    TxnKind::Write,
+                    &PgCancellation::default(),
+                    |tx| stage_fixture(tx, &data)
+                )
+                .is_err()
+            );
         }
-        assert_eq!(DECODED.with(|p|p.get()),0);
-        assert_eq!(baseline(),before);
+        assert_eq!(DECODED.with(|p| p.get()), 0);
+        assert_eq!(baseline(), before);
     }
-    DECODED.with(|p|p.set(0));
+    DECODED.with(|p| p.set(0));
     {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = cancelled.clone();
-        let control = selected_read::SelectedReadControl::new(std::time::Instant::now()+std::time::Duration::from_secs(20),cancelled);
+        let control = selected_read::SelectedReadControl::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(20),
+            cancelled,
+        );
         let _scope = selected_read::Scope::enter(&control);
-        selected_read::set_hook("pg_tree_writer_witness",0,move||flag.store(true,std::sync::atomic::Ordering::SeqCst));
-        assert!(pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data)).is_err());
+        selected_read::set_hook("pg_tree_writer_witness", 0, move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst)
+        });
+        assert!(
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| stage_fixture(tx, &data)
+            )
+            .is_err()
+        );
     }
-    assert_eq!(DECODED.with(|p|p.get()),0);
-    assert_eq!(baseline(),before);
+    assert_eq!(DECODED.with(|p| p.get()), 0);
+    assert_eq!(baseline(), before);
     std::fs::remove_dir_all(data.root).unwrap();
 }
 

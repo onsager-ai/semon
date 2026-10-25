@@ -2,14 +2,29 @@
 //! Source namespace or a caller-supplied owner ID. All transactions acquire the
 //! schema-scoped advisory lock BEFORE any SourceState/file/UsageSource lock.
 //! Source work takes shared; the independently qualified host takes exclusive.
-use super::{PgCancellation, PgPool, sqlstate, txn::{PgTxn, TxnKind}};
+use super::{
+    PgCancellation, PgPool, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use sha2::{Digest, Sha256};
 
 const TABLES: [(&str, &str, &str); 3] = [
-    ("owner", "singleton boolean,owner name,contract integer,epoch bigint", "singleton"),
-    ("state", "singleton boolean,owner name,revision bigint,pricing_target bytea?", "singleton"),
-    ("operations", "operation_id bytea,owner name,request_digest bytea,revision bigint", "operation_id"),
+    (
+        "owner",
+        "singleton boolean,owner name,contract integer,epoch bigint",
+        "singleton",
+    ),
+    (
+        "state",
+        "singleton boolean,owner name,revision bigint,pricing_target bytea?",
+        "singleton",
+    ),
+    (
+        "operations",
+        "operation_id bytea,owner name,request_digest bytea,revision bigint",
+        "operation_id",
+    ),
 ];
 
 pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
@@ -46,19 +61,44 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             ARRAY(SELECT a.attname::text FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.num WHERE k.conrelid=c.oid AND k.contype='p' ORDER BY x.ord),
             ARRAY(SELECT p.polname::text||':'||p.polcmd::text||':'||p.polpermissive::text||':'||p.polroles::text||':'||coalesce(pg_get_expr(p.polqual,p.polrelid),'')||':'||coalesce(pg_get_expr(p.polwithcheck,p.polrelid),'') FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname)
             FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname=$1", &[&name]).map_err(sqlstate::error)?;
-        if rows.len()!=1 { return Err(StorageError::ScopeChanged); }
-        let row=&rows[0];
-        let mut policies=vec!["read_store:r:true:{0}:true:".to_owned()];
-        if table=="state" { policies.push("write_store:w:true:{0}:(owner = CURRENT_USER):(owner = CURRENT_USER)".into()); }
-        if table=="operations" {
+        if rows.len() != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let row = &rows[0];
+        let mut policies = vec!["read_store:r:true:{0}:true:".to_owned()];
+        if table == "state" {
+            policies.push(
+                "write_store:w:true:{0}:(owner = CURRENT_USER):(owner = CURRENT_USER)".into(),
+            );
+        }
+        if table == "operations" {
             // Verify the policy structurally below as well as its exact role,
             // command and expression. The subquery cannot depend on Source GUCs.
             let expr = "((owner = CURRENT_USER) AND (owner = ( SELECT semon_pg_store_owner.owner\n   FROM semon_pg_store_owner\n  WHERE semon_pg_store_owner.singleton)))";
             policies.push(format!("write_store:a:true:{{0}}::{expr}"));
         }
-        if !row.get::<_,bool>(0) || row.get::<_,Vec<String>>(2)!=columns.split(',').map(str::to_owned).collect::<Vec<_>>() || row.get::<_,Vec<String>>(3)!=vec![key.to_owned()] || row.get::<_,Vec<String>>(4)!=policies { return Err(StorageError::ScopeChanged); }
-        let owners=tx.driver.query("SELECT owner::text,contract,epoch FROM semon_pg_store_owner WHERE singleton", &[]).map_err(sqlstate::error)?;
-        if owners.len()!=1 || owners[0].get::<_,String>(0)!=row.get::<_,String>(1) || owners[0].get::<_,i32>(1)!=1 || owners[0].get::<_,i64>(2)!=1 { return Err(StorageError::ScopeChanged); }
+        if !row.get::<_, bool>(0)
+            || row.get::<_, Vec<String>>(2)
+                != columns.split(',').map(str::to_owned).collect::<Vec<_>>()
+            || row.get::<_, Vec<String>>(3) != vec![key.to_owned()]
+            || row.get::<_, Vec<String>>(4) != policies
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let owners = tx
+            .driver
+            .query(
+                "SELECT owner::text,contract,epoch FROM semon_pg_store_owner WHERE singleton",
+                &[],
+            )
+            .map_err(sqlstate::error)?;
+        if owners.len() != 1
+            || owners[0].get::<_, String>(0) != row.get::<_, String>(1)
+            || owners[0].get::<_, i32>(1) != 1
+            || owners[0].get::<_, i64>(2) != 1
+        {
+            return Err(StorageError::ScopeChanged);
+        }
     }
     Ok(())
 }
@@ -89,29 +129,60 @@ pub(super) fn lock_publication(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 pub(super) fn read(tx: &mut PgTxn<'_>) -> Result<(i64, Option<String>), StorageError> {
     tx.check()?;
     let rows=tx.driver.query("SELECT s.revision,octet_length(s.pricing_target)::bigint,s.owner=o.owner AND o.contract=1 AND o.epoch=1 FROM semon_pg_store_state s CROSS JOIN semon_pg_store_owner o WHERE s.singleton AND o.singleton", &[]).map_err(sqlstate::error)?;
-    if rows.len()!=1 || !rows[0].get::<_,bool>(2) || rows[0].get::<_,i64>(0)<0 { return Err(StorageError::ScopeChanged); }
-    let bytes=rows[0].get::<_,Option<i64>>(1);
-    if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) { return Err(StorageError::ScopeChanged); }
-    crate::selected_read::charge(64,bytes.unwrap_or(0) as usize).map_err(|_| StorageError::Busy)?;
-    let value:Option<Vec<u8>>=tx.driver.query_one("SELECT pricing_target FROM semon_pg_store_state WHERE singleton", &[]).map_err(sqlstate::error)?.get(0);
-    let value=value.map(String::from_utf8).transpose().map_err(|_| StorageError::ScopeChanged)?;
-    Ok((rows[0].get(0),value))
+    if rows.len() != 1 || !rows[0].get::<_, bool>(2) || rows[0].get::<_, i64>(0) < 0 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let bytes = rows[0].get::<_, Option<i64>>(1);
+    if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) {
+        return Err(StorageError::ScopeChanged);
+    }
+    crate::selected_read::charge(64, bytes.unwrap_or(0) as usize)
+        .map_err(|_| StorageError::Busy)?;
+    let value: Option<Vec<u8>> = tx
+        .driver
+        .query_one(
+            "SELECT pricing_target FROM semon_pg_store_state WHERE singleton",
+            &[],
+        )
+        .map_err(sqlstate::error)?
+        .get(0);
+    let value = value
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| StorageError::ScopeChanged)?;
+    Ok((rows[0].get(0), value))
 }
 
 /// Host control capability, bound to a qualified resource factory/pool. Opening
 /// it reauthorizes the actual connection role; no identity string is accepted.
 #[derive(Clone)]
-pub struct PgStoreMetadata { pool: PgPool }
+pub struct PgStoreMetadata {
+    pool: PgPool,
+}
 impl PgStoreMetadata {
     pub fn open(pool: PgPool, control: &PgCancellation) -> Result<Self, StorageError> {
-        pool.transaction(&LogicalSourceNamespace::new("host-control")?,TxnKind::ReadSnapshot,control,|tx| authorize(tx))?;
-        Ok(Self{pool})
+        pool.transaction(
+            &LogicalSourceNamespace::new("host-control")?,
+            TxnKind::ReadSnapshot,
+            control,
+            |tx| authorize(tx),
+        )?;
+        Ok(Self { pool })
     }
     /// Durable STORE operation identity; this is never a Source ingest ACK.
-    pub fn set_pricing_target(&self, operation: &[u8;32], expected_revision: i64, target: Option<&str>, control: &PgCancellation) -> Result<i64,StorageError> {
-        if expected_revision<0 || target.is_some_and(|v|v.len()>1048576) { return Err(StorageError::InvalidArguments); }
-        let request=serde_json::to_vec(&(expected_revision,target)).map_err(|_|StorageError::InvalidArguments)?;
-        let digest=Sha256::digest(request).to_vec();
+    pub fn set_pricing_target(
+        &self,
+        operation: &[u8; 32],
+        expected_revision: i64,
+        target: Option<&str>,
+        control: &PgCancellation,
+    ) -> Result<i64, StorageError> {
+        if expected_revision < 0 || target.is_some_and(|v| v.len() > 1048576) {
+            return Err(StorageError::InvalidArguments);
+        }
+        let request = serde_json::to_vec(&(expected_revision, target))
+            .map_err(|_| StorageError::InvalidArguments)?;
+        let digest = Sha256::digest(request).to_vec();
         self.pool.transaction(&LogicalSourceNamespace::new("host-control")?,TxnKind::StoreWrite,control,|tx| {
             authorize(tx)?;
             let prior=tx.driver.query("SELECT request_digest,revision FROM semon_pg_store_operations WHERE operation_id=$1", &[&&operation[..]]).map_err(sqlstate::error)?;
@@ -126,9 +197,11 @@ impl PgStoreMetadata {
         })
     }
 }
-fn authorize(tx: &mut PgTxn<'_>) -> Result<(),StorageError> {
+fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let allowed:bool=tx.driver.query_one("SELECT owner=CURRENT_USER AND has_table_privilege('semon_pg_store_state','UPDATE') AND has_table_privilege('semon_pg_store_operations','INSERT') FROM semon_pg_store_owner WHERE singleton", &[]).map_err(sqlstate::error)?.get(0);
-    if !allowed { return Err(StorageError::ScopeChanged); }
+    if !allowed {
+        return Err(StorageError::ScopeChanged);
+    }
     read(tx)?;
     Ok(())
 }

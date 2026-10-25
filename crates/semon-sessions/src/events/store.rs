@@ -5990,8 +5990,12 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
             r.get(0)
         })?;
     values.push(pricing);
-    super::tree_rows::interpretation(&values.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)
+    super::tree_rows::interpretation(
+        &values
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn tree_reusable(
