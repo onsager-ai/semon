@@ -352,20 +352,14 @@ pub(super) fn write_values(
     id: i64,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
-    let turn = serde_json::to_string(&summary.codex_turn)
+    let rows = crate::events::tree_rows::TreeRows::new(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let turn = &rows.codex_turn;
     tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,'codex_turn',?2) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,'codex_turn',?2) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,turn])?;
-    for (label, value) in [
-        ("first", &summary.first),
-        ("last", &summary.last),
-        ("cwd", &summary.cwd),
-        ("branch", &summary.branch),
-    ] {
-        if let Some(value) = value {
-            tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,?2,?3) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,label,value])?;
-        }
+    for (label, value) in rows.labels() {
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,?2,?3) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,label,value])?;
     }
-    for model in &summary.models {
+    for model in rows.models {
         tx.prepare_cached(sql(
             tx,
             "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING",
@@ -373,13 +367,13 @@ pub(super) fn write_values(
         )?)?
         .execute(params![id, model])?;
     }
-    for (tool, name) in &summary.tools {
+    for (tool, name) in rows.tools {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name])?;
     }
-    for tool in &summary.closed_tools {
+    for tool in rows.closed_tools {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool])?;
     }
-    for (message, model) in &summary.usage_models {
+    for (message, model) in rows.usage_models {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_usage_models VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET model=excluded.model", "INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?)?.execute(params![id,message,model])?;
     }
     Ok(())
