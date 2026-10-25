@@ -8,6 +8,29 @@ use std::collections::BTreeMap;
 use super::{FileIndex, Ledger, Links, ModelTokens, RateLimits};
 use crate::Tokens;
 
+/// Canonical small native-usage root, shared by both physical file writers.
+pub(crate) fn encoded_native_usage(index: &FileIndex) -> serde_json::Result<Option<String>> {
+    #[derive(serde::Serialize)]
+    struct Root {
+        projection_version: u32,
+        tokens: Tokens,
+        cost: crate::pricing::CostBuild,
+    }
+    let Some(native) = &index.codex_native_usage else {
+        return Ok(None);
+    };
+    let mut cost = index.codex_cost();
+    cost.models.clear();
+    cost.by_day.clear();
+    cost.unpriced_models.clear();
+    serde_json::to_string(&Root {
+        projection_version: 1,
+        tokens: native.tokens(),
+        cost,
+    })
+    .map(Some)
+}
+
 /// Borrowed values in the existing `PUT_FILE` bind order.
 pub(crate) struct FileRow<'a> {
     pub(crate) dev: u64,

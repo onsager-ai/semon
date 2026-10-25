@@ -2,7 +2,53 @@
 //! signed INTEGER/SUM must never narrow or convert native token counters.
 use super::*;
 use crate::{events::CodexNativeUsage, native_record::Record, pricing::CostBuild};
-use std::collections::BTreeSet;
+pub(crate) mod algorithm;
+
+#[cfg(test)]
+pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex {
+    let mut index = FileIndex::default();
+    if harness == "codex" {
+        index.native_usage_observations = Some(Vec::new());
+    }
+    parser_append_fixture(path, harness, &mut index, 0);
+    index
+}
+
+#[cfg(test)]
+pub(crate) fn parser_append_fixture(
+    path: &std::path::Path,
+    harness: &str,
+    index: &mut FileIndex,
+    from: u64,
+) {
+    let mut file = crate::sealed::LogFile::open(path).unwrap();
+    super::super::parse(
+        &mut file,
+        from,
+        harness,
+        index,
+        None,
+        None,
+        &mut crate::native_timing::Measurements::default(),
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn sqlite_fixture(
+    db: &mut Connection,
+    path: &str,
+    expected: Option<&Ledger>,
+    ledger: &Ledger,
+    append: bool,
+    index: &FileIndex,
+) -> i64 {
+    let tx = db.transaction().unwrap();
+    let id = begin_source(&tx, path, expected, ledger, append).unwrap();
+    write(&tx, path, ledger, index).unwrap();
+    tx.commit().unwrap();
+    id
+}
 
 mod repair;
 #[cfg(test)]
@@ -95,7 +141,7 @@ CREATE TABLE IF NOT EXISTS native_tree_repairs (
 CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(namespace,state,last_attempt,source_path);
 ";
 
-pub(super) fn schema(composite: bool) -> [&'static str; 2] {
+pub(crate) fn schema(composite: bool) -> [&'static str; 2] {
     if composite {
         [COMPOSITE_SCHEMA, COMPOSITE_REPAIR_SCHEMA]
     } else {
@@ -167,19 +213,8 @@ struct Root {
 }
 
 pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
-    let Some(native) = &index.codex_native_usage else {
-        return Ok(None);
-    };
-    let mut cost = index.codex_cost();
-    cost.models.clear();
-    cost.by_day.clear();
-    cost.unpriced_models.clear();
-    json(&Root {
-        projection_version: 1,
-        tokens: native.tokens(),
-        cost,
-    })
-    .map(Some)
+    super::super::file_rows::encoded_native_usage(index)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 pub(super) fn source(c: &Connection, path: &str) -> rusqlite::Result<Option<(i64, String)>> {
@@ -287,17 +322,161 @@ fn restore_root(c: &Connection, id: i64, encoded: &str) -> rusqlite::Result<Code
     Ok(native)
 }
 
-fn put_dimension<T: Serialize>(
+// Preserve physical SQLite errors through the backend-neutral state machine.
+struct SqliteEffects<'a, 'tx> {
+    tx: &'a Transaction<'tx>,
+    error: Option<rusqlite::Error>,
+}
+
+impl SqliteEffects<'_, '_> {
+    fn result<T>(&mut self, result: rusqlite::Result<T>) -> Result<T, StorageError> {
+        result.map_err(|error| {
+            self.error = Some(error);
+            StorageError::Unavailable
+        })
+    }
+}
+
+fn with_effects<T>(
     tx: &Transaction<'_>,
-    id: i64,
-    kind: &str,
-    key: &str,
-    value: &T,
-) -> rusqlite::Result<()> {
-    tx.prepare_cached(sql(tx,
-        "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,kind,dimension) DO UPDATE SET value=excluded.value",
-        "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_id,kind,dimension) DO UPDATE SET value=excluded.value")?)?.execute(params![id,kind,key,json(value)?])?;
-    Ok(())
+    f: impl FnOnce(&mut SqliteEffects<'_, '_>) -> Result<T, StorageError>,
+) -> rusqlite::Result<T> {
+    let mut effects = SqliteEffects { tx, error: None };
+    f(&mut effects).map_err(|_| effects.error.unwrap_or(rusqlite::Error::InvalidQuery))
+}
+
+impl algorithm::Effects for SqliteEffects<'_, '_> {
+    fn current(&mut self, path: &str) -> Result<Option<(i64, String)>, StorageError> {
+        self.result(source(self.tx, path))
+    }
+    fn create(&mut self, path: &str, receipt: &str) -> Result<i64, StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            let id = if composite(tx)? {
+                tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id", params![path,receipt,CACHE_VERSION], |r| r.get(0))?
+            } else {
+                tx.execute("INSERT INTO native_usage_sources(source_path,receipt,checkpoint,parser_version) VALUES(?1,?2,0,?3)", params![path,receipt,CACHE_VERSION])?;
+                tx.last_insert_rowid()
+            };
+            tx.execute(sql(tx,
+                "INSERT INTO native_usage_current VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET source_id=excluded.source_id",
+                "INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id")?,params![path,id])?;
+            Ok(id)
+        })();
+        self.result(result)
+    }
+    fn receipt(&mut self, id: i64, receipt: &str) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            tx.execute(sql(tx, "UPDATE native_usage_sources SET receipt=?2 WHERE source_id=?1",
+                "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,params![id,receipt])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
+    fn unblock(&mut self, path: &str, receipt: &str) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            tx.execute(repair::sql(tx,
+                "UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",
+                "UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')")?,params![path,receipt])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
+    fn fact(&mut self, id: i64, offset: u64) -> Result<Option<(String, String)>, StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            tx.query_row(sql(tx,
+                "SELECT payload,record FROM native_usage_facts WHERE source_id=?1 AND native_offset=?2",
+                "SELECT payload,record FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset=?2")?,params![id,offset],|r|Ok((r.get(0)?,r.get(1)?))).optional()
+        })();
+        self.result(result)
+    }
+    fn first(
+        &mut self,
+        id: i64,
+        scope: &str,
+        identity: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            tx.query_row(sql(tx,
+            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.source_id=?1 AND i.scope=?2 AND i.identity=?3",
+            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3")?,params![id,scope,identity],|r|r.get(0)).optional()
+        })();
+        self.result(result)
+    }
+    fn identity(
+        &mut self,
+        id: i64,
+        scope: &str,
+        identity: &str,
+        offset: u64,
+    ) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            tx.prepare_cached(sql(
+                tx,
+                "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
+                "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
+            )?)?
+            .execute(params![id, scope, identity, offset])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
+    fn insert(&mut self, fact: algorithm::Fact<'_>) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            let offset = i64::try_from(fact.offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            tx.prepare_cached(sql(
+                tx,
+                "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
+            )?)?
+            .execute(params![
+                fact.source,
+                offset,
+                fact.identity,
+                fact.payload,
+                fact.record,
+                fact.tree,
+                fact.model
+            ])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
+    fn dimension(
+        &mut self,
+        id: i64,
+        kind: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            tx.prepare_cached(sql(tx,
+                "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,kind,dimension) DO UPDATE SET value=excluded.value",
+                "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_id,kind,dimension) DO UPDATE SET value=excluded.value")?)?.execute(params![id,kind,key,value])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
+    fn ready(&mut self, id: i64, checkpoint: u64) -> Result<(), StorageError> {
+        let tx = self.tx;
+        let result = (|| {
+            let checkpoint =
+                i64::try_from(checkpoint).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            tx.execute(sql(tx, "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE source_id=?1",
+                "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,params![id,checkpoint])?;
+            Ok(())
+        })();
+        self.result(result)
+    }
 }
 
 pub(super) fn write(
@@ -306,20 +485,7 @@ pub(super) fn write(
     ledger: &Ledger,
     index: &FileIndex,
 ) -> rusqlite::Result<()> {
-    let Some(_) = &index.native_usage_observations else {
-        return Ok(());
-    };
-    let id = source(tx, path)?.ok_or(rusqlite::Error::InvalidQuery)?.0;
-    write_observations(tx, id, index)?;
-    tx.execute(
-        sql(tx, "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE source_id=?1",
-            "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,
-        params![
-            id,
-            i64::try_from(ledger.offset).map_err(|_| rusqlite::Error::InvalidQuery)?
-        ],
-    )?;
-    Ok(())
+    with_effects(tx, |effects| algorithm::write(effects, path, ledger, index))
 }
 
 pub(super) fn begin_source(
@@ -329,123 +495,22 @@ pub(super) fn begin_source(
     ledger: &Ledger,
     append: bool,
 ) -> rusqlite::Result<i64> {
-    let id = match source(tx, path)? {
-        Some((id, receipt))
-            if (append || expected == Some(ledger))
-                && expected.is_some_and(|old| receipt == header_ledger(old)) =>
-        {
-            id
-        }
-        _ => {
-            let id = if composite(tx)? {
-                tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id",params![path,header_ledger(ledger),CACHE_VERSION], |r| r.get(0))?
-            } else {
-                tx.execute("INSERT INTO native_usage_sources(source_path,receipt,checkpoint,parser_version) VALUES(?1,?2,0,?3)",params![path,header_ledger(ledger),CACHE_VERSION])?;
-                tx.last_insert_rowid()
-            };
-            tx.execute(sql(tx,
-                "INSERT INTO native_usage_current VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET source_id=excluded.source_id",
-                "INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id")?,params![path,id])?;
-            id
-        }
-    };
-    tx.execute(
-        sql(tx, "UPDATE native_usage_sources SET receipt=?2 WHERE source_id=?1",
-            "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,
-        params![id, header_ledger(ledger),],
-    )?;
-    tx.execute(repair::sql(tx,
-        "UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",
-        "UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')")?,params![path,header_ledger(ledger)])?;
-    Ok(id)
+    with_effects(tx, |effects| {
+        algorithm::begin(effects, path, expected, ledger, append)
+    })
 }
 
-fn write_observations(tx: &Transaction<'_>, id: i64, index: &FileIndex) -> rusqlite::Result<()> {
-    let observations = index
-        .native_usage_observations
-        .as_deref()
-        .unwrap_or_default();
-    let mut models = BTreeSet::new();
-    let mut days = BTreeSet::new();
-    for observation in observations {
-        let offset =
-            i64::try_from(observation.record.offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let payload = json(&observation.payload)?;
-        let evidence = json(&observation.record)?;
-        let replay: Option<(String,String)> = tx.query_row(sql(tx,
-            "SELECT payload,record FROM native_usage_facts WHERE source_id=?1 AND native_offset=?2",
-            "SELECT payload,record FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset=?2")?,params![id,offset],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some(replay) = replay {
-            if replay != (payload, evidence) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            continue;
-        }
-        let outcome = |scope: &str| -> rusqlite::Result<&str> {
-            let first: Option<String> = tx.query_row(sql(tx,
-                "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.source_id=?1 AND i.scope=?2 AND i.identity=?3",
-                "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3")?,params![id,scope,observation.identity],|r|r.get(0)).optional()?;
-            let outcome = match first.as_deref() {
-                None => "accepted",
-                Some(first) if first == payload => "duplicate",
-                Some(_) => "conflict",
-            };
-            if outcome == "accepted" {
-                tx.prepare_cached(sql(
-                    tx,
-                    "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
-                    "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
-                )?)?
-                .execute(params![id, scope, observation.identity, offset])?;
-            }
-            Ok(outcome)
-        };
-        let tree_outcome = outcome("tree")?;
-        let model_outcome = if observation.payload.model.is_some() {
-            outcome("model")?
-        } else {
-            "unavailable"
-        };
-        tx.prepare_cached(sql(
-            tx,
-            "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
-        )?)?
-        .execute(params![
-            id,
-            offset,
-            observation.identity,
-            payload,
-            evidence,
-            tree_outcome,
-            model_outcome
-        ])?;
-        if model_outcome == "accepted"
-            && let Some(model) = &observation.payload.model
-        {
-            models.insert(model.clone());
-            if let Some(time) = observation.payload.timestamp {
-                days.insert(crate::pricing::utc_day(time));
-            }
-        }
-    }
-    if let Some(native) = &index.codex_native_usage {
-        let cost = index.codex_cost();
-        for model in models {
-            if let Some(tokens) = native.by_model.get(&model) {
-                put_dimension(tx, id, "model", &model, tokens)?;
-            }
-            if let Some(value) = cost.models.get(&model) {
-                put_dimension(tx, id, "cost_model", &model, value)?;
-            }
-        }
-        for day in days {
-            if let Some(value) = cost.by_day.get(&day) {
-                put_dimension(tx, id, "cost_day", &day, value)?;
-            }
-        }
-    }
-    Ok(())
+#[cfg(test)]
+fn put_dimension<T: Serialize>(
+    tx: &Transaction<'_>,
+    id: i64,
+    kind: &str,
+    key: &str,
+    value: &T,
+) -> rusqlite::Result<()> {
+    use algorithm::Effects;
+    let value = json(value)?;
+    with_effects(tx, |effects| effects.dimension(id, kind, key, &value))
 }
 
 /// Drop transient batch identities after a successful checkpoint. Complete
