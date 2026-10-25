@@ -978,6 +978,7 @@ pub(crate) fn stored_receipt(
     if captured_digest.as_ref().is_some_and(|digest| digest != &operation.payload_digest) {
         return Ok(Some(SourceMutationReceipt::Conflict));
     }
+    crate::native_timing::discovery_count(|counts| counts.statements += 1);
     let found: Option<(String, String)> = db.query_row(
         "SELECT payload_digest,outcome FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2",
         params![namespace.unwrap_or(""), operation.id],
