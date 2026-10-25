@@ -12,6 +12,31 @@ use crate::{
     },
 };
 
+// Tree's fixture reparses only the dimensions needed by its family tests.
+// A connected file commit needs the complete production scan, including the
+// auxiliary headers captured outside parse(). Finish all SQLite work before PG.
+fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
+    let mut cache = crate::events::EventCache::open(&data.root.join("index.json")).unwrap();
+    for (path, _, index) in &mut data.sources {
+        let physical = path.strip_suffix("\0🦀").unwrap();
+        let scanned = crate::events::scan_file(
+            std::path::Path::new(physical),
+            harness,
+            &mut cache,
+            &mut false,
+        )
+        .unwrap();
+        *index = (*scanned).clone();
+        assert!(index.tree_summary.is_some(), "production Tree input");
+        if harness == "codex" {
+            assert!(index.codex_header.is_some(), "production Codex header input");
+        }
+    }
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
+    data
+}
+
 fn apply(
     tx: &mut PgTxn<'_>,
     path: &str,
@@ -75,12 +100,13 @@ fn oracle_metadata(data: &Fixture) -> Vec<(String, String)> {
 #[test]
 fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_oracle() {
     for harness in ["claude", "codex", "copilot"] {
-        let data = parser_fixture(harness);
+        let data = complete_fixture(parser_fixture(harness), harness);
         let metadata = oracle_metadata(&data);
         if harness == "codex" {
             assert!(!metadata.is_empty(), "nonempty independent header oracle");
         }
-        let next = (harness != "copilot").then(|| append_fixture(&data, harness));
+        let next = (harness != "copilot")
+            .then(|| complete_fixture(append_fixture(&data, harness), harness));
         let (pool, factory) = fixture(|_| {});
         let namespace = ns("bundle\0🦀");
         let control = PgCancellation::default();
@@ -89,14 +115,15 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
                 apply(tx, path, ledger, index, None, None)?;
             }
             for (key, value) in &metadata {
-                let actual: Vec<u8> = tx
+                let rows = tx
                     .driver
-                    .query_one(
+                    .query(
                         "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
                         &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()],
                     )
-                    .map_err(sqlstate::error)?
-                    .get(0);
+                    .map_err(sqlstate::error)?;
+                assert_eq!(rows.len(), 1, "independent auxiliary metadata row exists");
+                let actual: Vec<u8> = rows[0].get(0);
                 assert!(
                     actual == value.as_bytes(),
                     "independent auxiliary metadata oracle"
@@ -175,7 +202,7 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
 
 #[test]
 fn pg_native_bundle_namespace_retirement_and_drift_refusal() {
-    let data = parser_fixture("codex");
+    let data = complete_fixture(parser_fixture("codex"), "codex");
     let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
     let namespace = ns("bundle-owner\0🦀");
     let foreign = ns("bundle-foreign\0🦀");
@@ -225,7 +252,7 @@ fn pg_native_bundle_namespace_retirement_and_drift_refusal() {
 
 #[test]
 fn pg_native_bundle_every_connected_boundary_rolls_back_and_stale_cas_refuses() {
-    let data = parser_fixture("codex");
+    let data = complete_fixture(parser_fixture("codex"), "codex");
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("bundle-fault\0🦀");
     let control = PgCancellation::default();
