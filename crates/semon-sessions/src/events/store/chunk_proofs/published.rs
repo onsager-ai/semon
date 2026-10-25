@@ -80,7 +80,9 @@ fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> 
 /// snapshots keep collected proofs available until their last reader closes.
 pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let mut referenced = BTreeSet::new();
-    referenced.extend(crate::storage::sqlite::proof_generations::referenced(tx, path)?);
+    referenced.extend(crate::storage::sqlite::proof_generations::referenced(
+        tx, path,
+    )?);
     for sql in reference_statements(tx)? {
         let mut statement = tx.prepare(sql)?;
         for text in statement.query_map([path], |r| r.get::<_, Option<String>>(0))? {

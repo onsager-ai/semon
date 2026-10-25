@@ -5102,23 +5102,41 @@ mod tests {
         use std::io::Write;
         let (a, b, options, inputs) = model_sources();
         for (i, config) in [&a.config, &b].into_iter().enumerate() {
-            let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
             let binding = capability.reader_binding().unwrap();
             let mut cache = EventCache::open_semantic(capability).unwrap();
             let path = inputs[i].full_path(&options[i]);
-            cache.ingest(&"a".repeat(64), &path, inputs[i].root.as_str()).unwrap();
+            cache
+                .ingest(&"a".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
             let (batch, model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
-            let (outcome, publication) = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+            let (outcome, publication) = cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
             assert_eq!(outcome, Outcome::Written);
             let key = model.prepared().rows[0].key.clone();
             let runtime = binding.reader_runtime().unwrap();
             let id = runtime.current_generation(&key).unwrap();
             let token = "b".repeat(64);
-            let mut lease = runtime.selected_generation(&key, &id, &token, 60_000).unwrap();
-            assert_eq!(lease.snapshot().publication_generation, publication.unwrap());
+            let mut lease = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
+            assert_eq!(
+                lease.snapshot().publication_generation,
+                publication.unwrap()
+            );
             let first = lease.read_record(&options[i], None, &path, 0).unwrap();
             assert!(first.is_some());
-            let first_page = lease.transcript_records(&options[i], None, 0, 8, &crate::SelectedReadControl::default()).unwrap();
+            let first_page = lease
+                .transcript_records(
+                    &options[i],
+                    None,
+                    0,
+                    8,
+                    &crate::SelectedReadControl::default(),
+                )
+                .unwrap();
             assert_eq!(first_page.snapshot.proof_generation, id);
             cache.finish_semantic_stage(batch.epoch).unwrap();
             let extra = if i == 0 {
@@ -5126,60 +5144,176 @@ mod tests {
             } else {
                 "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"s2-next\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{\"role\":\"user\",\"content\":\"S2 appended\"}}\n"
             };
-            fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(extra.as_bytes()).unwrap();
-            cache.ingest(&"c".repeat(64), &path, inputs[i].root.as_str()).unwrap();
-            let (next, next_model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
-            assert_eq!(cache.publish_semantic_catalog(&next, next_model.prepared()).unwrap().0, Outcome::Written);
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(extra.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"c".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let (next, next_model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&next, next_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
             let second_id = runtime.current_generation(&key).unwrap();
             assert_ne!(second_id, id);
-            let mut second = runtime.selected_generation(&key, &second_id, &"9".repeat(64), 60_000).unwrap();
-            let second_page = lease.transcript_records(&options[i], None, 0, 8, &crate::SelectedReadControl::default()).unwrap();
+            let mut second = runtime
+                .selected_generation(&key, &second_id, &"9".repeat(64), 60_000)
+                .unwrap();
+            let second_page = lease
+                .transcript_records(
+                    &options[i],
+                    None,
+                    0,
+                    8,
+                    &crate::SelectedReadControl::default(),
+                )
+                .unwrap();
             assert_eq!(second_page.snapshot.proof_generation, id);
-            assert_eq!(serde_json::to_value(&second_page.records).unwrap(), serde_json::to_value(&first_page.records).unwrap());
+            assert_eq!(
+                serde_json::to_value(&second_page.records).unwrap(),
+                serde_json::to_value(&first_page.records).unwrap()
+            );
             cache.finish_semantic_stage(next.epoch).unwrap();
-            let third_extra = extra.replace("S2 appended", "S2 third").replace("s2-next", "s2-third");
-            fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(third_extra.as_bytes()).unwrap();
-            cache.ingest(&"8".repeat(64), &path, inputs[i].root.as_str()).unwrap();
-            let (third, third_model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
-            assert_eq!(cache.publish_semantic_catalog(&third, third_model.prepared()).unwrap().0, Outcome::Written);
-            assert_eq!(lease.read_record(&options[i], None, &path, 0).unwrap(), first);
+            let third_extra = extra
+                .replace("S2 appended", "S2 third")
+                .replace("s2-next", "s2-third");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(third_extra.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"8".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let (third, third_model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&third, third_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            assert_eq!(
+                lease.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
             // No long-lived connection exists in Lease: reopen resolves the
             // durable token and exact old generation, independently of WAL.
-            let reopened = runtime.selected_generation(&key, &id, &token, 60_000).unwrap();
+            let reopened = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
             assert_eq!(reopened.snapshot().proof_generation, id);
-            assert_eq!(reopened.read_record(&options[i], None, &path, 0).unwrap(), first);
+            assert_eq!(
+                reopened.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
             let owner = NativeOwnership::admit(config).unwrap();
             let mut db = SourceJournal::owned(owner).connection().unwrap();
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-            assert_eq!(crate::storage::sqlite::proof_generations::collect(&tx, config.namespace.as_str(), 1).unwrap(), 0);
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(
+                crate::storage::sqlite::proof_generations::collect(
+                    &tx,
+                    config.namespace.as_str(),
+                    1
+                )
+                .unwrap(),
+                0
+            );
             tx.commit().unwrap();
             lease.renew(60_000).unwrap();
             lease.release().unwrap();
             assert!(reopened.read_record(&options[i], None, &path, 0).is_err());
             // L1 is retained History. L2 is kept solely by its active reader.
-            assert!(runtime.selected_generation(&key, &id, &token, 60_000).is_ok());
+            assert!(
+                runtime
+                    .selected_generation(&key, &id, &token, 60_000)
+                    .is_ok()
+            );
             if i == 0 {
                 second.release().unwrap();
             } else {
-                db.execute("UPDATE storage_proof_leases SET expires=0 WHERE namespace=?1 AND token=?2", params![config.namespace.as_str(), "9".repeat(64)]).unwrap();
+                db.execute(
+                    "UPDATE storage_proof_leases SET expires=0 WHERE namespace=?1 AND token=?2",
+                    params![config.namespace.as_str(), "9".repeat(64)],
+                )
+                .unwrap();
                 assert!(second.renew(60_000).is_err());
             }
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-            assert_eq!(crate::storage::sqlite::proof_generations::collect(&tx, config.namespace.as_str(), 1).unwrap(), 1);
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(
+                crate::storage::sqlite::proof_generations::collect(
+                    &tx,
+                    config.namespace.as_str(),
+                    1
+                )
+                .unwrap(),
+                1
+            );
             tx.commit().unwrap();
-            assert!(runtime.selected_generation(&key, &second_id, &"9".repeat(64), 60_000).is_err());
+            assert!(
+                runtime
+                    .selected_generation(&key, &second_id, &"9".repeat(64), 60_000)
+                    .is_err()
+            );
             // The next actual Index mutation must collect L2's retained chunk
             // namespace, while original History L1 remains readable.
-            let old_prefix = format!("native_published_chunks:{}:{}:", crate::source_carrier::source_hash(path.to_str().unwrap()), crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&second.row().sources[0])));
-            let fourth = extra.replace("S2 appended", "S2 fourth").replace("s2-next", "s2-fourth");
-            fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(fourth.as_bytes()).unwrap();
-            cache.ingest(&"7".repeat(64), &path, inputs[i].root.as_str()).unwrap();
-            let remaining: i64 = db.query_row("SELECT count(*) FROM main.meta WHERE namespace=?1 AND key>=?2 AND key<?3", params![config.namespace.as_str(), old_prefix, format!("{old_prefix}~")], |r| r.get(0)).unwrap();
+            let old_prefix = format!(
+                "native_published_chunks:{}:{}:",
+                crate::source_carrier::source_hash(path.to_str().unwrap()),
+                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
+                    &second.row().sources[0]
+                ))
+            );
+            let fourth = extra
+                .replace("S2 appended", "S2 fourth")
+                .replace("s2-next", "s2-fourth");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(fourth.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"7".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let remaining: i64 = db
+                .query_row(
+                    "SELECT count(*) FROM main.meta WHERE namespace=?1 AND key>=?2 AND key<?3",
+                    params![
+                        config.namespace.as_str(),
+                        old_prefix,
+                        format!("{old_prefix}~")
+                    ],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(remaining, 0);
-            let history = runtime.selected_generation(&key, &id, &token, 60_000).unwrap();
-            assert_eq!(history.read_record(&options[i], None, &path, 0).unwrap(), first);
+            let history = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
+            assert_eq!(
+                history.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
             assert!(path.exists(), "metadata GC cannot delete Raw");
-            assert!(!EventCache::path(&options[i].cache).exists(), "owned selected reads cannot open Options.cache");
+            assert!(
+                !EventCache::path(&options[i].cache).exists(),
+                "owned selected reads cannot open Options.cache"
+            );
         }
     }
 
@@ -5187,35 +5321,69 @@ mod tests {
     fn configured_semantic_s2_real_raw_tamper_missing_roots_and_runtime_fence_refuse() {
         use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
         let (a, _, options, inputs) = model_sources();
-        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
         let binding = capability.reader_binding().unwrap();
         let mut cache = EventCache::open_semantic(capability).unwrap();
         let path = inputs[0].full_path(&options[0]);
         cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
         let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-refuse");
-        cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
         let key = &model.prepared().rows[0].key;
         let runtime = binding.reader_runtime().unwrap();
         let id = runtime.current_generation(key).unwrap();
         let token = "d".repeat(64);
-        let mut lease = runtime.selected_generation(key, &id, &token, 60_000).unwrap();
-        assert!(runtime.selected_generation(key, &id, &"e".repeat(64), 60_001).is_err());
+        let mut lease = runtime
+            .selected_generation(key, &id, &token, 60_000)
+            .unwrap();
+        assert!(
+            runtime
+                .selected_generation(key, &id, &"e".repeat(64), 60_001)
+                .is_err()
+        );
         struct Denied;
         impl crate::SessionSourceReader for Denied {
-            fn read_range(&self, _: &crate::SessionSourceRef, _: Option<&str>, _: u64, _: usize) -> std::io::Result<crate::SessionSourceRange> {
-                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "fixture revoked"))
+            fn read_range(
+                &self,
+                _: &crate::SessionSourceRef,
+                _: Option<&str>,
+                _: u64,
+                _: usize,
+            ) -> std::io::Result<crate::SessionSourceRange> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture revoked",
+                ))
             }
         }
-        assert!(lease.read_record(&options[0], Some((&Denied, crate::SessionSourceReadMode::ProviderOnly)), &path, 0).is_err());
+        assert!(
+            lease
+                .read_record(
+                    &options[0],
+                    Some((&Denied, crate::SessionSourceReadMode::ProviderOnly)),
+                    &path,
+                    0
+                )
+                .is_err()
+        );
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let control = crate::SelectedReadControl::new(std::time::Instant::now() + std::time::Duration::from_secs(20), cancelled);
-        assert!(lease.read_record_with_control(&options[0], None, &path, 0, &control).is_err());
+        let control = crate::SelectedReadControl::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(20),
+            cancelled,
+        );
+        assert!(
+            lease
+                .read_record_with_control(&options[0], None, &path, 0, &control)
+                .is_err()
+        );
         let original = fs::read(&path).unwrap();
         let mut tampered = original.clone();
         tampered[20] ^= 1;
         fs::write(&path, tampered).unwrap();
         assert!(lease.read_record(&options[0], None, &path, 0).is_err());
-        fs::write(&path, &original[..original.len()/2]).unwrap();
+        fs::write(&path, &original[..original.len() / 2]).unwrap();
         assert!(lease.read_record(&options[0], None, &path, 0).is_err());
         fs::write(&path, &original).unwrap();
         let replacement = path.with_extension("replacement");
@@ -5230,37 +5398,65 @@ mod tests {
         let successor = binding.reader_runtime().unwrap();
         assert!(runtime.current_generation(key).is_err());
         assert!(lease.renew(60_000).is_err());
-        assert!(successor.selected_generation(key, &id, &token, 60_000).is_err());
+        assert!(
+            successor
+                .selected_generation(key, &id, &token, 60_000)
+                .is_err()
+        );
     }
 
     #[test]
     fn configured_semantic_s2_generation_ref_failure_rolls_back_and_replays_durably() {
         use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
         let (a, _, options, inputs) = model_sources();
-        let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap()).unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
+        )
+        .unwrap();
         let path = inputs[0].full_path(&options[0]);
         cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
         let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-fault");
         let before = shared_state(&a);
         FAIL_EFFECT.with(|point| point.set(Some("semantic_publish_generation_refs")));
-        assert!(cache.publish_semantic_catalog(&batch, model.prepared()).is_err());
+        assert!(
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .is_err()
+        );
         FAIL_EFFECT.with(|point| point.set(None));
         assert_eq!(shared_state(&a), before);
-        let (outcome, head) = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+        let (outcome, head) = cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
         assert_eq!(outcome, Outcome::Written);
         let committed = shared_state(&a);
         // Simulate a caller that lost the ACK: durable publication identity
         // reconciles exactly rather than depending on any lease expiry.
-        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap(), (Outcome::Written, head.clone()));
+        assert_eq!(
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap(),
+            (Outcome::Written, head.clone())
+        );
         assert_eq!(shared_state(&a), committed);
         drop(cache);
-        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap().reader_binding().unwrap();
+        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config)
+            .unwrap()
+            .reader_binding()
+            .unwrap();
         let runtime = binding.reader_runtime().unwrap();
         let key = &model.prepared().rows[0].key;
         let id = runtime.current_generation(key).unwrap();
-        let lease = runtime.selected_generation(key, &id, &"f".repeat(64), 60_000).unwrap();
+        let lease = runtime
+            .selected_generation(key, &id, &"f".repeat(64), 60_000)
+            .unwrap();
         assert_eq!(Some(lease.snapshot().publication_generation.clone()), head);
-        assert!(lease.read_record(&options[0], None, &path, 0).unwrap().is_some());
+        assert!(
+            lease
+                .read_record(&options[0], None, &path, 0)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -5268,17 +5464,27 @@ mod tests {
         use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
         let (a, b, options, mut inputs) = model_sources();
         inputs[1] = inputs[0].clone();
-        fs::copy(inputs[0].full_path(&options[0]), inputs[1].full_path(&options[1])).unwrap();
+        fs::copy(
+            inputs[0].full_path(&options[0]),
+            inputs[1].full_path(&options[1]),
+        )
+        .unwrap();
         let mut runtimes = Vec::new();
         let mut ids = Vec::new();
         let mut keys = Vec::new();
         for (i, config) in [&a.config, &b].into_iter().enumerate() {
-            let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
             let binding = capability.reader_binding().unwrap();
             let mut cache = EventCache::open_semantic(capability).unwrap();
-            cache.ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), "codex").unwrap();
-            let (batch, model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-isolation");
-            cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+            cache
+                .ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), "codex")
+                .unwrap();
+            let (batch, model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-isolation");
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
             let runtime = binding.reader_runtime().unwrap();
             let key = model.prepared().rows[0].key.clone();
             ids.push(runtime.current_generation(&key).unwrap());
@@ -5288,19 +5494,45 @@ mod tests {
         assert_eq!(keys[0], keys[1]);
         assert_ne!(ids[0], ids[1]);
         let foreign = namespace_state(&a, "source-a");
-        assert!(runtimes[1].selected_generation(&keys[1], &ids[0], &"b".repeat(64), 60_000).is_err());
+        assert!(
+            runtimes[1]
+                .selected_generation(&keys[1], &ids[0], &"b".repeat(64), 60_000)
+                .is_err()
+        );
         assert_eq!(namespace_state(&a, "source-a"), foreign);
         let mut leases = Vec::new();
         for i in 0..64 {
-            leases.push(runtimes[0].selected_generation(&keys[0], &ids[0], &format!("{i:064x}"), 60_000).unwrap());
+            leases.push(
+                runtimes[0]
+                    .selected_generation(&keys[0], &ids[0], &format!("{i:064x}"), 60_000)
+                    .unwrap(),
+            );
         }
-        assert!(matches!(runtimes[0].selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000), Err(StorageError::Busy)));
+        assert!(matches!(
+            runtimes[0].selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000),
+            Err(StorageError::Busy)
+        ));
         // The same token in another namespace neither conflicts nor grants a
         // foreign source. Capacity remains source-local as well.
-        let other = runtimes[1].selected_generation(&keys[1], &ids[1], &format!("{:064x}", 0), 60_000).unwrap();
-        assert!(other.read_record(&options[0], None, &inputs[1].full_path(&options[1]), 0).is_err());
-        assert!(other.read_record(&options[1], None, &inputs[1].full_path(&options[1]), 0).unwrap().is_some());
+        let other = runtimes[1]
+            .selected_generation(&keys[1], &ids[1], &format!("{:064x}", 0), 60_000)
+            .unwrap();
+        assert!(
+            other
+                .read_record(&options[0], None, &inputs[1].full_path(&options[1]), 0)
+                .is_err()
+        );
+        assert!(
+            other
+                .read_record(&options[1], None, &inputs[1].full_path(&options[1]), 0)
+                .unwrap()
+                .is_some()
+        );
         leases[0].release().unwrap();
-        assert!(runtimes[0].selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000).is_ok());
+        assert!(
+            runtimes[0]
+                .selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000)
+                .is_ok()
+        );
     }
 }

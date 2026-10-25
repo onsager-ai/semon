@@ -859,7 +859,8 @@ impl Stage {
         )
         .map_err(error)?;
         #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_generation_refs").map_err(error)?;
+        crate::events::store::configured::effect("semantic_publish_generation_refs")
+            .map_err(error)?;
         super::proof_generations::collect(&tx, ns, 16).map_err(error)?;
         publication_phase("claim_ack");
         for (path, claim) in &prepared.claims {

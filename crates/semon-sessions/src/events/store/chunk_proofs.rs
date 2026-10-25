@@ -470,7 +470,8 @@ impl Focused {
         if let Some(owner) = &db.1 {
             // Only typed native custody can qualify an enrolled proof reader.
             // The unbound factory below continues refusing enrolled stores.
-            owner.validate_ready(&connection)
+            owner
+                .validate_ready(&connection)
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         } else {
             if !super::current(&connection)
