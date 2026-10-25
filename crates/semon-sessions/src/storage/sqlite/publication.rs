@@ -25,41 +25,108 @@ pub(crate) struct CurrentWriter<'a> {
 }
 impl<'a> CurrentWriter<'a> {
     pub(crate) fn unbound(db: &'a rusqlite::Connection) -> Self {
-        Self { db, namespace: None }
+        Self {
+            db,
+            namespace: None,
+        }
     }
-    pub(super) fn admitted(db: &'a rusqlite::Connection, source: &'a super::semantic::AdmittedSource) -> Result<Self, StorageError> {
+    pub(super) fn admitted(
+        db: &'a rusqlite::Connection,
+        source: &'a super::semantic::AdmittedSource,
+    ) -> Result<Self, StorageError> {
         source.validate_publication(db)?;
-        Ok(Self { db, namespace: Some(source.namespace()) })
+        Ok(Self {
+            db,
+            namespace: Some(source.namespace()),
+        })
     }
 }
 impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
     type Error = rusqlite::Error;
-    fn current(&self, row: &crate::model::summary::CatalogRow, metadata: &str) -> rusqlite::Result<bool> {
+    fn current(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        metadata: &str,
+    ) -> rusqlite::Result<bool> {
         let sql = if self.namespace.is_some() {
             "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key"
         } else {
             "INSERT INTO main.session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(session_key) DO UPDATE SET lifecycle=excluded.lifecycle,last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key"
         };
-        self.db.prepare_cached(sql)?.execute(params![self.namespace,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,metadata]).map(|n|n>0)
+        self.db
+            .prepare_cached(sql)?
+            .execute(params![
+                self.namespace,
+                row.key,
+                row.last.unwrap_or(0),
+                row.harness,
+                row.repo,
+                row.parent,
+                metadata
+            ])
+            .map(|n| n > 0)
     }
     fn retire_sources(&self, key: &str) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() { "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2" } else { "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE session_key=?2" };
-        self.db.prepare_cached(sql)?.execute(params![self.namespace,key])?;
+        let sql = if self.namespace.is_some() {
+            "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2"
+        } else {
+            "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE session_key=?2"
+        };
+        self.db
+            .prepare_cached(sql)?
+            .execute(params![self.namespace, key])?;
         Ok(())
     }
-    fn clear_dependencies(&self, source: &crate::model::summary::CatalogSource) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() { "DELETE FROM main.catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'" } else { "DELETE FROM main.catalog_native_dependencies WHERE source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'" };
-        self.db.prepare_cached(sql)?.execute(params![self.namespace,source.path.to_string_lossy()])?;
+    fn clear_dependencies(
+        &self,
+        source: &crate::model::summary::CatalogSource,
+    ) -> rusqlite::Result<()> {
+        let sql = if self.namespace.is_some() {
+            "DELETE FROM main.catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'"
+        } else {
+            "DELETE FROM main.catalog_native_dependencies WHERE source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'"
+        };
+        self.db
+            .prepare_cached(sql)?
+            .execute(params![self.namespace, source.path.to_string_lossy()])?;
         Ok(())
     }
-    fn dependency(&self, source: &crate::model::summary::CatalogSource, harness: &str, native: &str) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() { "INSERT OR IGNORE INTO main.catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(?1,?2,?3,?4)" } else { "INSERT OR IGNORE INTO main.catalog_native_dependencies(source_path,harness,native_id) VALUES(?2,?3,?4)" };
-        self.db.prepare_cached(sql)?.execute(params![self.namespace,source.path.to_string_lossy(),harness,native])?;
+    fn dependency(
+        &self,
+        source: &crate::model::summary::CatalogSource,
+        harness: &str,
+        native: &str,
+    ) -> rusqlite::Result<()> {
+        let sql = if self.namespace.is_some() {
+            "INSERT OR IGNORE INTO main.catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(?1,?2,?3,?4)"
+        } else {
+            "INSERT OR IGNORE INTO main.catalog_native_dependencies(source_path,harness,native_id) VALUES(?2,?3,?4)"
+        };
+        self.db.prepare_cached(sql)?.execute(params![
+            self.namespace,
+            source.path.to_string_lossy(),
+            harness,
+            native
+        ])?;
         Ok(())
     }
-    fn source(&self, row: &crate::model::summary::CatalogRow, source: &crate::model::summary::CatalogSource) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() { "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'current',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id" } else { "INSERT INTO main.session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?2,?3,?4,?5) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id" };
-        self.db.prepare_cached(sql)?.execute(params![self.namespace,row.key,row.harness,source.native_id,source.path.to_string_lossy()])?;
+    fn source(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        source: &crate::model::summary::CatalogSource,
+    ) -> rusqlite::Result<()> {
+        let sql = if self.namespace.is_some() {
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'current',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id"
+        } else {
+            "INSERT INTO main.session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?2,?3,?4,?5) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id"
+        };
+        self.db.prepare_cached(sql)?.execute(params![
+            self.namespace,
+            row.key,
+            row.harness,
+            source.native_id,
+            source.path.to_string_lossy()
+        ])?;
         Ok(())
     }
 }

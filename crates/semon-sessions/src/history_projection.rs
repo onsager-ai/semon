@@ -1,15 +1,15 @@
 //! Producer-materialized history context. Current catalog/native authority stays
 //! independent. Missing source paths retain their original generation recipes;
 //! rewrites at the same path are not silently treated as that original source.
+#[cfg(test)]
+use crate::slot_projection::SavedSlot;
 use crate::{
     model::summary::CatalogRow,
     slot_projection::{Publication, VERSION},
 };
-use rusqlite::{Connection, OptionalExtension, Transaction};
 #[cfg(test)]
 use rusqlite::params;
-#[cfg(test)]
-use crate::slot_projection::SavedSlot;
+use rusqlite::{Connection, OptionalExtension, Transaction};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -94,7 +94,10 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
 }
 
 #[cfg(test)]
-pub(crate) fn publish_original(tx: &Transaction<'_>, publication: &Publication<'_>) -> rusqlite::Result<()> {
+pub(crate) fn publish_original(
+    tx: &Transaction<'_>,
+    publication: &Publication<'_>,
+) -> rusqlite::Result<()> {
     let Some(projections) = publication.transcripts else {
         return Ok(());
     };
@@ -302,7 +305,6 @@ pub(crate) fn publish_original(tx: &Transaction<'_>, publication: &Publication<'
     }
     Ok(())
 }
-#[cfg(test)]
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }

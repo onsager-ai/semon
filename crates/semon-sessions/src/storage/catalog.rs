@@ -15,7 +15,12 @@ pub(crate) trait CurrentPublicationStore {
     fn current(&self, row: &CatalogRow, metadata: &str) -> Result<bool, Self::Error>;
     fn retire_sources(&self, key: &str) -> Result<(), Self::Error>;
     fn clear_dependencies(&self, source: &CatalogSource) -> Result<(), Self::Error>;
-    fn dependency(&self, source: &CatalogSource, harness: &str, native: &str) -> Result<(), Self::Error>;
+    fn dependency(
+        &self,
+        source: &CatalogSource,
+        harness: &str,
+        native: &str,
+    ) -> Result<(), Self::Error>;
     fn source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), Self::Error>;
 }
 
@@ -25,7 +30,13 @@ pub(crate) trait SearchPublicationStore {
     type Error;
     fn validate(&self, key: &str) -> Result<(), Self::Error>;
     fn remove(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
-    fn document(&self, scope: crate::CatalogReadScope, row: &CatalogRow, fields: &str, complete: bool) -> Result<(), Self::Error>;
+    fn document(
+        &self,
+        scope: crate::CatalogReadScope,
+        row: &CatalogRow,
+        fields: &str,
+        complete: bool,
+    ) -> Result<(), Self::Error>;
     fn postings(&self, rows: &[(&String, &CatalogRow)]) -> Result<(), Self::Error>;
     fn counts(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
 }
@@ -38,11 +49,26 @@ pub(crate) trait CompositeHistoryStore {
     fn previous(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn history_exists(&self, key: &str) -> Result<bool, Self::Error>;
     fn retain_source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), Self::Error>;
-    fn relocated(&self, old: &CatalogSource, current: &[CatalogSource]) -> Result<bool, Self::Error>;
+    fn relocated(
+        &self,
+        old: &CatalogSource,
+        current: &[CatalogSource],
+    ) -> Result<bool, Self::Error>;
     fn clear(&self, key: &str) -> Result<(), Self::Error>;
-    fn previous_recipe(&self, key: &str) -> Result<(bool, Option<HistoryRecipeHeader>), Self::Error>;
+    fn previous_recipe(
+        &self,
+        key: &str,
+    ) -> Result<(bool, Option<HistoryRecipeHeader>), Self::Error>;
     fn recipe_slots(&self, key: &str, history: bool) -> Result<Vec<String>, Self::Error>;
-    fn composed(&self, key: &str, generation: &str, sources: &str, metadata: &str, texts: &[String], incomplete: bool) -> Result<(), Self::Error>;
+    fn composed(
+        &self,
+        key: &str,
+        generation: &str,
+        sources: &str,
+        metadata: &str,
+        texts: &[String],
+        incomplete: bool,
+    ) -> Result<(), Self::Error>;
 }
 
 /// The original dependency derivation and statement ordering, shared by both
@@ -51,7 +77,11 @@ pub(crate) fn publish_current_sources<P: CurrentPublicationStore>(
     store: &P,
     row: &CatalogRow,
 ) -> Result<(), P::Error> {
-    publish_current_sources_measured(store, row, &mut crate::native_timing::Measurements::new(false))
+    publish_current_sources_measured(
+        store,
+        row,
+        &mut crate::native_timing::Measurements::new(false),
+    )
 }
 
 pub(crate) fn publish_current_sources_measured<P: CurrentPublicationStore>(
@@ -66,13 +96,22 @@ pub(crate) fn publish_current_sources_measured<P: CurrentPublicationStore>(
         let started = measurements.start();
         store.clear_dependencies(source)?;
         let parent = source.native_role.as_ref().and_then(|role| {
-            role.pointer("/Agent/parent").and_then(Value::as_str).or_else(|| {
-                (role.pointer("/Codex/guardian_review").and_then(Value::as_bool) != Some(true))
+            role.pointer("/Agent/parent")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    (role
+                        .pointer("/Codex/guardian_review")
+                        .and_then(Value::as_bool)
+                        != Some(true))
                     .then(|| role.pointer("/Codex/parent_thread").and_then(Value::as_str))
                     .flatten()
-            })
+                })
         });
-        if let Some(observations) = row.query.as_ref().and_then(|query| query["rows"].as_object()) {
+        if let Some(observations) = row
+            .query
+            .as_ref()
+            .and_then(|query| query["rows"].as_object())
+        {
             for observation in observations.values() {
                 if let Some(pid) = observation["summary"]["pid"].as_u64() {
                     store.dependency(source, "runtime:pid", &pid.to_string())?;
@@ -385,10 +424,7 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
     let Some(projections) = projections else {
         return Ok(());
     };
-    let rows: BTreeMap<_, _> = rows
-        .iter()
-        .map(|row| (row.key.as_str(), row))
-        .collect();
+    let rows: BTreeMap<_, _> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
     for projection in projections {
         let Some(current) = rows.get(projection.key.as_str()).copied() else {
             continue;
@@ -421,9 +457,7 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
         let mut missing = BTreeMap::new();
         for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
-            if !paths.contains(&source.path)
-                && !store.relocated(source, &current.sources)?
-            {
+            if !paths.contains(&source.path) && !store.relocated(source, &current.sources)? {
                 missing.insert(source.path.clone(), source.clone());
             }
         }
@@ -525,14 +559,29 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         // while allowing current continuation to advance after a disappearance.
         let mut seen = BTreeSet::new();
         slots.retain(|slot| seen.insert(slot.identity()));
-        let texts: Vec<String> = slots.iter().map(serde_json::to_string).collect::<Result<_, _>>().map_err(P::data)?;
+        let texts: Vec<String> = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<_, _>>()
+            .map_err(P::data)?;
         let sources = crate::retention::source_generation(&history.sources).map_err(P::data)?;
         let metadata = serde_json::to_string(&history).map_err(P::data)?;
         let generation = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_string(&(VERSION, &sources, &texts, incomplete)).map_err(P::data)?.as_bytes())
+            Sha256::digest(
+                serde_json::to_string(&(VERSION, &sources, &texts, incomplete))
+                    .map_err(P::data)?
+                    .as_bytes()
+            )
         );
-        store.composed(&current.key, &generation, &sources, &metadata, &texts, incomplete)?;
+        store.composed(
+            &current.key,
+            &generation,
+            &sources,
+            &metadata,
+            &texts,
+            incomplete,
+        )?;
     }
     Ok(())
 }

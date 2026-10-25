@@ -145,9 +145,10 @@ pub(super) struct WriterShapeProbe(Option<WriterShapeMeasurements>);
 
 impl WriterShapeProbe {
     pub(super) fn new(enabled: bool) -> Self {
-        Self(WRITER_SHAPE_MEASUREMENTS.with(|cell| {
-            cell.replace(enabled.then(WriterShapeMeasurements::default))
-        }))
+        Self(
+            WRITER_SHAPE_MEASUREMENTS
+                .with(|cell| cell.replace(enabled.then(WriterShapeMeasurements::default))),
+        )
     }
 
     fn start(label: &'static str) -> Option<std::time::Instant> {
@@ -185,8 +186,10 @@ impl Drop for WriterShapeProbe {
             // Keep this diagnostic separate from cleanup's test recorder.
             eprintln!(
                 "semon sessions native: writer_shape core_shape_calls={} core_shape_query_us={} meta_shape_calls={} meta_shape_query_us={}",
-                measurements.core_calls, measurements.core_us,
-                measurements.meta_calls, measurements.meta_us
+                measurements.core_calls,
+                measurements.core_us,
+                measurements.meta_calls,
+                measurements.meta_us
             );
         }
     }
@@ -3054,31 +3057,50 @@ mod tests {
         let mut store = owned_semantic(&a.config);
         let (batch, prepared) = publication_ready(&mut *store, &a.raw, "search-current");
         let key = &prepared.rows[0].key;
-        for table in ["session_slots", "session_slot_projections", "session_history_catalog", "session_history_projections", "session_history_slots", "session_history_slot_parts", "session_search_coverage", "session_search_documents", "session_search_memberships", "session_search_counts"] {
+        for table in [
+            "session_slots",
+            "session_slot_projections",
+            "session_history_catalog",
+            "session_history_projections",
+            "session_history_slots",
+            "session_history_slot_parts",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+        ] {
             assert!(a.db().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)",[table],|r|r.get::<_,bool>(0)).unwrap(), "{table}");
         }
         let before = shared_state(&a);
-        FAIL_EFFECT.with(|point|point.set(Some("semantic_publish_search")));
+        FAIL_EFFECT.with(|point| point.set(Some("semantic_publish_search")));
         assert!(store.publish_semantic_catalog(&batch, &prepared).is_err());
-        FAIL_EFFECT.with(|point|point.set(None));
+        FAIL_EFFECT.with(|point| point.set(None));
         assert_eq!(shared_state(&a), before);
         store.publish_semantic_catalog(&batch, &prepared).unwrap();
         assert_eq!(namespace_state(&a, "source-b"), b_before);
-        let db=a.db();
-        for scope in ["current","retained_history"] {
+        let db = a.db();
+        for scope in ["current", "retained_history"] {
             let fields:String=db.query_row("SELECT fields FROM session_search_documents WHERE namespace='source-a' AND read_scope=?1 AND session_key=?2",params![scope,key],|r|r.get(0)).unwrap();
-            let fields:Vec<String>=serde_json::from_str(&fields).unwrap();
+            let fields: Vec<String> = serde_json::from_str(&fields).unwrap();
             assert!(fields.contains(&key.to_lowercase()));
             assert_eq!(db.query_row("SELECT count(*) FROM session_search_counts c WHERE namespace='source-a' AND read_scope=?1 AND members<>(SELECT count(*) FROM session_search_memberships p WHERE p.namespace=c.namespace AND p.gram=c.gram AND CASE WHEN ?1='current' THEN p.current_last_ms ELSE p.history_last_ms END IS NOT NULL)",[scope],|r|r.get::<_,i64>(0)).unwrap(),0);
         }
-        assert!(db.query_row("SELECT count(*) FROM session_search_memberships WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
-        let published=shared_state(&a);
+        assert!(
+            db.query_row(
+                "SELECT count(*) FROM session_search_memberships WHERE namespace='source-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+                > 0
+        );
+        let published = shared_state(&a);
         store.publish_semantic_catalog(&batch, &prepared).unwrap();
-        assert_eq!(shared_state(&a),published);
+        assert_eq!(shared_state(&a), published);
         store.finish_semantic_stage(batch.epoch).unwrap();
-        let (next, prepared)=publication_ready(&mut *store,&a.raw,"search-repeat");
-        store.publish_semantic_catalog(&next,&prepared).unwrap();
-        assert_eq!(namespace_state(&a,"source-b"),b_before);
+        let (next, prepared) = publication_ready(&mut *store, &a.raw, "search-repeat");
+        store.publish_semantic_catalog(&next, &prepared).unwrap();
+        assert_eq!(namespace_state(&a, "source-b"), b_before);
         assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND session_key=?1",[key],|r|r.get::<_,i64>(0)).unwrap(),2);
     }
 

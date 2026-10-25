@@ -85,7 +85,9 @@ fn invalidate_prepared<'a>(
             return Err(rusqlite::Error::InvalidQuery);
         }
         work.executions += 1;
-        work.claim_rows += statements.claim.execute(params![namespace, path, reason, now()])?;
+        work.claim_rows += statements
+            .claim
+            .execute(params![namespace, path, reason, now()])?;
     } else {
         work.revision_rows += statements.revision.execute([])?;
         work.executions += 1;
@@ -131,9 +133,16 @@ pub(crate) fn discover(
     if let Some(started) = started {
         eprintln!(
             "semon sessions native: source_journal_batch elapsed_us={} authored_write_prepares={} prepare_us={} write_executions={} namespace_probes={} membership_rows={} revision_rows={} claim_rows={} state_rows={} success={}",
-            started.elapsed().as_micros(), work.prepares, work.prepare_us, work.executions,
-            work.namespace_probes, work.membership_rows, work.revision_rows,
-            work.claim_rows, work.state_rows, result.is_ok()
+            started.elapsed().as_micros(),
+            work.prepares,
+            work.prepare_us,
+            work.executions,
+            work.namespace_probes,
+            work.membership_rows,
+            work.revision_rows,
+            work.claim_rows,
+            work.state_rows,
+            result.is_ok()
         );
     }
     result
@@ -197,8 +206,8 @@ fn discover_prepared(
     work.executions += 1;
     let started = crate::native_timing::enabled().then(std::time::Instant::now);
     if let Some(namespace) = namespace {
-        let mut statement = db
-            .prepare("UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1")?;
+        let mut statement =
+            db.prepare("UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1")?;
         work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
         work.state_rows += statement.execute(params![namespace, state])?;
     } else {
@@ -598,13 +607,25 @@ mod tests {
         tx.rollback().unwrap();
         assert!(batch_rows(&db, false).is_empty());
         let membership: i64 = db
-            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(membership, 0);
-        let revision: Option<String> = db.query_row("SELECT value FROM meta WHERE key='catalog_source_revision'", [], |r| r.get(0)).optional().unwrap();
+        let revision: Option<String> = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
         assert_eq!(revision, None);
         // A rolled-back binding DDL must not poison a subsequent unbound call.
-        db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE storage_namespaces(namespace TEXT); ROLLBACK;").unwrap();
+        db.execute_batch(
+            "BEGIN IMMEDIATE; CREATE TABLE storage_namespaces(namespace TEXT); ROLLBACK;",
+        )
+        .unwrap();
         discover_prepared(
             &db,
             None,
@@ -634,7 +655,11 @@ mod tests {
     #[test]
     fn discovery_batch_revision_overflow_rolls_back_membership() {
         let mut db = batch_db(true);
-        db.execute("UPDATE storage_source_journal SET revision=9223372036854775807 WHERE namespace='A'", []).unwrap();
+        db.execute(
+            "UPDATE storage_source_journal SET revision=9223372036854775807 WHERE namespace='A'",
+            [],
+        )
+        .unwrap();
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -652,10 +677,18 @@ mod tests {
         tx.rollback().unwrap();
         assert!(batch_rows(&db, true).is_empty());
         let membership: i64 = db
-            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(membership, 0);
-        let revision: i64 = db.query_row("SELECT revision FROM storage_source_journal WHERE namespace='A'", [], |r| r.get(0)).unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace='A'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(revision, i64::MAX);
     }
 
