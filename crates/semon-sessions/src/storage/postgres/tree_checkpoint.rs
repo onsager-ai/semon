@@ -72,75 +72,71 @@ impl Snapshot {
             control,
             poisoned: false,
         };
+        let control = snapshot.control.for_selected_read();
         let (file, projection, source, mut summary) = snapshot
             .pool
-            .transaction(
-                &snapshot.namespace,
-                TxnKind::ReadSnapshot,
-                &snapshot.control,
-                |tx| {
-                    let (file, projection, source) = snapshot.authority(tx, false)?;
-                    let mut summary = Summary::default();
-                    rows(
-                        tx,
-                        "tree_labels",
-                        "projection_id",
-                        projection,
-                        &["label", "value"],
-                        1,
-                        |values| {
-                            let key = required(&values, 0)?;
-                            let value = required(&values, 1)?;
-                            match key.as_str() {
-                                "first" => summary.first = Some(value),
-                                "last" => summary.last = Some(value),
-                                "cwd" => summary.cwd = Some(value),
-                                "branch" => summary.branch = Some(value),
-                                "codex_turn" => {
-                                    summary.codex_turn = serde_json::from_str(&value)
-                                        .map_err(|_| StorageError::Unavailable)?
-                                }
-                                _ => return Err(StorageError::Unavailable),
+            .transaction(&snapshot.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                let (file, projection, source) = snapshot.authority(tx, false)?;
+                let mut summary = Summary::default();
+                rows(
+                    tx,
+                    "tree_labels",
+                    "projection_id",
+                    projection,
+                    &["label", "value"],
+                    1,
+                    |values| {
+                        let key = required(&values, 0)?;
+                        let value = required(&values, 1)?;
+                        match key.as_str() {
+                            "first" => summary.first = Some(value),
+                            "last" => summary.last = Some(value),
+                            "cwd" => summary.cwd = Some(value),
+                            "branch" => summary.branch = Some(value),
+                            "codex_turn" => {
+                                summary.codex_turn = serde_json::from_str(&value)
+                                    .map_err(|_| StorageError::Unavailable)?
                             }
-                            Ok(())
-                        },
-                    )?;
-                    rows(
-                        tx,
-                        "tree_models",
-                        "projection_id",
-                        projection,
-                        &["model"],
-                        1,
-                        |values| {
-                            summary.models.insert(required(&values, 0)?);
-                            Ok(())
-                        },
-                    )?;
-                    rows(
-                        tx,
-                        "tree_tools",
-                        "projection_id",
-                        projection,
-                        &["tool_id", "name", "convert_to(closed::text,'UTF8')"],
-                        1,
-                        |values| {
-                            let id = required(&values, 0)?;
-                            match required(&values, 2)?.as_str() {
-                                "false" => {
-                                    if let Some(name) = &values[1] {
-                                        summary.tools.insert(id, name.clone());
-                                    }
+                            _ => return Err(StorageError::Unavailable),
+                        }
+                        Ok(())
+                    },
+                )?;
+                rows(
+                    tx,
+                    "tree_models",
+                    "projection_id",
+                    projection,
+                    &["model"],
+                    1,
+                    |values| {
+                        summary.models.insert(required(&values, 0)?);
+                        Ok(())
+                    },
+                )?;
+                rows(
+                    tx,
+                    "tree_tools",
+                    "projection_id",
+                    projection,
+                    &["tool_id", "name", "convert_to(closed::text,'UTF8')"],
+                    1,
+                    |values| {
+                        let id = required(&values, 0)?;
+                        match required(&values, 2)?.as_str() {
+                            "false" => {
+                                if let Some(name) = &values[1] {
+                                    summary.tools.insert(id, name.clone());
                                 }
-                                "true" => (),
-                                _ => return Err(StorageError::Unavailable),
                             }
-                            Ok(())
-                        },
-                    )?;
-                    Ok((file, projection, source, summary))
-                },
-            )
+                            "true" => (),
+                            _ => return Err(StorageError::Unavailable),
+                        }
+                        Ok(())
+                    },
+                )?;
+                Ok((file, projection, source, summary))
+            })
             .map_err(|error| {
                 selected_read::check()
                     .err()
@@ -179,16 +175,12 @@ impl Snapshot {
         if self.poisoned {
             return Err(io::ErrorKind::WouldBlock.into());
         }
+        let control = self.control.for_selected_read();
         self.pool
-            .transaction(
-                &self.namespace,
-                TxnKind::ReadSnapshot,
-                &self.control,
-                |tx| {
-                    self.authority(tx, true)?;
-                    read(tx)
-                },
-            )
+            .transaction(&self.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                self.authority(tx, true)?;
+                read(tx)
+            })
             .map_err(|error| {
                 selected_read::check()
                     .err()
