@@ -181,7 +181,7 @@ pub(super) fn read(tx: &mut PgTxn<'_>) -> Result<(i64, Option<String>), StorageE
     if rows.len() != 1 || !rows[0].get::<_, bool>(2) || rows[0].get::<_, i64>(0) < 0 {
         return Err(StorageError::ScopeChanged);
     }
-    let bad_operation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_store_operations p CROSS JOIN semon_pg_store_owner o WHERE p.owner<>o.owner)", &[]).map_err(sqlstate::error)?.get(0);
+    let bad_operation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_store_operations p CROSS JOIN semon_pg_store_owner o CROSS JOIN semon_pg_store_state s WHERE p.owner<>o.owner OR p.revision<1 OR p.revision>s.revision)", &[]).map_err(sqlstate::error)?.get(0);
     if bad_operation {
         return Err(StorageError::ScopeChanged);
     }

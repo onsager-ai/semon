@@ -79,6 +79,11 @@ fn pg_store_metadata_distinct_source_principal_journal_cold_warm_cannot_control(
             &namespace,
         );
         assert!(PgStoreMetadata::open(pool.clone(), &control).is_err());
+        let pricing_in_source = pool.transaction(&ns(&namespace), TxnKind::Write, &control, |tx| {
+            tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&tx.namespace.as_str().as_bytes(), &b"pricing_recompute_target".as_slice(), &b"forged".as_slice()]).map_err(sqlstate::error)?;
+            Ok(())
+        });
+        assert!(pricing_in_source.is_err(), "STORE key is illegal in Source metadata");
         let operation_id = "1f".repeat(32);
         let source_operation = crate::storage::postgres::OperationIdentity {
             operation_id: &operation_id,
@@ -220,6 +225,8 @@ fn pg_store_metadata_warm_corruption_matrix_refuses_without_mutation() {
         "ALTER TABLE semon_pg_store_operations OWNER TO semon_source",
         "UPDATE semon_pg_store_state SET owner='semon_source'",
         "DELETE FROM semon_pg_store_state",
+        "INSERT INTO semon_pg_store_operations VALUES(decode(repeat('de',32),'hex'),'semon_f1',decode(repeat('ad',32),'hex'),0)",
+        "INSERT INTO semon_pg_store_operations VALUES(decode(repeat('de',32),'hex'),'semon_f1',decode(repeat('ad',32),'hex'),100)",
         "INSERT INTO semon_pg_store_operations VALUES(decode(repeat('de',32),'hex'),'semon_source',decode(repeat('ad',32),'hex'),0)",
         "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_pkey; INSERT INTO semon_pg_store_owner VALUES(true,'semon_f1',1,1)",
         "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_contract_check; UPDATE semon_pg_store_owner SET contract=2",
