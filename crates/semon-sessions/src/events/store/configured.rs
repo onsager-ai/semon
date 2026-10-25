@@ -7169,14 +7169,21 @@ mod tests {
             // The admitted writer preserves a differing Current observation
             // as an original before composing History. With the explicitly
             // empty prior History above, changed owners therefore retain
-            // their exact prior metadata, including Query facts and sources.
+            // their exact prior metadata, including Query facts and sources,
+            // with the explicit Current-to-Retained custody transition.
             let mut expected_history = prior_history;
             for current in &model.prepared().rows {
                 let Some(old) = prior_current.get(&current.key) else {
                     continue;
                 };
                 if old != &serde_json::to_string(current).unwrap() {
-                    expected_history.insert(current.key.clone(), old.clone());
+                    let mut retained =
+                        serde_json::from_str::<crate::model::summary::CatalogRow>(old).unwrap();
+                    retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                    expected_history.insert(
+                        current.key.clone(),
+                        serde_json::to_string(&retained).unwrap(),
+                    );
                 }
             }
             publish(&mut cache, &f, &batch, &model);
@@ -7209,10 +7216,11 @@ mod tests {
             let history_row =
                 serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata)
                     .unwrap();
-            let old = serde_json::from_str::<crate::model::summary::CatalogRow>(
+            let mut old = serde_json::from_str::<crate::model::summary::CatalogRow>(
                 &prior_current[history_key],
             )
             .unwrap();
+            old.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
             assert_eq!(
                 serde_json::to_value(&history_row).unwrap(),
                 serde_json::to_value(&old).unwrap(),

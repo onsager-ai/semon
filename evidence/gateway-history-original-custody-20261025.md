@@ -24,3 +24,12 @@ No production code, schema, adapter, proof lifetime, PG or S2 work changed.
 No local build/test/formatter ran: thermal telemetry is absent. Exact-head CI,
 its formatting artifact and fresh Manager review remain required. Full #477,
 PG, migration, Hub313 and the #380 gate remain pending.
+
+CI follow-up on 3b4f638766fbf7f484f149d134566451d3d1b140 again passed
+72/73 configured tests. The exact actual/expected History maps differed only
+in lifecycle: the implementation correctly marks the original Retained, while
+the first Gateway oracle left it Current. The expected original now performs
+that explicit custody transition before exact equality. All other fields were
+confirmed identical; no payload field is ignored. The implementation's rule
+is preserve_original in storage/catalog.rs. This is another test-only fix,
+still requiring exact-head CI and independent review.
