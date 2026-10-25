@@ -3,6 +3,43 @@
 use crate::native_tree::Summary;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TreeSummaryRecord {
+    pub(crate) version: u32,
+    pub(crate) parser_version: u32,
+    pub(crate) ledger: String,
+    #[serde(default)]
+    pub(crate) projection_witness: Option<String>,
+    #[serde(default)]
+    pub(crate) interpretation_witness: Option<String>,
+    pub(crate) summary: Summary,
+}
+
+impl TreeSummaryRecord {
+    pub(crate) fn new(
+        ledger: String,
+        projection_witness: Option<String>,
+        interpretation: String,
+        summary: &Summary,
+        normalized_usage: bool,
+    ) -> Self {
+        Self {
+            version: 3,
+            parser_version: super::CACHE_VERSION,
+            ledger,
+            projection_witness,
+            interpretation_witness: Some(interpretation),
+            summary: summary.compact(normalized_usage),
+        }
+    }
+}
+
+pub(crate) fn interpretation(values: &[Option<String>; 3]) -> serde_json::Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(values)?)))
+}
+
 pub(crate) struct TreeRows<'a> {
     pub(crate) codex_turn: String,
     labels: [(&'static str, Option<&'a str>); 4],
@@ -79,17 +116,17 @@ pub(crate) mod witness {
             self.0.update(row.as_bytes());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn label(&mut self, key: &str, value: &str) {
             self.encoded(&serde_json::to_string(&[key, value]).unwrap());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn model(&mut self, model: &str) {
             self.encoded(&serde_json::to_string(&[model]).unwrap());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn tool(&mut self, id: &str, name: &str) {
             self.encoded(&serde_json::to_string(&[id, name]).unwrap());
         }

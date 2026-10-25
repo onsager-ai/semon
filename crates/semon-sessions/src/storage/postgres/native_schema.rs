@@ -287,7 +287,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || pg_get_expr(p.polwithcheck,p.polrelid) FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
         (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attname='namespace_digest' AND a.attgenerated='s'),
         ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname)
-        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND c.relname<>'semon_pg_schema' AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
+        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND c.relname<>'semon_pg_schema' AND c.relname NOT IN ('semon_pg_store_owner','semon_pg_store_state','semon_pg_store_operations') AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
     if rows.len() != TABLES.len() + FOUNDATION.len() {
         return Err(StorageError::ScopeChanged);
     }
