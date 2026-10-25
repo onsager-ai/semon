@@ -7448,11 +7448,18 @@ pub(crate) fn prepare_semantic_batch(
         return Err(io::Error::other("semantic model generation changed"));
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
-        let binding = cache.query_runtime_binding()?.ok_or_else(|| io::Error::other("selected presentation requires logical runtime binding"))?;
-        let observations = crate::storage::selected::PresentationObservations::capture(options, &binding)?;
+        let binding = cache.query_runtime_binding()?.ok_or_else(|| {
+            io::Error::other("selected presentation requires logical runtime binding")
+        })?;
+        let observations =
+            crate::storage::selected::PresentationObservations::capture(options, &binding)?;
         let observations = serde_json::to_value(observations).map_err(io::Error::other)?;
         for row in &mut prepared.rows {
-            let query = row.query.as_mut().and_then(serde_json::Value::as_object_mut).ok_or_else(|| io::Error::other("selected presentation requires Query facts"))?;
+            let query = row
+                .query
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| io::Error::other("selected presentation requires Query facts"))?;
             query.insert("selected_presentation_observations".into(), observations.clone());
         }
     }
