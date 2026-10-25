@@ -3195,6 +3195,7 @@ pub(crate) fn scan_file(
                         .map(|(store, ledger)| (store, key.as_str(), ledger))
                 })
                 .flatten(),
+            &mut cache.scan_measurements,
         )?;
         if let Some(started) = parse_started {
             cache.parse_duration += started.elapsed();
@@ -3408,6 +3409,7 @@ fn parse(
     index: &mut FileIndex,
     budget: Option<u64>,
     stored: Option<(&dyn IndexStore, &str, &Ledger)>,
+    measurements: &mut crate::native_timing::Measurements,
 ) -> io::Result<(u64, [u8; 32], bool)> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
@@ -3421,7 +3423,11 @@ fn parse(
             break;
         }
         line.clear();
+        let started = measurements.start();
         let length = reader.read_until(b'\n', &mut line)?;
+        // Buffered reader time includes refill I/O; this is not physical I/O
+        // latency or a count of unique source bytes.
+        measurements.record("body_buffered_read", started, length);
         if length == 0 {
             break;
         }
@@ -3440,13 +3446,16 @@ fn parse(
         }
         let line_offset = offset;
         offset += length as u64;
+        let started = measurements.start();
         parsed.update(&line);
+        measurements.record("body_record_hash", started, length);
         #[cfg(test)]
         {
             PARSED.with(|parsed| parsed.set(parsed.get() + 1));
             PARSED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
             SOURCE_HASHED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
         }
+        let started = measurements.start();
         let record = serde_json::from_slice::<Value>(&line);
         // Only a touched message needs its old report for the Tree delta.
         if harness == "claude"
@@ -3515,6 +3524,7 @@ fn parse(
             }
             _ => gap(index, line_offset),
         }
+        measurements.record("body_record_projection", started, 1);
     }
     Ok((offset, parsed.finalize().into(), bounded))
 }

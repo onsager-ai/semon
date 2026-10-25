@@ -58,6 +58,7 @@ jobs:
       - name: SQLite adapter and reusable metadata conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
@@ -82,6 +83,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stale_record_and_admission_refuse_without_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::copied_usage_layout_is_warmed_by_actual_producer_and_selected_factories -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib native_timing::tests::cleanup_prepare_failure_preserves_error_without_zero_vm_work_or_record -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib native_timing::tests::cold_discovery_progress_separates_active_pages_from_continuation_gaps -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_mixed_family_refuses_before_ingest -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stage_authored_keys_preserve_collisions_and_refuse_unported_consumers -- --exact --nocapture

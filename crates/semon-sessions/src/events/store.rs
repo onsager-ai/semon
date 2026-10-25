@@ -2613,6 +2613,8 @@ impl IndexStore for SqliteStore {
         complete: bool,
     ) -> Result<(), StoreError> {
         let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
         let cached = self.discovery.publication.take();
         if !self.connection.is_autocommit() {
             self.discovery.recovery = None;
@@ -2621,11 +2623,15 @@ impl IndexStore for SqliteStore {
             ));
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
+        let started = measurements.start();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        measurements.record("immediate_transaction", started, 1);
+        let started = measurements.start();
         let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_before", started, 1);
         if cached.as_ref().is_some_and(|(old, inputs, done)| {
             *old == witness && inputs == paths && *done == complete
         }) {
@@ -2634,26 +2640,44 @@ impl IndexStore for SqliteStore {
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
             return Ok(());
         }
+        let started = measurements.start();
         if self.discovery.recovery != Some(witness) {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("qualification", started, 1);
         let before = tx.total_changes();
+        let started = measurements.start();
         crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
             .map_err(failure)?;
+        measurements.record("source_journal_inclusive", started, paths.len());
+        let started = measurements.start();
         let recovery_still_complete = if self.discovery.recovery == Some(witness) {
             crate::native_timing::discovery_count(|counts| counts.statements += 1);
             tx.query_row(configured::metadata_sql(&tx,"SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')","SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after')").map_err(failure)?,[],|r|r.get::<_,bool>(0)).map_err(failure)?
         } else {
             false
         };
+        measurements.record("recovery_marker", started, 1);
+        let started = measurements.start();
         let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_after", started, 1);
+        let started = measurements.start();
         if committed.contract != witness.contract
             || committed.main_schema != witness.main_schema
             || committed.temp_schema != witness.temp_schema
         {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("contract_requalification", started, 1);
+        let started = measurements.start();
         tx.commit().map_err(failure)?;
+        measurements.record("commit", started, 1);
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&self.path),
+                "discovery_publication_work",
+            );
+        }
         // Only advance after rechecking the durable marker under this same
         // lock, including effects of authored or fault-injected triggers.
         if recovery_still_complete {
@@ -6659,11 +6683,13 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
     copied_usage_sql(transaction, "", "")?;
     semantic_stage::support_sql(transaction, "", "")?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     // The source ledger fences raw bytes; the sidecar is an independent
     // interpretation dependency. Re-encoding derived proofs changes neither.
     let semantic_change = expected != Some(ledger)
@@ -6675,6 +6701,12 @@ fn write_index_changes_measured(
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "relocation_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("relocation")?;
     let started = measurements.start();
@@ -6699,6 +6731,7 @@ fn write_index_changes_measured(
     #[cfg(test)]
     configured::effect("native_usage")?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(semantic_stage::support_sql(transaction,
         "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
         "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')")?, [path])?;
@@ -6724,10 +6757,17 @@ fn write_index_changes_measured(
         )?;
     }
     measurements.record("dependencies", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "dependencies_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("dependencies")?;
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(semantic_stage::support_sql(transaction,
         "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
         "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')")?, [path])?;
@@ -6748,6 +6788,12 @@ fn write_index_changes_measured(
         }
     }
     measurements.record("semantic_dependencies", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "semantic_dependencies_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("semantic_dependencies")?;
     let started = measurements.start();
@@ -6773,6 +6819,7 @@ fn write_index_changes_measured(
         measurements.record("representation_repair", started, 1);
     }
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(
         semantic_stage::support_sql(transaction,
             "DELETE FROM session_source_mutations WHERE source_path=?1",
@@ -6780,6 +6827,12 @@ fn write_index_changes_measured(
         [path],
     )?;
     measurements.record("mutation_retirement", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "mutation_retirement_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("mutation_retirement")?;
     #[cfg(test)]
@@ -6790,6 +6843,21 @@ fn write_index_changes_measured(
             .with(|n| n.set(n.get() + (written_after - written_before) as u64));
     }
     Ok(())
+}
+
+// Actual SQLite row changes (including triggers), distinct from leaf input
+// units. Reads are disabled together with timing and are inclusive per leaf.
+fn record_writer_rows(
+    transaction: &Transaction<'_>,
+    measurements: &mut crate::native_timing::Measurements,
+    label: &'static str,
+    before: Option<u64>,
+) {
+    if let Some(before) = before {
+        let rows = usize::try_from(transaction.total_changes().saturating_sub(before))
+            .unwrap_or(usize::MAX);
+        measurements.count(label, rows);
+    }
 }
 
 /// Upserts `path`'s `files` row, then writes its child rows where `index`
@@ -6861,6 +6929,7 @@ fn write_file(
     #[cfg(test)]
     configured::effect("proof_sidecar")?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     if started.is_some() {
         chunk_proofs::write_measured(
             transaction,
@@ -6873,6 +6942,12 @@ fn write_file(
         chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     }
     measurements.record("proof_chunks", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "proof_chunks_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("proof_chunks")?;
     let started = measurements.start();
@@ -6947,6 +7022,7 @@ fn write_file(
     };
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     write_tree_summary(
         transaction,
         path,
@@ -6955,6 +7031,12 @@ fn write_file(
         index.native_usage_observations.is_some(),
     )?;
     measurements.record("proof_tree", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "proof_tree_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
@@ -7024,6 +7106,7 @@ fn write_file(
     measurements.count("signal_records", signals.len());
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     let mut put = transaction.prepare_cached(copied_usage_sql(
         transaction,
         PUT_USAGE,
@@ -7050,10 +7133,12 @@ fn write_file(
         }
     }
     measurements.record("usage", started, changes.usage.len());
+    record_writer_rows(transaction, measurements, "usage_written_rows", rows_before);
     #[cfg(test)]
     configured::effect("usage")?;
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     let mut put = transaction.prepare_cached(copied_usage_sql(
         transaction,
         PUT_CODEX_USAGE,
@@ -7097,6 +7182,12 @@ fn write_file(
         },
     )?;
     measurements.record("codex_usage", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "codex_usage_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("codex_usage")?;
     measurements.count("codex_usage_records", codex_usage_events.len());
