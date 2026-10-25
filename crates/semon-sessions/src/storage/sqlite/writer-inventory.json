@@ -91,6 +91,7 @@
     "storage.rs",
     "storage/postgres/native_usage/tests.rs",
     "storage/postgres/native_usage_identity/tests.rs",
+    "storage/postgres/tree_checkpoint/tests.rs",
     "test_hooks.rs",
     "transcript_range.rs",
     "viewer.rs"
