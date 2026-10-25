@@ -7092,6 +7092,7 @@ fn write_file_with_usage_deletes<'tx>(
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
     let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
+    let file_row = super::file_rows::FileRow::new(ledger, index);
     copied_usage_sql(transaction, "", "")?;
     let FileIndex {
         dirty_rows: _,
@@ -7105,41 +7106,10 @@ fn write_file_with_usage_deletes<'tx>(
         events,
         extras,
         signals,
-        pending,
-        tool_ids,
-        yields,
-        busy,
-        links,
-        entrypoint,
-        title,
-        agent_name,
-        last_model,
-        failed,
-        first,
-        last,
-        cwd,
-        branch,
         usage_by_id,
-        codex_tokens,
-        codex_tokens_by_model,
         codex_usage_events,
         codex_native_usage: _,
-        copilot,
-        rate_limits,
     } = index;
-    let Ledger {
-        stat:
-            Stat {
-                dev,
-                ino,
-                size,
-                modified_ns,
-                changed_ns,
-            },
-        offset,
-        prefix,
-        tail,
-    } = ledger;
     let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     measurements.record("proof_header", started, 1);
@@ -7193,7 +7163,7 @@ fn write_file_with_usage_deletes<'tx>(
     #[cfg(test)]
     configured::effect("proof_launch")?;
     let started = measurements.start();
-    let rate_limits = rate_limits.as_ref().map(json).transpose()?;
+    let rate_limits = file_row.rate_limits.as_ref().map(json).transpose()?;
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
@@ -7206,33 +7176,33 @@ fn write_file_with_usage_deletes<'tx>(
         let started = measurements.start();
         let parameters = params![
             path,
-            int(*dev),
-            int(*ino),
-            int(*size),
-            modified_ns.to_be_bytes(),
-            int(*offset),
-            prefix,
-            tail,
-            entrypoint,
-            title,
-            agent_name,
-            last_model,
-            failed,
-            first,
-            last,
-            cwd,
-            branch,
-            json(pending)?,
-            json(tool_ids)?,
-            json(yields)?,
-            json(busy)?,
-            json(links)?,
-            json(codex_tokens)?,
-            json(codex_tokens_by_model)?,
+            int(file_row.dev),
+            int(file_row.ino),
+            int(file_row.size),
+            file_row.modified_ns.to_be_bytes(),
+            int(file_row.offset),
+            file_row.prefix,
+            file_row.tail,
+            file_row.entrypoint,
+            file_row.title,
+            file_row.agent_name,
+            file_row.last_model,
+            file_row.failed,
+            file_row.first,
+            file_row.last,
+            file_row.cwd,
+            file_row.branch,
+            json(file_row.pending)?,
+            json(file_row.tool_ids)?,
+            json(file_row.yields)?,
+            json(file_row.busy)?,
+            json(file_row.links)?,
+            json(file_row.codex_tokens)?,
+            json(file_row.codex_tokens_by_model)?,
             rate_limits,
-            native_usage::encoded(index)?,
-            copilot.as_ref().map(json).transpose()?,
-            changed_ns.map(i128::to_be_bytes),
+            native_usage::encoded(file_row.index)?,
+            file_row.copilot.as_ref().map(json).transpose()?,
+            file_row.changed_ns.map(i128::to_be_bytes),
         ];
         measurements.record("file_parameters", started, 1);
         let started = measurements.start();
@@ -13000,6 +12970,90 @@ mod tests {
             .map(|(path, _, _)| path.as_str())
             .collect();
         assert_eq!(paths, ["b.jsonl"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_row_codec_matches_persisted_dimensions_through_append_and_truncation() {
+        use crate::events::file_rows::FileRow;
+
+        let root = scratch("file-row-codec");
+        let db = root.join("index.sqlite3");
+        let (mut store, _) = opened(&db);
+        let mut cold = full();
+        cold.entrypoint = Some("entry\0中".into());
+        cold.title = None;
+        cold.agent_name = Some("agent é e\u{301}".into());
+        cold.last_model = None;
+        let first = ledger(1);
+        assert_eq!(
+            store.write_one("file.jsonl", None, None, &first, &cold).unwrap(),
+            Outcome::Written
+        );
+
+        let mut appended = cold.clone();
+        appended.events.push(Event {
+            k: Kind::A,
+            o: 900,
+            ..Event::default()
+        });
+        appended.title = Some("append \0 😀".into());
+        let second = ledger(2);
+        assert_eq!(
+            store
+                .write_one("file.jsonl", Some(&first), Some(&cold), &second, &appended)
+                .unwrap(),
+            Outcome::Written
+        );
+
+        let mut truncated = appended.clone();
+        truncated.events.truncate(1);
+        truncated.title = None;
+        let third = ledger(3);
+        assert_eq!(
+            store
+                .write_one(
+                    "file.jsonl",
+                    Some(&second),
+                    Some(&appended),
+                    &third,
+                    &truncated,
+                )
+                .unwrap(),
+            Outcome::Written
+        );
+
+        let row = FileRow::new(&third, &truncated);
+        let persisted: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = store
+            .connection
+            .query_row(
+                "SELECT entrypoint,title,agent_name,last_model,failed FROM files WHERE path=?1",
+                ["file.jsonl"],
+                |record| {
+                    Ok((
+                        record.get(0)?,
+                        record.get(1)?,
+                        record.get(2)?,
+                        record.get(3)?,
+                        record.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.0.as_ref(), row.entrypoint.as_ref());
+        assert_eq!(persisted.1.as_ref(), row.title.as_ref());
+        assert_eq!(persisted.2.as_ref(), row.agent_name.as_ref());
+        assert_eq!(persisted.3.as_ref(), row.last_model.as_ref());
+        assert_eq!(persisted.4 != 0, row.failed);
+        assert_eq!(store.read_one("file.jsonl").unwrap(), Some((third, truncated)));
+
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
