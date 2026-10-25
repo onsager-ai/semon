@@ -490,9 +490,14 @@ impl PresentationObservations {
             let Some(authority) = &self.authority else {
                 return Ok(());
             };
-            let recorded = authority.recorded.as_ref().map(|head| {
-                head.lock().map_err(|_| io::Error::other("selected source authority unavailable"))
-            }).transpose()?;
+            let recorded = authority
+                .recorded
+                .as_ref()
+                .map(|head| {
+                    head.lock()
+                        .map_err(|_| io::Error::other("selected source authority unavailable"))
+                })
+                .transpose()?;
             if let Some(recorded) = &recorded {
                 recorded.validate()?;
             }
@@ -504,19 +509,26 @@ impl PresentationObservations {
                 if self.sources.len() >= 8192 {
                     return Err(io::Error::other("selected source observation bound"));
                 }
-                let relative = crate::catalog::source_relative(&authority.options, &row.harness, source)
-                    .ok_or_else(|| io::Error::other("selected relative source unavailable"))?;
+                let relative =
+                    crate::catalog::source_relative(&authority.options, &row.harness, source)
+                        .ok_or_else(|| io::Error::other("selected relative source unavailable"))?;
                 let current_codex = if row.harness == "codex" {
-                    recorded.as_ref().map(|head| head.codex_current(&relative))
-                        .transpose()?.flatten()
+                    recorded
+                        .as_ref()
+                        .map(|head| head.codex_current(&relative))
+                        .transpose()?
+                        .flatten()
                 } else {
                     None
                 };
-                self.sources.insert(key, SourceObservation {
-                    relative,
-                    current_codex,
-                    cached: crate::catalog::source_state(source) == "cached",
-                });
+                self.sources.insert(
+                    key,
+                    SourceObservation {
+                        relative,
+                        current_codex,
+                        cached: crate::catalog::source_state(source) == "cached",
+                    },
+                );
             }
             if let Some(recorded) = &recorded {
                 recorded.validate()?;
@@ -525,7 +537,8 @@ impl PresentationObservations {
         })();
         if captured.is_err() {
             let unavailable = json!({"state":null,"observation":"unavailable"});
-            self.relative_statuses.insert(row.key.clone(), unavailable.clone());
+            self.relative_statuses
+                .insert(row.key.clone(), unavailable.clone());
             return unavailable;
         }
         let status = self.observed_relative_status(row);

@@ -7465,16 +7465,18 @@ pub(crate) fn prepare_semantic_batch(
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
         let binding = cache.query_runtime_binding()?;
-        prepared.relationships.presentation = Some(
-            crate::storage::selected::PresentationObservations::capture(
+        prepared.relationships.presentation =
+            Some(crate::storage::selected::PresentationObservations::capture(
                 options,
                 binding.as_ref(),
-                prepared
-                    .rows
-                    .iter()
-                    .chain(batch.context.endpoints.values().map(|endpoint| &endpoint.row)),
-            ),
-        );
+                prepared.rows.iter().chain(
+                    batch
+                        .context
+                        .endpoints
+                        .values()
+                        .map(|endpoint| &endpoint.row),
+                ),
+            ));
     }
     Ok(SemanticModelBatch { prepared })
 }
