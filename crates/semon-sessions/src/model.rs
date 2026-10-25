@@ -7289,12 +7289,21 @@ impl PreparedSources {
     /// Exact content-free publication witness shared by staging and publish.
     pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
         serde_json::to_string(&(
-            self
-                .transcripts
+            self.transcripts
                 .iter()
                 .map(|p| (&p.key, &p.slots, p.repair))
                 .collect::<Vec<_>>(),
-            self.rows.iter().map(|row| (&row.key, row.trace.as_ref().map(|trace| trace.publication_witness(row)))).collect::<Vec<_>>(),
+            self.rows
+                .iter()
+                .map(|row| {
+                    (
+                        &row.key,
+                        row.trace
+                            .as_ref()
+                            .map(|trace| trace.publication_witness(row)),
+                    )
+                })
+                .collect::<Vec<_>>(),
         ))
         .map_err(io::Error::other)
     }

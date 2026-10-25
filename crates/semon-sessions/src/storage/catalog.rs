@@ -13,10 +13,27 @@ pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 pub(crate) trait TracePublicationStore {
     type Error;
     fn invalid(error: io::Error) -> Self::Error;
-    fn matches_header(&self, key: &str, generation: &str, source: &str) -> Result<bool, Self::Error>;
-    fn header(&self, key: &str, generation: &str, source: &str, metadata: &str) -> Result<bool, Self::Error>;
+    fn matches_header(
+        &self,
+        key: &str,
+        generation: &str,
+        source: &str,
+    ) -> Result<bool, Self::Error>;
+    fn header(
+        &self,
+        key: &str,
+        generation: &str,
+        source: &str,
+        metadata: &str,
+    ) -> Result<bool, Self::Error>;
     fn clear(&self, key: &str) -> Result<(), Self::Error>;
-    fn turn(&self, key: &str, id: Option<&str>, start: Option<&str>, metadata: &str) -> Result<(), Self::Error>;
+    fn turn(
+        &self,
+        key: &str,
+        id: Option<&str>,
+        start: Option<&str>,
+        metadata: &str,
+    ) -> Result<(), Self::Error>;
     fn edge(&self, key: &str, id: Option<&str>, metadata: &str) -> Result<(), Self::Error>;
     fn bookmark(&self, key: &str, target: &str, edge: &str) -> Result<(), Self::Error>;
 }

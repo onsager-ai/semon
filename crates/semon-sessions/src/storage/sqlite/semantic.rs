@@ -453,7 +453,11 @@ impl Stage {
         {
             return Err(refuse("semantic_publication_nonprimitive_owners_pending"));
         }
-        if prepared.rows.iter().any(|row| row.query.is_some() && row.trace.is_none()) {
+        if prepared
+            .rows
+            .iter()
+            .any(|row| row.query.is_some() && row.trace.is_none())
+        {
             return Err(refuse("semantic_publication_trace_missing"));
         }
         let projection_rows: std::collections::BTreeMap<_, _> =
@@ -493,7 +497,8 @@ impl Stage {
             .iter()
             .map(|p| (&p.key, &p.slots, p.repair))
             .collect::<Vec<_>>();
-        let producer_witness = prepared.staged_projection_witness()
+        let producer_witness = prepared
+            .staged_projection_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
         if producer_witness.len() > 2 * 1048576 {
             return Err(refuse("semantic_context_budget"));
@@ -676,7 +681,12 @@ impl Stage {
         {
             return Err(refuse("semantic_affected_owner_retirement_pending"));
         }
-        if prepared.rows.iter().any(|row| row.query.is_some() || row.trace.is_some()) || !prepared.transcripts.is_empty() {
+        if prepared
+            .rows
+            .iter()
+            .any(|row| row.query.is_some() || row.trace.is_some())
+            || !prepared.transcripts.is_empty()
+        {
             let witness = prepared
                 .staged_projection_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
@@ -692,8 +702,8 @@ impl Stage {
             .map_err(StoreError::Configured)?;
         for row in &prepared.rows {
             if let Some(trace) = &row.trace {
-                projections_unchanged &= crate::causal_trace::is_published(&trace_effects, row, trace)
-                    .map_err(error)?;
+                projections_unchanged &=
+                    crate::causal_trace::is_published(&trace_effects, row, trace).map_err(error)?;
             }
         }
         for projection in &prepared.transcripts {
@@ -800,8 +810,7 @@ impl Stage {
             .map_err(StoreError::Configured)?;
         for row in &prepared.rows {
             if let Some(projection) = &row.trace {
-                crate::causal_trace::publish_with_store(&trace, row, projection)
-                    .map_err(error)?;
+                crate::causal_trace::publish_with_store(&trace, row, projection).map_err(error)?;
             }
         }
         #[cfg(test)]
@@ -1093,12 +1102,20 @@ impl Stage {
         head(&self.db).map_err(error)
     }
 
-    pub(crate) fn runtime_binding(&self) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {
-        self.source.validate(&self.db).map_err(StoreError::Configured)?;
+    pub(crate) fn runtime_binding(
+        &self,
+    ) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {
+        self.source
+            .validate(&self.db)
+            .map_err(StoreError::Configured)?;
         Ok(crate::storage::QueryRuntimeBinding {
             namespace: self.source.config.namespace.clone(),
             admission: self.source.admission,
-            stream_epoch: self.source.config.expected_stream_epoch.clone()
+            stream_epoch: self
+                .source
+                .config
+                .expected_stream_epoch
+                .clone()
                 .ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
         })
     }

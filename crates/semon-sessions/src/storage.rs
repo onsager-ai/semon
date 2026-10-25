@@ -86,7 +86,8 @@ impl QueryRuntimeBinding {
             self.admission,
             &self.stream_epoch,
             runtime,
-        )).map_err(std::io::Error::other)?;
+        ))
+        .map_err(std::io::Error::other)?;
         Ok(format!("source-runtime-v1:{:x}", Sha256::digest(bytes)))
     }
 }
