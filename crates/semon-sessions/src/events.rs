@@ -1023,6 +1023,20 @@ pub(crate) struct Loaded {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    /// Backend-specific borrowed port; native SQLite retains its owner
+    /// connection and committed discovery witness for the full producer call.
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        None
+    }
+
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        None
+    }
+
     fn event_receipt(
         &self,
         _path: &str,
@@ -1103,18 +1117,6 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
-    fn backfill_state(&self) -> Result<Option<String>, StoreError>;
-    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        ))
-    }
-    fn discover_catalog_sources(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<(), StoreError>;
-    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError>;
     fn resolve_catalog_input(
         &mut self,
         path: &str,
@@ -1134,17 +1136,7 @@ pub(crate) trait IndexStore: Send {
         &self,
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
-    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
-    fn invalidate_catalog_sources(
-        &mut self,
-        _expected: &[(String, Option<i64>)],
-    ) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        ))
-    }
     fn catalog_component_paths(
         &self,
         paths: &[String],
@@ -1301,55 +1293,6 @@ pub(crate) trait IndexStore: Send {
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError>;
 }
 
-impl crate::storage::source_observations::SourceObservationStore for EventCache {
-    fn discover(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<(), crate::storage::StorageError> {
-        self.store
-            .as_mut()
-            .ok_or(crate::storage::StorageError::Unavailable)?
-            .discover_catalog_sources(paths, complete)
-            .map_err(configured_error)
-    }
-    fn invalidate(
-        &mut self,
-        expected: &[(String, Option<i64>)],
-    ) -> Result<bool, crate::storage::StorageError> {
-        self.store
-            .as_mut()
-            .ok_or(crate::storage::StorageError::Unavailable)?
-            .invalidate_catalog_sources(expected)
-            .map_err(configured_error)
-    }
-    fn claims(
-        &self,
-        paths: &[String],
-    ) -> Result<crate::storage::source_observations::SourceClaims, crate::storage::StorageError>
-    {
-        self.store
-            .as_ref()
-            .ok_or(crate::storage::StorageError::Unavailable)?
-            .catalog_claims(paths)
-            .map_err(configured_error)
-    }
-    fn pending(&self, limit: usize) -> Result<Vec<String>, crate::storage::StorageError> {
-        self.store
-            .as_ref()
-            .ok_or(crate::storage::StorageError::Unavailable)?
-            .pending_catalog_sources(limit)
-            .map_err(configured_error)
-    }
-    fn backfill_state(&self) -> Result<Option<String>, crate::storage::StorageError> {
-        self.store
-            .as_ref()
-            .ok_or(crate::storage::StorageError::Unavailable)?
-            .backfill_state()
-            .map_err(configured_error)
-    }
-}
-
 impl crate::storage::native_events::NativeEventStore for EventCache {
     fn ingest(
         &mut self,
@@ -1437,6 +1380,13 @@ pub(crate) struct EventCache {
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
+    source_observations:
+        Option<Box<dyn crate::storage::source_observations::SourceObservationStore>>,
+    observation_namespace: String,
+    observation_path: Option<PathBuf>,
+    pending_source_operation: Option<PendingSourceOperation>,
+    reconciled_recovery: Option<bool>,
+    deferred_source_operations: bool,
     scoped: bool,
     explicit_store: bool,
     event_operation: Option<String>,
@@ -1567,7 +1517,189 @@ enum Base {
     Unreadable,
 }
 
+/// Exact typed payload shared by the producer and its durable backend journal.
+type PendingSourceOperation = crate::storage::source_observations::SourceIntent;
+
 impl EventCache {
+    fn observation_store(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        if let Some(store) = &self.source_observations {
+            Some(store.as_ref())
+        } else {
+            self.store.as_ref()?.source_observations()
+        }
+    }
+
+    fn observation_store_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        if let Some(ref mut store) = self.source_observations {
+            Some(store.as_mut())
+        } else {
+            self.store.as_mut()?.source_observations_mut()
+        }
+    }
+
+    /// Test-only binding of the real producer without a native IndexStore.
+    /// This is not a public PG backend factory or qualification.
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn source_observation_test_producer(
+        namespace: &str,
+        path: &Path,
+        store: Box<dyn crate::storage::source_observations::SourceObservationStore>,
+    ) -> io::Result<Self> {
+        let mut cache = Self {
+            observation_namespace: namespace.to_owned(),
+            observation_path: Some(path.to_owned()),
+            source_observations: Some(store),
+            ..Self::default()
+        };
+        cache.reconcile_pending_source_operation()?;
+        Ok(cache)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_source_observations(
+        &mut self,
+        store: Box<dyn crate::storage::source_observations::SourceObservationStore>,
+    ) {
+        self.source_observations = Some(store);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acknowledge_source_for_test(
+        &mut self,
+        path: &str,
+    ) -> Result<Outcome, StoreError> {
+        let observations = self
+            .observation_store()
+            .expect("test source observation store");
+        let revision = observations
+            .claims(&[path.to_owned()])
+            .map_err(StoreError::Configured)?[0]
+            .1
+            .expect("test source claim");
+        let store = self.store.as_mut().expect("test producer store");
+        store.resolve_catalog_input(path, revision, None, None)
+    }
+
+    /// Reopen and replay the durable queue before capturing any new identity.
+    /// A failed apply/ack leaves the original payload available to the next open.
+    pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
+        let pending_source_operation = self.pending_source_operation.clone();
+        let mut recovered = self.reconciled_recovery;
+        let Some(store) = self.observation_store_mut() else {
+            return if pending_source_operation.is_none() {
+                Ok(())
+            } else {
+                Err(io::Error::other("source observation producer unavailable"))
+            };
+        };
+        if let Some(pending) = &pending_source_operation {
+            store
+                .persist_intent(pending)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        let pending = store
+            .pending_intents()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let mut deferred = false;
+        for intent in pending {
+            if let PendingSourceOperation::Recover { operation, cursor } = &intent {
+                // Keep later captured pages durable for a later API call. An
+                // unconsumed result must never be overwritten by another page.
+                if recovered.is_some() {
+                    deferred = true;
+                    continue;
+                }
+                let (_, done) = store
+                    .recover(operation, cursor.as_deref())
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                recovered = Some(done);
+            } else {
+                intent
+                    .apply(store)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            store
+                .acknowledge_intent(intent.operation())
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        self.pending_source_operation = None;
+        self.reconciled_recovery = recovered;
+        self.deferred_source_operations = deferred;
+        Ok(())
+    }
+
+    fn persist_source_operation(
+        &mut self,
+        intent: PendingSourceOperation,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        let operation = intent.operation().clone();
+        // Keep this copy even if committing the intent itself is uncertain.
+        self.pending_source_operation = Some(intent.clone());
+        self.observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .persist_intent(&intent)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(operation)
+    }
+
+    fn capture_discover_operation(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        self.reconcile_pending_source_operation()?;
+        let payload = serde_json::to_vec(&(paths, complete)).map_err(io::Error::other)?;
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "discover",
+            &payload,
+        );
+        self.persist_source_operation(PendingSourceOperation::Discover {
+            operation,
+            paths: paths.to_vec(),
+            complete,
+        })
+    }
+
+    fn capture_finish_backfill_operation(
+        &mut self,
+        expected_generation: Option<&str>,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        self.reconcile_pending_source_operation()?;
+        let payload = serde_json::to_vec(&expected_generation).map_err(io::Error::other)?;
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "finish_backfill",
+            &payload,
+        );
+        self.persist_source_operation(PendingSourceOperation::FinishBackfill {
+            operation,
+            expected_generation: expected_generation.map(str::to_owned),
+        })
+    }
+
+    fn finish_source_operation(
+        &mut self,
+        operation: &crate::storage::source_observations::SourceOperation,
+    ) -> io::Result<()> {
+        self.observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .acknowledge_intent(operation)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if self
+            .pending_source_operation
+            .as_ref()
+            .is_some_and(|pending| pending.operation().id == operation.id)
+        {
+            self.pending_source_operation = None;
+        }
+        Ok(())
+    }
+
     pub(crate) fn query_runtime_binding(
         &self,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
@@ -1582,24 +1714,42 @@ impl EventCache {
     pub(crate) fn open_semantic(
         capability: crate::storage::sqlite::semantic::SemanticStaging,
     ) -> Result<Self, crate::storage::StorageError> {
+        let source_journal = capability.journal();
+        let observation_namespace = source_journal.namespace().to_owned();
+        let observation_path = Some(source_journal.database_path().clone());
         let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
-        Ok(Self {
+        let mut cache = Self {
             store: Some(store),
+            source_observations: Some(Box::new(source_journal)),
+            observation_namespace,
+            observation_path,
             scoped: true,
             explicit_store: true,
             ..Self::default()
-        })
+        };
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
     }
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
     ) -> Result<Self, crate::storage::StorageError> {
         let store = crate::storage::sqlite::open_configured_index(config)?;
-        Ok(Self {
+        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let mut cache = Self {
             store: Some(store),
+            source_observations: Some(crate::storage::sqlite::source_journal::configured(config)),
+            observation_namespace: config.namespace.as_str().to_owned(),
+            observation_path: Some(database.clone()),
             scoped: true,
             explicit_store: true,
             ..Self::default()
-        })
+        };
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
     }
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
@@ -1649,6 +1799,7 @@ impl EventCache {
                 crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
+                cache.observation_path = Some(path.clone());
                 cache
             }
             Err(store::Unopened::Unsupported(reason)) => return Err(reason),
@@ -1661,6 +1812,9 @@ impl EventCache {
             }
         };
         cache.v1_cache = Some(v1_cache.to_owned());
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
@@ -1670,8 +1824,12 @@ impl EventCache {
         let (store, loaded) = store::open_scoped(&Self::path(v1_cache))?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
+        cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
         cache.lock_cache = Some(v1_cache.to_owned());
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
@@ -1768,18 +1926,56 @@ impl EventCache {
     }
 
     pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+        self.observation_store()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .backfill_state()
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        self.store
-            .as_mut()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .discover_recovery_sources()
-            .map_err(|error| io::Error::other(error.to_string()))
+        let path = self
+            .observation_path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
+            .to_owned();
+        let _probe = crate::native_timing::DiscoveryProbe::new(&path, "recovery");
+        // A failed/unknown ACK retains the exact identity before any new capture.
+        if self.reconciled_recovery.is_none()
+            && (self.pending_source_operation.is_some() || self.deferred_source_operations)
+        {
+            self.reconcile_pending_source_operation()?;
+        }
+        if let Some(done) = self.reconciled_recovery.take() {
+            return Ok(done);
+        }
+        let store = self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?;
+        if store
+            .recovery_is_current()
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            return Ok(true);
+        }
+        let cursor = store
+            .recovery_cursor()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "recover",
+            &serde_json::to_vec(&cursor).map_err(io::Error::other)?,
+        );
+        let operation = self.persist_source_operation(PendingSourceOperation::Recover {
+            operation,
+            cursor: cursor.clone(),
+        })?;
+        let (_, done) = self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .recover(&operation, cursor.as_deref())
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        // The native port has already committed its matching ACK with Done.
+        self.finish_source_operation(&operation)?;
+        Ok(done)
     }
     pub(crate) fn discover_catalog_sources(
         &mut self,
@@ -1787,23 +1983,85 @@ impl EventCache {
         inputs: &[crate::Input],
         complete: bool,
     ) -> io::Result<()> {
+        let observation_path = self
+            .observation_path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
+            .to_owned();
+        let _probe = crate::native_timing::DiscoveryProbe::new(&observation_path, "publication");
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
         let paths = inputs
             .iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .map(|input| input.full_path(options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        self.store
-            .as_mut()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .discover_catalog_sources(&paths, complete)
-            .map_err(|error| io::Error::other(error.to_string()))
+        if self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .discovery_is_current(&paths, complete)
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            return Ok(());
+        }
+        let operation = self.capture_discover_operation(&paths, complete)?;
+        let started = measurements.start();
+        let result = self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .discover(&operation, &paths, complete);
+        let receipt = match result {
+            Ok(receipt) => {
+                self.finish_source_operation(&operation)?;
+                receipt
+            }
+            Err(error) => {
+                return Err(io::Error::other(error.to_string()));
+            }
+        };
+        measurements.record("source_journal_inclusive", started, paths.len());
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&observation_path),
+                "discovery_publication_work",
+            );
+        }
+        match receipt {
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(()),
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "source observation operation changed",
+                ))
+            }
+        }
     }
     pub(crate) fn finish_catalog_backfill(&mut self, generation: &str) -> io::Result<Outcome> {
-        self.store
-            .as_mut()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .finish_catalog_backfill(Some(generation))
-            .map_err(|error| io::Error::other(error.to_string()))
+        let expected_generation = Some(generation);
+        let operation = self.capture_finish_backfill_operation(expected_generation)?;
+        let result = self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .finish_backfill(&operation, expected_generation);
+        let receipt = match result {
+            Ok(receipt) => {
+                self.finish_source_operation(&operation)?;
+                receipt
+            }
+            Err(error) => {
+                return Err(io::Error::other(error.to_string()));
+            }
+        };
+        match receipt {
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => {
+                Ok(Outcome::Written)
+            }
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Ok(Outcome::Conflict)
+            }
+        }
     }
 
     pub(crate) fn retire_scoped_sources(
@@ -1854,10 +2112,9 @@ impl EventCache {
     }
 
     pub(crate) fn pending_catalog_sources(&self, limit: usize) -> io::Result<Vec<String>> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .pending_catalog_sources(limit)
+        self.observation_store()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .pending(limit)
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
@@ -1872,10 +2129,9 @@ impl EventCache {
         &self,
         paths: &[String],
     ) -> io::Result<Vec<(String, Option<i64>)>> {
-        self.store
-            .as_ref()
+        self.observation_store()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .catalog_claims(paths)
+            .claims(paths)
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
@@ -2355,7 +2611,9 @@ impl EventCache {
                 let stamp = self.claude_json_stamp.take();
                 *self = Self::from_loaded(loaded);
                 self.store = Some(store);
+                self.observation_path = Some(Self::path(&v1_cache));
                 self.v1_cache = Some(v1_cache);
+                self.reconcile_pending_source_operation()?;
                 // Runs read from `~/.claude.json` meanwhile are kept.
                 if let Some(stamp) = stamp
                     && !runs.is_empty()

@@ -1459,6 +1459,25 @@ mod tests {
             crate::history_projection::SCHEMA,
             crate::catalog_search::SCHEMA,
             crate::storage::sqlite::changes::SCHEMA,
+            "
+CREATE TABLE IF NOT EXISTS source_observation_receipts (
+    namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),
+    recovery_done INTEGER CHECK(recovery_done IN (0,1)),
+    PRIMARY KEY(namespace,operation_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS source_observation_intents (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(namespace,operation_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observation_intents(namespace,sequence);
+",
             queue_schema(false),
             catalog_schema(false, false, false),
             file_schema(false, false),
@@ -1467,7 +1486,7 @@ mod tests {
         let mut configured_original = original;
         configured_original[4] = configured::CORE_SCHEMA;
         configured_original[10] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
-        configured_original[20] = configured::pricing_file_schema(false);
+        configured_original[21] = configured::pricing_file_schema(false);
         assert_eq!(
             authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
             configured_original
@@ -1508,7 +1527,7 @@ mod tests {
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
-        // Every table, index and trigger from all 21 dependencies is required,
+        // Every table, index and trigger from all 22 dependencies is required,
         // including history, overview, support, slots, search and semantic stage.
         let required_objects = objects(&reference);
         for copied in [false, true] {

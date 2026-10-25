@@ -3,14 +3,13 @@ use crate::events::{
     DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
 };
 use crate::sealed::LogFile;
-use crate::storage::source_observations::SourceObservationStore;
 use crate::storage::{StorageError, StoreConfig};
 use std::{collections::BTreeSet, io, sync::Arc};
 
 pub(super) struct ConfiguredIndex {
-    journal: super::source_journal::SourceJournal,
     native: crate::events::store::configured::Writer,
     semantic: Option<super::semantic::Stage>,
+    journal: super::source_journal::SourceJournal,
 }
 
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
@@ -18,9 +17,9 @@ pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageE
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {
-        journal,
         native: crate::events::store::configured::Writer::new(config),
         semantic: None,
+        journal,
     }))
 }
 
@@ -40,13 +39,25 @@ pub(crate) fn open_semantic(
     journal.prepare()?;
     let native = capability.writer();
     Ok(Box::new(ConfiguredIndex {
-        journal,
         native,
         semantic: Some(super::semantic::Stage::open(capability)?),
+        journal,
     }))
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&self.journal)
+    }
+
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&mut self.journal)
+    }
+
     fn query_runtime_binding(
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
@@ -86,14 +97,6 @@ impl IndexStore for ConfiguredIndex {
         self.native.receipt(path).map_err(StoreError::Configured)
     }
 
-    fn invalidate_catalog_sources(
-        &mut self,
-        expected: &[(String, Option<i64>)],
-    ) -> Result<bool, StoreError> {
-        self.journal
-            .invalidate(expected)
-            .map_err(StoreError::Configured)
-    }
     fn describe(&self) -> String {
         "configured source observations".to_owned()
     }
@@ -162,25 +165,6 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn backfill_state(&self) -> Result<Option<String>, StoreError> {
-        self.journal
-            .backfill_state()
-            .map_err(StoreError::Configured)
-    }
-    fn discover_catalog_sources(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<(), StoreError> {
-        self.journal
-            .discover(paths, complete)
-            .map_err(StoreError::Configured)
-    }
-    fn finish_catalog_backfill(&mut self, _expected: Option<&str>) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
-    }
     fn resolve_catalog_input(
         &mut self,
         _path: &str,
@@ -214,16 +198,10 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-        self.journal.pending(limit).map_err(StoreError::Configured)
-    }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))
-    }
-    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-        self.journal.claims(paths).map_err(StoreError::Configured)
     }
     fn catalog_component_paths(
         &self,
