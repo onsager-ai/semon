@@ -6862,7 +6862,35 @@ mod tests {
         #[test]
         fn configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication()
          {
-            let (f, _, options, _) = model_sources();
+            fn published_state(
+                f: &Fixture,
+            ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+                namespace_state(f, "source-a")
+                    .into_iter()
+                    .filter(|(table, _)| {
+                        (table.starts_with("session_") && table != "session_catalog_invalidations")
+                            || table.starts_with("storage_proof_")
+                            || table == "storage_semantic_publications"
+                    })
+                    .collect()
+            }
+
+            let (f, foreign_config, options, foreign_inputs) = model_sources();
+            // Give the foreign namespace real published state to preserve.
+            {
+                let mut foreign = open(&foreign_config);
+                let input = &foreign_inputs[1];
+                foreign
+                    .ingest(&"7".repeat(64), &input.full_path(&options[1]), "claude")
+                    .unwrap();
+                let (batch, model) =
+                    ready(&mut foreign, &f, &options[1], std::slice::from_ref(input));
+                publish(&mut foreign, &f, &batch, &model);
+                assert_eq!(
+                    foreign.finish_semantic_stage(batch.epoch).unwrap(),
+                    Outcome::Written
+                );
+            }
             let options = &options[0];
             let mut cache = open(&f.config);
             let inputs = (0..65)
@@ -6871,7 +6899,9 @@ mod tests {
                     path: format!("sessions/budget-{i:02}.jsonl"),
                 })
                 .collect::<Vec<_>>();
-            for (i, input) in inputs.iter().enumerate() {
+            // First publish a complete, legally admitted 64-owner family.
+            // Do not create the 65th Raw child until this publication finishes.
+            for (i, input) in inputs[..64].iter().enumerate() {
                 let id = format!("budget-{i:02}");
                 write(
                     options,
@@ -6887,56 +6917,66 @@ mod tests {
                     )
                     .unwrap();
             }
+            let (batch, model) = ready(&mut cache, &f, options, &inputs[..64]);
+            assert_eq!(model.prepared().rows.len(), 64);
+            publish(&mut cache, &f, &batch, &model);
+            assert_eq!(
+                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),64);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='budget-00' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),63);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),64);
+            let prior = published_state(&f);
+            let foreign = namespace_state(&f, "source-b");
+
+            write(options, &inputs[64], "budget-64", Some("budget-00"));
+            cache
+                .ingest(
+                    &format!("{:064x}", 5464),
+                    &inputs[64].full_path(options),
+                    "codex",
+                )
+                .unwrap();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            let paths = inputs
+            // Two legal seeds enroll the 64 prior Current owners plus the new
+            // child. This is the typed closure source bound, not admission.
+            let paths = [&inputs[0], &inputs[64]]
                 .iter()
                 .map(|input| input.full_path(options).to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
-            cache
-                .begin_semantic_stage_with_journal(&paths, &runtime, true)
-                .unwrap();
-            for _ in 0..128 {
-                let before = shared_state(&f);
-                let batch = match cache.semantic_batch(64) {
-                    Ok(Some(batch)) => batch,
-                    Err(error) => {
-                        assert!(
-                            error.to_string().contains("budget"),
-                            "explicit bounded refusal: {error}"
-                        );
-                        assert_eq!(
-                            shared_state(&f),
-                            before,
-                            "refused closure transaction has zero effects"
-                        );
-                        assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-                        return;
-                    }
-                    Ok(None) => panic!("component disappeared"),
-                };
-                if batch.paths.is_empty() {
-                    continue;
-                }
-                let selected = inputs
-                    .iter()
-                    .filter(|i| {
-                        batch
-                            .paths
-                            .contains(&i.full_path(options).to_string_lossy().into_owned())
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                assert_eq!(selected.len(), batch.paths.len());
+            assert_eq!(
                 cache
-                    .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
-                assert_ne!(
-                    batch.phase,
-                    Phase::Publication,
-                    "65-owner component cannot partially publish"
-                );
-            }
-            panic!("high degree component never explicitly refused")
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(
+                published_state(&f),
+                prior,
+                "staging preserves prior publication"
+            );
+            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let before = shared_state(&f);
+            let error = cache.semantic_batch(64).unwrap_err();
+            assert!(
+                error.to_string().contains("budget"),
+                "explicit bounded refusal: {error}"
+            );
+            assert_eq!(error.to_string(), "semantic_affected_owner_source_budget");
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "refused closure transaction has zero effects"
+            );
+            assert_eq!(
+                published_state(&f),
+                prior,
+                "complete prior Current, History, slots and proofs survive"
+            );
+            assert_eq!(namespace_state(&f, "source-b"), foreign);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND session_key='budget-64'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         }
     }
 }
