@@ -5,7 +5,10 @@ use super::{
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use std::sync::Arc;
 
-pub(super) const VERSION: i32 = 2;
+#[path = "native_schema.rs"]
+mod native;
+
+pub(super) const VERSION: i32 = 4;
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx
@@ -20,7 +23,8 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     {
         return Err(StorageError::ScopeChanged);
     }
-    Ok(())
+    native::verify(tx)?;
+    super::store_metadata::verify(tx)
 }
 
 impl PgPool {
@@ -43,7 +47,7 @@ impl PgPool {
                     .batch_execute(
                         "
                 CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY);
-                INSERT INTO semon_pg_schema VALUES (2);
+                INSERT INTO semon_pg_schema VALUES (4);
                 CREATE TABLE semon_pg_operations(
                     namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
                     namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
@@ -122,7 +126,9 @@ impl PgPool {
                 for table in ["semon_pg_source_state", "semon_pg_source_members", "semon_pg_source_invalidations", "semon_pg_source_receipts", "semon_pg_source_intents"] {
                     tx.driver.batch_execute(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; CREATE POLICY {table}_namespace ON {table} USING (semon_pg_namespace_matches(namespace,namespace_digest,decode(current_setting('semon.namespace',true),'hex'))) WITH CHECK (semon_pg_namespace_matches(namespace,namespace_digest,decode(current_setting('semon.namespace',true),'hex')));")).map_err(sqlstate::error)?;
                 }
-                Ok(())
+                native::install(tx)?;
+                super::store_metadata::install(tx)?;
+                verify(tx)
             },
         )?;
         Ok(pool)
