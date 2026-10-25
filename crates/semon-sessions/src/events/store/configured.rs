@@ -127,18 +127,26 @@ pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct WriterShapeMeasurements {
+    core_calls: usize,
+    meta_calls: usize,
+    core_us: u128,
+    meta_us: u128,
+}
+
 thread_local! {
-    static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<crate::native_timing::Measurements>> = const { std::cell::RefCell::new(None) };
+    static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<WriterShapeMeasurements>> = const { std::cell::RefCell::new(None) };
 }
 
 // Observation only. In particular, this guard caches no shape result: every
 // existing selector still executes its complete qualification query.
-pub(super) struct WriterShapeProbe(Option<crate::native_timing::Measurements>);
+pub(super) struct WriterShapeProbe(Option<WriterShapeMeasurements>);
 
 impl WriterShapeProbe {
     pub(super) fn new(enabled: bool) -> Self {
         Self(WRITER_SHAPE_MEASUREMENTS.with(|cell| {
-            cell.replace(enabled.then(|| crate::native_timing::Measurements::new(true)))
+            cell.replace(enabled.then(WriterShapeMeasurements::default))
         }))
     }
 
@@ -146,15 +154,24 @@ impl WriterShapeProbe {
         WRITER_SHAPE_MEASUREMENTS.with(|cell| {
             let mut cell = cell.borrow_mut();
             let measurements = cell.as_mut()?;
-            measurements.count(label, 1);
-            measurements.start()
+            match label {
+                "core_shape_calls" => measurements.core_calls += 1,
+                "meta_shape_calls" => measurements.meta_calls += 1,
+                _ => unreachable!("fixed writer shape label"),
+            }
+            Some(std::time::Instant::now())
         })
     }
 
     fn finish(label: &'static str, started: Option<std::time::Instant>) {
         WRITER_SHAPE_MEASUREMENTS.with(|cell| {
             if let Some(measurements) = cell.borrow_mut().as_mut() {
-                measurements.record(label, started, 1);
+                let us = started.map_or(0, |started| started.elapsed().as_micros());
+                match label {
+                    "core_shape_query" => measurements.core_us += us,
+                    "meta_shape_query" => measurements.meta_us += us,
+                    _ => unreachable!("fixed writer shape label"),
+                }
             }
         });
     }
@@ -165,7 +182,12 @@ impl Drop for WriterShapeProbe {
         if let Some(measurements) =
             WRITER_SHAPE_MEASUREMENTS.with(|cell| cell.replace(self.0.take()))
         {
-            measurements.emit("index_writer", "writer_shape");
+            // Keep this diagnostic separate from cleanup's test recorder.
+            eprintln!(
+                "semon sessions native: writer_shape core_shape_calls={} core_shape_query_us={} meta_shape_calls={} meta_shape_query_us={}",
+                measurements.core_calls, measurements.core_us,
+                measurements.meta_calls, measurements.meta_us
+            );
         }
     }
 }
