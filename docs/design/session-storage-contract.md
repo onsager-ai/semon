@@ -5,7 +5,8 @@ Catalog/Query metadata, bounded native navigation and source observations now
 have semantic storage interfaces, with SQLite adapters, explicit `StoreConfig`
 and `LogicalSourceNamespace`. The existing parser, identity and semantic
 projection algorithms are unchanged. The full native commit unit remains pending.
-PostgreSQL (#479) and Hub adoption/migration (#313) are not implemented.
+PostgreSQL (#479) has private pool, schema and native-row prerequisites. Its
+complete session backend and Hub adoption/migration (#313) remain undelivered.
 
 MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
@@ -20,6 +21,11 @@ cold-start results below describe the earlier gate and do not qualify this revis
 The initial five-second revision passed the isolated producer check but measured
 5.82 seconds under the full parallel PostgreSQL regression; the eight-second
 revision requires a fresh full run.
+
+The streamed Tree witness repair passed scoped independent review at d794ef2a:
+43 focused PostgreSQL tests, 1142 full library tests and every Storage contract
+group passed, including the actual encoded-byte and cancellation cases. This
+qualifies the witness component; full backend and migration acceptance remain open.
 
 ## Worker 21 repair: preserve the metadata physical contract
 
@@ -527,6 +533,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
