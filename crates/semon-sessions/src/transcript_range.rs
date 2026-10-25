@@ -616,7 +616,10 @@ fn read_inner(
             .iter()
             .map(|source| (source.path.clone(), source.clone()))
             .collect();
-        let render_time = identity.observed_at;
+        // A lease authenticates the presentation inputs, not a distinct clock.
+        // Keep active-call elapsed rendering on the same current clock as the
+        // ordinary range path below.
+        let render_time = None;
         let selection = Selection {
             render_time,
             proof_db: None,
