@@ -1551,9 +1551,7 @@ enum PendingSourceOperation {
 impl PendingSourceOperation {
     fn operation(&self) -> &crate::storage::source_observations::SourceOperation {
         match self {
-            Self::Discover { operation, .. } | Self::FinishBackfill { operation, .. } => {
-                operation
-            }
+            Self::Discover { operation, .. } | Self::FinishBackfill { operation, .. } => operation,
         }
     }
 }
