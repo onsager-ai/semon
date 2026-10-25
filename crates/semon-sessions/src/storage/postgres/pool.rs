@@ -79,7 +79,7 @@ impl Driver {
         control: &PgCancellation,
         limits: PoolLimits,
     ) {
-        self.deadline = deadline;
+        self.deadline = control.deadline(deadline);
         self.control = control.clone();
         self.limits = limits;
     }
@@ -90,13 +90,18 @@ impl Driver {
         if self.interrupted.get() {
             return Err(DriverError::Interrupted);
         }
+        if self.control.is_cancelled() || Instant::now() >= self.deadline {
+            self.tainted.set(true);
+            self.interrupted.set(true);
+            return Err(DriverError::Interrupted);
+        }
         self.handle.block_on(async {
             tokio::pin!(future);
             tokio::select! {
                 biased;
-                result = &mut future => return result.map_err(DriverError::Pg),
                 _ = tokio::time::sleep_until(self.deadline.into()) => (),
                 _ = self.control.cancelled() => (),
+                result = &mut future => return result.map_err(DriverError::Pg),
             };
             self.tainted.set(true);
             // Inline, owned cancel future: dropping timeout closes its transport.
@@ -147,8 +152,8 @@ impl Driver {
     }
     pub(super) fn rollback(&mut self) -> Result<(), DriverError> {
         // A real rollback ACK may establish noncommit. Cancel alone never does.
+        self.deadline = self.control.deadline(Instant::now() + self.limits.cancel_grace);
         self.control = PgCancellation::default();
-        self.deadline = Instant::now() + self.limits.cancel_grace;
         self.batch_execute("ROLLBACK")
     }
 }
@@ -318,7 +323,7 @@ impl PgPool {
         })
     }
     pub(super) fn acquire(&self, cancel: &PgCancellation) -> Result<Lease, StorageError> {
-        let deadline = Instant::now() + self.inner.limits.acquire_timeout;
+        let deadline = cancel.deadline(Instant::now() + self.inner.limits.acquire_timeout);
         loop {
             if cancel.is_cancelled() || Instant::now() >= deadline {
                 return Err(StorageError::Busy);
@@ -390,9 +395,9 @@ impl PgPool {
                 let connection = runtime.block_on(async {
                     tokio::select! {
                         biased;
-                        result = self.inner.factory.connect() => result,
                         _ = tokio::time::sleep_until(deadline.into()) => Err(StorageError::Busy),
                         _ = cancel.cancelled() => Err(StorageError::Busy),
+                        result = self.inner.factory.connect() => result,
                     }
                 })?;
                 lease.connection = Some(connection);
@@ -433,8 +438,12 @@ impl Lease {
         if connection.client.tainted.get() {
             return Err(StorageError::Unavailable);
         }
+        let deadline = connection
+            .client
+            .control
+            .deadline(Instant::now() + self.inner.limits.cancel_grace);
         connection.client.context(
-            Instant::now() + self.inner.limits.cancel_grace,
+            deadline,
             &PgCancellation::default(),
             self.inner.limits,
         );

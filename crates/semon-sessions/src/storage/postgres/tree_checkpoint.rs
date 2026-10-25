@@ -72,12 +72,13 @@ impl Snapshot {
             control,
             poisoned: false,
         };
+        let control = snapshot.control.for_selected_read();
         let (file, projection, source, mut summary) = snapshot
             .pool
             .transaction(
                 &snapshot.namespace,
                 TxnKind::ReadSnapshot,
-                &snapshot.control,
+                &control,
                 |tx| {
                     let (file, projection, source) = snapshot.authority(tx, false)?;
                     let mut summary = Summary::default();
@@ -179,11 +180,12 @@ impl Snapshot {
         if self.poisoned {
             return Err(io::ErrorKind::WouldBlock.into());
         }
+        let control = self.control.for_selected_read();
         self.pool
             .transaction(
                 &self.namespace,
                 TxnKind::ReadSnapshot,
-                &self.control,
+                &control,
                 |tx| {
                     self.authority(tx, true)?;
                     read(tx)
