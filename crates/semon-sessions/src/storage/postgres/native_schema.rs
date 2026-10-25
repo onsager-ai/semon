@@ -13,6 +13,16 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "reported_runs",
+        columns: "session_digest bytea,session_id bytea,start bigint,record bytea",
+        key: "session_digest,start",
+    },
+    Table {
+        name: "reported_stamp",
+        columns: "singleton boolean,stamp bytea",
+        key: "singleton",
+    },
+    Table {
         name: "source_mutations",
         columns: "source_path bytea,evidence bytea",
         key: "source_path",

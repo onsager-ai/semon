@@ -9,6 +9,7 @@ mod native_core;
 mod native_usage;
 mod native_usage_identity;
 mod operations;
+mod reported_facts;
 mod pool;
 mod schema;
 mod source_journal;
