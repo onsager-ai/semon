@@ -328,3 +328,34 @@ fn pg_native_bundle_every_connected_boundary_rolls_back_and_stale_cas_refuses() 
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
+    let codex = complete_fixture(parser_fixture("codex"), "codex");
+    let copilot = complete_fixture(parser_fixture("copilot"), "copilot");
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("bundle-tree-retirement\0🦀");
+    let control = PgCancellation::default();
+    let (_, ledger, index) = &codex.sources[0];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &codex.path, ledger, index, None, None)
+    })
+    .unwrap();
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
+    let (_, replacement, index) = &copilot.sources[0];
+    assert!(index.tree_summary.is_none());
+    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &codex.path, replacement, index, Some(ledger), None)
+    });
+    assert!(matches!(result, Err(StorageError::NamespaceUpgradePending)));
+    let after = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
+    assert!(before == after, "Tree retirement refuses before any effects");
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(codex.root).unwrap();
+    std::fs::remove_dir_all(copilot.root).unwrap();
+}
