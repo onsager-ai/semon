@@ -12404,6 +12404,16 @@ mod tests {
                 "publication version",
             ),
             (
+                "recipe-other-family",
+                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+                "publication version",
+            ),
+            (
+                "recipe-older-current-family",
+                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
+                "publication version",
+            ),
+            (
                 "archive",
                 "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":7}')",
                 "archived marker version",
@@ -12514,7 +12524,6 @@ mod tests {
             "UPDATE meta SET value='1' WHERE key='cache_version'",
             "INSERT INTO meta VALUES('catalog_version','1')",
             "INSERT INTO meta VALUES('search_version','1')",
-            "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
             "INSERT INTO meta VALUES('archive_event_index:old','{\"version\":1}')",
             "CREATE TABLE native_usage_migrations(source_path TEXT); PRAGMA user_version=31",
         ] {
