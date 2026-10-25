@@ -11,6 +11,7 @@
   "native_event_metadata_composite": false,
   "semantic_stage_publication_qualification": 0,
   "semantic_stage_wip": [
+    "Worker36 private SemanticModelBatch dispatches real index/identity/staged producers through EventCache; final model metadata/recipe/claim witness is recorded and checked under epoch CAS; standalone Claude without incident candidates and Codex share publication; existing Query listing accepts a private admitted QueryCatalogStore with explicit namespace selectors; full selected/proof/repair, changed-owner retirement, search readiness and PID/lineage/relation/withdrawal remain refused or pending; CI and independent acceptance pending",
     "private authored complete 12-table namespace-keyed stage and relocation/dependency/mutation physical input groups added to the existing 21-chunk composition; default and public configured profiles unchanged",
     "real configured ingest selects scoped dependency writes, mutation retirement and relocation advancement from its own input-family layout; mixed/corrupt keys/indexes rejected before Raw admission; sole-Source guards enforce composite OLD/NEW namespace ownership without qualification",
     "four configured_semantic_ CI fixtures cover actual ingest/colliding foreign witnesses/restart/rollback/replay, mixed-layout refusal, complete stage keys and committed-schema cache rollback; CI and independent acceptance pending",
