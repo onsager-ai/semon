@@ -47,7 +47,7 @@ fn phase(cache_path:&std::path::Path,path:&std::path::Path,harness:&str) -> Phas
         }).collect::<rusqlite::Result<Cells>>()).unwrap().map(Result::unwrap).collect();
         ((*family).into(),data)
     }).collect();
-    Phase {index,ledger,rows}
+    Phase {index:(*index).clone(),ledger,rows}
 }
 fn assert_rows(tx:&mut PgTxn<'_>,phase:&Phase) -> Result<(),StorageError> {
     for (family,expected) in &phase.rows {
