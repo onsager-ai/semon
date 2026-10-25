@@ -600,6 +600,23 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         atomic::{AtomicUsize, Ordering},
     };
     let mut result = Vec::new();
+    c.execute_batch("SAVEPOINT native_layout_probe").unwrap();
+    for family in ["metadata", "support"] {
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        c.progress_handler(1, Some(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        }));
+        if family == "metadata" {
+            crate::events::store::configured::metadata_sql(c, "", "namespace").unwrap();
+        } else {
+            crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
+        }
+        c.progress_handler(0, None::<fn() -> bool>);
+        eprintln!("native_frontier_layout family={family} vm_steps={}", steps.load(Ordering::Relaxed));
+    }
+    c.execute_batch("ROLLBACK TO native_layout_probe; RELEASE native_layout_probe").unwrap();
     // Each read/page starts from exactly the same source/stage state.
     for kind in [
         "filename",
