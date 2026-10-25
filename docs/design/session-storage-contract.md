@@ -1604,3 +1604,26 @@ qualification. It has no conversion to EventReceipt. Public qualification stays
 zero; no public backend factory or IndexStore implementation is activated.
 Meaningful real-parser, independent SQLite metadata, connected rollback and
 stale-CAS tests are registered in the existing PG filter; exact CI is required.
+
+
+## Worker117: private native file page persistence (WIP)
+
+The native SQLite chunk and launch writers and private PG file bundle consume
+`events/native_pages` encoding plans. The current PG layout is version 5, created
+fresh only. It stores lossless namespace bytes, content-addressed page blobs,
+exact Usage-source/ledger/header-bound native generations, immutable page
+references and a transactionally updated path-digest pointer with full-path
+collision checks. Old generations are retained; this adapter has no GC.
+
+The private reader checks namespace, exact ledger, generation binding, byte
+limits, cancellation/deadline, payload digests and chunk Merkle witnesses before
+returning a hash. Launch reconstruction shares the production SQLite validator,
+including EOF and its complete-index fingerprint. SQL snapshots grant no Raw
+access. A native generation is not a Catalog publication generation.
+
+This increment is unqualified WIP. Catalog Current/history references, actual
+reader/pool lease ownership, GC ownership and selected publication integration
+remain unported. No complete native ingest receipt, public PG backend, full
+no-SQLite path, migration, cutover or rollback is claimed. History-noise resource
+measurements and complete page/lease adversarial qualification remain required.
+Exact CI and independent review determine acceptance; public qualification is 0.

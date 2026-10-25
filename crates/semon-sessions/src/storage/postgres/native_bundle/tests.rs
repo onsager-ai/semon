@@ -540,7 +540,8 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     let (_, old_ledger, old_index) = &data.sources[0];
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, old_ledger, old_index, None, None)).unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let source = algorithm::begin(&mut Usage::new(tx)?, "launch\0🦀", None, &ledger, false)?;
+        algorithm::write(&mut Usage::new(tx)?, "launch\0🦀", &ledger, &scanned)?;
         let prepared = native_pages::prepare(&ledger, &scanned)?;
         let id = native_pages::write(tx, source, "launch\0🦀", &ledger, prepared)?;
         let pinned = native_pages::open(tx, "launch\0🦀", &ledger, id)?;
