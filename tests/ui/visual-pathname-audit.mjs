@@ -9,17 +9,7 @@ const TYPES = ['image', 'evidence'];
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const isDigest = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-const isSourceSha = (value) =>
-  typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
 const identity = (row) => JSON.stringify([row.comparator, row.scope, row.kind, row.key]);
-
-function containsPath(parent, candidate) {
-  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
-  return (
-    relative === '' ||
-    (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-  );
-}
 
 function readBytes(file) {
   if (fs.statSync(file).size > MAX_FILE_BYTES) throw new Error('Input exceeds 8 MiB');
@@ -193,13 +183,6 @@ export function audit({ root, registry }) {
       firstErrors: (Array.isArray(current.errors) ? current.errors : [])
         .slice(0, 4)
         .map((error) => String(error).slice(0, 180)),
-      coverageFailures:
-        typeof current.coverageFailures === 'number' ||
-        typeof current.coverageFailures === 'boolean' ||
-        current.coverageFailures === null ||
-        current.coverageFailures === undefined
-          ? (current.coverageFailures ?? null)
-          : String(current.coverageFailures).slice(0, 180),
     });
     for (const { kind, row } of currentRows.filter(({ row }) => row.pass === false)) {
       const exactState = { comparator, scope, kind, key: row.key };
@@ -219,6 +202,7 @@ export function audit({ root, registry }) {
         );
         if (matches.length !== 1) throw new Error('Expected one accepted state');
         const accepted = matches[0];
+        if (accepted.decision !== 'accepted') throw new Error('State has no accepted decision');
         if (!sameReferences(current, accepted)) throw new Error('Reference pins changed');
         const approved = accepted.artifactDigests;
         if (!isDigest(approved?.candidate?.evidence))
@@ -272,213 +256,33 @@ export function audit({ root, registry }) {
   };
 }
 
-function patchForRegistry(beforeText, afterText, provenance) {
-  if (beforeText === afterText) return '';
-  if (!beforeText.endsWith('\n') || !afterText.endsWith('\n'))
-    throw new Error('Registry text must end with a newline');
-  const before = beforeText.slice(0, -1).split('\n');
-  const after = afterText.slice(0, -1).split('\n');
-  if (before.length !== after.length) throw new Error('Proposal changes registry line count');
-  const changed = [];
-  for (let index = 0; index < before.length; index++)
-    if (before[index] !== after[index]) changed.push(index);
-  if (!changed.length) return '';
-
-  const hunks = [];
-  for (const index of changed) {
-    const start = Math.max(0, index - 3);
-    const end = Math.min(before.length, index + 4);
-    const previous = hunks.at(-1);
-    if (previous && start <= previous.end) previous.end = Math.max(previous.end, end);
-    else hunks.push({ start, end });
-  }
-  const lines = [
-    '# visual-binding-proposal-v1 (diagnostic only; no approval implied)',
-    `# source_sha: ${provenance.sourceSha}`,
-    `# runtime_fingerprint: ${provenance.runtimeFingerprint}`,
-    `# report_sha256: ${JSON.stringify(provenance.reportDigests)}`,
-    `# qualified_count: ${provenance.qualifiedCount}`,
-    `# refused_count: ${provenance.refusedCount}`,
-    'diff --git a/tests/ui/visual-acceptance.json b/tests/ui/visual-acceptance.json',
-    '--- a/tests/ui/visual-acceptance.json',
-    '+++ b/tests/ui/visual-acceptance.json',
-  ];
-  for (const { start, end } of hunks) {
-    const count = end - start;
-    lines.push(`@@ -${start + 1},${count} +${start + 1},${count} @@`);
-    for (let index = start; index < end; index++) {
-      if (before[index] === after[index]) lines.push(' ' + before[index]);
-      else lines.push('-' + before[index], '+' + after[index]);
-    }
-  }
-  return lines.join('\n') + '\n';
-}
-
-function withoutProposedFields(registry, changedIndexes) {
-  const copy = structuredClone(registry);
-  for (const index of changedIndexes) {
-    delete copy.acceptances[index].candidateFingerprint;
-    delete copy.acceptances[index].artifactDigests.candidate.evidence;
-  }
-  return copy;
-}
-
-export function createBindingProposal({ registry, registryText, result, sourceSha }) {
-  const refuse = (reason) => ({ status: 'refused', reason, patch: '', updates: [] });
-  if (!isSourceSha(sourceSha)) return refuse('Missing or invalid CI source SHA');
-  if (!registry || !Array.isArray(registry.acceptances)) return refuse('Invalid accepted registry');
-  if (!result || result.diagnosticOnly !== true || !Array.isArray(result.qualified))
-    return refuse('Missing pathname audit result');
-  if (!Array.isArray(result.refused) || result.refused.length)
-    return refuse('Pathname audit has refused rows');
-  if (!Array.isArray(result.reports) || !result.reports.length)
-    return refuse('Pathname audit has no report summaries');
-  if (
-    result.reports.some(
-      (report) =>
-        report.errorCount !== 0 ||
-        report.coverageFailures !== null ||
-        !isDigest(report.reportSha256),
-    )
-  )
-    return refuse('A report has execution errors, coverage failures, or no digest');
-
-  const fingerprints = new Set(result.reports.map((report) => report.candidateFingerprint));
-  if (fingerprints.size !== 1 || !isDigest([...fingerprints][0]))
-    return refuse('Reports do not share one valid runtime fingerprint');
-  const runtimeFingerprint = [...fingerprints][0];
-  if (!result.qualified.length) return { status: 'no-changes', patch: '', updates: [] };
-  if (result.qualified.some((row) => row.candidateFingerprint !== runtimeFingerprint))
-    return refuse('Qualified rows do not match the report runtime fingerprint');
-
-  let parsedRegistry;
-  try {
-    parsedRegistry = JSON.parse(registryText);
-  } catch {
-    return refuse('Accepted registry text is invalid JSON');
-  }
-  if (
-    JSON.stringify(parsedRegistry) !== JSON.stringify(registry) ||
-    registryText !== JSON.stringify(registry, null, 2) + '\n'
-  )
-    return refuse('Accepted registry is not the canonical checked-in JSON');
-
-  const proposedRegistry = structuredClone(registry);
-  const updates = [];
-  const seenStates = new Set();
-  const changedIndexes = new Set();
-  for (const row of result.qualified) {
-    const stateId = identity(row);
-    if (seenStates.has(stateId)) return refuse('Pathname audit duplicated a qualified state');
-    seenStates.add(stateId);
-    const matches = registry.acceptances
-      .map((entry, index) => ({ entry, index }))
-      .filter(({ entry }) => identity(entry) === stateId);
-    if (matches.length !== 1) return refuse('Expected one accepted record for a qualified state');
-    const { entry, index } = matches[0];
-    const candidateEvidence = row.artifactDigests?.candidate?.evidence;
-    if (!isDigest(candidateEvidence) || !isDigest(entry.candidateFingerprint))
-      return refuse('Qualified state has invalid candidate binding digests');
-    if (!entry.artifactDigests?.candidate)
-      return refuse('Qualified state has no accepted candidate artifacts');
-    const proposed = proposedRegistry.acceptances[index];
-    proposed.candidateFingerprint = runtimeFingerprint;
-    proposed.artifactDigests.candidate.evidence = candidateEvidence;
-    if (
-      entry.candidateFingerprint !== runtimeFingerprint ||
-      entry.artifactDigests.candidate.evidence !== candidateEvidence
-    ) {
-      updates.push({ index, ...row });
-      changedIndexes.add(index);
-    }
-  }
-  if (!updates.length) return { status: 'no-changes', patch: '', updates: [] };
-  if (
-    JSON.stringify(withoutProposedFields(registry, changedIndexes)) !==
-    JSON.stringify(withoutProposedFields(proposedRegistry, changedIndexes))
-  )
-    return refuse('Proposal changes fields outside candidate fingerprint/evidence hashes');
-
-  const proposedRegistryText = JSON.stringify(proposedRegistry, null, 2) + '\n';
-  const provenance = {
-    sourceSha,
-    runtimeFingerprint,
-    reportDigests: Object.fromEntries(
-      result.reports.map(({ source, reportSha256 }) => [source, reportSha256]),
-    ),
-    qualifiedCount: result.qualified.length,
-    refusedCount: result.refused.length,
-  };
-  return {
-    status: 'proposed',
-    patch: patchForRegistry(registryText, proposedRegistryText, provenance),
-    proposedRegistryText,
-    provenance,
-    updates,
-  };
-}
-
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.length !== 2)
+    throw new Error('Use visual-binding-proposal.mjs for binding proposals');
   const root = process.env.SEMON_UI_OUT;
   if (!root) throw new Error('SEMON_UI_OUT is required');
   const result = audit({
     root,
     registry: decodeJson(readBytes(new URL('./visual-acceptance.json', import.meta.url))),
   });
-  if (process.argv.includes('--propose')) {
-    const registryBytes = readBytes(new URL('./visual-acceptance.json', import.meta.url));
-    let proposal = createBindingProposal({
-      root,
-      registry: decodeJson(registryBytes),
-      registryText: new TextDecoder('utf-8', { fatal: true }).decode(registryBytes),
-      result,
-      sourceSha: process.env.GITHUB_SHA,
-    });
-    const proposalPath = process.env.SEMON_VISUAL_PROPOSAL_PATH;
-    const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-    const safeProposalPath = Boolean(
-      proposalPath && !containsPath(workspace, proposalPath) && !containsPath(root, proposalPath),
-    );
-    if (!safeProposalPath) {
-      proposal = {
-        status: 'refused',
-        reason: 'Proposal output must be outside the repository and capture tree',
-        patch: '',
-      };
-    }
-    if (proposal.status === 'proposed') fs.writeFileSync(proposalPath, proposal.patch);
-    else if (safeProposalPath) fs.rmSync(proposalPath, { force: true });
-    console.log(
-      JSON.stringify({
-        status: proposal.status,
-        qualified: result.qualified.length,
-        refused: result.refused.length,
-        output: proposal.status === 'proposed' ? path.basename(proposalPath) : null,
-        reason: proposal.status === 'refused' ? proposal.reason : undefined,
-      }),
-    );
-    if (proposal.status === 'refused') process.exitCode = 1;
-    if (result.refused.length) process.exitCode = 1;
-  } else {
-    fs.writeFileSync(
-      path.join(root, 'visual-pathname-audit.json'),
-      JSON.stringify(result, null, 2) + '\n',
-    );
-    console.log(
-      JSON.stringify({
-        qualified: result.qualified.length,
-        refused: result.refused.length,
-        qualifiedStates: result.qualified.slice(0, 6).map(({ key, reason }) => ({
-          key: String(key).slice(0, 80),
-          reason: String(reason).slice(0, 80),
-        })),
-        refusedStates: result.refused.slice(0, 6).map(({ key, reason }) => ({
-          key: String(key).slice(0, 80),
-          reason: String(reason).slice(0, 120),
-        })),
-        output: 'visual-pathname-audit.json',
-      }),
-    );
-    if (result.refused.length) process.exitCode = 1;
-  }
+  fs.writeFileSync(
+    path.join(root, 'visual-pathname-audit.json'),
+    JSON.stringify(result, null, 2) + '\n',
+  );
+  console.log(
+    JSON.stringify({
+      qualified: result.qualified.length,
+      refused: result.refused.length,
+      qualifiedStates: result.qualified.slice(0, 6).map(({ key, reason }) => ({
+        key: String(key).slice(0, 80),
+        reason: String(reason).slice(0, 80),
+      })),
+      refusedStates: result.refused.slice(0, 6).map(({ key, reason }) => ({
+        key: String(key).slice(0, 80),
+        reason: String(reason).slice(0, 120),
+      })),
+      output: 'visual-pathname-audit.json',
+    }),
+  );
+  if (result.refused.length) process.exitCode = 1;
 }

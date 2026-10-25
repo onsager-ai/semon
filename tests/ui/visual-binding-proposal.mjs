@@ -189,6 +189,11 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
     audit.reports.some((item) => !expectedSources.has(item.source))
   )
     refusals.push('pathname audit report set does not match this suite');
+  const fingerprints = new Set(
+    specs.map((spec) => reports[spec.reportPath]?.candidateFingerprint),
+  );
+  if (fingerprints.size !== 1 || !isSha256([...fingerprints][0]))
+    refusals.push('reports do not share one valid runtime fingerprint');
 
   const registryCopy = structuredClone(registry);
   const updates = [];
@@ -202,7 +207,9 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
     if (
       auditSummaries.length !== 1 ||
       auditSummaries[0]?.scope !== spec.scope ||
-      auditSummaries[0]?.errorCount !== 0
+      auditSummaries[0]?.errorCount !== 0 ||
+      auditSummaries[0]?.candidateFingerprint !== report?.candidateFingerprint ||
+      !isSha256(auditSummaries[0]?.reportSha256)
     ) {
       refusals.push(`${spec.auditSource}: audit summary missing, duplicated, or has errors`);
     }
@@ -228,6 +235,10 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
         continue;
       }
       const { entry: accepted, index } = acceptedMatches[0];
+      if (accepted.decision !== 'accepted') {
+        refusals.push(`${spec.reportPath}: state has no accepted decision`);
+        continue;
+      }
       const qualifiedMatches = audit.qualified.filter((item) => identity(item) === stateId);
       const refusedMatches = audit.refused.filter((item) => identity(item) === stateId);
       if (qualifiedMatches.length !== 1 || refusedMatches.length !== 0) {
@@ -288,11 +299,7 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
     }
   }
 
-  const inSuite = (item) =>
-    specs.some((spec) => spec.comparator === item.comparator && spec.scope === item.scope);
-  const qualifiedStates = audit.qualified.filter(inSuite);
-  const refusedStates = audit.refused.filter(inSuite);
-  if (qualifiedStates.length !== expectedStates.size || refusedStates.length !== 0)
+  if (audit.qualified.length !== expectedStates.size || audit.refused.length !== 0)
     refusals.push('audit states do not exactly match report failures');
   if (refusals.length)
     return {
@@ -338,16 +345,19 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
   };
 }
 
-function boundedJson(file) {
+function boundedBytes(file) {
   if (fs.statSync(file).size > MAX_FILE_BYTES) throw new Error('Input exceeds 8 MiB');
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file)));
+  return fs.readFileSync(file);
 }
+
+const decodeJson = (bytes) => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 
 function runCli() {
   const root = process.env.SEMON_UI_OUT;
   const suite = process.env.SEMON_VISUAL_PROPOSAL_SUITE;
   if (!root) {
     console.log(JSON.stringify({ status: 'refused', reason: 'SEMON_UI_OUT is required' }));
+    process.exitCode = 1;
     return;
   }
   fs.mkdirSync(root, { recursive: true });
@@ -355,20 +365,40 @@ function runCli() {
   const patchFile = path.join(root, `visual-acceptance-${safeSuite}-review.patch`);
   const summaryFile = path.join(root, `visual-acceptance-${safeSuite}-proposal.json`);
   let result;
+  let provenance;
   try {
     const specs = SUITES[suite];
     if (!specs) throw new Error('unknown proposal suite');
+    const sourceSha = process.env.GITHUB_SHA;
+    if (typeof sourceSha !== 'string' || !/^[a-f0-9]{40}$/.test(sourceSha))
+      throw new Error('missing or invalid CI source SHA');
+    const audit = decodeJson(boundedBytes(path.join(root, 'visual-pathname-audit.json')));
+    const reportDigests = {};
     const reports = Object.fromEntries(
-      specs.map((spec) => [spec.reportPath, boundedJson(path.join(root, spec.reportPath))]),
+      specs.map((spec) => {
+        const bytes = boundedBytes(path.join(root, spec.reportPath));
+        const reportSha256 = sha256(bytes);
+        const summaries = audit.reports?.filter((item) => item.source === spec.auditSource);
+        if (summaries?.length !== 1 || summaries[0].reportSha256 !== reportSha256)
+          throw new Error(`${spec.reportPath}: audit report digest does not match current bytes`);
+        reportDigests[spec.reportPath] = reportSha256;
+        return [spec.reportPath, decodeJson(bytes)];
+      }),
     );
     const registryPath = new URL('./visual-acceptance.json', import.meta.url);
-    const registryBytes = fs.readFileSync(registryPath);
-    if (registryBytes.length > MAX_FILE_BYTES) throw new Error('Registry exceeds 8 MiB');
+    const registryBytes = boundedBytes(registryPath);
     const registryText = new TextDecoder('utf-8', { fatal: true }).decode(registryBytes);
+    provenance = {
+      sourceSha,
+      runtimeFingerprint: reports[specs[0].reportPath].candidateFingerprint,
+      reportDigests,
+      qualifiedCount: audit.qualified?.length,
+      refusedCount: audit.refused?.length,
+    };
     result = proposeVisualBindings({
       suite,
       reports,
-      audit: boundedJson(path.join(root, 'visual-pathname-audit.json')),
+      audit,
       registry: JSON.parse(registryText),
       registryText,
     });
@@ -389,6 +419,7 @@ function runCli() {
       {
         version: 1,
         diagnosticOnly: true,
+        provenance,
         suite: result.suite,
         status: result.status,
         proposedEntries: result.updates.map(({ comparator, scope, kind, key }) => ({
@@ -415,6 +446,7 @@ function runCli() {
       patch: result.status === 'proposed' ? path.basename(patchFile) : null,
     }),
   );
+  if (result.status === 'refused') process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCli();
