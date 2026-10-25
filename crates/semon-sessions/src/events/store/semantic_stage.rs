@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Earlier stages may contain parent turns derived from partial receipt sets.
 // Rebuild their witnesses using complete physical sender receipt boundaries.
-pub(super) const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
+pub(super) const RECIPE: &str = "recorded-origin-turn-native-name-hints-v4";
 pub(super) fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -2700,6 +2700,10 @@ impl SqliteStore {
                 for path in &endpoint.paths {
                     tx.execute("INSERT OR IGNORE INTO catalog_semantic_paths(path,session_key) VALUES(?1,?2)",params![path,endpoint.row.key]).map_err(failure)?;
                 }
+                crate::model::relation_stage::native_name_hints_with(endpoint, |path, name| {
+                    tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'name:claude',?2)", params![path,name])?;
+                    Ok::<_, rusqlite::Error>(())
+                }).map_err(failure)?;
                 endpoint_frontier(&tx, endpoint).map_err(failure)?;
             }
             for endpoint in prepared.relationships.endpoints.values() {
@@ -3016,9 +3020,11 @@ impl SqliteStore {
                     |r| r.get(0),
                 )
                 .map_err(failure)?;
-            for key in replay {
-                queue(&tx, "members", &key, "").map_err(failure)?;
-            }
+            crate::model::relation_stage::replay_members_with(
+                &replay,
+                || rusqlite::Error::InvalidQuery,
+                |key| queue(&tx, "members", key, ""),
+            ).map_err(failure)?;
             frontier_page(&tx).map_err(failure)?;
             reset(&tx, &runtime).map_err(failure)?;
             tx.commit().map_err(failure)?;

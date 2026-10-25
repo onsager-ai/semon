@@ -72,6 +72,9 @@ impl OwnerStore for Owners<'_> {
         for name in &endpoint.names {
             self.db.execute("INSERT OR IGNORE INTO main.catalog_semantic_names(namespace,name,session_key) VALUES(?1,?2,?3)",params![self.namespace,name,endpoint.row.key])?;
         }
+        crate::model::relation_stage::native_name_hints_with(endpoint, |path, name| {
+            self.dependency(path, "name:claude", name)
+        })?;
         if let Some(pid) = endpoint.pid {
             for source in &endpoint.row.sources {
                 self.dependency(

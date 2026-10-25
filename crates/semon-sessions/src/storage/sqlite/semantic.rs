@@ -225,7 +225,10 @@ fn reset_page(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
         if budget == 0 {
             return Ok(false);
         }
-        budget-=c.execute(&format!("DELETE FROM main.{table} WHERE namespace=?1 AND ({key}) IN (SELECT {key} FROM main.{table} WHERE namespace=?1 ORDER BY {key} LIMIT ?2)"), params![ns,budget as i64])?;
+        // Member replay is a durable discovery cursor, including across the
+        // epoch reset that invalidates the old model and its callers.
+        let filter = if table == "catalog_semantic_frontier" { " AND kind<>'members'" } else { "" };
+        budget-=c.execute(&format!("DELETE FROM main.{table} WHERE namespace=?1{filter} AND ({key}) IN (SELECT {key} FROM main.{table} WHERE namespace=?1{filter} ORDER BY {key} LIMIT ?2)"), params![ns,budget as i64])?;
     }
     if budget == 0 {
         return Ok(false);
@@ -833,6 +836,9 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             return Ok(true);
         };
         let sql = match kind.as_str() {
+            "members" => {
+                "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND session_key=?2 AND lifecycle='current' AND source_path>?3 ORDER BY source_path LIMIT ?4"
+            }
             "pathowner" => {
                 "SELECT peer.source_path FROM main.session_catalog_sources own JOIN main.session_catalog_sources peer ON peer.namespace=own.namespace AND peer.session_key=own.session_key WHERE own.namespace=?1 AND own.source_path=?2 AND own.lifecycle='current' AND peer.lifecycle='current' AND peer.source_path>?3 GROUP BY peer.source_path ORDER BY peer.source_path LIMIT ?4"
             }
@@ -950,7 +956,7 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
         self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM main.catalog_semantic_names n JOIN main.catalog_semantic_endpoints e ON e.namespace=n.namespace AND e.session_key=n.session_key WHERE n.namespace=?1 AND e.namespace=?1 AND n.name=?2 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM main.catalog_semantic_events sent JOIN main.catalog_semantic_events receipt ON receipt.namespace=sent.namespace AND receipt.msg_id=sent.msg_id JOIN main.catalog_semantic_endpoints e ON e.namespace=sent.namespace AND e.session_key=sent.owner JOIN main.catalog_semantic_endpoints root ON root.namespace=e.namespace AND root.session_key=e.root_key WHERE sent.namespace=?1 AND receipt.namespace=?1 AND e.namespace=?1 AND root.namespace=?1 AND sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?2 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM main.catalog_semantic_events first WHERE first.namespace=?1 AND first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
     }
     fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
-        self.db.prepare("SELECT d.session_key FROM main.session_descriptions d JOIN main.session_catalog owner ON owner.namespace=d.namespace AND owner.session_key=d.session_key WHERE d.namespace=?1 AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?2) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
+        self.db.prepare("SELECT DISTINCT member.session_key FROM main.catalog_native_dependencies hint INDEXED BY catalog_native_dependency JOIN main.session_catalog_sources member ON member.namespace=hint.namespace AND member.source_path=hint.source_path JOIN main.session_catalog owner ON owner.namespace=member.namespace AND owner.session_key=member.session_key WHERE hint.namespace=?1 AND hint.harness='name:claude' AND hint.native_id=?2 AND member.namespace=?1 AND member.lifecycle='current' AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=member.session_key) ORDER BY member.session_key LIMIT 65")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
     }
     fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
         self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND parent_native=?2 AND task=?3 LIMIT 2")?.query_map(params![self.ns, parent, task], |r| r.get(0))?.collect()
@@ -1668,23 +1674,24 @@ impl Stage {
         epoch: i64,
         selector: &crate::model::relation_stage::Selector,
     ) -> Result<crate::model::relation_stage::Selection, StoreError> {
-        let tx = self.db.transaction().map_err(error)?;
+        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(error)?;
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.namespace();
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND resetting=0)",params![ns,epoch],|r|r.get(0)).map_err(error)?;
         if !valid {
             return Err(refuse("stale semantic selector"));
         }
-        if matches!(
-            selector,
-            crate::model::relation_stage::Selector::ClaudeName { .. }
-        ) {
-            return Err(refuse("semantic_claude_name_members_pending"));
+        if self.epoch != Some(epoch)
+            || head(&tx).map_err(error)? != self.source.generation
+            || !reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        {
+            return Err(refuse("stale semantic selector"));
         }
         if matches!(
             selector,
             crate::model::relation_stage::Selector::ClaudeReceipt { .. }
                 | crate::model::relation_stage::Selector::ClaudeCall { .. }
+                | crate::model::relation_stage::Selector::ClaudeName { .. }
         ) {
             // A negative is authoritative only after discovery, reduction and
             // the separate copied-event qualification sub-phase all complete.
@@ -1699,9 +1706,25 @@ impl Stage {
             replay: Vec::new(),
         };
         let result = crate::model::relation_stage::select_with(&mut lookup, selector);
-        // Hints cannot become authoritative negative matches. The admitted
-        // durable members replay is deliberately still closed in this slice.
-        if !lookup.replay.is_empty() {
+        let replay = lookup.replay;
+        if !replay.is_empty() {
+            crate::model::relation_stage::replay_members_with(
+                &replay,
+                || rusqlite::Error::InvalidQuery,
+                |key| {
+                    tx.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'members',?2,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge=''", params![ns,key])?;
+                    Ok(())
+                },
+            ).map_err(error)?;
+            let layout = FrontierLayout::bind(&tx).map_err(error)?;
+            frontier_page(&layout, ns)?;
+            staged_paths(&tx, ns)?;
+            let runtime: String = tx.query_row("SELECT runtime FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            reset(&tx, ns, &runtime).map_err(error)?;
+            tx.execute("DELETE FROM storage_semantic_model_batches WHERE namespace=?1", [ns]).map_err(error)?;
+            let next_epoch = tx.query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            tx.commit().map_err(error)?;
+            self.epoch = Some(next_epoch);
             return Err(refuse("semantic_claude_name_members_pending"));
         }
         result.map_err(error)
