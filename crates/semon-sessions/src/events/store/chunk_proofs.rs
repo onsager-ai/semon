@@ -12,11 +12,21 @@ mod published;
 
 /// Own the selected read transaction until the last lazy proof reader drops.
 /// Connections are never returned to a pool with an unfinished transaction.
-pub(crate) struct Snapshot(Mutex<Connection>);
+pub(crate) struct Snapshot(
+    Mutex<Connection>,
+    Option<crate::events::store::configured::NativeOwnership>,
+);
 
 impl Snapshot {
     pub(crate) fn new(db: Connection) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(db)))
+        Arc::new(Self(Mutex::new(db), None))
+    }
+
+    pub(crate) fn owned(
+        db: Connection,
+        owner: crate::events::store::configured::NativeOwnership,
+    ) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(db), Some(owner)))
     }
 
     fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
@@ -457,15 +467,23 @@ impl Focused {
                 .execute_batch("BEGIN DEFERRED")
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         }
-        if !super::current(&connection)
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
-        {
-            return Err(
-                FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
-            );
+        if let Some(owner) = &db.1 {
+            // Only typed native custody can qualify an enrolled proof reader.
+            // The unbound factory below continues refusing enrolled stores.
+            owner
+                .validate_ready(&connection)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
+        } else {
+            if !super::current(&connection)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
+            {
+                return Err(
+                    FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
+                );
+            }
+            super::require_current(&connection)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
         }
-        super::require_current(&connection)
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
             diagnostic.index_offset = Some(index.offset);

@@ -327,7 +327,7 @@ fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub(super) fn support_sql<'a>(
+pub(crate) fn support_sql<'a>(
     c: &Connection,
     singleton: &'a str,
     scoped: &'a str,
@@ -2589,39 +2589,11 @@ impl SqliteStore {
                             "semantic relation metadata budget exceeded".into(),
                         ));
                     }
-                    let mut prior: Relation = serde_json::from_str(&old)
+                    let prior: Relation = serde_json::from_str(&old)
                         .map_err(|error| StoreError::Data(error.to_string()))?;
-                    let witness = prior
-                        .source_turn
-                        .merge(&merged.source_turn)
-                        .ok_or_else(|| StoreError::Data("conflicting staged parent turn".into()))?;
-                    prior.source_turn = Default::default();
-                    merged.source_turn = Default::default();
-                    if json(&prior).map_err(failure)? != json(&merged).map_err(failure)? {
-                        // Name the differing fields only: no identities or
-                        // content.
-                        let fields = |relation: &Relation| {
-                            serde_json::to_value(relation)
-                                .ok()
-                                .and_then(|value| value.as_object().cloned())
-                                .unwrap_or_default()
-                        };
-                        let (before, after) = (fields(&prior), fields(&merged));
-                        let differing: Vec<&str> = before
-                            .keys()
-                            .chain(after.keys())
-                            .filter(|key| before.get(*key) != after.get(*key))
-                            .map(String::as_str)
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        return Err(StoreError::Data(format!(
-                            "conflicting staged native relationship: kind={} fields={}",
-                            merged.kind,
-                            differing.join(",")
-                        )));
-                    }
-                    merged.source_turn = witness;
+                    merged = merged
+                        .merge_prior(&prior)
+                        .map_err(|error| StoreError::Data(error.to_string()))?;
                 }
                 let encoded = json(&merged).map_err(failure)?;
                 if encoded.len() > MAX_CONTEXT {
