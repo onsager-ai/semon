@@ -93,6 +93,7 @@ pub(super) struct Pinned {
     pub(super) id: ProofGenerationId,
     pub(super) chunks_header: String,
     pub(super) launch_header: Option<String>,
+    ledger: Ledger,
 }
 
 pub(super) fn current(tx: &mut PgTxn<'_>, path: &str, ledger: &Ledger) -> Result<Pinned, StorageError> {
@@ -124,10 +125,25 @@ pub(super) fn open(tx: &mut PgTxn<'_>, path: &str, ledger: &Ledger, id: ProofGen
     let receipt = crate::events::store::header_ledger(ledger);
     let binding = serde_json::to_string(&(path, &receipt, &chunks_header, launch_header.as_ref())).map_err(|_| StorageError::Unavailable)?;
     if source == 0 || ProofGenerationId::derive(tx.namespace.as_str(), source, "native-file", &binding) != id || usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64)) != Ok(header.count) { return Err(StorageError::ScopeChanged); }
-    Ok(Pinned { namespace: tx.namespace.as_str().to_owned(), id, chunks_header, launch_header })
+    Ok(Pinned { namespace: tx.namespace.as_str().to_owned(), id, chunks_header, launch_header, ledger: ledger.clone() })
 }
 
 impl Pinned {
+    pub(super) fn launch(&self, tx: &mut PgTxn<'_>) -> Result<crate::native_handoff::Index, StorageError> {
+        tx.check()?;
+        let encoded = self.launch_header.as_ref().ok_or(StorageError::ScopeChanged)?;
+        let header: codec::launch::Header = serde_json::from_str(encoded).map_err(|_| StorageError::ScopeChanged)?;
+        if !header.valid(&self.ledger) { return Err(StorageError::ScopeChanged); }
+        let mut calls = std::collections::VecDeque::new();
+        for at in 0..header.count.div_ceil(256) {
+            let encoded = self.page(tx, 1, &format!("{at:010}"))?;
+            let page: codec::launch::Page = serde_json::from_str(&encoded).map_err(|_| StorageError::ScopeChanged)?;
+            if page.version != 1 || page.index != at || page.calls.len() != (header.count - calls.len()).min(256) { return Err(StorageError::ScopeChanged); }
+            calls.extend(page.calls);
+        }
+        codec::launch::restore(header, calls, &self.ledger).map_err(|_| StorageError::ScopeChanged)?.ok_or(StorageError::ScopeChanged)
+    }
+
     pub(super) fn chunk_hash(&self, tx: &mut PgTxn<'_>, index: usize) -> Result<[u8; 32], StorageError> {
         tx.check()?;
         let header: codec::chunks::Header = serde_json::from_str(&self.chunks_header).map_err(|_| StorageError::ScopeChanged)?;
