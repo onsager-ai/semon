@@ -109,7 +109,9 @@ impl SourceIntent {
     ) -> Result<SourceMutationReceipt, StorageError> {
         match self {
             Self::Recover { operation, cursor } => {
-                store.recover(operation, cursor.as_deref()).map(|(receipt, _)| receipt)
+                store
+                    .recover(operation, cursor.as_deref())
+                    .map(|(receipt, _)| receipt)
             }
             Self::Discover {
                 operation,

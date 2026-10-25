@@ -1386,6 +1386,7 @@ pub(crate) struct EventCache {
     observation_path: Option<PathBuf>,
     pending_source_operation: Option<PendingSourceOperation>,
     reconciled_recovery: Option<bool>,
+    deferred_source_operations: bool,
     scoped: bool,
     explicit_store: bool,
     event_operation: Option<String>,
@@ -1587,6 +1588,7 @@ impl EventCache {
     /// A failed apply/ack leaves the original payload available to the next open.
     pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
         let pending_source_operation = self.pending_source_operation.clone();
+        let mut recovered = self.reconciled_recovery;
         let Some(store) = self.observation_store_mut() else {
             return if pending_source_operation.is_none() {
                 Ok(())
@@ -1602,17 +1604,22 @@ impl EventCache {
         let pending = store
             .pending_intents()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if pending.iter().filter(|intent| matches!(intent, PendingSourceOperation::Recover { .. })).count() > 1 {
-            return Err(io::Error::other("multiple pending recovery pages"));
-        }
-        let mut recovered = None;
+        let mut deferred = false;
         for intent in pending {
             if let PendingSourceOperation::Recover { operation, cursor } = &intent {
-                let (_, done) = store.recover(operation, cursor.as_deref())
+                // Keep later captured pages durable for a later API call. An
+                // unconsumed result must never be overwritten by another page.
+                if recovered.is_some() {
+                    deferred = true;
+                    continue;
+                }
+                let (_, done) = store
+                    .recover(operation, cursor.as_deref())
                     .map_err(|error| io::Error::other(error.to_string()))?;
                 recovered = Some(done);
             } else {
-                intent.apply(store)
+                intent
+                    .apply(store)
                     .map_err(|error| io::Error::other(error.to_string()))?;
             }
             store
@@ -1620,9 +1627,8 @@ impl EventCache {
                 .map_err(|error| io::Error::other(error.to_string()))?;
         }
         self.pending_source_operation = None;
-        if recovered.is_some() {
-            self.reconciled_recovery = recovered;
-        }
+        self.reconciled_recovery = recovered;
+        self.deferred_source_operations = deferred;
         Ok(())
     }
 
@@ -1926,31 +1932,44 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        let path = self.observation_path.as_deref()
+        let path = self
+            .observation_path
+            .as_deref()
             .ok_or_else(|| io::Error::other("source observation path unavailable"))?
             .to_owned();
         let _probe = crate::native_timing::DiscoveryProbe::new(&path, "recovery");
         // A failed/unknown ACK retains the exact identity before any new capture.
-        if self.pending_source_operation.is_some() {
+        if self.reconciled_recovery.is_none()
+            && (self.pending_source_operation.is_some() || self.deferred_source_operations)
+        {
             self.reconcile_pending_source_operation()?;
         }
         if let Some(done) = self.reconciled_recovery.take() {
             return Ok(done);
         }
-        let store = self.observation_store_mut()
+        let store = self
+            .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?;
-        if store.recovery_is_current().map_err(|error| io::Error::other(error.to_string()))? {
+        if store
+            .recovery_is_current()
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
             return Ok(true);
         }
-        let cursor = store.recovery_cursor().map_err(|error| io::Error::other(error.to_string()))?;
+        let cursor = store
+            .recovery_cursor()
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let operation = crate::storage::source_observations::SourceOperation::capture(
-            &self.observation_namespace, "recover",
+            &self.observation_namespace,
+            "recover",
             &serde_json::to_vec(&cursor).map_err(io::Error::other)?,
         );
         let operation = self.persist_source_operation(PendingSourceOperation::Recover {
-            operation, cursor: cursor.clone(),
+            operation,
+            cursor: cursor.clone(),
         })?;
-        let (_, done) = self.observation_store_mut()
+        let (_, done) = self
+            .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .recover(&operation, cursor.as_deref())
             .map_err(|error| io::Error::other(error.to_string()))?;
