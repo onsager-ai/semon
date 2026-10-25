@@ -369,10 +369,11 @@ impl Stage {
             ));
         }
         let resetting: bool=tx.query_row("SELECT resetting FROM main.catalog_semantic_stage WHERE namespace=?1",[ns],|r|r.get(0)).map_err(error)?;
-        if resetting { reset_page(&tx,ns).map_err(error)?; }
+        let reset_complete=if resetting { reset_page(&tx,ns).map_err(error)? } else { true };
         if !resetting && !reduction_witnesses(&tx,ns).map_err(error)? { return Err(StoreError::Configured(StorageError::Conflict)); }
         let mut result_phase=Phase::Indexing;
         let mut paths=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r|r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
+        if !reset_complete { paths.clear(); }
         let mut context=Context::default();
         if paths.is_empty() && !resetting {
             if !self.reduction { return Err(StoreError::Configured(StorageError::NamespaceUpgradePending)); }
@@ -464,7 +465,7 @@ impl Stage {
                     if endpoint.row.harness!="codex" || endpoint.parent.is_some() || endpoint.row.parent.is_some() || endpoint.row.parent_source.is_some() || !endpoint.native_parents.is_empty() || endpoint.pid.is_some() { return Err(refuse("semantic_nonprimitive_identity_pending")); }
                     if endpoint.row.sources.is_empty() || endpoint.row.sources.len()>64 { return Err(refuse("semantic_identity_source_budget")); }
                     let ids=endpoint.row.sources.iter().map(|s|s.native_id.as_str()).collect::<std::collections::BTreeSet<_>>();
-                    if ids!=endpoint.row.native_ids.iter().map(String::as_str).collect() { return Ok(Outcome::Conflict); }
+                    if ids!=endpoint.row.native_ids.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>() { return Ok(Outcome::Conflict); }
                     for source in &endpoint.row.sources {
                         let path=source.path.to_string_lossy().into_owned();
                         if !batch.paths.contains(&path) { return Ok(Outcome::Conflict); }

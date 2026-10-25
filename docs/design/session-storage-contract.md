@@ -1141,7 +1141,42 @@ discarding them. Identity/relations, publish, finish, select and replay remain
 unavailable; the public factory still refuses semantic work. No Current, global,
 metadata, usage or multi-Source qualification changed. S1A/S1/#477 are not complete.
 
-Resume constraints: one writer on the existing task branch; Worker count 24,
+Worker25 removes the test-only constructor restriction. A crate-private
+`SemanticStaging` capability validates the admitted Source, native writer profile
+and existing authored composite stage schema before any stage support DDL. It is
+absent from Options/config parsing and the public factory still uses no semantic
+capability. The earlier primitive-only internal constructor remains limited to
+its existing behavior; the explicit reduction capability enables the next phases.
+These are internal runtime seams, not public backend qualification or a store
+creation/migration path. Existing singleton stage/native data is never converted.
+
+The primitive Codex adapter now has namespace-bound bounded event/key/frontier
+pages and reset pages. Reset and reduction validate the admitted owner and epoch/
+Catalog generation inside IMMEDIATE transactions. The old parent/root/cost
+schedule is extracted into one shared semantic reducer, with separate authored
+unbound and namespace-bound physical operations. Primitive Codex identity records
+validate complete source witnesses and native keys before inserting endpoints;
+the shared reducer then produces roots/cost state and Relations batches. Empty
+primitive relation records retain all Source claims. Publication still refuses.
+
+Three additional CI cases cover the runtime capability/public-factory separation,
+real ingest through indexing/identity/shared reduction/relations, and reduction/
+reset fault rollback plus stale-epoch/generation refusal. The earlier three cases
+are unchanged. No local execution or CI pass is claimed by Worker25; Root owns
+exact-head CI/formatting and independent review.
+
+The reduction capability is deliberately bounded to primitive Codex components
+of at most 64 sources/identities. Existing Current owner closure, cross-harness
+native-key collisions, non-Codex relationship events/frontiers, native-parent/
+lineage dependencies, withdrawals, transcript/PID/projection and relation rows
+have named refusals. Their ports are not waived. Same-DB two-Source success still
+needs composite ownership of the Writer's singleton meta/native families
+(S1A-2). Competing Catalog-generation stale begin needs the typed publisher
+(S1B). Publish/finish/select/replay, atomic ACK/change hints and full S1 acceptance
+are still outstanding. All public qualifications remain zero and #380 still
+holds #477 merge.
+
+Resume constraints: one writer on the existing task branch; Worker count 25,
 without reset. Thermal readings are absent: no local cargo/build/check/test/
 clippy/fmt, Node tests/typechecks/formatters, browser/screenshots or image work;
 use CI. Check temperatures before/after CPU work and stop at 85 C or higher;
