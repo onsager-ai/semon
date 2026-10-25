@@ -21,7 +21,7 @@ fn configured_semantic_selected89_real_codec_roundtrip_and_one_byte_tamper_befor
             |r| Ok(GenerationRecord {
                 namespace: r.get(0)?, id: crate::storage::proof_lifetime::ProofGenerationId(r.get(1)?),
                 session_key: r.get(2)?, publication: r.get(3)?, proof: r.get(4)?,
-                admission: r.get(5)?, stream: r.get(6)?, metadata: r.get(7)?,
+                admission: u64::try_from(r.get::<_, i64>(5)?).unwrap(), stream: r.get(6)?, metadata: r.get(7)?,
                 slots: r.get(8)?, prefix: r.get(9)?,
             }),
         ).unwrap();

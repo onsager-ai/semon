@@ -114,30 +114,56 @@ mod tests {
 
     fn fixture() -> GenerationRecord {
         let row = CatalogRow {
-            overview: None, trace: None, query: None, lifecycle: Default::default(),
-            key: "key".into(), name: "session".into(), harness: "codex".into(),
-            kind: "session".into(), presentation_kind: None, native_ids: vec!["native".into()],
-            parent: None, parent_source: None, repo: None, branch: None,
-            model: "model".into(), effort: None, start: None, last: None,
-            tokens: [0.0; 3], cost: Default::default(), sources: vec![],
+            overview: None,
+            trace: None,
+            query: None,
+            lifecycle: Default::default(),
+            key: "key".into(),
+            name: "session".into(),
+            harness: "codex".into(),
+            kind: "session".into(),
+            presentation_kind: None,
+            native_ids: vec!["native".into()],
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: "model".into(),
+            effort: None,
+            start: None,
+            last: None,
+            tokens: [0.0; 3],
+            cost: Default::default(),
+            sources: vec![],
         };
         GenerationRecord {
             namespace: "source-a".into(),
             id: ProofGenerationId::derive("source-a", 1, "stream", "proof"),
-            session_key: row.key.clone(), publication: "publication".into(),
-            proof: "proof".into(), admission: 1, stream: "stream".into(),
-            metadata: serde_json::to_string(&row).unwrap(), slots: "[]".into(),
+            session_key: row.key.clone(),
+            publication: "publication".into(),
+            proof: "proof".into(),
+            admission: 1,
+            stream: "stream".into(),
+            metadata: serde_json::to_string(&row).unwrap(),
+            slots: "[]".into(),
             prefix: crate::retention::source_generation(&row.sources).unwrap(),
         }
     }
 
     fn decode(record: GenerationRecord) -> Result<(GenerationRecord, CatalogRow), StorageError> {
         let trusted = fixture();
-        decode_generation(record, ExpectedGeneration {
-            namespace: &trusted.namespace, id: &trusted.id, admission: trusted.admission,
-            stream: &trusted.stream, proof: &trusted.proof,
-            publication: &trusted.publication, prefix: &trusted.prefix,
-        })
+        decode_generation(
+            record,
+            ExpectedGeneration {
+                namespace: &trusted.namespace,
+                id: &trusted.id,
+                admission: trusted.admission,
+                stream: &trusted.stream,
+                proof: &trusted.proof,
+                publication: &trusted.publication,
+                prefix: &trusted.prefix,
+            },
+        )
     }
 
     #[test]
@@ -162,12 +188,20 @@ mod tests {
     refuses!(codec89_wrong_admission, admission, 2);
     refuses!(codec89_wrong_stream, stream, "other".into());
     refuses!(codec89_wrong_proof, proof, "other".into());
-    refuses!(codec89_wrong_generation, id, ProofGenerationId("other".into()));
+    refuses!(
+        codec89_wrong_generation,
+        id,
+        ProofGenerationId("other".into())
+    );
     refuses!(codec89_wrong_publication, publication, "other".into());
     refuses!(codec89_wrong_prefix, prefix, "other".into());
     refuses!(codec89_wrong_session_key, session_key, "other".into());
     refuses!(codec89_malformed_metadata, metadata, "{".into());
-    refuses!(codec89_oversized_metadata, metadata, " ".repeat(METADATA_MAX + 1));
+    refuses!(
+        codec89_oversized_metadata,
+        metadata,
+        " ".repeat(METADATA_MAX + 1)
+    );
     refuses!(codec89_malformed_slots, slots, "{".into());
     refuses!(codec89_oversized_slots, slots, " ".repeat(METADATA_MAX + 1));
     // Valid JSON is insufficient: every slot must be a native SavedSlot.
@@ -177,7 +211,12 @@ mod tests {
     fn codec89_forged_matching_derive_is_not_authority() {
         let mut record = fixture();
         record.namespace = "foreign".into();
-        record.id = ProofGenerationId::derive(&record.namespace, record.admission, &record.stream, &record.proof);
+        record.id = ProofGenerationId::derive(
+            &record.namespace,
+            record.admission,
+            &record.stream,
+            &record.proof,
+        );
         assert!(decode(record).is_err());
     }
 
@@ -186,18 +225,32 @@ mod tests {
         let mut record = fixture();
         record.id = ProofGenerationId("forged".into());
         let trusted = record.clone();
-        assert!(decode_generation(record, ExpectedGeneration {
-            namespace: &trusted.namespace, id: &trusted.id, admission: trusted.admission,
-            stream: &trusted.stream, proof: &trusted.proof,
-            publication: &trusted.publication, prefix: &trusted.prefix,
-        }).is_err());
+        assert!(
+            decode_generation(
+                record,
+                ExpectedGeneration {
+                    namespace: &trusted.namespace,
+                    id: &trusted.id,
+                    admission: trusted.admission,
+                    stream: &trusted.stream,
+                    proof: &trusted.proof,
+                    publication: &trusted.publication,
+                    prefix: &trusted.prefix,
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn codec89_existing_metadata_and_slots_limits_are_inclusive() {
         let mut record = fixture();
-        record.metadata.push_str(&" ".repeat(METADATA_MAX - record.metadata.len()));
-        record.slots.push_str(&" ".repeat(METADATA_MAX - record.slots.len()));
+        record
+            .metadata
+            .push_str(&" ".repeat(METADATA_MAX - record.metadata.len()));
+        record
+            .slots
+            .push_str(&" ".repeat(METADATA_MAX - record.slots.len()));
         assert!(decode(record).is_ok());
     }
 
@@ -222,7 +275,9 @@ mod tests {
         // The writer accepted these bytes before codec extraction. Bounds
         // remain at the existing persisted-reader and capture guards.
         let metadata = "x".repeat(METADATA_MAX + 1);
-        assert_eq!(presentation_entry(&metadata, "[]", "null").unwrap(),
-            digest(&serde_json::to_vec(&(&metadata, "[]", "null")).unwrap()));
+        assert_eq!(
+            presentation_entry(&metadata, "[]", "null").unwrap(),
+            digest(&serde_json::to_vec(&(&metadata, "[]", "null")).unwrap())
+        );
     }
 }
