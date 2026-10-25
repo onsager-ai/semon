@@ -2185,7 +2185,7 @@ fn publication_storage_failure(error: crate::storage::StorageError) -> StoreErro
 }
 
 /// A rusqlite error, as the cache handles it.
-fn failure(error: rusqlite::Error) -> StoreError {
+pub(crate) fn failure(error: rusqlite::Error) -> StoreError {
     if is_busy(&error) {
         StoreError::Busy(error.to_string())
     } else if is_data_error(&error) {
@@ -2613,6 +2613,8 @@ impl IndexStore for SqliteStore {
         complete: bool,
     ) -> Result<(), StoreError> {
         let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
         let cached = self.discovery.publication.take();
         if !self.connection.is_autocommit() {
             self.discovery.recovery = None;
@@ -2621,11 +2623,15 @@ impl IndexStore for SqliteStore {
             ));
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
+        let started = measurements.start();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        measurements.record("immediate_transaction", started, 1);
+        let started = measurements.start();
         let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_before", started, 1);
         if cached.as_ref().is_some_and(|(old, inputs, done)| {
             *old == witness && inputs == paths && *done == complete
         }) {
@@ -2634,26 +2640,44 @@ impl IndexStore for SqliteStore {
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
             return Ok(());
         }
+        let started = measurements.start();
         if self.discovery.recovery != Some(witness) {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("qualification", started, 1);
         let before = tx.total_changes();
+        let started = measurements.start();
         crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
             .map_err(failure)?;
+        measurements.record("source_journal_inclusive", started, paths.len());
+        let started = measurements.start();
         let recovery_still_complete = if self.discovery.recovery == Some(witness) {
             crate::native_timing::discovery_count(|counts| counts.statements += 1);
             tx.query_row(configured::metadata_sql(&tx,"SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')","SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after')").map_err(failure)?,[],|r|r.get::<_,bool>(0)).map_err(failure)?
         } else {
             false
         };
+        measurements.record("recovery_marker", started, 1);
+        let started = measurements.start();
         let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        measurements.record("witness_after", started, 1);
+        let started = measurements.start();
         if committed.contract != witness.contract
             || committed.main_schema != witness.main_schema
             || committed.temp_schema != witness.temp_schema
         {
             require_current_sql(&tx).map_err(failure)?;
         }
+        measurements.record("contract_requalification", started, 1);
+        let started = measurements.start();
         tx.commit().map_err(failure)?;
+        measurements.record("commit", started, 1);
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&self.path),
+                "discovery_publication_work",
+            );
+        }
         // Only advance after rechecking the durable marker under this same
         // lock, including effects of authored or fault-injected triggers.
         if recovery_still_complete {
@@ -3248,7 +3272,9 @@ fn closed_catalog(
     Ok(true)
 }
 
+#[cfg(test)]
 const CATALOG_INSERT: &str = "INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES ";
+#[cfg(test)]
 const CATALOG_CONFLICT: &str = " ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
 
 #[derive(Clone, Copy)]
@@ -3256,6 +3282,8 @@ enum CatalogWriter {
     Auto,
     #[cfg(test)]
     RowWise,
+    #[cfg(test)]
+    OriginalPorts,
     #[cfg(test)]
     Traversal {
         owners: usize,
@@ -3272,6 +3300,8 @@ fn catalog_batch_bytes(
 ) -> Option<usize> {
     match writer {
         CatalogWriter::Auto => {}
+        #[cfg(test)]
+        CatalogWriter::OriginalPorts => return None,
         #[cfg(test)]
         CatalogWriter::Traversal { .. } => {}
         #[cfg(test)]
@@ -3300,56 +3330,6 @@ fn catalog_batch_bytes(
         }
     }
     Some(bytes)
-}
-
-fn put_catalog_batch(
-    transaction: &Transaction<'_>,
-    rows: &[crate::model::summary::CatalogRow],
-    metadata: &[String],
-) -> rusqlite::Result<Vec<bool>> {
-    let values = (0..rows.len())
-        .map(|position| {
-            let first = position * 6 + 1;
-            format!(
-                "(?{first},'current',?{},?{},?{},?{},?{})",
-                first + 1,
-                first + 2,
-                first + 3,
-                first + 4,
-                first + 5
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("{CATALOG_INSERT}{values}{CATALOG_CONFLICT} RETURNING session_key");
-    let mut statement = transaction.prepare(&sql)?;
-    for (position, (row, metadata)) in rows.iter().zip(metadata).enumerate() {
-        let first = position * 6 + 1;
-        statement.raw_bind_parameter(first, &row.key)?;
-        statement.raw_bind_parameter(first + 1, row.last.unwrap_or(0))?;
-        statement.raw_bind_parameter(first + 2, &row.harness)?;
-        statement.raw_bind_parameter(first + 3, &row.repo)?;
-        statement.raw_bind_parameter(first + 4, &row.parent)?;
-        statement.raw_bind_parameter(first + 5, metadata)?;
-    }
-    let mut changed = vec![false; rows.len()];
-    {
-        let mut returned = statement.raw_query();
-        while let Some(row) = returned.next()? {
-            let rusqlite::types::ValueRef::Text(key) = row.get_ref(0)? else {
-                return Err(rusqlite::Error::InvalidQuery);
-            };
-            let Some(position) = rows.iter().position(|row| row.key.as_bytes() == key) else {
-                return Err(rusqlite::Error::InvalidQuery);
-            };
-            if std::mem::replace(&mut changed[position], true) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-        }
-    }
-    // Finalize RETURNING before source/search work or its after-DML sample.
-    statement.finalize()?;
-    Ok(changed)
 }
 
 impl SqliteStore {
@@ -3571,12 +3551,30 @@ impl SqliteStore {
                 }
             }
             stage("fences", &transaction);
-            if !crate::history_projection::preserve_replacements(&transaction, publication)
-                .map_err(failure)?
-            {
+            #[cfg(test)]
+            let preserved = if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::history_projection::legacy_reference::preserve_replacements(
+                    &transaction,
+                    publication,
+                )
+            } else {
+                crate::history_projection::preserve_replacements(&transaction, publication)
+            };
+            #[cfg(not(test))]
+            let preserved =
+                crate::history_projection::preserve_replacements(&transaction, publication);
+            if !preserved.map_err(failure)? {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
+            #[cfg(test)]
+            if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::history_projection::publish_original(&transaction, publication)
+                    .map_err(failure)?;
+            } else {
+                crate::history_projection::publish(&transaction, publication).map_err(failure)?;
+            }
+            #[cfg(not(test))]
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             stage("history", &transaction);
             let mut metadata_measurements =
@@ -3629,17 +3627,23 @@ impl SqliteStore {
                     let mut member = transaction
                         .prepare("INSERT INTO catalog_members VALUES (?1)")
                         .map_err(failure)?;
+                    #[cfg(test)]
                     let single_sql = format!(
                         "{CATALOG_INSERT}(?1, 'current', ?2, ?3, ?4, ?5, ?6){CATALOG_CONFLICT}"
                     );
+                    #[cfg(test)]
                     let mut put = if batch_bytes.is_none() {
                         Some(transaction.prepare(&single_sql).map_err(failure)?)
                     } else {
                         None
                     };
+                    let current_effects =
+                        crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction);
+                    #[cfg(test)]
                     let mut remove_sources = transaction
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
+                    #[cfg(test)]
                     let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     metadata_measurements.record("statements", statements_started, 1);
                     let bulk_changed = if batch_bytes.is_some() {
@@ -3676,8 +3680,12 @@ impl SqliteStore {
                             sample.stage("overview_and_members", &transaction);
                         }
                         let started = metadata_measurements.start();
-                        let changed =
-                            put_catalog_batch(&transaction, rows, &metadata).map_err(failure)?;
+                        let changed = crate::storage::sqlite::publication::put_catalog_batch(
+                            &transaction,
+                            rows,
+                            &metadata,
+                        )
+                        .map_err(failure)?;
                         metadata_measurements.record("catalog_rows", started, rows.len());
                         if let Some(sample) = metadata_sample.as_mut() {
                             sample.stage("catalog_rows", &transaction);
@@ -3728,18 +3736,38 @@ impl SqliteStore {
                             if let Some(sample) = sample.as_mut() {
                                 sample.stage("member_insert", &transaction);
                             }
-                            let changed = put
-                                .as_mut()
-                                .expect("row_wise writer statement")
-                                .execute(params![
-                                    row.key,
-                                    row.last.unwrap_or(0),
-                                    row.harness,
-                                    row.repo,
-                                    row.parent,
-                                    metadata
-                                ])
-                                .map_err(failure)?;
+                            #[cfg(test)]
+                            let changed = if matches!(writer, CatalogWriter::OriginalPorts) {
+                                put.as_mut()
+                                    .expect("row_wise writer statement")
+                                    .execute(params![
+                                        row.key,
+                                        row.last.unwrap_or(0),
+                                        row.harness,
+                                        row.repo,
+                                        row.parent,
+                                        metadata
+                                    ])
+                                    .map_err(failure)?
+                            } else {
+                                usize::from(
+                                    crate::storage::catalog::CurrentPublicationStore::current(
+                                        &current_effects,
+                                        row,
+                                        metadata,
+                                    )
+                                    .map_err(failure)?,
+                                )
+                            };
+                            #[cfg(not(test))]
+                            let changed = usize::from(
+                                crate::storage::catalog::CurrentPublicationStore::current(
+                                    &current_effects,
+                                    row,
+                                    metadata,
+                                )
+                                .map_err(failure)?,
+                            );
                             if !rebuild_search
                                 && (changed > 0
                                     || initialize_search
@@ -3771,57 +3799,77 @@ impl SqliteStore {
                             search_rows.push(row);
                         }
                         if changed || previous_version.as_deref() != Some(&version) {
+                            #[cfg(test)]
                             let started = metadata_measurements.start();
-                            remove_sources.execute([&row.key]).map_err(failure)?;
-                            metadata_measurements.record("source_retirement", started, 1);
-                            if let Some(sample) = sample.as_mut() {
-                                sample.stage("source_retirement", &transaction);
-                            }
-                            for source in &row.sources {
-                                let started = metadata_measurements.start();
-                                let path = source.path.to_string_lossy();
-                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
-                                let parent = source.native_role.as_ref().and_then(|role| {
-                                    role.pointer("/Agent/parent")
-                                        .and_then(Value::as_str)
-                                        .or_else(|| {
-                                            (role
-                                                .pointer("/Codex/guardian_review")
-                                                .and_then(Value::as_bool)
-                                                != Some(true))
-                                            .then(|| {
-                                                role.pointer("/Codex/parent_thread")
-                                                    .and_then(Value::as_str)
+                            #[cfg(test)]
+                            if matches!(writer, CatalogWriter::OriginalPorts) {
+                                remove_sources.execute([&row.key]).map_err(failure)?;
+                                metadata_measurements.record("source_retirement", started, 1);
+                                if let Some(sample) = sample.as_mut() {
+                                    sample.stage("source_retirement", &transaction);
+                                }
+                                for source in &row.sources {
+                                    let started = metadata_measurements.start();
+                                    let path = source.path.to_string_lossy();
+                                    transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
+                                    let parent = source.native_role.as_ref().and_then(|role| {
+                                        role.pointer("/Agent/parent")
+                                            .and_then(Value::as_str)
+                                            .or_else(|| {
+                                                (role
+                                                    .pointer("/Codex/guardian_review")
+                                                    .and_then(Value::as_bool)
+                                                    != Some(true))
+                                                .then(|| {
+                                                    role.pointer("/Codex/parent_thread")
+                                                        .and_then(Value::as_str)
+                                                })
+                                                .flatten()
                                             })
-                                            .flatten()
-                                        })
-                                });
-                                if let Some(observations) = row
-                                    .query
-                                    .as_ref()
-                                    .and_then(|query| query["rows"].as_object())
-                                {
-                                    for observation in observations.values() {
-                                        if let Some(pid) = observation["summary"]["pid"].as_u64() {
-                                            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)",params![path.as_ref(),pid.to_string()]).map_err(failure)?;
+                                    });
+                                    if let Some(observations) = row
+                                        .query
+                                        .as_ref()
+                                        .and_then(|query| query["rows"].as_object())
+                                    {
+                                        for observation in observations.values() {
+                                            if let Some(pid) =
+                                                observation["summary"]["pid"].as_u64()
+                                            {
+                                                transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)",params![path.as_ref(),pid.to_string()]).map_err(failure)?;
+                                            }
                                         }
                                     }
+                                    if let Some(parent) = parent {
+                                        transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",params![path.as_ref(),row.harness,parent]).map_err(failure)?;
+                                    }
+                                    metadata_measurements.record("native_dependencies", started, 1);
+                                    let started = metadata_measurements.start();
+                                    put_source
+                                        .execute(params![
+                                            row.key,
+                                            row.harness,
+                                            source.native_id,
+                                            source.path.to_string_lossy()
+                                        ])
+                                        .map_err(failure)?;
+                                    metadata_measurements.record("catalog_sources", started, 1);
                                 }
-                                if let Some(parent) = parent {
-                                    transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",params![path.as_ref(),row.harness,parent]).map_err(failure)?;
-                                }
-                                metadata_measurements.record("native_dependencies", started, 1);
-                                let started = metadata_measurements.start();
-                                put_source
-                                    .execute(params![
-                                        row.key,
-                                        row.harness,
-                                        source.native_id,
-                                        source.path.to_string_lossy()
-                                    ])
-                                    .map_err(failure)?;
-                                metadata_measurements.record("catalog_sources", started, 1);
+                            } else {
+                                crate::storage::catalog::publish_current_sources_measured(
+                                    &current_effects,
+                                    row,
+                                    &mut metadata_measurements,
+                                )
+                                .map_err(failure)?;
                             }
+                            #[cfg(not(test))]
+                            crate::storage::catalog::publish_current_sources_measured(
+                                &current_effects,
+                                row,
+                                &mut metadata_measurements,
+                            )
+                            .map_err(failure)?;
                         } else if let Some(sample) = sample.as_mut() {
                             sample.stage("source_retirement", &transaction);
                         }
@@ -3874,6 +3922,9 @@ impl SqliteStore {
                     measured.then_some(&mut search_observation),
                 )
                 .map_err(failure)?;
+            } else if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::catalog_search::publish_current_rows_original(&transaction, &search_rows)
+                    .map_err(failure)?;
             } else {
                 crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                     .map_err(failure)?;
@@ -3909,6 +3960,7 @@ impl SqliteStore {
             }
             stage("search", &transaction);
             let generation = {
+                let mut return_component_generation = None;
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
                 if claims.is_some() {
@@ -3920,12 +3972,13 @@ impl SqliteStore {
                             |row| row.get(0),
                         )
                         .map_err(failure)?;
-                    digest.update(previous.as_deref().unwrap_or("").as_bytes());
-                    digest.update(epoch.as_bytes());
-                    for value in &metadata {
-                        digest.update((value.len() as u64).to_le_bytes());
-                        digest.update(value.as_bytes());
-                    }
+                    return_component_generation =
+                        Some(crate::storage::catalog::component_generation(
+                            &version,
+                            previous.as_deref(),
+                            &epoch,
+                            &metadata,
+                        ));
                 } else {
                     for table in ["session_catalog", "session_history_catalog"] {
                         digest.update(table.as_bytes());
@@ -3942,7 +3995,7 @@ impl SqliteStore {
                         }
                     }
                 }
-                format!("{:x}", digest.finalize())
+                return_component_generation.unwrap_or_else(|| format!("{:x}", digest.finalize()))
             };
             if previous.as_deref() != Some(&generation)
                 || previous_version.as_deref() != Some(&version)
@@ -3964,48 +4017,22 @@ impl SqliteStore {
             }
             stage("generation", &transaction);
             if let Some(projections) = publication.transcripts {
-                let rows_by_key: BTreeMap<_, _> =
-                    rows.iter().map(|row| (row.key.as_str(), row)).collect();
-                for projection in projections {
-                    let Some(row) = rows_by_key.get(projection.key.as_str()) else {
-                        continue;
-                    };
-                    let metadata: Vec<String> = projection
-                        .slots
-                        .iter()
-                        .map(json)
-                        .collect::<Result<_, _>>()
-                        .map_err(failure)?;
-                    let source_generation = crate::retention::source_generation(&row.sources)
-                        .map_err(|_| {
-                            StoreError::Data("source projection metadata cannot serialize".into())
-                        })?;
-                    let slot_generation =
-                        crate::slot_projection::generation(&metadata, &row.sources)
-                            .map_err(|error| StoreError::Data(error.to_string()))?;
-                    let changed = transaction.execute(
-                        "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
-                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
-                    if changed > 0 || projection.repair {
-                        transaction
-                            .execute(
-                                "DELETE FROM session_slots WHERE session_key=?1",
-                                [&projection.key],
-                            )
-                            .map_err(failure)?;
-                        let mut put = transaction.prepare("INSERT INTO session_slots(session_key,slot,metadata) VALUES (?1,?2,?3)").map_err(failure)?;
-                        for (slot, metadata) in metadata.iter().enumerate() {
-                            put.execute(params![
-                                projection.key,
-                                i64::try_from(slot).map_err(|_| StoreError::Data(
-                                    "slot index exceeds SQL range".into()
-                                ))?,
-                                metadata
-                            ])
-                            .map_err(failure)?;
-                        }
-                    }
+                #[cfg(test)]
+                if matches!(writer, CatalogWriter::OriginalPorts) {
+                    original_slot_publication_reference(&transaction, rows, projections)?;
+                } else {
+                    crate::storage::catalog::publish_slot_rows(
+                        &crate::storage::sqlite::publication::SlotWriter::unbound(&transaction),
+                        rows,
+                        projections,
+                    )?;
                 }
+                #[cfg(not(test))]
+                crate::storage::catalog::publish_slot_rows(
+                    &crate::storage::sqlite::publication::SlotWriter::unbound(&transaction),
+                    rows,
+                    projections,
+                )?;
                 if claims.is_none() {
                     transaction.execute("DELETE FROM session_slots WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
                     transaction.execute("DELETE FROM session_slot_projections WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
@@ -5035,7 +5062,11 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         reprice::file_schema(false, false)
     };
     Ok([
-        SLOT_SCHEMA,
+        if p.semantic_stage {
+            crate::storage::sqlite::publication::SLOT_SCHEMA
+        } else {
+            SLOT_SCHEMA
+        },
         catalog_schema(p.catalog),
         semantic_stage::support_schema(p.semantic_support, p.semantic_stage),
         metadata_schema(p.metadata),
@@ -5058,8 +5089,16 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         crate::overview::SCHEMA,
         crate::causal_trace::header_schema(p.trace),
         crate::causal_trace::SCHEMA,
-        crate::history_projection::SCHEMA,
-        crate::catalog_search::SCHEMA,
+        if p.semantic_stage {
+            crate::storage::sqlite::history::SCHEMA
+        } else {
+            crate::history_projection::SCHEMA
+        },
+        if p.semantic_stage {
+            crate::storage::sqlite::search::SCHEMA
+        } else {
+            crate::catalog_search::SCHEMA
+        },
         crate::storage::sqlite::changes::schema(p.metadata, p.catalog),
         reprice::queue_schema(p.pricing_queue),
         reprice::catalog_schema(p.pricing_queue, p.catalog, p.metadata),
@@ -6687,11 +6726,13 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
     copied_usage_sql(transaction, "", "")?;
     semantic_stage::support_sql(transaction, "", "")?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     // The source ledger fences raw bytes; the sidecar is an independent
     // interpretation dependency. Re-encoding derived proofs changes neither.
     let semantic_change = expected != Some(ledger)
@@ -6703,6 +6744,12 @@ fn write_index_changes_measured(
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "relocation_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("relocation")?;
     let started = measurements.start();
@@ -6727,6 +6774,7 @@ fn write_index_changes_measured(
     #[cfg(test)]
     configured::effect("native_usage")?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(semantic_stage::support_sql(transaction,
         "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
         "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')")?, [path])?;
@@ -6752,10 +6800,17 @@ fn write_index_changes_measured(
         )?;
     }
     measurements.record("dependencies", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "dependencies_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("dependencies")?;
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(semantic_stage::support_sql(transaction,
         "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
         "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')")?, [path])?;
@@ -6776,6 +6831,12 @@ fn write_index_changes_measured(
         }
     }
     measurements.record("semantic_dependencies", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "semantic_dependencies_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("semantic_dependencies")?;
     let started = measurements.start();
@@ -6801,6 +6862,7 @@ fn write_index_changes_measured(
         measurements.record("representation_repair", started, 1);
     }
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     transaction.execute(
         semantic_stage::support_sql(transaction,
             "DELETE FROM session_source_mutations WHERE source_path=?1",
@@ -6808,6 +6870,12 @@ fn write_index_changes_measured(
         [path],
     )?;
     measurements.record("mutation_retirement", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "mutation_retirement_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("mutation_retirement")?;
     #[cfg(test)]
@@ -6818,6 +6886,21 @@ fn write_index_changes_measured(
             .with(|n| n.set(n.get() + (written_after - written_before) as u64));
     }
     Ok(())
+}
+
+// Actual SQLite row changes (including triggers), distinct from leaf input
+// units. Reads are disabled together with timing and are inclusive per leaf.
+fn record_writer_rows(
+    transaction: &Transaction<'_>,
+    measurements: &mut crate::native_timing::Measurements,
+    label: &'static str,
+    before: Option<u64>,
+) {
+    if let Some(before) = before {
+        let rows = usize::try_from(transaction.total_changes().saturating_sub(before))
+            .unwrap_or(usize::MAX);
+        measurements.count(label, rows);
+    }
 }
 
 /// Upserts `path`'s `files` row, then writes its child rows where `index`
@@ -6889,6 +6972,7 @@ fn write_file(
     #[cfg(test)]
     configured::effect("proof_sidecar")?;
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     if started.is_some() {
         chunk_proofs::write_measured(
             transaction,
@@ -6901,6 +6985,12 @@ fn write_file(
         chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     }
     measurements.record("proof_chunks", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "proof_chunks_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("proof_chunks")?;
     let started = measurements.start();
@@ -6975,6 +7065,7 @@ fn write_file(
     };
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     write_tree_summary(
         transaction,
         path,
@@ -6983,6 +7074,12 @@ fn write_file(
         index.native_usage_observations.is_some(),
     )?;
     measurements.record("proof_tree", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "proof_tree_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
@@ -7052,6 +7149,7 @@ fn write_file(
     measurements.count("signal_records", signals.len());
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     let mut put = transaction.prepare_cached(copied_usage_sql(
         transaction,
         PUT_USAGE,
@@ -7078,10 +7176,12 @@ fn write_file(
         }
     }
     measurements.record("usage", started, changes.usage.len());
+    record_writer_rows(transaction, measurements, "usage_written_rows", rows_before);
     #[cfg(test)]
     configured::effect("usage")?;
 
     let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
     let mut put = transaction.prepare_cached(copied_usage_sql(
         transaction,
         PUT_CODEX_USAGE,
@@ -7125,6 +7225,12 @@ fn write_file(
         },
     )?;
     measurements.record("codex_usage", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "codex_usage_written_rows",
+        rows_before,
+    );
     #[cfg(test)]
     configured::effect("codex_usage")?;
     measurements.count("codex_usage_records", codex_usage_events.len());
@@ -8932,6 +9038,78 @@ mod tests {
         );
         drop(disabled);
         drop(enabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_typed_custody_and_slots_match_original_publication_digest() {
+        use sha2::{Digest, Sha256};
+        let root = scratch("typed-publication-original-parity");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 4, false);
+        let (mut typed, mut original) = catalog_pair(&options);
+        for round in 0..3 {
+            if round == 1 {
+                // Cross-harness replacement exercises original custody and
+                // its exact recipe/header bytes before Current is overwritten.
+                rows[0].harness = if rows[0].harness == "claude" {
+                    "codex"
+                } else {
+                    "claude"
+                }
+                .into();
+                rows[0].name = "replaced native owner".into();
+            }
+            let left =
+                catalog_write(&mut typed, &rows, &projections, false, CatalogWriter::Auto).unwrap();
+            let right = catalog_write(
+                &mut original,
+                &rows,
+                &projections,
+                false,
+                CatalogWriter::OriginalPorts,
+            )
+            .unwrap();
+            assert_eq!(left, right);
+            assert_eq!(left.0, Outcome::Written);
+            let a = catalog_comparable_state(&typed.connection);
+            let b = catalog_comparable_state(&original.connection);
+            assert_eq!(a, b, "round {round}: every durable table and digest");
+            assert_eq!(
+                Sha256::digest(format!("{a:?}").as_bytes()),
+                Sha256::digest(format!("{b:?}").as_bytes())
+            );
+        }
+        for table in [
+            "session_catalog",
+            "session_catalog_sources",
+            "catalog_native_dependencies",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+        ] {
+            assert!(
+                typed
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap()
+                    > 0,
+                "the frozen oracle must exercise {table}"
+            );
+        }
+        assert!(
+            typed
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM session_history_slots WHERE session_key=?1",
+                    [&rows[0].key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                > 0
+        );
+        drop(typed);
+        drop(original);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -11734,4 +11912,53 @@ mod summary_tests {
         drop(store);
         fs::remove_file(path).unwrap();
     }
+}
+
+// Frozen pre-extraction slot publisher, used only by the full-Catalog CI oracle.
+#[cfg(test)]
+fn original_slot_publication_reference(
+    transaction: &rusqlite::Transaction<'_>,
+    rows: &[crate::model::summary::CatalogRow],
+    projections: &[crate::slot_projection::Projection],
+) -> Result<(), StoreError> {
+    let rows_by_key: BTreeMap<_, _> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
+    for projection in projections {
+        let Some(row) = rows_by_key.get(projection.key.as_str()) else {
+            continue;
+        };
+        let metadata: Vec<String> = projection
+            .slots
+            .iter()
+            .map(json)
+            .collect::<Result<_, _>>()
+            .map_err(failure)?;
+        let source_generation = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StoreError::Data("source projection metadata cannot serialize".into()))?;
+        let slot_generation = crate::slot_projection::generation(&metadata, &row.sources)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let changed = transaction.execute(
+                        "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
+                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
+        if changed > 0 || projection.repair {
+            transaction
+                .execute(
+                    "DELETE FROM session_slots WHERE session_key=?1",
+                    [&projection.key],
+                )
+                .map_err(failure)?;
+            let mut put = transaction
+                .prepare("INSERT INTO session_slots(session_key,slot,metadata) VALUES (?1,?2,?3)")
+                .map_err(failure)?;
+            for (slot, metadata) in metadata.iter().enumerate() {
+                put.execute(params![
+                    projection.key,
+                    i64::try_from(slot)
+                        .map_err(|_| StoreError::Data("slot index exceeds SQL range".into()))?,
+                    metadata
+                ])
+                .map_err(failure)?;
+            }
+        }
+    }
+    Ok(())
 }

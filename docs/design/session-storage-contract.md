@@ -1215,3 +1215,122 @@ finish/select/replay, competing Catalog generation tests, immutable retained
 snapshots/leases/GC/Raw custody, all other owner ports, PostgreSQL, supported-store
 migration/cutover/rollback and Hub #313 remain required. The cold full-suite gate
 and #380 image acceptance remain open; #477 merge stays held.
+
+Worker29 adds a private initial-Current publication candidate, not full S1B
+qualification. The admitted composite owner supplies an IMMEDIATE transaction
+that checks Source admission/physical inventory, stage epoch/runtime, Catalog
+base generation, journal revision, exact claims, staged completion and current
+Raw/role witnesses before writes. Current rows and their existing scoped change
+triggers, an append-only proof/claim inventory, exact-revision ACKs and the bound
+head commit together. Four fault points cover rows, proof, ACK and head. The
+component-generation hash recipe is shared with the legacy publisher; its
+History/search/slot publication body has NOT been ported or duplicated.
+
+Private finish removes only the matching namespace's working stage after all
+publication/ACK flags are complete. Native-key selection and bounded no-relation
+endpoint replay now have scoped implementations. Identical publication retry
+is read-only, and a new stage over unchanged Raw retains the generation digest.
+The unbound transitional head still refuses enrolled stores. Public factories,
+configuration and qualification flags remain closed.
+
+This candidate refuses replacement of differing existing Current metadata until
+retained History is ported. It also refuses transcripts, PID/relations, lineage,
+native-parent and withdrawal payloads; non-native-key selectors and incident
+relation replay remain unported. This is therefore NOT the complete existing
+publication/recipe algorithm and NOT S1B acceptance. Generic partial/closed/full
+Catalog writers, slot/search/history/description/trace owners and the typed
+multi-Source proof/repair reader remain fenced. Previously authored private
+profiles with unconditional Catalog fences are not upgraded implicitly.
+
+Five new explicit CI cases cover actual two-Source ingest/stage/publication,
+competing epochs and stale begin/publish zero-write snapshots, rollback at each
+commit step, Raw replay idempotence and preservation of the unbound head refusal.
+No local checks ran; CI and independent acceptance are pending. Worker count is
+29 without reset. Worker28 cold witness/instrumentation, PG/Cargo, UI and Hub are
+untouched. Full-domain S1B, S2-S4, #479 integration, migration/cutover/rollback and
+Hub #313 remain required; #380 completion still gates #477 merge.
+
+### Worker32: shared original custody and slot publication, S1B still unfinished
+
+The private admitted publisher now expands a published Current path to every
+Current source of that owner within the same namespace, instead of refusing
+existing owners. The existing reducer consumes those sources again; unchanged
+Raw can reach publication after finish. This does not port Claude lineage,
+incident edges or the complete native owner-closure domain.
+
+`storage::catalog::OriginalHistoryStore` carries typed original metadata,
+projection headers, bounded recipe-copy/checkpoint operations and completion.
+The original custody algorithm (64 records / 1 MiB per step, oversized byte
+parts, changed-witness reset and immutable original header) is shared by the
+legacy unbound publisher and the admitted namespace adapter. The legacy policy
+still selects cross-harness replacements; the private scoped policy also
+preserves differing Current metadata before overwriting it. Deferred custody
+commits only bounded original-copy progress; Current, generation and claims
+remain unchanged until custody finishes. This is original custody, not S2
+immutable history for every successive published generation.
+
+`SlotPublicationStore` similarly shares the existing slot serialization,
+source-generation/digest recipe and conditional replacement. Its SQLite
+adapter owns distinct authored unbound/scoped statements. The admitted path
+bounds projection owners, slots and encoded bytes, requires source membership,
+and binds projections into its publication proof and changed-generation recipe.
+These are private transaction ports; full model/transcript preparation through
+the configured backend is still missing. Public factories still expose no
+semantic capability and all public qualification flags remain zero.
+
+Two explicit CI cases were added: real A/B ingest followed by A append,
+replacement, retained metadata, exact claim ACK, new hints, fault rollback and
+stale-publisher whole-DB equality; and complete unbound publication comparing
+all durable rows/digests against frozen pre-extraction custody/slot SQL, including
+cross-harness replacement and nonempty native recipes. Existing custody paging
+and replay tests remain in the CI list. No observed pass is claimed here.
+
+Search publication, complete Current/source/native-dependency effects, composite
+History composition, complete selectors/incident replay, nonprimitive identity,
+PID/lineage/native-parent/withdrawal and full producer integration remain open.
+The full legacy publication algorithm has therefore not yet been extracted.
+S1B is unfinished. S2-S4, PG integration without SQLite, migration/cutover/
+rollback, Hub #313 and fresh independent acceptance remain required. #380 still
+blocks #477 main merge. Thermal readings are absent: no local checks ran.
+
+### Worker34: authored publication families and shared effects (unqualified)
+
+The five Worker32 configured publication failures have a concrete common
+physical mismatch: `authored_storage_ddl` selected singleton History and slot
+schemas even for the fully composite private semantic profile, while the new
+admitted effects explicitly queried `main.*` with `namespace`. Fresh semantic
+profiles now select independently authored namespace-keyed History, slot and
+search DDL. Other profiles retain their original DDL. Publication checks these
+family keys before payload effects; existing private profiles are not upgraded.
+Test-only diagnostics print a publication phase and optional SQLite extended
+code, never the SQLite message, SQL, paths or content. Production error mapping
+is unchanged.
+
+`CurrentPublicationStore` owns authored Current/source/dependency statements;
+one `publish_current_sources` loop retains the original retirement, dependency
+clearing, PID/parent derivation and source insertion order. The legacy batch
+Current statement has moved into the adapter. `SearchPublicationStore` supplies
+cohort/member/removal/document/posting/count effects to the existing search
+algorithm, preserving its normalization, field limits, tokenization, posting
+order and per-cohort counts. `CompositeHistoryStore` supplies physical effects
+to the original missing-source recipe composition. Both publishers use these
+algorithms. Only test code retains frozen original publication paths for the
+independent durable-row/digest comparison. The comparison requires nonempty
+Current/source, native-dependency, search and original-recipe families.
+
+Scoped Current, History, slots, search, proof, ACK and change hints stay in the
+same fenced IMMEDIATE transaction. The new after-search fault is covered by
+whole-database rollback and the existing stale/replacement tests. Additional
+private two-Source coverage checks search documents/counts, replay and foreign
+namespace equality. CI results remain pending; these fixtures are not the
+required full configured model/Query integration test.
+
+S1B remains unfinished: the real model preparation path still needs a coherent
+typed runtime/producer seam; record still refuses nonprimitive projection
+payloads, and exact staged primitive rows remain required at publication.
+Full affected-owner lifecycle retirement, complete selectors/incident replay,
+nonprimitive owner closure and the multi-Source proof/repair reader remain.
+Public qualification is 0 and the public factory retains `semantic=None`.
+Immutable generations/leases/GC/Raw custody, remaining owners, public backend
+qualification, full PG parity/no hidden SQLite, migration/cutover/rollback and
+Hub #313 remain required. #380 must complete before #477 merges.

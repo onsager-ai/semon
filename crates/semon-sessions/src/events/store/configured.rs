@@ -127,6 +127,74 @@ pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct WriterShapeMeasurements {
+    core_calls: usize,
+    meta_calls: usize,
+    core_us: u128,
+    meta_us: u128,
+}
+
+thread_local! {
+    static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<WriterShapeMeasurements>> = const { std::cell::RefCell::new(None) };
+}
+
+// Observation only. In particular, this guard caches no shape result: every
+// existing selector still executes its complete qualification query.
+pub(super) struct WriterShapeProbe(Option<WriterShapeMeasurements>);
+
+impl WriterShapeProbe {
+    pub(super) fn new(enabled: bool) -> Self {
+        Self(
+            WRITER_SHAPE_MEASUREMENTS
+                .with(|cell| cell.replace(enabled.then(WriterShapeMeasurements::default))),
+        )
+    }
+
+    fn start(label: &'static str) -> Option<std::time::Instant> {
+        WRITER_SHAPE_MEASUREMENTS.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let measurements = cell.as_mut()?;
+            match label {
+                "core_shape_calls" => measurements.core_calls += 1,
+                "meta_shape_calls" => measurements.meta_calls += 1,
+                _ => unreachable!("fixed writer shape label"),
+            }
+            Some(std::time::Instant::now())
+        })
+    }
+
+    fn finish(label: &'static str, started: Option<std::time::Instant>) {
+        WRITER_SHAPE_MEASUREMENTS.with(|cell| {
+            if let Some(measurements) = cell.borrow_mut().as_mut() {
+                let us = started.map_or(0, |started| started.elapsed().as_micros());
+                match label {
+                    "core_shape_query" => measurements.core_us += us,
+                    "meta_shape_query" => measurements.meta_us += us,
+                    _ => unreachable!("fixed writer shape label"),
+                }
+            }
+        });
+    }
+}
+
+impl Drop for WriterShapeProbe {
+    fn drop(&mut self) {
+        if let Some(measurements) =
+            WRITER_SHAPE_MEASUREMENTS.with(|cell| cell.replace(self.0.take()))
+        {
+            // Keep this diagnostic separate from cleanup's test recorder.
+            eprintln!(
+                "semon sessions native: writer_shape core_shape_calls={} core_shape_query_us={} meta_shape_calls={} meta_shape_query_us={}",
+                measurements.core_calls,
+                measurements.core_us,
+                measurements.meta_calls,
+                measurements.meta_us
+            );
+        }
+    }
+}
+
 /// Select an authored statement for the physical family shape, never rewrite
 /// SQL or retry errors against another schema. Singleton stores still support
 /// read-only admission/assignment; configured writes require validate_core.
@@ -135,7 +203,10 @@ pub(super) fn sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    let started = WriterShapeProbe::start("core_shape_calls");
+    let composite = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get::<_, bool>(0));
+    WriterShapeProbe::finish("core_shape_query", started);
+    let composite = composite?;
     Ok(if composite { scoped } else { legacy })
 }
 
@@ -151,13 +222,16 @@ pub(crate) fn metadata_sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
+    let started = WriterShapeProbe::start("meta_shape_calls");
     crate::native_timing::discovery_count(|counts| {
         counts.schema_probes += 1;
         counts.statements += 1;
     });
-    let (columns, namespace, key, values): (i64, i64, i64, i64) = db.prepare_cached(
+    let shape = db.prepare_cached(
         "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
-    )?.query_row([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    )?.query_row([], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)));
+    WriterShapeProbe::finish("meta_shape_query", started);
+    let (columns, namespace, key, values) = shape?;
     let composite = match (columns, namespace, key, values) {
         (2, 0, 1, 1) => false,
         (3, 1, 2, 1) => true,
@@ -183,6 +257,9 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
     "native_tree_failure:",
     "native_tree_summary:",
     "slot_upgrade_selected:",
+    "history_transfer:",
+    "history_original_header:",
+    "overview_needed:",
 ];
 const STORE_METADATA_KEYS: &[&str] = &[
     "cache_version",
@@ -617,7 +694,35 @@ impl NativeOwnership {
                 // Unported Catalog, history, descriptions, trace and pricing
                 // consumers are fenced even on this private fresh profile.
                 for operation in ["INSERT", "UPDATE", "DELETE"] {
-                    tx.execute_batch(&format!("CREATE TRIGGER storage_private_unported_{index}_{operation} BEFORE {operation} ON \"{}\" BEGIN SELECT RAISE(ABORT,'private native family unported'); END;",table.replace('"',"\"\""))).map_err(failed)?;
+                    let condition = if [
+                        "session_catalog",
+                        "session_catalog_sources",
+                        "session_catalog_changes",
+                        "session_history_catalog",
+                        "session_history_projections",
+                        "session_history_slots",
+                        "session_history_slot_parts",
+                        "session_slot_projections",
+                        "session_slots",
+                        "session_search_coverage",
+                        "session_search_documents",
+                        "session_search_memberships",
+                        "session_search_counts",
+                    ]
+                    .contains(&table.as_str())
+                    {
+                        let scope = match operation {
+                            "UPDATE" => {
+                                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"
+                            }
+                            "DELETE" => "OLD.namespace IS NOT semon_namespace()",
+                            _ => "NEW.namespace IS NOT semon_namespace()",
+                        };
+                        format!("WHEN semon_semantic_publisher()<>1 OR {scope}")
+                    } else {
+                        String::new()
+                    };
+                    tx.execute_batch(&format!("CREATE TRIGGER storage_private_unported_{index}_{operation} BEFORE {operation} ON \"{}\" {condition} BEGIN SELECT RAISE(ABORT,'private native family unported'); END;",table.replace('"',"\"\""))).map_err(failed)?;
                 }
             }
         }
@@ -692,7 +797,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','slot_projection_catalog_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -2446,9 +2551,15 @@ mod tests {
         );
         assert_eq!(store.catalog_claims(&paths).unwrap(), claims);
         assert_eq!(store.session_catalog_generation().unwrap(), generation);
-        assert!(
-            store.semantic_batch(64).is_err(),
-            "publication remains unqualified"
+        let publication = store.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(publication.phase, Phase::Publication);
+        let before = f.state();
+        let mut public = crate::storage::sqlite::open_configured_index(&f.config).unwrap();
+        assert!(public.begin_semantic_stage(&paths, "public", true).is_err());
+        assert_eq!(f.state(), before);
+        assert_eq!(
+            crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
+            0
         );
     }
 
@@ -2564,6 +2675,447 @@ mod tests {
             assert!(!receipt.replayed);
         }
         (a, b, b_raw)
+    }
+
+    fn namespace_state(
+        f: &Fixture,
+        namespace: &str,
+    ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        let db = f.db();
+        shared_state(f)
+            .into_iter()
+            .map(|(table, rows)| {
+                let columns = db
+                    .prepare(&format!(
+                        "PRAGMA main.table_info(\"{}\")",
+                        table.replace('"', "\"\"")
+                    ))
+                    .unwrap()
+                    .query_map([], |r| r.get::<_, String>(1))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                let index = columns.iter().position(|name| name == "namespace");
+                let rows = rows
+                    .into_iter()
+                    .filter(|row| {
+                        index.is_some_and(|index| {
+                            row.get(index) == Some(&rusqlite::types::Value::Text(namespace.into()))
+                        })
+                    })
+                    .collect();
+                (table, rows)
+            })
+            .collect()
+    }
+
+    fn publication_ready(
+        store: &mut dyn IndexStore,
+        path: &Path,
+        runtime: &str,
+    ) -> (
+        crate::model::relation_stage::Batch,
+        crate::model::PreparedSources,
+    ) {
+        use crate::model::relation_stage::Phase;
+        let paths = vec![path.to_string_lossy().into_owned()];
+        assert_eq!(
+            store.begin_semantic_stage(&paths, runtime, true).unwrap(),
+            Outcome::Written
+        );
+        for _ in 0..128 {
+            let batch = store.semantic_batch(64).unwrap().unwrap();
+            if batch.paths.is_empty() {
+                continue;
+            }
+            let mut prepared = semantic_prepared_path(store, path, &batch);
+            match batch.phase {
+                Phase::Indexing => {}
+                Phase::Identity => add_primitive_endpoint(&mut prepared),
+                Phase::Relations => {}
+                Phase::Publication => {
+                    prepared.rows = batch
+                        .context
+                        .endpoints
+                        .values()
+                        .map(|e| e.row.clone())
+                        .collect();
+                    assert_eq!(prepared.rows.len(), 1);
+                    return (batch, prepared);
+                }
+            }
+            assert_eq!(
+                store.record_semantic_batch(&batch, &prepared).unwrap(),
+                Outcome::Written
+            );
+        }
+        panic!("bounded semantic stage did not reach publication")
+    }
+
+    #[test]
+    fn configured_semantic_two_source_publication_ack_finish_and_head() {
+        let (a, b, b_raw) = same_db_sources();
+        let mut stores = [owned_semantic(&a.config), owned_semantic(&b)];
+        for (i, path) in [&a.raw, &b_raw].into_iter().enumerate() {
+            let (batch, prepared) = publication_ready(&mut *stores[i], path, "publish");
+            let native = prepared.rows[0].native_ids[0].clone();
+            let selected = stores[i]
+                .semantic_select(
+                    batch.epoch,
+                    &crate::model::relation_stage::Selector::NativeKey {
+                        native: native.clone(),
+                        harness: "codex".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(selected.key, Some(native));
+            let owners = vec![prepared.rows[0].key.clone()];
+            assert_eq!(
+                stores[i]
+                    .semantic_replay_page(batch.epoch, &owners, "")
+                    .unwrap()
+                    .endpoints
+                    .len(),
+                1
+            );
+            let (outcome, generation) = stores[i]
+                .publish_semantic_catalog(&batch, &prepared)
+                .unwrap();
+            assert_eq!(outcome, Outcome::Written);
+            assert!(generation.is_some());
+            assert_eq!(stores[i].session_catalog_generation().unwrap(), generation);
+            assert!(
+                stores[i]
+                    .catalog_claims(&batch.paths)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, claim)| claim.is_none())
+            );
+            assert_eq!(
+                stores[i].finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(stores[i].session_catalog_generation().unwrap(), generation);
+        }
+        let db = a.db();
+        for (ns, key) in [("source-a", "native-session"), ("source-b", "native-b")] {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                    params![ns, key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog_changes WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    > 0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key<>?2",
+                    params![ns, key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    fn publication_snapshot_digest(f: &Fixture) -> String {
+        use sha2::{Digest, Sha256};
+        // Ordered tables, rows and typed values give a deterministic witness.
+        format!(
+            "{:x}",
+            Sha256::digest(format!("{:?}", shared_state(f)).as_bytes())
+        )
+    }
+
+    #[test]
+    fn configured_semantic_competing_publisher_and_begin_zero_writes() {
+        let (a, _, _) = same_db_sources();
+        let mut stale = owned_semantic(&a.config);
+        let (old, old_prepared) = publication_ready(&mut *stale, &a.raw, "old");
+        let mut winner = owned_semantic(&a.config);
+        let (current, prepared) = publication_ready(&mut *winner, &a.raw, "winner");
+        assert!(current.epoch > old.epoch);
+        assert_eq!(
+            winner
+                .publish_semantic_catalog(&current, &prepared)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let before = shared_state(&a);
+        let digest = publication_snapshot_digest(&a);
+        assert_eq!(
+            stale
+                .publish_semantic_catalog(&old, &old_prepared)
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(
+            stale
+                .begin_semantic_stage(&old.paths, "stale-begin", true)
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(publication_snapshot_digest(&a), digest);
+    }
+
+    #[test]
+    fn configured_semantic_publication_faults_rollback_ack_proof_and_hints() {
+        let (a, _, _) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "fault");
+        for fault in [
+            "semantic_publish_rows",
+            "semantic_publish_search",
+            "semantic_publish_proof",
+            "semantic_publish_ack",
+            "semantic_publish_head",
+        ] {
+            let before = shared_state(&a);
+            FAIL_EFFECT.with(|point| point.set(Some(fault)));
+            assert!(
+                store.publish_semantic_catalog(&batch, &prepared).is_err(),
+                "{fault}"
+            );
+            FAIL_EFFECT.with(|point| point.set(None));
+            assert_eq!(shared_state(&a), before, "{fault}");
+        }
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
+    }
+
+    #[test]
+    fn configured_semantic_publication_replay_is_idempotent() {
+        let (a, _, _) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "replay");
+        let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
+        let before = shared_state(&a);
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap(),
+            first
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(
+            store.finish_semantic_stage(batch.epoch).unwrap(),
+            Outcome::Written
+        );
+        let (next, prepared) = publication_ready(&mut *store, &a.raw, "replay-again");
+        assert_eq!(
+            store.publish_semantic_catalog(&next, &prepared).unwrap(),
+            first
+        );
+        assert_eq!(store.session_catalog_generation().unwrap(), first.1);
+    }
+
+    #[test]
+    fn configured_semantic_replacement_retains_history_and_fences_stale_publisher() {
+        use crate::storage::native_events::NativeEventStore;
+        use std::io::Write;
+        let (a, b, b_raw) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let mut other = owned_semantic(&b);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "original");
+        let original = prepared.rows[0].clone();
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
+        store.finish_semantic_stage(batch.epoch).unwrap();
+        let (batch, prepared) = publication_ready(&mut *other, &b_raw, "other");
+        assert_eq!(
+            other.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
+        other.finish_semantic_stage(batch.epoch).unwrap();
+        let b_before = namespace_state(&a, "source-b");
+        let hints_before: i64 = a
+            .db()
+            .query_row(
+                "SELECT count(*) FROM session_catalog_changes WHERE namespace='source-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut raw = fs::OpenOptions::new().append(true).open(&a.raw).unwrap();
+        writeln!(raw, "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"continued replacement\"}}]}}}}").unwrap();
+        drop(raw);
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let mut cache = EventCache::open_semantic(capability).unwrap();
+        cache.ingest(&"b".repeat(64), &a.raw, "codex").unwrap();
+        drop(cache);
+        let mut stale = owned_semantic(&a.config);
+        let (old_batch, old_prepared) = publication_ready(&mut *stale, &a.raw, "stale-replacement");
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "replacement");
+        assert_ne!(prepared.rows[0].sources, original.sources);
+        assert!(
+            prepared
+                .claims
+                .iter()
+                .any(|(_, revision)| revision.is_some())
+        );
+        for fault in [
+            "semantic_publish_history",
+            "semantic_publish_slots",
+            "semantic_publish_rows",
+            "semantic_publish_search",
+            "semantic_publish_proof",
+            "semantic_publish_ack",
+            "semantic_publish_head",
+        ] {
+            let before = shared_state(&a);
+            FAIL_EFFECT.with(|point| point.set(Some(fault)));
+            assert!(
+                store.publish_semantic_catalog(&batch, &prepared).is_err(),
+                "{fault}"
+            );
+            FAIL_EFFECT.with(|point| point.set(None));
+            assert_eq!(shared_state(&a), before, "{fault}");
+        }
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
+        let db = a.db();
+        let retained: String = db.query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-a' AND session_key=?1",[&original.key],|r|r.get(0)).unwrap();
+        let mut expected = original.clone();
+        expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        assert_eq!(retained, serde_json::to_string(&expected).unwrap());
+        assert!(
+            store
+                .catalog_claims(&batch.paths)
+                .unwrap()
+                .iter()
+                .all(|(_, revision)| revision.is_none())
+        );
+        assert!(
+            db.query_row(
+                "SELECT count(*) FROM session_catalog_changes WHERE namespace='source-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+                > hints_before
+        );
+        assert_eq!(namespace_state(&a, "source-b"), b_before);
+        let before = shared_state(&a);
+        let digest = publication_snapshot_digest(&a);
+        assert_eq!(
+            stale
+                .publish_semantic_catalog(&old_batch, &old_prepared)
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(publication_snapshot_digest(&a), digest);
+    }
+
+    #[test]
+    fn configured_semantic_scoped_search_effects_replace_and_rollback() {
+        let (a, b, b_raw) = same_db_sources();
+        let mut other = owned_semantic(&b);
+        let (batch, prepared) = publication_ready(&mut *other, &b_raw, "search-other");
+        other.publish_semantic_catalog(&batch, &prepared).unwrap();
+        other.finish_semantic_stage(batch.epoch).unwrap();
+        let b_before = namespace_state(&a, "source-b");
+        let mut store = owned_semantic(&a.config);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "search-current");
+        let key = &prepared.rows[0].key;
+        for table in [
+            "session_slots",
+            "session_slot_projections",
+            "session_history_catalog",
+            "session_history_projections",
+            "session_history_slots",
+            "session_history_slot_parts",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+        ] {
+            assert!(a.db().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)",[table],|r|r.get::<_,bool>(0)).unwrap(), "{table}");
+        }
+        let before = shared_state(&a);
+        FAIL_EFFECT.with(|point| point.set(Some("semantic_publish_search")));
+        assert!(store.publish_semantic_catalog(&batch, &prepared).is_err());
+        FAIL_EFFECT.with(|point| point.set(None));
+        assert_eq!(shared_state(&a), before);
+        store.publish_semantic_catalog(&batch, &prepared).unwrap();
+        assert_eq!(namespace_state(&a, "source-b"), b_before);
+        let db = a.db();
+        for scope in ["current", "retained_history"] {
+            let fields:String=db.query_row("SELECT fields FROM session_search_documents WHERE namespace='source-a' AND read_scope=?1 AND session_key=?2",params![scope,key],|r|r.get(0)).unwrap();
+            let fields: Vec<String> = serde_json::from_str(&fields).unwrap();
+            assert!(fields.contains(&key.to_lowercase()));
+            assert_eq!(db.query_row("SELECT count(*) FROM session_search_counts c WHERE namespace='source-a' AND read_scope=?1 AND members<>(SELECT count(*) FROM session_search_memberships p WHERE p.namespace=c.namespace AND p.gram=c.gram AND CASE WHEN ?1='current' THEN p.current_last_ms ELSE p.history_last_ms END IS NOT NULL)",[scope],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+        assert!(
+            db.query_row(
+                "SELECT count(*) FROM session_search_memberships WHERE namespace='source-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+                > 0
+        );
+        let published = shared_state(&a);
+        store.publish_semantic_catalog(&batch, &prepared).unwrap();
+        assert_eq!(shared_state(&a), published);
+        store.finish_semantic_stage(batch.epoch).unwrap();
+        let (next, prepared) = publication_ready(&mut *store, &a.raw, "search-repeat");
+        store.publish_semantic_catalog(&next, &prepared).unwrap();
+        assert_eq!(namespace_state(&a, "source-b"), b_before);
+        assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND session_key=?1",[key],|r|r.get::<_,i64>(0)).unwrap(),2);
+    }
+
+    #[test]
+    fn configured_semantic_publisher_keeps_unbound_head_refusal() {
+        let (a, _, _) = same_db_sources();
+        let mut db = a.db();
+        let before = shared_state(&a);
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            crate::storage::sqlite::publication::transitional_head(&tx),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
+        drop(tx);
+        assert_eq!(shared_state(&a), before);
     }
 
     #[test]
