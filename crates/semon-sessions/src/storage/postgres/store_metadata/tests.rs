@@ -88,7 +88,16 @@ fn pg_store_metadata_distinct_source_principal_journal_cold_warm_cannot_control(
         );
         assert!(PgStoreMetadata::open(pool.clone(), &control).is_err());
         let pricing_in_source = pool.transaction(&ns(&namespace), TxnKind::Write, &control, |tx| {
-            tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&tx.namespace.as_str().as_bytes(), &b"pricing_recompute_target".as_slice(), &b"forged".as_slice()]).map_err(sqlstate::error)?;
+            tx.driver
+                .execute(
+                    "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)",
+                    &[
+                        &tx.namespace.as_str().as_bytes(),
+                        &b"pricing_recompute_target".as_slice(),
+                        &b"forged".as_slice(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
             Ok(())
         });
         assert!(
@@ -123,8 +132,15 @@ fn pg_store_metadata_distinct_source_principal_journal_cold_warm_cannot_control(
             // Direct SQL cannot turn caller-controlled GUCs or owner strings
             // into a control capability, even outside the typed API.
             let mut client = source.client();
+            // Match the production GUC transport: PostgreSQL text cannot carry
+            // the NUL in an opaque namespace. Empty attacker context stays empty.
+            let context = if name.is_empty() {
+                String::new()
+            } else {
+                crate::storage::postgres::namespace_context(&ns(name))
+            };
             client
-                .query_one("SELECT set_config('semon.namespace',$1,false)", &[&name])
+                .query_one("SELECT set_config('semon.namespace',$1,false)", &[&context])
                 .unwrap();
             for sql in [
                 "UPDATE semon_pg_store_state SET revision=revision+1",
@@ -346,7 +362,11 @@ fn pg_store_metadata_held_row_lock_sql_cancel_rolls_back_and_reuses_pool() {
     let host = PgStoreMetadata::open(pool, &control).unwrap();
     let before = full_snapshot(&factory);
     let mut blocker = factory.client();
-    blocker.batch_execute("BEGIN; SELECT revision FROM semon_pg_store_state WHERE singleton FOR UPDATE").unwrap();
+    blocker
+        .batch_execute(
+            "BEGIN; SELECT revision FROM semon_pg_store_state WHERE singleton FOR UPDATE",
+        )
+        .unwrap();
     let blocker_pid: i32 = blocker
         .query_one("SELECT pg_backend_pid()", &[])
         .unwrap()
@@ -354,9 +374,8 @@ fn pg_store_metadata_held_row_lock_sql_cancel_rolls_back_and_reuses_pool() {
     let cancelled = PgCancellation::default();
     std::thread::scope(|scope| {
         let cancel = &cancelled;
-        let writer = scope.spawn(|| {
-            host.set_pricing_target(&[71; 32], 0, Some("blocked-row"), cancel)
-        });
+        let writer =
+            scope.spawn(|| host.set_pricing_target(&[71; 32], 0, Some("blocked-row"), cancel));
         wait_for_blocked_sql(&factory, blocker_pid);
         cancelled.cancel();
         assert!(writer.join().unwrap().is_err());
