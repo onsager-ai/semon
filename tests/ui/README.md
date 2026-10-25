@@ -144,9 +144,9 @@ its completion witness is the native-publication success message in the CI log.
   edge pixels in three 10.5px Claude marks; text, geometry and the other five
   image/evidence bindings stayed identical. The cross-process capture regression
   includes those fractional-size marks. Hub Members and full-page visual captures
-  consume the same side-effect-free launch options. This changes no screenshot content,
-  animation policy, state, threshold or exact digest requirement; fresh CI images
-  and actual review remain required before rebinding acceptance data.
+  consume the same side-effect-free launch options. This changes no screenshot
+  content, animation policy, state, threshold or exact digest requirement; fresh
+  CI images and actual review remain required before rebinding acceptance data.
   The d71b292 capture review uses CI run 40070762417, artifact 12550918798.
   Actual light/dark desktop Machines candidate/reference/diff images were viewed;
   only three PNG digests change, with identical bounded text/geometry evidence.
