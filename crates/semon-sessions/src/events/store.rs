@@ -13002,6 +13002,133 @@ mod tests {
         assert_eq!(paths, ["b.jsonl"]);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn recovery_tree_rows_canonical_witness_matches_persisted_dimensions() {
+        use crate::events::tree_rows::{TreeRows, witness};
+        let root = scratch("tree-rows-witness");
+        let db = root.join("index.sqlite3");
+        let (mut store, _) = opened(&db);
+        let mut expected_witnesses = Vec::new();
+        let adversarial = format!(
+            "quote\" slash\\ / NUL\0 namespace\0suffix {} é e\u{301} 中 😀 \u{2028}\u{2029}",
+            (0..=31).map(char::from).collect::<String>()
+        );
+        let summaries = [
+            crate::native_tree::Summary::default(),
+            crate::native_tree::Summary {
+                models: ["old".into(), "new".into()].into_iter().collect(),
+                tools: [("tree-tool".into(), "Bash".into())].into_iter().collect(),
+                ..Default::default()
+            },
+            crate::native_tree::Summary {
+                first: Some(adversarial.clone()),
+                last: Some(String::new()),
+                cwd: Some("/cwd\0tail".into()),
+                branch: Some("branch\n\t".into()),
+                models: [adversarial.clone(), String::new(), "é".into()]
+                    .into_iter()
+                    .collect(),
+                tools: [
+                    (adversarial.clone(), adversarial.clone()),
+                    ("closed".into(), "retained name".into()),
+                ]
+                .into_iter()
+                .collect(),
+                closed_tools: ["closed".into(), "closed without name".into()]
+                    .into_iter()
+                    .collect(),
+                usage_models: [("message\0id".into(), adversarial.clone())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        ];
+        for (number, summary) in summaries.into_iter().enumerate() {
+            let path = format!("tree-{number}.jsonl");
+            let ledger = ledger(1);
+            let index = FileIndex {
+                tree_summary: Some(summary.clone()),
+                source_chunks: Some(std::sync::Arc::new(crate::source_chunks::Chunks {
+                    offset: 3,
+                    hashes: vec![[1; 32]],
+                    resume: None,
+                })),
+                marker_index: Some(crate::native_marker::Index::default()),
+                handoff_index: Some(crate::native_handoff::Index::default()),
+                ..Default::default()
+            };
+            assert_eq!(
+                store.write_one(&path, None, None, &ledger, &index).unwrap(),
+                Outcome::Written
+            );
+            let rows = TreeRows::new(&summary).unwrap();
+            let mut labels: std::collections::BTreeMap<_, _> = rows.labels().collect();
+            labels.insert("codex_turn", &rows.codex_turn);
+            let expected = witness::digest(
+                labels,
+                rows.models.iter().map(String::as_str),
+                rows.tools
+                    .iter()
+                    .filter(|(id, _)| !rows.closed_tools.contains(*id))
+                    .map(|(id, name)| (id.as_str(), name.as_str())),
+            );
+            assert_eq!(
+                tree_state::witness(&store.connection, &path, &ledger).unwrap(),
+                Some(expected.clone())
+            );
+            expected_witnesses.push((path.clone(), ledger.clone(), expected));
+            let (_, restored) = store.read_tree(&path, &ledger.stat).unwrap().unwrap();
+            assert_eq!(restored.summary.first, summary.first);
+            assert_eq!(restored.summary.last, summary.last);
+            assert_eq!(restored.summary.cwd, summary.cwd);
+            assert_eq!(restored.summary.branch, summary.branch);
+            assert_eq!(restored.summary.models, summary.models);
+            assert_eq!(
+                restored.summary.tools,
+                summary
+                    .tools
+                    .into_iter()
+                    .filter(|(id, _)| !summary.closed_tools.contains(id))
+                    .collect()
+            );
+        }
+        drop(store);
+        let (reopened, _) = opened(&db);
+        for (path, ledger, expected) in expected_witnesses {
+            assert_eq!(
+                tree_state::witness(&reopened.connection, &path, &ledger).unwrap(),
+                Some(expected)
+            );
+        }
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+        tree_rows_json_array_encoding_matches_sqlite_edge_values();
+        tree_metadata_and_evidence_share_one_snapshot_during_concurrent_commit();
+    }
+
+    #[test]
+    fn tree_rows_json_array_encoding_matches_sqlite_edge_values() {
+        let connection = Connection::open_in_memory().unwrap();
+        let strings = [
+            String::new(),
+            "\"\\/\0é中😀\u{2028}\u{2029}".into(),
+            (0..=31).map(char::from).collect::<String>(),
+        ];
+        for value in strings {
+            let actual: String = connection
+                .query_row(
+                    "SELECT json_array(?1,NULL,?2,?3)",
+                    params![value, i64::MIN, i64::MAX],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let expected =
+                serde_json::to_string(&serde_json::json!([value, null, i64::MIN, i64::MAX]))
+                    .unwrap();
+            assert_eq!(actual.as_bytes(), expected.as_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
