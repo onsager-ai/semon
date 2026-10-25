@@ -7402,12 +7402,6 @@ pub(crate) fn prepare_semantic_batch(
             "semantic model inputs differ from staged batch",
         ));
     }
-    let by_path: BTreeMap<_, _> = inputs
-        .iter()
-        .map(|input| (input.full_path(options).to_string_lossy().into_owned(), input.clone()))
-        .collect();
-    let ordered = batch.paths.iter().map(|path| by_path[path].clone()).collect::<Vec<_>>();
-    let inputs = ordered.as_slice();
     let mut prepared = match batch.phase {
         relation_stage::Phase::Indexing => {
             prepare_semantic_index_sources(options, cache, inputs, now)?
@@ -7425,6 +7419,14 @@ pub(crate) fn prepare_semantic_batch(
     if batch.phase != relation_stage::Phase::Indexing {
         prepared.withdrawals = semantic_withdrawals(options, inputs)?;
     }
+    // Preserve the shared parser's input order. Only the typed claim witness
+    // follows the storage batch order; claim values and membership stay exact.
+    let claim_paths = prepared.claims.iter().map(|(path, _)| path.clone()).collect::<BTreeSet<_>>();
+    if prepared.claims.len() != paths.len() || claim_paths != paths {
+        return Err(io::Error::other("semantic model claim membership changed"));
+    }
+    let ranks = batch.paths.iter().enumerate().map(|(rank, path)| (path.clone(), rank)).collect::<BTreeMap<_, _>>();
+    prepared.claims.sort_by_key(|(path, _)| ranks[path]);
     if prepared.base_generation != batch.base_generation {
         return Err(io::Error::other("semantic model generation changed"));
     }
