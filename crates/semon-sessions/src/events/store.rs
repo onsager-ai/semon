@@ -6838,28 +6838,6 @@ fn clear_preserving_tree(
     Ok(())
 }
 
-/// Writes touched rows and the appended tail, deleting a truncated tail
-/// only for synthetic deltas (the append parser never removes rows).
-fn changed<T>(
-    before: usize,
-    touched: &std::collections::BTreeSet<usize>,
-    new: &[T],
-    mut put: impl FnMut(usize, &T) -> rusqlite::Result<()>,
-    cut: impl FnOnce(usize) -> rusqlite::Result<()>,
-) -> rusqlite::Result<()> {
-    let mut rows = touched.clone();
-    rows.extend(before..new.len());
-    for seq in rows {
-        if let Some(row) = new.get(seq) {
-            put(seq, row)?;
-        }
-    }
-    if new.len() < before {
-        cut(new.len())?;
-    }
-    Ok(())
-}
-
 fn write_index_changes(
     transaction: &Transaction<'_>,
     path: &str,
@@ -7126,6 +7104,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements: &mut crate::native_timing::Measurements,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
+    let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
     copied_usage_sql(transaction, "", "")?;
     let FileIndex {
         dirty_rows: _,
@@ -7303,14 +7282,8 @@ fn write_file_with_usage_deletes<'tx>(
     )?)?;
     let mut cut = transaction
         .prepare_cached(configured::sql(transaction, "DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?)?;
-    for (extra, before, touched, new_rows) in [
-        (false, changes.before_events, &changes.events, events),
-        (true, changes.before_extras, &changes.extras, extras),
-    ] {
-        changed(
-            before,
-            touched,
-            new_rows,
+    for (extra, rows) in [(false, &row_plan.events), (true, &row_plan.extras)] {
+        rows.apply(
             |seq, event| put_event(&mut put, file_id, extra, seq, event),
             |from| {
                 cut.execute(params![file_id, extra, seq_int(from)])
@@ -7329,10 +7302,7 @@ fn write_file_with_usage_deletes<'tx>(
         PUT_SIGNAL,
         configured::PUT_SIGNAL,
     )?)?;
-    changed(
-        changes.before_signals,
-        &changes.signals,
-        signals,
+    row_plan.signals.apply(
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
             put.execute(params![
@@ -7383,10 +7353,7 @@ fn write_file_with_usage_deletes<'tx>(
         PUT_CODEX_USAGE,
         COMPOSITE_PUT_CODEX_USAGE,
     )?)?;
-    changed(
-        changes.before_codex_usage,
-        &changes.codex_usage,
-        codex_usage_events,
+    row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
                 model,
