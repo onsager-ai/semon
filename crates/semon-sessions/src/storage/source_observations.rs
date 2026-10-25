@@ -10,7 +10,7 @@ pub type SourceClaims = Vec<(String, Option<i64>)>;
 /// Stable identity for one typed source-observation mutation. The namespace is
 /// bound into the ID; the digest binds the operation kind and payload. Callers
 /// retain this value across retries so an uncertain commit can be reconciled.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceOperation {
     pub namespace: String,
     pub id: String,
@@ -66,7 +66,41 @@ pub enum SourceMutationReceipt {
     Conflict,
 }
 
+/// Durable typed producer work. The payload and identity travel together from
+/// capture, through an uncertain acknowledgement, to restart reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SourceIntent {
+    Discover { operation: SourceOperation, paths: Vec<String>, complete: bool },
+    Invalidate { operation: SourceOperation, expected: SourceClaims },
+    FinishBackfill { operation: SourceOperation, expected_generation: Option<String> },
+}
+
+impl SourceIntent {
+    pub fn operation(&self) -> &SourceOperation {
+        match self {
+            Self::Discover { operation, .. }
+            | Self::Invalidate { operation, .. }
+            | Self::FinishBackfill { operation, .. } => operation,
+        }
+    }
+
+    pub fn apply(&self, store: &mut dyn SourceObservationStore) -> Result<SourceMutationReceipt, StorageError> {
+        match self {
+            Self::Discover { operation, paths, complete } => store.discover(operation, paths, *complete),
+            Self::Invalidate { operation, expected } => store.invalidate(operation, expected),
+            Self::FinishBackfill { operation, expected_generation } => store.finish_backfill(operation, expected_generation.as_deref()),
+        }
+    }
+}
+
 pub trait SourceObservationStore: Send {
+    /// Commit an intent before attempting its effect. Never replace another
+    /// payload under the same key; enforce the bounded outstanding-work limit.
+    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError>;
+    /// Load at most 256 intents in durable capture order, refusing overflow.
+    fn pending_intents(&self) -> Result<Vec<SourceIntent>, StorageError>;
+    /// Remove only an intent with a matching terminal backend receipt.
+    fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError>;
     /// Record newly discovered paths atomically with their invalidations. An
     /// exact retry returns `AlreadyApplied`; a reused key with another payload
     /// or namespace returns `Conflict` without changing observations.

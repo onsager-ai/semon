@@ -1532,67 +1532,46 @@ enum Base {
     Unreadable,
 }
 
-/// Exact typed work whose commit outcome was not observed. Keeping its
-/// payload beside the receipt key prevents a later producer call from
-/// substituting a new nonce for an uncertain mutation.
-#[derive(Clone)]
-enum PendingSourceOperation {
-    Discover {
-        operation: crate::storage::source_observations::SourceOperation,
-        paths: Vec<String>,
-        complete: bool,
-    },
-    FinishBackfill {
-        operation: crate::storage::source_observations::SourceOperation,
-        expected_generation: Option<String>,
-    },
-}
-
-impl PendingSourceOperation {
-    fn operation(&self) -> &crate::storage::source_observations::SourceOperation {
-        match self {
-            Self::Discover { operation, .. } | Self::FinishBackfill { operation, .. } => operation,
-        }
-    }
-}
+/// Exact typed payload shared by the producer and its durable backend journal.
+type PendingSourceOperation = crate::storage::source_observations::SourceIntent;
 
 impl EventCache {
-    /// Re-submit an uncertain mutation with its original identity and payload
-    /// before admitting a different mutation. A receipt is terminal even when
-    /// it is a conflict: that old typed request cannot be retried into a
-    /// different state.
-    fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
-        let Some(pending) = self.pending_source_operation.clone() else {
-            return Ok(());
+    #[cfg(test)]
+    pub(crate) fn inject_source_observations(
+        &mut self,
+        store: Box<dyn crate::storage::source_observations::SourceObservationStore>,
+    ) {
+        self.source_observations = Some(store);
+    }
+
+    /// Reopen and replay the durable queue before capturing any new identity.
+    /// A failed apply/ack leaves the original payload available to the next open.
+    pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
+        let Some(store) = self.source_observations.as_mut() else {
+            return if self.pending_source_operation.is_none() { Ok(()) } else {
+                Err(io::Error::other("source observation producer unavailable"))
+            };
         };
-        let receipt = match &pending {
-            PendingSourceOperation::Discover {
-                operation,
-                paths,
-                complete,
-            } => self
-                .source_observations
-                .as_mut()
-                .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
-                .discover(operation, paths, *complete),
-            PendingSourceOperation::FinishBackfill {
-                operation,
-                expected_generation,
-            } => self
-                .source_observations
-                .as_mut()
-                .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
-                .finish_backfill(operation, expected_generation.as_deref()),
+        if let Some(pending) = &self.pending_source_operation {
+            store.persist_intent(pending).map_err(|error| io::Error::other(error.to_string()))?;
         }
-        .map_err(|error| io::Error::other(error.to_string()))?;
-        match receipt {
-            crate::storage::source_observations::SourceMutationReceipt::Applied
-            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied
-            | crate::storage::source_observations::SourceMutationReceipt::Conflict => {
-                self.pending_source_operation = None;
-                Ok(())
-            }
+        let pending = store.pending_intents().map_err(|error| io::Error::other(error.to_string()))?;
+        for intent in pending {
+            intent.apply(store.as_mut()).map_err(|error| io::Error::other(error.to_string()))?;
+            store.acknowledge_intent(intent.operation()).map_err(|error| io::Error::other(error.to_string()))?;
         }
+        self.pending_source_operation = None;
+        Ok(())
+    }
+
+    fn persist_source_operation(&mut self, intent: PendingSourceOperation) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        let operation = intent.operation().clone();
+        // Keep this copy even if committing the intent itself is uncertain.
+        self.pending_source_operation = Some(intent.clone());
+        self.source_observations.as_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .persist_intent(&intent).map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(operation)
     }
 
     fn capture_discover_operation(
@@ -1600,16 +1579,6 @@ impl EventCache {
         paths: &[String],
         complete: bool,
     ) -> io::Result<crate::storage::source_observations::SourceOperation> {
-        if let Some(PendingSourceOperation::Discover {
-            operation,
-            paths: pending_paths,
-            complete: pending_complete,
-        }) = &self.pending_source_operation
-        {
-            if pending_paths == paths && *pending_complete == complete {
-                return Ok(operation.clone());
-            }
-        }
         self.reconcile_pending_source_operation()?;
         let payload = serde_json::to_vec(&(paths, complete)).map_err(io::Error::other)?;
         let operation = crate::storage::source_observations::SourceOperation::capture(
@@ -1617,27 +1586,17 @@ impl EventCache {
             "discover",
             &payload,
         );
-        self.pending_source_operation = Some(PendingSourceOperation::Discover {
-            operation: operation.clone(),
+        self.persist_source_operation(PendingSourceOperation::Discover {
+            operation,
             paths: paths.to_vec(),
             complete,
-        });
-        Ok(operation)
+        })
     }
 
     fn capture_finish_backfill_operation(
         &mut self,
         expected_generation: Option<&str>,
     ) -> io::Result<crate::storage::source_observations::SourceOperation> {
-        if let Some(PendingSourceOperation::FinishBackfill {
-            operation,
-            expected_generation: pending_generation,
-        }) = &self.pending_source_operation
-        {
-            if pending_generation.as_deref() == expected_generation {
-                return Ok(operation.clone());
-            }
-        }
         self.reconcile_pending_source_operation()?;
         let payload = serde_json::to_vec(&expected_generation).map_err(io::Error::other)?;
         let operation = crate::storage::source_observations::SourceOperation::capture(
@@ -1645,28 +1604,23 @@ impl EventCache {
             "finish_backfill",
             &payload,
         );
-        self.pending_source_operation = Some(PendingSourceOperation::FinishBackfill {
-            operation: operation.clone(),
+        self.persist_source_operation(PendingSourceOperation::FinishBackfill {
+            operation,
             expected_generation: expected_generation.map(str::to_owned),
-        });
-        Ok(operation)
+        })
     }
 
     fn finish_source_operation(
         &mut self,
         operation: &crate::storage::source_observations::SourceOperation,
-        uncertain: bool,
-    ) {
-        if uncertain {
-            return;
-        }
-        if self
-            .pending_source_operation
-            .as_ref()
-            .is_some_and(|pending| pending.operation().id == operation.id)
-        {
+    ) -> io::Result<()> {
+        self.source_observations.as_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .acknowledge_intent(operation).map_err(|error| io::Error::other(error.to_string()))?;
+        if self.pending_source_operation.as_ref().is_some_and(|pending| pending.operation().id == operation.id) {
             self.pending_source_operation = None;
         }
+        Ok(())
     }
 
     pub(crate) fn query_runtime_binding(
@@ -1687,7 +1641,7 @@ impl EventCache {
         let observation_namespace = source_journal.namespace().to_owned();
         let observation_path = Some(source_journal.database_path().clone());
         let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
-        Ok(Self {
+        let mut cache = Self {
             store: Some(store),
             source_observations: Some(Box::new(source_journal)),
             observation_namespace,
@@ -1695,14 +1649,16 @@ impl EventCache {
             scoped: true,
             explicit_store: true,
             ..Self::default()
-        })
+        };
+        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
     }
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
     ) -> Result<Self, crate::storage::StorageError> {
         let store = crate::storage::sqlite::open_configured_index(config)?;
         let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
-        Ok(Self {
+        let mut cache = Self {
             store: Some(store),
             source_observations: Some(crate::storage::sqlite::source_journal::configured(config)),
             observation_namespace: config.namespace.as_str().to_owned(),
@@ -1710,7 +1666,9 @@ impl EventCache {
             scoped: true,
             explicit_store: true,
             ..Self::default()
-        })
+        };
+        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
     }
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
@@ -1775,6 +1733,7 @@ impl EventCache {
             }
         };
         cache.v1_cache = Some(v1_cache.to_owned());
+        cache.reconcile_pending_source_operation().map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
@@ -1790,6 +1749,7 @@ impl EventCache {
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
         cache.lock_cache = Some(v1_cache.to_owned());
+        cache.reconcile_pending_source_operation().map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
@@ -1906,20 +1866,8 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .discover_recovery_sources(&operation);
         let (receipt, complete) = match result {
-            Ok(result) => {
-                self.finish_source_operation(&operation, false);
-                result
-            }
-            Err(error) => {
-                self.finish_source_operation(
-                    &operation,
-                    matches!(
-                        &error,
-                        StoreError::Configured(crate::storage::StorageError::CommitUncertain)
-                    ),
-                );
-                return Err(io::Error::other(error.to_string()));
-            }
+            Ok(result) => result,
+            Err(error) => return Err(io::Error::other(error.to_string())),
         };
         match receipt {
             crate::storage::source_observations::SourceMutationReceipt::Applied => Ok(complete),
@@ -1963,14 +1911,10 @@ impl EventCache {
             .discover(&operation, &paths, complete);
         let receipt = match result {
             Ok(receipt) => {
-                self.finish_source_operation(&operation, false);
+                self.finish_source_operation(&operation)?;
                 receipt
             }
             Err(error) => {
-                self.finish_source_operation(
-                    &operation,
-                    error == crate::storage::StorageError::CommitUncertain,
-                );
                 return Err(io::Error::other(error.to_string()));
             }
         };
@@ -2002,14 +1946,10 @@ impl EventCache {
             .finish_backfill(&operation, expected_generation);
         let receipt = match result {
             Ok(receipt) => {
-                self.finish_source_operation(&operation, false);
+                self.finish_source_operation(&operation)?;
                 receipt
             }
             Err(error) => {
-                self.finish_source_operation(
-                    &operation,
-                    error == crate::storage::StorageError::CommitUncertain,
-                );
                 return Err(io::Error::other(error.to_string()));
             }
         };

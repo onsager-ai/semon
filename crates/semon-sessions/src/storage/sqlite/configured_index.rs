@@ -90,8 +90,11 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         expected: &[(String, Option<i64>)],
     ) -> Result<bool, StoreError> {
-        self.journal
-            .invalidate_current(expected)
+        let payload = serde_json::to_vec(expected)
+            .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?;
+        let operation = self.journal.operation("invalidate", &payload);
+        self.journal.invalidate(&operation, expected)
+            .map(|receipt| receipt != crate::storage::source_observations::SourceMutationReceipt::Conflict)
             .map_err(StoreError::Configured)
     }
     fn describe(&self) -> String {
