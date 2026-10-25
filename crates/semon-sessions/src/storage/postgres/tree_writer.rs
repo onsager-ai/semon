@@ -27,7 +27,13 @@ struct Writer<'a, 'tx> {
 impl Writer<'_, '_> {
     fn effect(&mut self, query: &str, args: &[&(dyn ToSql + Sync)]) -> Result<(), StorageError> {
         self.tx.check()?;
-        if self.tx.driver.execute(query, args).map_err(sqlstate::error)? != 1 {
+        if self
+            .tx
+            .driver
+            .execute(query, args)
+            .map_err(sqlstate::error)?
+            != 1
+        {
             return Err(StorageError::Conflict);
         }
         #[cfg(test)]
@@ -51,9 +57,20 @@ impl Writer<'_, '_> {
         let rows = TreeRows::new(summary).map_err(|_| StorageError::InvalidArguments)?;
         let ns = self.tx.namespace.as_str().as_bytes().to_vec();
         let label = "INSERT INTO semon_pg_native_tree_labels(namespace,projection_id,label,value) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,label) DO UPDATE SET value=excluded.value";
-        self.effect(label, &[&ns, &projection, &b"codex_turn".as_slice(), &rows.codex_turn.as_bytes()])?;
+        self.effect(
+            label,
+            &[
+                &ns,
+                &projection,
+                &b"codex_turn".as_slice(),
+                &rows.codex_turn.as_bytes(),
+            ],
+        )?;
         for (key, value) in rows.labels() {
-            self.effect(label, &[&ns, &projection, &key.as_bytes(), &value.as_bytes()])?;
+            self.effect(
+                label,
+                &[&ns, &projection, &key.as_bytes(), &value.as_bytes()],
+            )?;
         }
         // DO UPDATE (including identical values) gives an exact affected-row
         // check while retaining historical models and closed tool names.
@@ -127,7 +144,10 @@ pub(super) fn stage(
     if (exists && headers.len() != 1) || (!exists && expected_header.is_some()) {
         return Err(StorageError::Conflict);
     }
-    let reuse = headers.first().filter(|r| r.get::<_, i64>(1) == expected_source).map(|r| r.get::<_, i64>(0));
+    let reuse = headers
+        .first()
+        .filter(|r| r.get::<_, i64>(1) == expected_source)
+        .map(|r| r.get::<_, i64>(0));
     let mut writer = Writer { tx };
     let projection = match reuse {
         Some(id) => {
@@ -153,39 +173,71 @@ fn persisted_witness(tx: &mut PgTxn<'_>, projection: i64) -> Result<String, Stor
     for (family, key, columns, filter) in [
         ("labels", "label", "label,value", ""),
         ("models", "model", "model", ""),
-        ("tools", "tool_id", "tool_id,name", " AND NOT closed AND name IS NOT NULL"),
+        (
+            "tools",
+            "tool_id",
+            "tool_id,name",
+            " AND NOT closed AND name IS NOT NULL",
+        ),
     ] {
         match family {
             "labels" => writer.labels(),
             "models" => writer.models(),
             _ => writer.tools(),
         }
-        let predicate = format!("FROM semon_pg_native_tree_{family} WHERE namespace=$1 AND projection_id=$2 AND ($3::bytea IS NULL OR {key}>$3){filter} ORDER BY {key} LIMIT 1");
-        let sizes = columns.split(',').map(|col|format!("octet_length({col})::bigint")).collect::<Vec<_>>().join(",");
+        let predicate = format!(
+            "FROM semon_pg_native_tree_{family} WHERE namespace=$1 AND projection_id=$2 AND ($3::bytea IS NULL OR {key}>$3){filter} ORDER BY {key} LIMIT 1"
+        );
+        let sizes = columns
+            .split(',')
+            .map(|col| format!("octet_length({col})::bigint"))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut cursor: Option<Vec<u8>> = None;
         loop {
             tx.check()?;
             selected_read::checkpoint("pg_tree_writer_witness").map_err(|_| StorageError::Busy)?;
-            let lengths = tx.driver.query(&format!("SELECT {sizes} {predicate}"), &[&tx.namespace.as_str().as_bytes(),&projection,&cursor]).map_err(sqlstate::error)?;
-            let Some(lengths) = lengths.first() else { break; };
+            let lengths = tx
+                .driver
+                .query(
+                    &format!("SELECT {sizes} {predicate}"),
+                    &[&tx.namespace.as_str().as_bytes(), &projection, &cursor],
+                )
+                .map_err(sqlstate::error)?;
+            let Some(lengths) = lengths.first() else {
+                break;
+            };
             let bytes = (0..lengths.len()).try_fold(0usize, |sum, at| {
-                usize::try_from(lengths.get::<_, i64>(at)).map(|n|sum.saturating_add(n)).map_err(|_|StorageError::Unavailable)
+                usize::try_from(lengths.get::<_, i64>(at))
+                    .map(|n| sum.saturating_add(n))
+                    .map_err(|_| StorageError::Unavailable)
             })?;
             // Charge eightfold dynamic cells plus fixed row/JSON framing before
             // the driver fetch or UTF-8/JSON decoding of the actual row.
             selected_read::charge(256, bytes).map_err(|_| StorageError::Busy)?;
             tx.check()?;
-            let row = tx.driver.query_one(&format!("SELECT {columns} {predicate}"), &[&tx.namespace.as_str().as_bytes(),&projection,&cursor]).map_err(sqlstate::error)?;
+            let row = tx
+                .driver
+                .query_one(
+                    &format!("SELECT {columns} {predicate}"),
+                    &[&tx.namespace.as_str().as_bytes(), &projection, &cursor],
+                )
+                .map_err(sqlstate::error)?;
             #[cfg(test)]
-            DECODED.with(|n|n.set(n.get()+1));
+            DECODED.with(|n| n.set(n.get() + 1));
             let first: Vec<u8> = row.get(0);
-            let key = std::str::from_utf8(&first).map_err(|_|StorageError::Unavailable)?;
+            let key = std::str::from_utf8(&first).map_err(|_| StorageError::Unavailable)?;
             match family {
                 "models" => writer.model(key),
                 _ => {
                     let value: Vec<u8> = row.get(1);
-                    let value = std::str::from_utf8(&value).map_err(|_|StorageError::Unavailable)?;
-                    if family == "labels" { writer.label(key,value); } else { writer.tool(key,value); }
+                    let value =
+                        std::str::from_utf8(&value).map_err(|_| StorageError::Unavailable)?;
+                    if family == "labels" {
+                        writer.label(key, value);
+                    } else {
+                        writer.tool(key, value);
+                    }
                 }
             }
             cursor = Some(first);

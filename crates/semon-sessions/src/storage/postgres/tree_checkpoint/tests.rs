@@ -157,32 +157,51 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
 pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
     use std::io::Write;
     let body = match harness {
-        "claude" => format!("{}\n{}\n",
+        "claude" => format!(
+            "{}\n{}\n",
             serde_json::json!({"type":"user","uuid":"result🦀","timestamp":"2026-09-29T00:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool\0🦀","content":"done"}]}}),
             serde_json::json!({"type":"assistant","uuid":"new-record🦀","timestamp":"2026-09-29T00:00:04Z","message":{"id":"new-message🦀","role":"assistant","model":"claude-new🦀","content":[{"type":"tool_use","id":"new-tool\0\u{1f}🦀","name":"Write\n\t'🦀","input":{}}],"usage":{"input_tokens":8,"output_tokens":5}}})
         ),
-        "codex" => format!("{}\n{}\n",
+        "codex" => format!(
+            "{}\n{}\n",
             serde_json::json!({"type":"turn_context","payload":{"model":"gpt-new🦀","cwd":"/new🦀"}}),
             serde_json::json!({"type":"token_usage_record","timestamp":"2026-09-29T00:00:03Z","payload":{"thread_id":"t\0🦀","session_id":"s\0🦀","turn_id":"new-turn","response_id":"new-response","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18,"cached_input_tokens":2,"reasoning_output_tokens":0}}})
         ),
         _ => unreachable!(),
     };
-    std::fs::OpenOptions::new().append(true).open(data.root.join("one.jsonl")).unwrap().write_all(body.as_bytes()).unwrap();
-    capture_fixture(data.root.clone(),harness)
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(data.root.join("one.jsonl"))
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    capture_fixture(data.root.clone(), harness)
 }
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
     install_families(tx, fixture, true)
 }
-pub(crate) fn install_without_tree(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+pub(crate) fn install_without_tree(
+    tx: &mut PgTxn<'_>,
+    fixture: &Fixture,
+) -> Result<(), StorageError> {
     install_families(tx, fixture, false)
 }
 pub(crate) fn oracle_witness(data: &Fixture) -> String {
     let db = rusqlite::Connection::open(EventCache::path(&data.root.join("index.json"))).unwrap();
     let path = data.path.strip_suffix("\0🦀").unwrap();
-    let encoded: String = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("native_tree_summary:{path}")], |r| r.get(0)).unwrap();
-    serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["projection_witness"].as_str().unwrap().into()
+    let encoded: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{path}")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["projection_witness"]
+        .as_str()
+        .unwrap()
+        .into()
 }
 fn install_families(tx: &mut PgTxn<'_>, fixture: &Fixture, tree: bool) -> Result<(), StorageError> {
     {
