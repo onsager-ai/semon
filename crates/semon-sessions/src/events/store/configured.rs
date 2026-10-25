@@ -8527,17 +8527,29 @@ mod tests {
         fn configured_semantic_domain81_peer_changed_raw_claim_refuses_publication_zero_effects() {
             let (f, _, options, _) = model_sources();
             let options = &options[1];
-            let inputs = peer_inputs(options,2,"claude72-1");
+            let inputs = peer_inputs(options, 2, "claude72-1");
             let mut cache = open(&f.config);
-            let (batch,model) = claude_ready_from(&mut cache,options,&inputs,&inputs[..1]);
+            let (batch, model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let target = inputs[1].full_path(options);
             let mut raw = fs::read_to_string(&target).unwrap();
             raw.push_str(&format!("{}\n",serde_json::json!({"type":"user","sessionId":"claude72-1","uuid":"peer81-claim-change","timestamp":"2026-10-01T00:04:00Z","message":{"role":"user","content":"changed real Raw"}})));
-            fs::write(&target,raw).unwrap();
-            cache.ingest(&format!("{:064x}",8199),&target,"claude").unwrap();
-            let before=shared_state(&f);
-            assert_eq!(cache.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
-            assert_eq!(shared_state(&f),before,"changed discovered claim cannot publish Current, History, proofs or ACK");
+            fs::write(&target, raw).unwrap();
+            cache
+                .ingest(&format!("{:064x}", 8199), &target, "claude")
+                .unwrap();
+            let before = shared_state(&f);
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "changed discovered claim cannot publish Current, History, proofs or ACK"
+            );
         }
     }
 }
