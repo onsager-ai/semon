@@ -174,6 +174,12 @@ mod tests {
         assert_eq!(serde_json::to_string(&row).unwrap(), record.metadata);
     }
 
+    fn oversized(mut json: String) -> String {
+        // Keep valid typed JSON so only the byte limit can reject this case.
+        json.push_str(&" ".repeat(METADATA_MAX + 1 - json.len()));
+        json
+    }
+
     macro_rules! refuses {
         ($name:ident, $field:ident, $value:expr) => {
             #[test]
@@ -200,10 +206,10 @@ mod tests {
     refuses!(
         codec89_oversized_metadata,
         metadata,
-        " ".repeat(METADATA_MAX + 1)
+        oversized(fixture().metadata)
     );
     refuses!(codec89_malformed_slots, slots, "{".into());
-    refuses!(codec89_oversized_slots, slots, " ".repeat(METADATA_MAX + 1));
+    refuses!(codec89_oversized_slots, slots, oversized("[]".into()));
     // Valid JSON is insufficient: every slot must be a native SavedSlot.
     refuses!(codec89_wrong_slot_type, slots, "[{}]".into());
 
