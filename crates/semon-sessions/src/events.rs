@@ -1401,8 +1401,7 @@ pub(crate) struct EventCache {
         Option<Box<dyn crate::storage::source_observations::SourceObservationStore>>,
     observation_namespace: String,
     observation_path: Option<PathBuf>,
-    pending_source_operation:
-        Option<(String, crate::storage::source_observations::SourceOperation)>,
+    pending_source_operation: Option<PendingSourceOperation>,
     scoped: bool,
     explicit_store: bool,
     event_operation: Option<String>,
@@ -1533,27 +1532,126 @@ enum Base {
     Unreadable,
 }
 
-impl EventCache {
-    fn capture_source_operation(
-        &mut self,
-        kind: &str,
-        payload: &[u8],
-    ) -> crate::storage::source_observations::SourceOperation {
-        let candidate = crate::storage::source_observations::SourceOperation::capture(
-            &self.observation_namespace,
-            kind,
-            payload,
-        );
-        if let Some((pending_kind, pending)) = &self.pending_source_operation {
-            if pending_kind == kind
-                && pending.namespace == self.observation_namespace
-                && pending.payload_digest == candidate.payload_digest
-            {
-                return pending.clone();
+/// Exact typed work whose commit outcome was not observed. Keeping its
+/// payload beside the receipt key prevents a later producer call from
+/// substituting a new nonce for an uncertain mutation.
+#[derive(Clone)]
+enum PendingSourceOperation {
+    Discover {
+        operation: crate::storage::source_observations::SourceOperation,
+        paths: Vec<String>,
+        complete: bool,
+    },
+    FinishBackfill {
+        operation: crate::storage::source_observations::SourceOperation,
+        expected_generation: Option<String>,
+    },
+}
+
+impl PendingSourceOperation {
+    fn operation(&self) -> &crate::storage::source_observations::SourceOperation {
+        match self {
+            Self::Discover { operation, .. } | Self::FinishBackfill { operation, .. } => {
+                operation
             }
         }
-        self.pending_source_operation = Some((kind.to_owned(), candidate.clone()));
-        candidate
+    }
+}
+
+impl EventCache {
+    /// Re-submit an uncertain mutation with its original identity and payload
+    /// before admitting a different mutation. A receipt is terminal even when
+    /// it is a conflict: that old typed request cannot be retried into a
+    /// different state.
+    fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
+        let Some(pending) = self.pending_source_operation.clone() else {
+            return Ok(());
+        };
+        let receipt = match &pending {
+            PendingSourceOperation::Discover {
+                operation,
+                paths,
+                complete,
+            } => self
+                .source_observations
+                .as_mut()
+                .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+                .discover(operation, paths, *complete),
+            PendingSourceOperation::FinishBackfill {
+                operation,
+                expected_generation,
+            } => self
+                .source_observations
+                .as_mut()
+                .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+                .finish_backfill(operation, expected_generation.as_deref()),
+        }
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        match receipt {
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied
+            | crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                self.pending_source_operation = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn capture_discover_operation(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        if let Some(PendingSourceOperation::Discover {
+            operation,
+            paths: pending_paths,
+            complete: pending_complete,
+        }) = &self.pending_source_operation
+        {
+            if pending_paths == paths && *pending_complete == complete {
+                return Ok(operation.clone());
+            }
+        }
+        self.reconcile_pending_source_operation()?;
+        let payload = serde_json::to_vec(&(paths, complete)).map_err(io::Error::other)?;
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "discover",
+            &payload,
+        );
+        self.pending_source_operation = Some(PendingSourceOperation::Discover {
+            operation: operation.clone(),
+            paths: paths.to_vec(),
+            complete,
+        });
+        Ok(operation)
+    }
+
+    fn capture_finish_backfill_operation(
+        &mut self,
+        expected_generation: Option<&str>,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
+        if let Some(PendingSourceOperation::FinishBackfill {
+            operation,
+            expected_generation: pending_generation,
+        }) = &self.pending_source_operation
+        {
+            if pending_generation.as_deref() == expected_generation {
+                return Ok(operation.clone());
+            }
+        }
+        self.reconcile_pending_source_operation()?;
+        let payload = serde_json::to_vec(&expected_generation).map_err(io::Error::other)?;
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "finish_backfill",
+            &payload,
+        );
+        self.pending_source_operation = Some(PendingSourceOperation::FinishBackfill {
+            operation: operation.clone(),
+            expected_generation: expected_generation.map(str::to_owned),
+        });
+        Ok(operation)
     }
 
     fn finish_source_operation(
@@ -1567,7 +1665,7 @@ impl EventCache {
         if self
             .pending_source_operation
             .as_ref()
-            .is_some_and(|(_, pending)| pending.id == operation.id)
+            .is_some_and(|pending| pending.operation().id == operation.id)
         {
             self.pending_source_operation = None;
         }
@@ -1799,8 +1897,11 @@ impl EventCache {
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
         // Recovery discovery owns a bounded source-tree page and durable
         // witness; keep the page, invalidations and receipt in one transaction.
-        let operation =
-            self.capture_source_operation("discover_recovery", b"source-recovery-page-v1");
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "discover_recovery",
+            b"source-recovery-page-v1",
+        );
         let result = self
             .store
             .as_mut()
@@ -1845,8 +1946,9 @@ impl EventCache {
         let observation_path = self
             .observation_path
             .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?;
-        let _probe = crate::native_timing::DiscoveryProbe::new(observation_path, "publication");
+            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
+            .to_owned();
+        let _probe = crate::native_timing::DiscoveryProbe::new(&observation_path, "publication");
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let paths = inputs
@@ -1854,8 +1956,7 @@ impl EventCache {
             .filter(|input| input.path.ends_with(".jsonl"))
             .map(|input| input.full_path(options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let payload = serde_json::to_vec(&(&paths, complete)).map_err(io::Error::other)?;
-        let operation = self.capture_source_operation("discover", &payload);
+        let operation = self.capture_discover_operation(&paths, complete)?;
         let started = measurements.start();
         let result = self
             .source_observations
@@ -1878,7 +1979,7 @@ impl EventCache {
         measurements.record("source_journal_inclusive", started, paths.len());
         if timing {
             measurements.emit(
-                &crate::native_timing::id(observation_path),
+                &crate::native_timing::id(&observation_path),
                 "discovery_publication_work",
             );
         }
@@ -1895,8 +1996,7 @@ impl EventCache {
     }
     pub(crate) fn finish_catalog_backfill(&mut self, generation: &str) -> io::Result<Outcome> {
         let expected_generation = Some(generation);
-        let payload = serde_json::to_vec(&expected_generation).map_err(io::Error::other)?;
-        let operation = self.capture_source_operation("finish_backfill", &payload);
+        let operation = self.capture_finish_backfill_operation(expected_generation)?;
         let result = self
             .source_observations
             .as_mut()

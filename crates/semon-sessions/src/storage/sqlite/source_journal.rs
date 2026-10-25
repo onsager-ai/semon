@@ -1361,7 +1361,16 @@ mod tests {
         assert_eq!(encoded.namespace.as_bytes(), namespace.as_bytes());
 
         let finish = finish_operation(namespace, None);
-        let _ = store.finish_backfill(&finish, None).unwrap();
+        assert_eq!(
+            store.finish_backfill(&finish, None).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        drop(store);
+        let mut reopened = open();
+        assert_eq!(
+            reopened.finish_backfill(&finish, None).unwrap(),
+            SourceMutationReceipt::AlreadyApplied
+        );
     }
 
     #[test]
