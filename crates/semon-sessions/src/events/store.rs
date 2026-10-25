@@ -13049,6 +13049,11 @@ mod tests {
             let ledger = ledger(1);
             let index = FileIndex {
                 tree_summary: Some(summary.clone()),
+                source_chunks: Some(std::sync::Arc::new(crate::source_chunks::Chunks {
+                    offset: 3,
+                    hashes: vec![[1; 32]],
+                    resume: None,
+                })),
                 marker_index: Some(crate::native_marker::Index::default()),
                 handoff_index: Some(crate::native_handoff::Index::default()),
                 ..Default::default()
@@ -13061,7 +13066,7 @@ mod tests {
             let mut labels: std::collections::BTreeMap<_, _> = rows.labels().collect();
             labels.insert("codex_turn", &rows.codex_turn);
             let expected = witness::digest(
-                labels.into_iter(),
+                labels,
                 rows.models.iter().map(String::as_str),
                 rows.tools
                     .iter()
