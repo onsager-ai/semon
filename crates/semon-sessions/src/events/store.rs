@@ -13054,10 +13054,9 @@ mod tests {
         assert_eq!(persisted.2.as_ref(), row.agent_name.as_ref());
         assert_eq!(persisted.3.as_ref(), row.last_model.as_ref());
         assert_eq!(persisted.4 != 0, row.failed);
-        assert_eq!(
-            store.read_one("file.jsonl").unwrap(),
-            Some((third, truncated))
-        );
+        let (read_ledger, read) = store.read_one("file.jsonl").unwrap().unwrap();
+        assert_eq!(read_ledger, third);
+        assert_eq!(format!("{read:?}"), format!("{truncated:?}"));
 
         drop(store);
         fs::remove_dir_all(root).unwrap();
