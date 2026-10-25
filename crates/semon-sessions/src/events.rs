@@ -1107,10 +1107,13 @@ pub(crate) trait IndexStore: Send {
     fn discover_recovery_sources(
         &mut self,
         _operation: &crate::storage::source_observations::SourceOperation,
-    ) -> Result<(
-        crate::storage::source_observations::SourceMutationReceipt,
-        bool,
-    ), StoreError> {
+    ) -> Result<
+        (
+            crate::storage::source_observations::SourceMutationReceipt,
+            bool,
+        ),
+        StoreError,
+    > {
         Err(StoreError::Configured(
             crate::storage::StorageError::NamespaceUpgradePending,
         ))
@@ -1394,10 +1397,12 @@ pub(crate) struct EventCache {
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
-    source_observations: Option<Box<dyn crate::storage::source_observations::SourceObservationStore>>,
+    source_observations:
+        Option<Box<dyn crate::storage::source_observations::SourceObservationStore>>,
     observation_namespace: String,
     observation_path: Option<PathBuf>,
-    pending_source_operation: Option<(String, crate::storage::source_observations::SourceOperation)>,
+    pending_source_operation:
+        Option<(String, crate::storage::source_observations::SourceOperation)>,
     scoped: bool,
     explicit_store: bool,
     event_operation: Option<String>,
@@ -1659,9 +1664,8 @@ impl EventCache {
                 crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
-                cache.source_observations = Some(
-                    crate::storage::sqlite::source_journal::legacy(path.clone()),
-                );
+                cache.source_observations =
+                    Some(crate::storage::sqlite::source_journal::legacy(path.clone()));
                 cache.observation_path = Some(path.clone());
                 cache
             }
@@ -1795,11 +1799,10 @@ impl EventCache {
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
         // Recovery discovery owns a bounded source-tree page and durable
         // witness; keep the page, invalidations and receipt in one transaction.
-        let operation = self.capture_source_operation(
-            "discover_recovery",
-            b"source-recovery-page-v1",
-        );
-        let result = self.store
+        let operation =
+            self.capture_source_operation("discover_recovery", b"source-recovery-page-v1");
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .discover_recovery_sources(&operation);
@@ -1811,7 +1814,10 @@ impl EventCache {
             Err(error) => {
                 self.finish_source_operation(
                     &operation,
-                    matches!(&error, StoreError::Configured(crate::storage::StorageError::CommitUncertain)),
+                    matches!(
+                        &error,
+                        StoreError::Configured(crate::storage::StorageError::CommitUncertain)
+                    ),
                 );
                 return Err(io::Error::other(error.to_string()));
             }
@@ -1822,10 +1828,12 @@ impl EventCache {
             // the next cursor on the next producer call; this may cost one
             // harmless empty page after the final commit.
             crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(false),
-            crate::storage::source_observations::SourceMutationReceipt::Conflict => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "source recovery operation changed",
-            )),
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "source recovery operation changed",
+                ))
+            }
         }
     }
     pub(crate) fn discover_catalog_sources(
@@ -1849,7 +1857,8 @@ impl EventCache {
         let payload = serde_json::to_vec(&(&paths, complete)).map_err(io::Error::other)?;
         let operation = self.capture_source_operation("discover", &payload);
         let started = measurements.start();
-        let result = self.source_observations
+        let result = self
+            .source_observations
             .as_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .discover(&operation, &paths, complete);
@@ -1876,17 +1885,20 @@ impl EventCache {
         match receipt {
             crate::storage::source_observations::SourceMutationReceipt::Applied
             | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(()),
-            crate::storage::source_observations::SourceMutationReceipt::Conflict => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "source observation operation changed",
-            )),
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "source observation operation changed",
+                ))
+            }
         }
     }
     pub(crate) fn finish_catalog_backfill(&mut self, generation: &str) -> io::Result<Outcome> {
         let expected_generation = Some(generation);
         let payload = serde_json::to_vec(&expected_generation).map_err(io::Error::other)?;
         let operation = self.capture_source_operation("finish_backfill", &payload);
-        let result = self.source_observations
+        let result = self
+            .source_observations
             .as_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .finish_backfill(&operation, expected_generation);
@@ -1905,8 +1917,12 @@ impl EventCache {
         };
         match receipt {
             crate::storage::source_observations::SourceMutationReceipt::Applied
-            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(Outcome::Written),
-            crate::storage::source_observations::SourceMutationReceipt::Conflict => Ok(Outcome::Conflict),
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => {
+                Ok(Outcome::Written)
+            }
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Ok(Outcome::Conflict)
+            }
         }
     }
 

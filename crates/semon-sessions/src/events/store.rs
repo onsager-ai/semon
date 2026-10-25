@@ -2589,10 +2589,13 @@ impl IndexStore for SqliteStore {
     fn discover_recovery_sources(
         &mut self,
         operation: &crate::storage::source_observations::SourceOperation,
-    ) -> Result<(
-        crate::storage::source_observations::SourceMutationReceipt,
-        bool,
-    ), StoreError> {
+    ) -> Result<
+        (
+            crate::storage::source_observations::SourceMutationReceipt,
+            bool,
+        ),
+        StoreError,
+    > {
         if let Some(receipt) = crate::storage::sqlite::source_journal::operation_replay(
             operation,
             None,
@@ -2616,12 +2619,9 @@ impl IndexStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
-        if let Some(receipt) = crate::storage::sqlite::source_journal::stored_receipt(
-            &tx,
-            None,
-            operation,
-        )
-        .map_err(StoreError::Configured)?
+        if let Some(receipt) =
+            crate::storage::sqlite::source_journal::stored_receipt(&tx, None, operation)
+                .map_err(StoreError::Configured)?
         {
             tx.commit().map_err(failure)?;
             return Ok((receipt, false));
@@ -7675,13 +7675,12 @@ mod tests {
                 (crate::storage::source_observations::SourceMutationReceipt::Applied, complete) => {
                     Ok(complete)
                 }
-                (
-                    crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied,
-                    _,
-                ) => Ok(false),
-                (crate::storage::source_observations::SourceMutationReceipt::Conflict, _) => {
-                    Err(StoreError::Configured(crate::storage::StorageError::Conflict))
+                (crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied, _) => {
+                    Ok(false)
                 }
+                (crate::storage::source_observations::SourceMutationReceipt::Conflict, _) => Err(
+                    StoreError::Configured(crate::storage::StorageError::Conflict),
+                ),
             }
         }
     }
