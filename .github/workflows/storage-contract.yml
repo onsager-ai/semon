@@ -60,6 +60,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          SEMON_TEST_NOW=1795000000000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::configured::tests::configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_before_raw -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_two_source_publication_ack_finish_and_head -- --exact --nocapture
