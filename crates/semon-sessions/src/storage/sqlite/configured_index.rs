@@ -33,7 +33,9 @@ pub(crate) fn open_private_semantic(
 }
 
 #[allow(dead_code)] // Requires an explicit validated capability, never Options.
-pub(crate) fn open_semantic(capability: super::semantic::SemanticStaging) -> Result<Box<dyn IndexStore>, StorageError> {
+pub(crate) fn open_semantic(
+    capability: super::semantic::SemanticStaging,
+) -> Result<Box<dyn IndexStore>, StorageError> {
     let config = capability.config();
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
