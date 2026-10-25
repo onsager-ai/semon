@@ -616,8 +616,9 @@ impl Stage {
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
         for (path, claim) in &prepared.claims {
-            if let Some(claim) = claim {
-                if tx.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND revision=?3",params![ns,path,claim]).map_err(error)?!=1 { return Err(refuse("semantic_publication_claim_changed")); }
+            if let Some(claim) = claim
+                && tx.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND revision=?3",params![ns,path,claim]).map_err(error)?!=1 {
+                return Err(refuse("semantic_publication_claim_changed"));
             }
         }
         #[cfg(test)]
