@@ -182,6 +182,7 @@ pub(super) fn write(
     changes: Option<&DirtyRows>,
 ) -> Result<i64, StorageError> {
     let (id, exists) = qualify(tx, path, expected)?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
     after(tx)?;
     if changes.is_none() && exists {
         // Identity deletion first is required by the copied-identity triggers.
