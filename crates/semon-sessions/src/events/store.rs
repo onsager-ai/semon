@@ -12987,7 +12987,9 @@ mod tests {
         cold.last_model = None;
         let first = ledger(1);
         assert_eq!(
-            store.write_one("file.jsonl", None, None, &first, &cold).unwrap(),
+            store
+                .write_one("file.jsonl", None, None, &first, &cold)
+                .unwrap(),
             Outcome::Written
         );
 
@@ -13051,7 +13053,10 @@ mod tests {
         assert_eq!(persisted.2.as_ref(), row.agent_name.as_ref());
         assert_eq!(persisted.3.as_ref(), row.last_model.as_ref());
         assert_eq!(persisted.4 != 0, row.failed);
-        assert_eq!(store.read_one("file.jsonl").unwrap(), Some((third, truncated)));
+        assert_eq!(
+            store.read_one("file.jsonl").unwrap(),
+            Some((third, truncated))
+        );
 
         drop(store);
         fs::remove_dir_all(root).unwrap();
