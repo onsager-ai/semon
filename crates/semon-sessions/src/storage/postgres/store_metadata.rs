@@ -96,7 +96,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             return Err(StorageError::ScopeChanged);
         }
         let checks: Vec<String> = tx.driver.query(
-            "SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=$1::regclass AND contype='c' AND convalidated ORDER BY 1", &[&name]
+            "SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=$1::text::regclass AND contype='c' AND convalidated ORDER BY 1", &[&name]
         ).map_err(sqlstate::error)?.iter().map(|r| r.get(0)).collect();
         let mut expected = match table {
             "owner" => vec!["singleton", "(contract = 1)", "(epoch = 1)"],
@@ -113,7 +113,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         };
         expected.sort_unstable();
         let shape: bool = tx.driver.query_one(
-            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=$1::regclass AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=$1::regclass)", &[&name]
+            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::text::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::text::regclass AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=$1::text::regclass AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=$1::text::regclass)", &[&name]
         ).map_err(sqlstate::error)?.get(0);
         if checks != expected || !shape {
             return Err(StorageError::ScopeChanged);
