@@ -343,10 +343,12 @@ impl NativeEvidence {
     }
 
     /// Advance cold candidate discovery without reading native bodies. The
-    /// latest page is published after discovery finishes, so a flat directory's
-    /// enumeration order cannot displace recent sessions with old history.
-    /// Workers yield after 512 entries or 64 accepted candidates; only the 64
-    /// newest candidates remain resident between steps.
+    /// Each observed page may publish a bounded provisional component while
+    /// discovery continues. This does not make the catalog exhaustive: the
+    /// durable source journal remains `discovering` until the cursor and
+    /// recovery pass both close. Workers yield after 512 entries or 64 accepted
+    /// candidates; only the 64 newest observed candidates remain resident
+    /// between steps.
     pub(crate) fn prepare_catalog(
         &self,
         work: &mut Work,
@@ -418,7 +420,12 @@ impl NativeEvidence {
                 candidates,
                 (page.complete, recovery_complete),
             );
-            if !page.complete || !recovery_complete {
+            // Recovery admission is a hard boundary, but global path discovery
+            // is not. Publishing only the observed newest page gives a useful
+            // provisional component without claiming exhaustive ordering or
+            // transitioning the durable backfill state to draining. The next
+            // invocation keeps this cursor and discovers the next bounded page.
+            if !recovery_complete || discovery.newest.is_empty() {
                 return Ok(CatalogPreparation::Pending);
             }
         }
