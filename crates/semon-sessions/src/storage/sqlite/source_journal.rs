@@ -2277,9 +2277,26 @@ mod tests {
             ))
         ));
         // A refused family neither detaches nor substitutes this store.
-        index
-            .discover_catalog_sources(&["after-refusal".into()], true)
-            .unwrap();
+        let paths = vec!["after-refusal".into()];
+        let operation = SourceOperation::capture(
+            f.config.namespace.as_str(),
+            "discover",
+            &serde_json::to_vec(&(&paths, true)).unwrap(),
+        );
+        let intent = SourceIntent::Discover {
+            operation: operation.clone(),
+            paths: paths.clone(),
+            complete: true,
+        };
+        let observations = index
+            .source_observations_mut()
+            .expect("configured source observation store");
+        observations.persist_intent(&intent).unwrap();
+        assert_eq!(
+            observations.discover(&operation, &paths, true).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        observations.acknowledge_intent(&operation).unwrap();
         assert_eq!(
             f.config
                 .source_observations()
