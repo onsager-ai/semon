@@ -61,7 +61,8 @@ pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::
 #[cfg(test)]
 fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<bool> {
     crate::storage::catalog::preserve_original(
-        &crate::storage::sqlite::history::OriginalHistory::unbound(tx), old,
+        &crate::storage::sqlite::history::OriginalHistory::unbound(tx),
+        old,
     )
 }
 
@@ -71,7 +72,8 @@ pub(crate) fn preserve_replacements(
     publication: &Publication<'_>,
 ) -> rusqlite::Result<bool> {
     crate::storage::catalog::preserve_replacement_rows(
-        &crate::storage::sqlite::history::OriginalHistory::unbound(tx), publication.rows,
+        &crate::storage::sqlite::history::OriginalHistory::unbound(tx),
+        publication.rows,
     )
 }
 
@@ -498,197 +500,195 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod legacy_reference {
     use super::*;
-// Transfer checkpoints are private producer work. Neither a History catalog row
-// nor a projection header is visible until every original byte has been copied.
-// Current remains the custody owner throughout an interrupted transfer.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Transfer {
-    witness: String,
-    last: Option<i64>,
-    copied: usize,
-    partial: i64,
-    complete: bool,
-}
-
-fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<bool> {
-    if catalog(tx, &old.key)?.is_some() {
-        return Ok(true);
+    // Transfer checkpoints are private producer work. Neither a History catalog row
+    // nor a projection header is visible until every original byte has been copied.
+    // Current remains the custody owner throughout an interrupted transfer.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Transfer {
+        witness: String,
+        last: Option<i64>,
+        copied: usize,
+        partial: i64,
+        complete: bool,
     }
-    let mut history = old.clone();
-    history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let header: Option<(String, u32, Option<String>, i64)> = tx.query_row(
+
+    fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<bool> {
+        if catalog(tx, &old.key)?.is_some() {
+            return Ok(true);
+        }
+        let mut history = old.clone();
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let header: Option<(String, u32, Option<String>, i64)> = tx.query_row(
         "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE session_key=?1",
         [&old.key],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional()?;
-    let metadata = encode(&history)?;
-    let original_header = encode(&header)?;
-    let witness = format!(
-        "{:x}",
-        Sha256::digest(encode(&(&metadata, &original_header))?.as_bytes())
-    );
-    let marker = format!("history_transfer:{}", old.key);
-    let saved: Option<String> = tx
-        .query_row("SELECT value FROM meta WHERE key=?1", [&marker], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    let prior = saved.as_deref().map(decode::<Transfer>).transpose()?;
-    if prior.as_ref().is_some_and(|prior| prior.witness != witness) {
-        // Another fenced publication changed the original. Discard only private
-        // staged rows, in bounded batches; never combine generations.
-        let removed = tx.execute("DELETE FROM session_history_slots WHERE session_key=?1 AND slot IN (SELECT slot FROM session_history_slots WHERE session_key=?1 ORDER BY slot LIMIT 64)", [&old.key])?;
-        let parts = tx.execute("DELETE FROM session_history_slot_parts WHERE session_key=?1 AND (slot,part) IN (SELECT slot,part FROM session_history_slot_parts WHERE session_key=?1 ORDER BY slot,part LIMIT 64)", [&old.key])?;
-        if removed == 0 && parts == 0 {
-            tx.execute("DELETE FROM meta WHERE key=?1", [&marker])?;
+        let metadata = encode(&history)?;
+        let original_header = encode(&header)?;
+        let witness = format!(
+            "{:x}",
+            Sha256::digest(encode(&(&metadata, &original_header))?.as_bytes())
+        );
+        let marker = format!("history_transfer:{}", old.key);
+        let saved: Option<String> = tx
+            .query_row("SELECT value FROM meta WHERE key=?1", [&marker], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let prior = saved.as_deref().map(decode::<Transfer>).transpose()?;
+        if prior.as_ref().is_some_and(|prior| prior.witness != witness) {
+            // Another fenced publication changed the original. Discard only private
+            // staged rows, in bounded batches; never combine generations.
+            let removed = tx.execute("DELETE FROM session_history_slots WHERE session_key=?1 AND slot IN (SELECT slot FROM session_history_slots WHERE session_key=?1 ORDER BY slot LIMIT 64)", [&old.key])?;
+            let parts = tx.execute("DELETE FROM session_history_slot_parts WHERE session_key=?1 AND (slot,part) IN (SELECT slot,part FROM session_history_slot_parts WHERE session_key=?1 ORDER BY slot,part LIMIT 64)", [&old.key])?;
+            if removed == 0 && parts == 0 {
+                tx.execute("DELETE FROM meta WHERE key=?1", [&marker])?;
+            }
+            return Ok(false);
         }
-        return Ok(false);
-    }
-    let mut transfer = prior.unwrap_or_else(|| Transfer {
-        witness,
-        last: None,
-        copied: 0,
-        partial: 0,
-        complete: header
-            .as_ref()
-            .is_some_and(|(_, version, recorded, total)| {
-                *version == VERSION
-                    && *total >= 0
-                    && !old.sources.is_empty()
-                    && old.sources.len() <= 64
-                    && recorded.is_some()
-                    && crate::retention::source_generation(&old.sources)
-                        .ok()
-                        .as_ref()
-                        == recorded.as_ref()
-            }),
-    });
-    let paths: BTreeSet<_> = old.sources.iter().map(|source| &source.path).collect();
-    let mut bytes = 0usize;
-    let mut processed = 0;
-    while processed < 64 && bytes < 1048576 {
-        let comparison = if transfer.last.is_some() { ">" } else { ">=" };
-        let next: Option<(i64, i64)> = tx.query_row(
+        let mut transfer = prior.unwrap_or_else(|| Transfer {
+            witness,
+            last: None,
+            copied: 0,
+            partial: 0,
+            complete: header
+                .as_ref()
+                .is_some_and(|(_, version, recorded, total)| {
+                    *version == VERSION
+                        && *total >= 0
+                        && !old.sources.is_empty()
+                        && old.sources.len() <= 64
+                        && recorded.is_some()
+                        && crate::retention::source_generation(&old.sources)
+                            .ok()
+                            .as_ref()
+                            == recorded.as_ref()
+                }),
+        });
+        let paths: BTreeSet<_> = old.sources.iter().map(|source| &source.path).collect();
+        let mut bytes = 0usize;
+        let mut processed = 0;
+        while processed < 64 && bytes < 1048576 {
+            let comparison = if transfer.last.is_some() { ">" } else { ">=" };
+            let next: Option<(i64, i64)> = tx.query_row(
             &format!("SELECT slot,octet_length(metadata) FROM session_slots WHERE session_key=?1 AND slot{comparison}?2 ORDER BY slot LIMIT 1"),
             params![old.key, transfer.last.unwrap_or(i64::MIN)], |row|Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
-        let Some((slot, length)) = next else { break };
-        let offset = transfer.partial;
-        let take = length.saturating_sub(offset).min((1048576 - bytes) as i64);
-        if length > 1048576 {
-            // Unsupported oversized values stay in ordered byte parts. No
-            // concatenation or whole-value decode can grow with their length.
-            // Their original header stays incomplete; ordinary readers refuse.
-            tx.execute("INSERT INTO session_history_slot_parts(session_key,slot,part,bytes) SELECT session_key,slot,?3,substr(CAST(metadata AS BLOB),?3+1,?4) FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot,offset,take])?;
-            transfer.complete = false;
-        } else {
-            if length as usize > 1048576 - bytes {
-                break;
-            }
-            tx.execute("INSERT INTO session_history_slots(session_key,slot,metadata) SELECT session_key,slot,metadata FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot])?;
-        }
-        bytes += take as usize;
-        processed += 1;
-        if offset + take != length {
-            transfer.partial += take;
-            break;
-        }
-        transfer.partial = 0;
-        transfer.complete &= usize::try_from(slot).ok() == Some(transfer.copied);
-        if transfer.complete {
+            let Some((slot, length)) = next else { break };
+            let offset = transfer.partial;
+            let take = length.saturating_sub(offset).min((1048576 - bytes) as i64);
             if length > 1048576 {
+                // Unsupported oversized values stay in ordered byte parts. No
+                // concatenation or whole-value decode can grow with their length.
+                // Their original header stays incomplete; ordinary readers refuse.
+                tx.execute("INSERT INTO session_history_slot_parts(session_key,slot,part,bytes) SELECT session_key,slot,?3,substr(CAST(metadata AS BLOB),?3+1,?4) FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot,offset,take])?;
                 transfer.complete = false;
             } else {
-                let text: String = tx.query_row(
+                if length as usize > 1048576 - bytes {
+                    break;
+                }
+                tx.execute("INSERT INTO session_history_slots(session_key,slot,metadata) SELECT session_key,slot,metadata FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot])?;
+            }
+            bytes += take as usize;
+            processed += 1;
+            if offset + take != length {
+                transfer.partial += take;
+                break;
+            }
+            transfer.partial = 0;
+            transfer.complete &= usize::try_from(slot).ok() == Some(transfer.copied);
+            if transfer.complete {
+                if length > 1048576 {
+                    transfer.complete = false;
+                } else {
+                    let text: String = tx.query_row(
                     "SELECT metadata FROM session_history_slots WHERE session_key=?1 AND slot=?2",
                     params![old.key, slot],
                     |row| row.get(0),
                 )?;
-                transfer.complete &= decode::<SavedSlot>(&text).ok().is_some_and(|slot| {
-                    slot.source_paths().iter().all(|path| paths.contains(*path))
-                });
+                    transfer.complete &= decode::<SavedSlot>(&text).ok().is_some_and(|slot| {
+                        slot.source_paths().iter().all(|path| paths.contains(*path))
+                    });
+                }
             }
+            transfer.last = Some(slot);
+            transfer.copied += 1;
         }
-        transfer.last = Some(slot);
-        transfer.copied += 1;
-    }
-    let comparison = if transfer.last.is_some() { ">" } else { ">=" };
-    let more: bool = tx.query_row(
+        let comparison = if transfer.last.is_some() { ">" } else { ">=" };
+        let more: bool = tx.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM session_slots WHERE session_key=?1 AND slot{comparison}?2)"
         ),
         params![old.key, transfer.last.unwrap_or(i64::MIN)],
         |row| row.get(0),
     )?;
-    if more {
+        if more {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                params![marker, encode(&transfer)?],
+            )?;
+            return Ok(false);
+        }
+        transfer.complete &= header
+            .as_ref()
+            .is_some_and(|(_, _, _, total)| usize::try_from(*total).ok() == Some(transfer.copied));
+        tx.execute(
+            "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
+            params![old.key, metadata],
+        )?;
         tx.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-            params![marker, encode(&transfer)?],
+            params![
+                format!("history_original_header:{}", old.key),
+                original_header
+            ],
         )?;
-        return Ok(false);
-    }
-    transfer.complete &= header
-        .as_ref()
-        .is_some_and(|(_, _, _, total)| usize::try_from(*total).ok() == Some(transfer.copied));
-    tx.execute(
-        "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
-        params![old.key, metadata],
-    )?;
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-        params![
-            format!("history_original_header:{}", old.key),
-            original_header
-        ],
-    )?;
-    if let Some((generation, version, sources, total)) = header {
-        tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6)",params![old.key,generation,sources.unwrap_or_default(),version,total,!transfer.complete])?;
-    }
-    tx.execute("DELETE FROM meta WHERE key=?1", [marker])?;
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
-        [format!("overview_needed:{}", old.key)],
-    )?;
-    Ok(true)
-}
-
-/// One bounded custody step per replacement owner, after publication/source CAS
-/// checks and before any Current mutation. False must commit only this private
-/// progress and leave the caller's durable publication intent pending.
-pub(crate) fn preserve_replacements(
-    tx: &Transaction<'_>,
-    publication: &Publication<'_>,
-) -> rusqlite::Result<bool> {
-    let mut advanced = false;
-    for row in publication.rows {
-        let retained: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
-            [&row.key],
-            |record| record.get(0),
-        )?;
-        if retained {
-            continue;
+        if let Some((generation, version, sources, total)) = header {
+            tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6)",params![old.key,generation,sources.unwrap_or_default(),version,total,!transfer.complete])?;
         }
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key=?1 AND harness!=?2",
-                params![row.key, row.harness],
+        tx.execute("DELETE FROM meta WHERE key=?1", [marker])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
+            [format!("overview_needed:{}", old.key)],
+        )?;
+        Ok(true)
+    }
+
+    /// One bounded custody step per replacement owner, after publication/source CAS
+    /// checks and before any Current mutation. False must commit only this private
+    /// progress and leave the caller's durable publication intent pending.
+    pub(crate) fn preserve_replacements(
+        tx: &Transaction<'_>,
+        publication: &Publication<'_>,
+    ) -> rusqlite::Result<bool> {
+        let mut advanced = false;
+        for row in publication.rows {
+            let retained: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+                [&row.key],
                 |record| record.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            if advanced {
-                return Ok(false);
+            )?;
+            if retained {
+                continue;
             }
-            let old: CatalogRow = decode(&old)?;
-            if !preserve_original_harness(tx, &old)? {
-                return Ok(false);
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1 AND harness!=?2",
+                    params![row.key, row.harness],
+                    |record| record.get(0),
+                )
+                .optional()?;
+            if let Some(old) = old {
+                if advanced {
+                    return Ok(false);
+                }
+                let old: CatalogRow = decode(&old)?;
+                if !preserve_original_harness(tx, &old)? {
+                    return Ok(false);
+                }
+                advanced = true;
             }
-            advanced = true;
         }
+        Ok(true)
     }
-    Ok(true)
-}
-
-
 }
