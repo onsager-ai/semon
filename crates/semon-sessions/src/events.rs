@@ -1545,7 +1545,10 @@ impl EventCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn acknowledge_source_for_test(&mut self, path: &str) -> Result<Outcome, StoreError> {
+    pub(crate) fn acknowledge_source_for_test(
+        &mut self,
+        path: &str,
+    ) -> Result<Outcome, StoreError> {
         let store = self.store.as_mut().expect("test producer store");
         let revision = store.catalog_claims(&[path.to_owned()])?[0]
             .1
@@ -1557,29 +1560,44 @@ impl EventCache {
     /// A failed apply/ack leaves the original payload available to the next open.
     pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
         let Some(store) = self.source_observations.as_mut() else {
-            return if self.pending_source_operation.is_none() { Ok(()) } else {
+            return if self.pending_source_operation.is_none() {
+                Ok(())
+            } else {
                 Err(io::Error::other("source observation producer unavailable"))
             };
         };
         if let Some(pending) = &self.pending_source_operation {
-            store.persist_intent(pending).map_err(|error| io::Error::other(error.to_string()))?;
+            store
+                .persist_intent(pending)
+                .map_err(|error| io::Error::other(error.to_string()))?;
         }
-        let pending = store.pending_intents().map_err(|error| io::Error::other(error.to_string()))?;
+        let pending = store
+            .pending_intents()
+            .map_err(|error| io::Error::other(error.to_string()))?;
         for intent in pending {
-            intent.apply(store.as_mut()).map_err(|error| io::Error::other(error.to_string()))?;
-            store.acknowledge_intent(intent.operation()).map_err(|error| io::Error::other(error.to_string()))?;
+            intent
+                .apply(store.as_mut())
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            store
+                .acknowledge_intent(intent.operation())
+                .map_err(|error| io::Error::other(error.to_string()))?;
         }
         self.pending_source_operation = None;
         Ok(())
     }
 
-    fn persist_source_operation(&mut self, intent: PendingSourceOperation) -> io::Result<crate::storage::source_observations::SourceOperation> {
+    fn persist_source_operation(
+        &mut self,
+        intent: PendingSourceOperation,
+    ) -> io::Result<crate::storage::source_observations::SourceOperation> {
         let operation = intent.operation().clone();
         // Keep this copy even if committing the intent itself is uncertain.
         self.pending_source_operation = Some(intent.clone());
-        self.source_observations.as_mut()
+        self.source_observations
+            .as_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
-            .persist_intent(&intent).map_err(|error| io::Error::other(error.to_string()))?;
+            .persist_intent(&intent)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(operation)
     }
 
@@ -1623,10 +1641,16 @@ impl EventCache {
         &mut self,
         operation: &crate::storage::source_observations::SourceOperation,
     ) -> io::Result<()> {
-        self.source_observations.as_mut()
+        self.source_observations
+            .as_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
-            .acknowledge_intent(operation).map_err(|error| io::Error::other(error.to_string()))?;
-        if self.pending_source_operation.as_ref().is_some_and(|pending| pending.operation().id == operation.id) {
+            .acknowledge_intent(operation)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if self
+            .pending_source_operation
+            .as_ref()
+            .is_some_and(|pending| pending.operation().id == operation.id)
+        {
             self.pending_source_operation = None;
         }
         Ok(())
@@ -1659,7 +1683,9 @@ impl EventCache {
             explicit_store: true,
             ..Self::default()
         };
-        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
         Ok(cache)
     }
     pub(crate) fn open_configured(
@@ -1676,7 +1702,9 @@ impl EventCache {
             explicit_store: true,
             ..Self::default()
         };
-        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
         Ok(cache)
     }
     /// A read-only request-local cache of selected source generations. The
@@ -1742,7 +1770,9 @@ impl EventCache {
             }
         };
         cache.v1_cache = Some(v1_cache.to_owned());
-        cache.reconcile_pending_source_operation().map_err(|error| error.to_string())?;
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
@@ -1758,7 +1788,9 @@ impl EventCache {
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
         cache.lock_cache = Some(v1_cache.to_owned());
-        cache.reconcile_pending_source_operation().map_err(|error| error.to_string())?;
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|error| error.to_string())?;
         Ok(cache)
     }
 
