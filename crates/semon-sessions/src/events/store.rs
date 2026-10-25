@@ -47,13 +47,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use super::Yield;
+use super::native_rows::EventState;
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
     MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
 };
-use super::native_rows::EventState;
-#[cfg(test)]
-use super::Yield;
 use crate::storage::sqlite::source_journal;
 use crate::storage::{
     StorageError,
@@ -7119,7 +7119,7 @@ fn write_file_with_usage_deletes<'tx>(
         last,
         cwd,
         branch,
-        usage_by_id: _,
+        usage_by_id,
         codex_tokens,
         codex_tokens_by_model,
         codex_usage_events,
@@ -7323,7 +7323,8 @@ fn write_file_with_usage_deletes<'tx>(
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
-        row_plan.usage,
+        changes,
+        usage_by_id,
         measurements,
         usage_deletes,
     )?;
@@ -7415,7 +7416,8 @@ fn write_copied_usage_rows(
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
-        super::native_rows::UsageChanges::new(changes, usage_by_id),
+        changes,
+        usage_by_id,
         measurements,
         &mut UsageDeletes::default(),
     )
@@ -7424,10 +7426,12 @@ fn write_copied_usage_rows(
 fn write_copied_usage_rows_with_deletes<'tx>(
     transaction: &'tx Transaction<'_>,
     file_id: i64,
-    rows: super::native_rows::UsageChanges<'_>,
+    changes: &super::DirtyRows,
+    usage_by_id: &BTreeMap<String, MessageUsage>,
     measurements: &mut crate::native_timing::Measurements,
     deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<UsageDeleteWork> {
+    let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
     let mut put = transaction.prepare_cached(copied_usage_sql(
         transaction,
