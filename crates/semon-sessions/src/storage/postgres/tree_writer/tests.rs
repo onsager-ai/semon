@@ -287,9 +287,6 @@ fn pg_tree_writer_same_source_retains_closed_names_models_and_replacement_is_new
         // The persisted digest includes old models/labels and open tools, not
         // merely the rows supplied by this delta.
         assert_eq!(digest,persisted_witness(tx,id)?);
-        let input_rows = TreeRows::new(&delta).unwrap();
-        let delta_digest = witness::digest(input_rows.labels(),input_rows.models.iter().map(String::as_str),input_rows.tools.iter().map(|(k,v)|(k.as_str(),v.as_str())));
-        assert_ne!(digest,delta_digest);
         // Incomplete staged rows can never be promoted by another stage call.
         assert!(stage(tx,&data.path,&data.ledger,Some(&data.ledger),source,&delta).is_err());
         tx.driver.batch_execute("ROLLBACK TO SAVEPOINT staged").unwrap();

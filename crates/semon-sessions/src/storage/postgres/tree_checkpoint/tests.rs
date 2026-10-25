@@ -123,9 +123,18 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
         .into_iter()
         .map(|path| {
             let ledger = read_ledger(&sqlite, &path);
-            let index = crate::events::store::native_usage::parser_fixture(
+            let mut index = crate::events::FileIndex {
+                tree_summary: Some(Summary::default()),
+                ..Default::default()
+            };
+            if harness == "codex" {
+                index.native_usage_observations = Some(Vec::new());
+            }
+            crate::events::store::native_usage::parser_append_fixture(
                 std::path::Path::new(&path),
                 harness,
+                &mut index,
+                0,
             );
             (format!("{path}\0🦀"), ledger, index)
         })
