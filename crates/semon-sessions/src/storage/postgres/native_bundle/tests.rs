@@ -29,7 +29,10 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
         *index = (*scanned).clone();
         assert!(index.tree_summary.is_some(), "production Tree input");
         if harness == "codex" {
-            assert!(index.codex_header.is_some(), "production Codex header input");
+            assert!(
+                index.codex_header.is_some(),
+                "production Codex header input"
+            );
         }
     }
     cache.flush_cold_writes().unwrap();
