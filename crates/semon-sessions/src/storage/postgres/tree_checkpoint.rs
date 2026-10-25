@@ -3,6 +3,9 @@ use super::{PgCancellation, PgPool, sqlstate, txn::{PgTxn, TxnKind}};
 use crate::{events::{Ledger, CACHE_VERSION, store::{header_ledger, tree_state::{SharedUsage, TreeCheckpoint}}}, native_tree::Summary, selected_read, storage::{LogicalSourceNamespace, StorageError, StoreConfig}, Tokens};
 use std::{collections::BTreeMap, fmt, io};
 
+#[cfg(test)]
+thread_local! { static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     pool: PgPool,
@@ -35,6 +38,7 @@ impl Snapshot {
     pub(crate) fn restore(pool: PgPool, namespace: LogicalSourceNamespace, path: &str, ledger: &Ledger, control: PgCancellation) -> io::Result<Summary> {
         let _scope = selected_read::Scope::ensure();
         selected_read::check()?;
+        selected_read::charge(512, path.len())?;
         let mut snapshot = Self { pool, namespace, path: path.into(), ledger: ledger.clone(), file: 0, projection: 0, source: 0, control, poisoned: false };
         let (file, projection, source, mut summary) = snapshot.pool.transaction(&snapshot.namespace, TxnKind::ReadSnapshot, &snapshot.control, |tx| {
             let (file, projection, source) = snapshot.authority(tx, false)?;
@@ -63,7 +67,7 @@ impl Snapshot {
                 Ok(())
             })?;
             Ok((file, projection, source, summary))
-        }).map_err(io_error)?;
+        }).map_err(|error| selected_read::check().err().unwrap_or_else(|| io_error(error)))?;
         snapshot.file = file; snapshot.projection = projection; snapshot.source = source;
         summary.stored = Some(TreeCheckpoint::Pg(snapshot));
         Ok(summary)
@@ -91,7 +95,7 @@ impl Snapshot {
         self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
             self.authority(tx, true)?;
             read(tx)
-        }).map_err(io_error)
+        }).map_err(|error| selected_read::check().err().unwrap_or_else(|| io_error(error)))
     }
     pub(crate) fn bind_configured(&mut self, _config: StoreConfig) {
         // StoreConfig currently only selects SQLite. It cannot rebind PG.
@@ -156,6 +160,8 @@ fn rows(tx: &mut PgTxn<'_>, family: &str, owner: &str, id: i64, columns: &[&str]
         selected_read::charge(128, dynamic).map_err(budget)?;
         tx.check()?;
         let row = tx.driver.query_one(&format!("SELECT {} {predicate}", columns.join(",")), &[&tx.namespace.as_str().as_bytes(), &id, &cursor]).map_err(sqlstate::error)?;
+        #[cfg(test)]
+        DECODED.with(|value| value.set(value.get()+1));
         cursor = Some((0..keys).map(|i| row.get(i)).collect());
         let values = (0..columns.len()).map(|i| row.get::<_, Option<Vec<u8>>>(i).map(text).transpose()).collect::<Result<_, _>>()?;
         consume(values)?;
