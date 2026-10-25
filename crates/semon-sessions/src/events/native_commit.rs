@@ -31,13 +31,10 @@ pub(crate) trait Effects {
 pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(), E::Error> {
     effects.begin(&input)?;
     effects.planning_started();
-    let full = DirtyRows {
-        usage: if input.changes.is_none() {
-            input.index.usage_by_id.keys().cloned().collect()
-        } else {
-            Default::default()
-        },
-        ..DirtyRows::default()
+    let full = if input.changes.is_none() {
+        super::native_rows::full_changes(input.index)
+    } else {
+        DirtyRows::default()
     };
     effects.planning_finished();
     effects.file(&input, input.changes.unwrap_or(&full))?;

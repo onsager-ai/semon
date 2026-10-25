@@ -213,19 +213,8 @@ struct Root {
 }
 
 pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
-    let Some(native) = &index.codex_native_usage else {
-        return Ok(None);
-    };
-    let mut cost = index.codex_cost();
-    cost.models.clear();
-    cost.by_day.clear();
-    cost.unpriced_models.clear();
-    json(&Root {
-        projection_version: 1,
-        tokens: native.tokens(),
-        cost,
-    })
-    .map(Some)
+    super::super::file_rows::encoded_native_usage(index)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 pub(super) fn source(c: &Connection, path: &str) -> rusqlite::Result<Option<(i64, String)>> {
