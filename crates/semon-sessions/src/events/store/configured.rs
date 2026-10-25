@@ -8083,6 +8083,81 @@ mod tests {
         }
 
         #[test]
+        fn configured_semantic_domain94_unfinished_member_keyset_resumes_after_restart() {
+            use crate::model::relation_stage::Selector;
+            let (f, foreign, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 34);
+            let initiator = inputs[0].full_path(options);
+            fs::write(
+                &initiator,
+                fs::read_to_string(&initiator).unwrap().replace(
+                    "\"customTitle\":\"worker\"",
+                    "\"customTitle\":\"initiator\"",
+                ),
+            )
+            .unwrap();
+            let mut other = open(&foreign);
+            let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs);
+            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            let foreign_before = namespace_state(&f, "source-b");
+            let mut cache = open(&f.config);
+            let (peers, peers_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
+            publish(&mut cache, &f, &peers, &peers_model);
+            cache.finish_semantic_stage(peers.epoch).unwrap();
+            let (old, old_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            let selector = Selector::ClaudeName {
+                name: "worker".into(),
+            };
+            let cursors = || {
+                f.db().prepare("SELECT value,after_key,done FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='members' ORDER BY value").unwrap()
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            let event_rows = || {
+                f.db().prepare("SELECT file_id,seq,k,id FROM events WHERE namespace='source-a' ORDER BY file_id,seq").unwrap()
+                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            let native_before = event_rows();
+            assert_eq!(
+                cache.semantic_select(old.epoch, &selector).unwrap_err().to_string(),
+                "semantic_claude_name_members_pending"
+            );
+            let saved = cursors();
+            let unfinished = saved.iter().find(|(_, after, done)| !after.is_empty() && !done).unwrap().clone();
+            assert!(saved.iter().any(|(_, after, done)| after.is_empty() && !done));
+            assert_eq!(saved.len(), 33);
+            let committed = shared_state(&f);
+            assert_eq!(cache.publish_semantic_catalog(&old, old_model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(shared_state(&f), committed);
+            assert_eq!(event_rows(), native_before, "discovery does not replay Raw");
+            drop(cache);
+            let mut cache = open(&f.config);
+            assert_eq!(cursors(), saved, "unfinished progress was committed before close");
+            let (fresh, fresh_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            let resumed = cursors();
+            assert!(resumed.iter().all(|(_, after, done)| !after.is_empty() && *done));
+            assert!(resumed.contains(&(unfinished.0, unfinished.1, true)), "the exhausted keyset completes without restarting its prefix");
+            for (key, after, done) in saved.iter().filter(|(_, _, done)| *done) {
+                assert!(resumed.contains(&(key.clone(), after.clone(), *done)), "completed prefixes stay unchanged");
+            }
+            assert_eq!(event_rows(), native_before, "restart does not duplicate native history");
+            assert_ne!(fresh.epoch, old.epoch);
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
+            assert_eq!(actual.count, 2, "ambiguity is bounded to two candidates");
+            assert_eq!(selector_value(actual), selector_value(ordinary.semantic_select(reference.epoch, &selector).unwrap()));
+            oracle(&cache, options, &inputs, fresh_model.prepared());
+            publish(&mut cache, &f, &fresh, &fresh_model);
+            assert_eq!(namespace_state(&f, "source-b"), foreign_before);
+        }
+
+        #[test]
         fn configured_semantic_domain94_name_hints_capacity_refuses_without_truncation() {
             use crate::model::relation_stage::Selector;
             let (f, _, options, _) = model_sources();
@@ -8375,6 +8450,11 @@ mod tests {
             );
             for _ in 0..256 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
+                // Reset pages commit progress but do not yet admit selectors.
+                // Reacquire the next batch after each empty continuation.
+                if batch.paths.is_empty() {
+                    continue;
+                }
                 if cache.explicit_store && matches!(batch.phase, Phase::Indexing | Phase::Identity)
                 {
                     let error = cache
@@ -8389,9 +8469,6 @@ mod tests {
                         error.to_string(),
                         "semantic_claude_event_projection_pending"
                     );
-                }
-                if batch.paths.is_empty() {
-                    continue;
                 }
                 let selected = inputs
                     .iter()

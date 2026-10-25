@@ -839,6 +839,12 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
         let Some((kind, value, harness, after)) = task else {
             return Ok(true);
         };
+        // Member discovery yields after 32 observations, independently of the
+        // 64-source component bound. This leaves a durable continuation even
+        // for valid components and keeps name-triggered replay ticks bounded.
+        if kind == "members" {
+            budget = budget.min(32);
+        }
         let sql = match kind.as_str() {
             "members" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND session_key=?2 AND lifecycle='current' AND source_path>?3 ORDER BY source_path LIMIT ?4"
@@ -1837,6 +1843,15 @@ impl Stage {
         let result = crate::model::relation_stage::select_with(&mut lookup, selector);
         let replay = lookup.replay;
         if !replay.is_empty() {
+            // Capacity is a property of the complete requested component,
+            // not of this tick's discovery page. Check it before committing
+            // an unfinished cursor or admitting any Raw preparation.
+            let keys = serde_json::to_string(&replay)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let count: usize = tx.query_row("SELECT count(*) FROM (SELECT DISTINCT source_path FROM (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 UNION ALL SELECT member.source_path FROM json_each(?2) requested JOIN main.session_catalog_sources member ON member.namespace=?1 AND member.session_key=requested.value AND member.lifecycle='current') LIMIT 65)", params![ns,keys], |r| r.get(0)).map_err(error)?;
+            if count > 64 {
+                return Err(refuse("semantic_affected_owner_source_budget"));
+            }
             crate::model::relation_stage::replay_members_with(
                 &replay,
                 || rusqlite::Error::InvalidQuery,
