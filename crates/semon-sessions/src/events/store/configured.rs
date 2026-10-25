@@ -6378,6 +6378,8 @@ mod tests {
         );
     }
     mod domain52 {
+        use std::collections::BTreeSet;
+
         use super::*;
         use crate::model::relation_stage::{Batch, Phase};
         use crate::storage::native_events::NativeEventStore;
@@ -7063,6 +7065,30 @@ mod tests {
             }
             let (held, held_model) = held.expect("parent seed discovers its whole prior family");
             assert_eq!(held_model.prepared().rows.len(), 3);
+            let prior_current = f
+                .db()
+                .prepare(
+                    "SELECT session_key,metadata FROM session_catalog WHERE namespace='source-a' ORDER BY session_key",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+                .unwrap();
+            let prior_history = f
+                .db()
+                .prepare(
+                    "SELECT session_key,metadata FROM session_history_catalog WHERE namespace='source-a' ORDER BY session_key",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+                .unwrap();
+            assert!(
+                prior_history.is_empty(),
+                "the first same-harness cohort has no retained custody"
+            );
             let prior = namespace_state(&f, "source-a")
                 .into_iter()
                 .filter(|(table, _)| {
@@ -7142,20 +7168,132 @@ mod tests {
             let (batch, model) = final_model.expect("bounded native restart reaches publication");
             assert_eq!(model.prepared().rows.len(), 4);
             oracle(&cache, options, &inputs, model.prepared());
-            publish(&mut cache, &f, &batch, &model);
-            let db = f.db();
-            for table in ["session_catalog", "session_history_catalog"] {
-                assert_eq!(
-                    db.query_row(
-                        &format!("SELECT count(*) FROM {table} WHERE namespace='source-a'"),
-                        [],
-                        |r| r.get::<_, i64>(0)
-                    )
-                    .unwrap(),
-                    4,
-                    "{table}"
+            // History is custody, not a Current mirror. Derive its exact
+            // expected set from the pre-incident owners and the ordinary
+            // final producer model: same-harness owners with no disappeared
+            // source clear History; a disappeared source composes one
+            // retained row with the current owner. This fixture has neither
+            // prior originals nor cross-harness replacements.
+            let mut expected_history = prior_history;
+            let final_paths = model
+                .prepared()
+                .rows
+                .iter()
+                .flat_map(|row| row.sources.iter().map(|source| source.path.clone()))
+                .collect::<BTreeSet<_>>();
+            for current in &model.prepared().rows {
+                let Some(old) = prior_current.get(&current.key) else {
+                    continue;
+                };
+                let old = serde_json::from_str::<crate::model::summary::CatalogRow>(old)
+                    .unwrap();
+                assert_eq!(old.harness, current.harness);
+                let current_paths = current
+                    .sources
+                    .iter()
+                    .map(|source| source.path.clone())
+                    .collect::<BTreeSet<_>>();
+                let missing = old
+                    .sources
+                    .iter()
+                    .filter(|source| {
+                        !current_paths.contains(&source.path)
+                            && !final_paths.contains(&source.path)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if missing.is_empty() {
+                    expected_history.remove(&current.key);
+                    continue;
+                }
+                let mut retained = current.clone();
+                retained.query = None;
+                retained.sources.extend(missing);
+                retained.native_ids = retained
+                    .sources
+                    .iter()
+                    .map(|source| source.native_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                expected_history.insert(
+                    current.key.clone(),
+                    serde_json::to_string(&retained).unwrap(),
                 );
             }
+            publish(&mut cache, &f, &batch, &model);
+            let db = f.db();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog WHERE namespace='source-a'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+                4
+            );
+            let history = db
+                .prepare(
+                    "SELECT session_key,metadata FROM session_history_catalog WHERE namespace='source-a' ORDER BY session_key",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+                .unwrap();
+            assert_eq!(history, expected_history, "exact retained custody metadata");
+            assert_eq!(
+                history.len(),
+                1,
+                "one disappeared parent source retains custody"
+            );
+            let (history_key, history_metadata) = history.iter().next().unwrap();
+            let history_row =
+                serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata).unwrap();
+            assert!(
+                history_row.query.is_none(),
+                "composite custody omits current Query facts"
+            );
+            let old =
+                serde_json::from_str::<crate::model::summary::CatalogRow>(&prior_current[history_key])
+                    .unwrap();
+            let current = model
+                .prepared()
+                .rows
+                .iter()
+                .find(|row| row.key == *history_key)
+                .unwrap();
+            assert!(
+                old.sources.iter().any(|source| {
+                    history_row
+                        .sources
+                        .iter()
+                        .any(|retained| retained.path == source.path)
+                        && !current
+                            .sources
+                            .iter()
+                            .any(|present| present.path == source.path)
+                }),
+                "the disappeared original source is retained"
+            );
+            assert!(
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE namespace='source-a' AND session_key=?1 AND total>=0)",
+                    [history_key],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap(),
+                "retained custody has a history recipe header"
+            );
+            assert!(
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_history_slots WHERE namespace='source-a' AND session_key=?1)",
+                    [history_key],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap(),
+                "retained custody preserves an inspectable slot prefix"
+            );
             assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='late-0' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),3);
             assert_eq!(db.query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),4);
             assert_eq!(namespace_state(&f, "source-b"), foreign);
