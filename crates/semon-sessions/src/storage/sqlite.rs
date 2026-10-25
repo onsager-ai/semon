@@ -7,6 +7,7 @@ pub(crate) mod history;
 pub(crate) mod namespace;
 pub(crate) mod navigation;
 pub(crate) mod publication;
+pub(crate) mod proof_generations;
 pub(crate) mod query;
 pub(crate) mod search;
 pub(crate) mod source_journal;
