@@ -1,0 +1,28 @@
+diff --git a/crates/semon-sessions/src/model.rs b/crates/semon-sessions/src/model.rs
+index d3d25913..5658d9d1 100644
+--- a/crates/semon-sessions/src/model.rs
++++ b/crates/semon-sessions/src/model.rs
+@@ -7342,6 +7342,8 @@ impl PreparedSources {
+             &self.relationships.endpoints,
+             &self.relationships.relations,
+             &self.message_dependencies,
++            &self.relationships.retired_owners,
++            &self.relationships.lifecycle_authority,
+         ))
+         .map_err(io::Error::other)
+     }
+@@ -7447,6 +7449,14 @@ pub(crate) fn prepare_semantic_batch(
+     if prepared.base_generation != batch.base_generation {
+         return Err(io::Error::other("semantic model generation changed"));
+     }
++    if batch.phase == relation_stage::Phase::Publication {
++        if !batch.context.prior_owners.is_empty() {
++            prepared.relationships.lifecycle_authority = Some(relation_stage::LifecycleAuthority::capture(options)?);
++        }
++        prepared.relationships.retired_owners = batch.context.prior_owners.values()
++            .filter(|old| !prepared.rows.iter().any(|row| row.key == old.key))
++            .cloned().collect();
++    }
+     Ok(SemanticModelBatch { prepared })
+ }
+ 

@@ -330,6 +330,60 @@ fn validate_withdrawals(
     Ok(paths)
 }
 
+fn staged_paths(db: &Connection, ns: &str) -> Result<Vec<String>, StoreError> {
+    let paths = db.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path LIMIT 65").map_err(error)?
+        .query_map([ns], |r| r.get(0)).map_err(error)?
+        .collect::<rusqlite::Result<Vec<String>>>().map_err(error)?;
+    if paths.len() > 64 { return Err(refuse("semantic_affected_owner_source_budget")); }
+    Ok(paths)
+}
+
+fn retirement_plan(
+    db: &Connection,
+    source: &AdmittedSource,
+    prepared: &PreparedSources,
+) -> Result<Vec<(String, bool)>, StoreError> {
+    let ns = source.namespace();
+    let paths = staged_paths(db, ns)?;
+    let effects = owners::Owners { db, namespace: ns };
+    let prior = effects.affected(&paths).map_err(|e| StoreError::Data(e.to_string()))?;
+    if !prior.is_empty()
+        && prepared.rows.iter().any(|row| row.query.is_some() || row.trace.is_some())
+        && prepared.relationships.lifecycle_authority.is_none()
+    {
+        return Err(refuse("semantic_affected_owner_authority_missing"));
+    }
+    let mut outgoing = Vec::new();
+    let mut plan = Vec::new();
+    for old in prior.values() {
+        // Even surviving incident owners must be rederived, never silently
+        // omitted because the transition changed their native identity.
+        if old.sources.iter().any(|s| !paths.contains(&s.path.to_string_lossy().into_owned())) {
+            return Err(refuse("semantic_affected_owner_scope"));
+        }
+        if prepared.rows.iter().any(|row| row.key == old.key) { continue; }
+        let withdrawn = old.sources.iter().all(|s| prepared.withdrawals.iter().any(|w| s.path == std::path::Path::new(&w.path)));
+        if !withdrawn && old.sources.iter().any(|s| !prepared.rows.iter().flat_map(|r| &r.sources).any(|new| new.path == s.path)) {
+            return Err(refuse("semantic_affected_owner_transition_pending"));
+        }
+        outgoing.push(old.clone());
+        plan.push((old.key.clone(), withdrawn));
+    }
+    if serde_json::to_string(&outgoing).map_err(|e| StoreError::Data(e.to_string()))?
+        != serde_json::to_string(&prepared.relationships.retired_owners).map_err(|e| StoreError::Data(e.to_string()))?
+    {
+        return Err(refuse("semantic_affected_owner_witness"));
+    }
+    Ok(plan)
+}
+
+fn lifecycle_current(_source: &AdmittedSource, _batch: &Batch, prepared: &PreparedSources) -> Result<bool, StoreError> {
+    let Some(authority) = &prepared.relationships.lifecycle_authority else {
+        return Ok(prepared.relationships.retired_owners.is_empty());
+    };
+    Ok(authority.current().unwrap_or(false))
+}
+
 fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0))) OR EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND (e.k IN ('xsm','agm','tn') OR e.k='tool' AND e.n IN ('SendMessage','Task','Agent')))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported {
@@ -619,6 +673,9 @@ impl Stage {
         if !valid || self.epoch != Some(batch.epoch) {
             return Ok((Outcome::Conflict, None));
         }
+        if !lifecycle_current(&self.source, batch, prepared)? {
+            return Ok((Outcome::Conflict, None));
+        }
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",[ns],|r|r.get(0)).map_err(error)?;
         if pending {
             return Err(refuse("semantic_publication_recovery_intent_pending"));
@@ -748,25 +805,7 @@ impl Stage {
         if covered.into_iter().collect::<Vec<_>>() != staged {
             return Ok((Outcome::Conflict, None));
         }
-        let old_owners: Vec<String> = tx.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=?1 AND lifecycle='current' AND source_path IN (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1) ORDER BY session_key LIMIT 65").map_err(error)?.query_map([ns],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
-        if old_owners.len() > 64 {
-            return Err(refuse("semantic_owner_budget"));
-        }
-        let retired = old_owners
-            .iter()
-            .filter(|key| !prepared.rows.iter().any(|row| &row.key == *key))
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in &retired {
-            let not_withdrawn: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=?1 AND s.session_key=?2 AND s.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources c WHERE c.namespace=s.namespace AND c.source_path=s.source_path AND c.withdrawal IS NOT NULL))",params![ns,key],|r|r.get(0)).map_err(error)?;
-            if not_withdrawn {
-                return Err(refuse("semantic_affected_owner_retirement_pending"));
-            }
-            let outside: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=?1 AND s.session_key=?2 AND s.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources c WHERE c.namespace=s.namespace AND c.source_path=s.source_path))",params![ns,key],|r|r.get(0)).map_err(error)?;
-            if outside {
-                return Err(refuse("semantic_owner_scope"));
-            }
-        }
+        let retired = retirement_plan(&tx, &self.source, prepared)?;
         if prepared
             .rows
             .iter()
@@ -776,6 +815,7 @@ impl Stage {
             || !prepared.relationships.relations.is_empty()
             || !prepared.pids.is_empty()
             || !prepared.lineage_dependencies.is_empty()
+            || !prepared.relationships.retired_owners.is_empty()
         {
             let witness = prepared
                 .staged_projection_witness()
@@ -844,6 +884,7 @@ impl Stage {
                 || !prepared.relationships.relations.is_empty()
                 || !prepared.pids.is_empty()
                 || !prepared.lineage_dependencies.is_empty()
+            || !prepared.relationships.retired_owners.is_empty()
             {
                 generation_metadata.push(producer_witness.clone());
             }
@@ -923,10 +964,8 @@ impl Stage {
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_owners").map_err(error)?;
-        for key in &retired {
-            tx.execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE namespace=?1 AND session_key=?2",params![ns,key]).map_err(error)?;
-            tx.execute("UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2",params![ns,key]).map_err(error)?;
-            tx.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE namespace=?1 AND session_key=?2",params![ns,key]).map_err(error)?;
+        for (key, withdrawal) in &retired {
+            OwnerStore::retire(&owner_effects, key, *withdrawal).map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_retirement").map_err(error)?;
@@ -955,7 +994,7 @@ impl Stage {
             let search = super::search::SearchWriter::admitted(&tx, &self.source)
                 .map_err(StoreError::Configured)?;
             let mut rows = Vec::new();
-            for key in &retired {
+            for (key, _) in &retired {
                 let text: String = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,key],|r|r.get(0)).map_err(error)?;
                 rows.push(
                     serde_json::from_str::<crate::model::summary::CatalogRow>(&text)
@@ -1423,6 +1462,29 @@ impl Stage {
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         let mut result_phase = Phase::Indexing;
+        // Enroll the complete recorded old-owner incident closure before any
+        // native reduction. A missing Raw path remains a producer refusal,
+        // never a fabricated negative observation or an omitted old owner.
+        if self.source.owner.is_some() && !resetting {
+            let seeds = staged_paths(&tx, ns)?;
+            let prior = owners::Owners { db: &tx, namespace: ns }.affected(&seeds)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let mut paths = std::collections::BTreeSet::new();
+            paths.extend(seeds.iter().cloned());
+            for row in prior.values() {
+                paths.extend(row.sources.iter().map(|s| s.path.to_string_lossy().into_owned()));
+            }
+            if paths.len() > 64 { return Err(refuse("semantic_affected_owner_source_budget")); }
+            if phase != "indexing" && paths.iter().any(|path| !seeds.contains(path)) {
+                return Err(refuse("semantic_affected_owner_late_incident_pending"));
+            }
+            let paths = paths.into_iter().collect::<Vec<_>>();
+            for (path, claim) in super::source_journal::claims(&tx, Some(ns), &paths).map_err(error)? {
+                tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
+            }
+            #[cfg(test)]
+            crate::events::store::configured::effect("semantic_lifecycle_enroll").map_err(error)?;
+        }
         let mut paths=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r|r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
         if !reset_complete {
             paths.clear();
@@ -1493,6 +1555,11 @@ impl Stage {
                 }
             }
         }
+        if result_phase == Phase::Publication && self.source.owner.is_some() {
+            context.prior_owners = owners::Owners { db: &tx, namespace: ns }
+                .affected(&staged_paths(&tx, ns)?)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+        }
         let source_revision = tx
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace=?1",
@@ -1560,6 +1627,9 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
+            if !lifecycle_current(&self.source, batch, prepared)? {
+                return Ok(Outcome::Conflict);
+            }
             if !reduction_witnesses(&tx, ns).map_err(error)? {
                 return Ok(Outcome::Conflict);
             }
@@ -1605,6 +1675,9 @@ impl Stage {
             }
             if covered != batch.paths.iter().cloned().collect() {
                 return Ok(Outcome::Conflict);
+            }
+            if self.source.owner.is_some() {
+                retirement_plan(&tx, &self.source, prepared)?;
             }
             let metadata =
                 serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
