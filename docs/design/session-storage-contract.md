@@ -1078,8 +1078,29 @@ its relocation/dependency/mutation input witnesses. The production default and
 configured factory still select their original profiles. The composite stage
 requires composite metadata, Catalog and input witnesses; unsupported combinations
 are rejected before creating a configured file. Its invalidation/backfill keys
-are also composite. Descriptions, reported facts, history and slot owners are
-not qualified by either new flag.
+are also composite. Descriptions, history and slot owners are not qualified by
+either new flag. Facts118 adds reported facts to this private authored Source
+family and its registered OLD/NEW namespace guards; public qualification stays 0.
+
+Facts118 shares the production reported-run `(session_id,start)` merge plan and
+allowlisted row validation between SQLite and the private PG family. Missing
+reported input retains every earlier run. A save writes its observations and
+current file stamp atomically. PG fresh schema 5 adds
+`semon_pg_native_reported_runs` and `semon_pg_native_reported_stamp`; Root must
+coordinate this fresh contract with the independent Proof117 tables. There is
+no schema upgrade chain. Opaque IDs and namespace bytes retain NUL/full UTF-8;
+indexed SHA-256 keys always retain a full-equality collision guard. Unsigned
+counters remain exact in the shared codec, including `u64::MAX`.
+
+The PG family uses existing schema/STORE/publication admission, then locks the
+Source revision before effects. Its durable operation receipt binds the exact
+request; retry reuses that identity. Named reads use a SQL keyset and charge row
+length before fetching and decoding the body under the existing transaction
+cancellation/deadline. All records and stamps remain content-free metadata.
+This private family is not a PgIndexStore or a selectable public PG backend.
+Complete migration snapshots, catch-up, fenced cutover/rollback, Hub #313 and
+fresh independent acceptance remain required. Facts118 CI is recorded separately
+from historical evidence; this paragraph is not an acceptance claim.
 
 The input-witness profile is connected to the existing configured parser/ingest
 transaction. Native lineage/bridge and Codex identity/parent dependency writes,
