@@ -79,7 +79,7 @@ impl Driver {
         control: &PgCancellation,
         limits: PoolLimits,
     ) {
-        self.deadline = deadline;
+        self.deadline = control.deadline(deadline);
         self.control = control.clone();
         self.limits = limits;
     }
@@ -147,8 +147,10 @@ impl Driver {
     }
     pub(super) fn rollback(&mut self) -> Result<(), DriverError> {
         // A real rollback ACK may establish noncommit. Cancel alone never does.
+        self.deadline = self
+            .control
+            .deadline(Instant::now() + self.limits.cancel_grace);
         self.control = PgCancellation::default();
-        self.deadline = Instant::now() + self.limits.cancel_grace;
         self.batch_execute("ROLLBACK")
     }
 }
@@ -318,7 +320,7 @@ impl PgPool {
         })
     }
     pub(super) fn acquire(&self, cancel: &PgCancellation) -> Result<Lease, StorageError> {
-        let deadline = Instant::now() + self.inner.limits.acquire_timeout;
+        let deadline = cancel.deadline(Instant::now() + self.inner.limits.acquire_timeout);
         loop {
             if cancel.is_cancelled() || Instant::now() >= deadline {
                 return Err(StorageError::Busy);
@@ -433,11 +435,13 @@ impl Lease {
         if connection.client.tainted.get() {
             return Err(StorageError::Unavailable);
         }
-        connection.client.context(
-            Instant::now() + self.inner.limits.cancel_grace,
-            &PgCancellation::default(),
-            self.inner.limits,
-        );
+        let deadline = connection
+            .client
+            .control
+            .deadline(Instant::now() + self.inner.limits.cancel_grace);
+        connection
+            .client
+            .context(deadline, &PgCancellation::default(), self.inner.limits);
         let row = connection
             .client
             .query_one("SELECT current_setting('semon.namespace', true)", &[])

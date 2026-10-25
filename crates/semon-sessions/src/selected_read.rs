@@ -80,6 +80,17 @@ thread_local! {
 }
 
 pub(crate) struct Scope(Option<Rc<Budget>>);
+/// Owned request limits for synchronous backend I/O. Never lend the TLS budget
+/// to a driver or retain its row/byte accounting beyond the current call.
+#[cfg(feature = "postgres")]
+pub(crate) fn io_control() -> Option<(Arc<AtomicBool>, Instant)> {
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|budget| (budget.control.cancelled.clone(), budget.control.deadline))
+    })
+}
 impl Scope {
     pub(crate) fn enter(control: &SelectedReadControl) -> Self {
         Self(ACTIVE.with(|active| {
