@@ -103,6 +103,7 @@ pub(super) fn save(
     };
     pool.apply_operation(namespace, &identity, control, |tx| {
         if revision(tx, true)? != expected_revision { return Err(StorageError::ScopeChanged); }
+        validate_prior(tx, &rows)?;
         boundary(tx)?;
         let ns = namespace.as_str().as_bytes();
         for (row, record) in rows.iter().zip(&encoded) {
@@ -119,6 +120,40 @@ pub(super) fn save(
         boundary(tx)?;
         Ok(serde_json::json!({"reportedFacts":1}))
     })?;
+    Ok(())
+}
+
+/// Do not overwrite an unsupported/corrupt observation into apparent validity.
+/// Validate only the affected keys; unrelated history is not a save-time scan.
+fn validate_prior(tx: &mut PgTxn<'_>, rows: &[ReportedRow]) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let mut budget = Budget { rows: 0, bytes: 0 };
+    let stamps = tx.driver.query("SELECT singleton,octet_length(stamp)::bigint FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 2", &[&ns]).map_err(sqlstate::error)?;
+    if stamps.len()>1 || stamps.first().is_some_and(|row|!row.get::<_,bool>(0)) { return Err(StorageError::Unavailable); }
+    if let Some(size) = stamps.first() {
+        budget.charge(size.get(1))?;
+        tx.check()?;
+        let row = tx.driver.query_one("SELECT stamp FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton=true", &[&ns]).map_err(sqlstate::error)?;
+        reported_rows::decode_stamp(&row.get::<_,Vec<u8>>(0)).map_err(|_|StorageError::Unavailable)?;
+    } else if !tx.driver.query("SELECT 1 FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 1", &[&ns]).map_err(sqlstate::error)?.is_empty() {
+        return Err(StorageError::Unavailable);
+    }
+    for planned in rows {
+        tx.check()?;
+        let id = planned.run.last_session_id.as_bytes();
+        let start = planned.run.last_start_time;
+        let sizes = tx.driver.query("SELECT octet_length(session_id)::bigint+octet_length(record)::bigint FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_digest=sha256($2::bytea) AND start=$3", &[&ns,&id,&start]).map_err(sqlstate::error)?;
+        if let Some(size) = sizes.first() {
+            budget.charge(size.get(0))?;
+            tx.check()?;
+            let row = tx.driver.query_one("SELECT session_id,record FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_digest=sha256($2::bytea) AND start=$3", &[&ns,&id,&start]).map_err(sqlstate::error)?;
+            tx.check()?;
+            let stored: Vec<u8> = row.get(0);
+            if stored!=id { return Err(StorageError::ScopeChanged); }
+            let prior = ReportedRow::decode(&row.get::<_,Vec<u8>>(1)).map_err(|_|StorageError::Unavailable)?.run;
+            if prior.last_session_id.as_bytes()!=id || prior.last_start_time!=start { return Err(StorageError::Unavailable); }
+        }
+    }
     Ok(())
 }
 
@@ -349,37 +384,99 @@ mod tests {
 
     #[test]
     fn pg_reported_facts_selected_work_unrelated_history_and_cancel_refusal() {
-        let (pool,_) = fixture(|_|{});
-        let source = ns("bounded"); seed(&pool,&source);
+        let (pool, _) = fixture(|_| {});
+        let source = ns("bounded");
+        seed(&pool, &source);
         let control = PgCancellation::default();
-        let selected = ReportedRunSnapshot { last_session_id:"selected".into(),last_duration:Some(u64::MAX),..Default::default() };
+        let selected = ReportedRunSnapshot {
+            last_session_id: "selected".into(),
+            last_duration: Some(u64::MAX),
+            ..Default::default()
+        };
         let ids = BTreeSet::from(["selected".into()]);
-        save(&pool,&source,0,&"a".repeat(64),std::slice::from_ref(&selected),&stamp(),&control).unwrap();
-        for (index,total) in [0,256,2048].into_iter().enumerate() {
-            if total>0 {
-                let history = (0..total).map(|n|ReportedRunSnapshot {last_session_id:format!("unrelated-{n}"),..Default::default()}).collect::<Vec<_>>();
-                save(&pool,&source,0,&format!("{:064x}",index+16),&history,&stamp(),&control).unwrap();
+        save(
+            &pool,
+            &source,
+            0,
+            &"a".repeat(64),
+            std::slice::from_ref(&selected),
+            &stamp(),
+            &control,
+        )
+        .unwrap();
+        for (index, total) in [0, 256, 2048].into_iter().enumerate() {
+            if total > 0 {
+                let history = (0..total)
+                    .map(|n| ReportedRunSnapshot {
+                        last_session_id: format!("unrelated-{n}"),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>();
+                save(
+                    &pool,
+                    &source,
+                    0,
+                    &format!("{:064x}", index + 16),
+                    &history,
+                    &stamp(),
+                    &control,
+                )
+                .unwrap();
             }
-            READ_WORK.with(|work|work.set(0));
-            assert_eq!(load(&pool,&source,Some(&ids),&control).unwrap().runs,[selected.clone()]);
-            READ_WORK.with(|work|assert_eq!(work.get(),1));
+            READ_WORK.with(|work| work.set(0));
+            assert_eq!(
+                load(&pool, &source, Some(&ids), &control).unwrap().runs,
+                [selected.clone()]
+            );
+            READ_WORK.with(|work| assert_eq!(work.get(), 1));
         }
-        let cancelled = PgCancellation::default(); cancelled.cancel();
-        assert!(matches!(load(&pool,&source,Some(&ids),&cancelled),Err(StorageError::Busy)));
-        assert!(matches!(save(&pool,&source,0,&"f".repeat(64),&[],&stamp(),&cancelled),Err(StorageError::Busy)));
-        assert_eq!(load(&pool,&source,Some(&ids),&control).unwrap().runs,[selected]);
+        let cancelled = PgCancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            load(&pool, &source, Some(&ids), &cancelled),
+            Err(StorageError::Busy)
+        ));
+        assert!(matches!(
+            save(
+                &pool,
+                &source,
+                0,
+                &"f".repeat(64),
+                &[],
+                &stamp(),
+                &cancelled
+            ),
+            Err(StorageError::Busy)
+        ));
+        assert_eq!(
+            load(&pool, &source, Some(&ids), &control).unwrap().runs,
+            [selected]
+        );
     }
 
     #[test]
     fn pg_reported_facts_warm_schema_drift_and_missing_namespace_refuse() {
-        let (pool,factory) = fixture(|_|{});
-        let source = ns("drift"); seed(&pool,&source);
+        let (pool, factory) = fixture(|_| {});
+        let source = ns("drift");
+        seed(&pool, &source);
         let control = PgCancellation::default();
-        save(&pool,&source,0,&"a".repeat(64),&[],&stamp(),&control).unwrap();
-        assert!(matches!(load(&pool,&ns("unadmitted"),None,&control),Err(StorageError::ScopeChanged)));
-        factory.client().batch_execute("ALTER TABLE semon_pg_native_reported_runs DROP COLUMN record").unwrap();
-        assert!(matches!(save(&pool,&source,0,&"b".repeat(64),&[],&stamp(),&control),Err(StorageError::ScopeChanged)));
-        assert!(matches!(load(&pool,&source,None,&control),Err(StorageError::ScopeChanged)));
+        save(&pool, &source, 0, &"a".repeat(64), &[], &stamp(), &control).unwrap();
+        assert!(matches!(
+            load(&pool, &ns("unadmitted"), None, &control),
+            Err(StorageError::ScopeChanged)
+        ));
+        factory
+            .client()
+            .batch_execute("ALTER TABLE semon_pg_native_reported_runs DROP COLUMN record")
+            .unwrap();
+        assert!(matches!(
+            save(&pool, &source, 0, &"b".repeat(64), &[], &stamp(), &control),
+            Err(StorageError::ScopeChanged)
+        ));
+        assert!(matches!(
+            load(&pool, &source, None, &control),
+            Err(StorageError::ScopeChanged)
+        ));
     }
 }
 
@@ -427,7 +524,7 @@ fn read_rows(
         };
         budget.charge(row.get(2))?;
         #[cfg(test)]
-        READ_WORK.with(|work|work.set(work.get()+1));
+        READ_WORK.with(|work| work.set(work.get() + 1));
         tx.check()?;
         let digest: Vec<u8> = row.get(0);
         let next_start: i64 = row.get(1);

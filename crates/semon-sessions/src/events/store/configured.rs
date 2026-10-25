@@ -1105,6 +1105,7 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
+        validate_prior_reported(&tx, &rows).map_err(failed)?;
         {
             let mut put = tx.prepare(PUT_RUN_SCOPED).map_err(failed)?;
             for row in rows {

@@ -1433,6 +1433,7 @@ pub(crate) struct EventCache {
 const REOPEN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReportedFileStamp {
     dev: u64,
     ino: u64,
