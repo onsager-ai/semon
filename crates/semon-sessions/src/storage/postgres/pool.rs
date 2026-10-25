@@ -139,7 +139,9 @@ impl PgPool {
                 }
                 if connection.returned_at.elapsed() >= self.inner.limits.idle_timeout {
                     let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() { return Err(StorageError::Busy); }
+                    if remaining.is_zero() {
+                        return Err(StorageError::Busy);
+                    }
                     // Validation owns this Lease; no new slot is available
                     // until the bounded call returns and any teardown finishes.
                     if connection.client.is_valid(remaining).is_err() {
@@ -230,7 +232,9 @@ impl Lease {
     /// first, so DISCARD cannot hide a leaked namespace.
     pub(super) fn check_clean(&mut self) -> Result<(), StorageError> {
         #[cfg(test)]
-        if super::tests::fail_clean() { return Err(StorageError::Unavailable); }
+        if super::tests::fail_clean() {
+            return Err(StorageError::Unavailable);
+        }
         let connection = self.connection.as_mut().ok_or(StorageError::Unavailable)?;
         let row = connection
             .client

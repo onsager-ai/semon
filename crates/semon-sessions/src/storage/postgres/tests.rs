@@ -15,7 +15,9 @@ thread_local! { static FAIL_CLEAN: Cell<bool> = const { Cell::new(false) }; }
 pub(super) fn lose_ack() -> bool {
     LOSE_ACK.with(|flag| flag.replace(false))
 }
-pub(super) fn fail_clean() -> bool { FAIL_CLEAN.with(|flag| flag.replace(false)) }
+pub(super) fn fail_clean() -> bool {
+    FAIL_CLEAN.with(|flag| flag.replace(false))
+}
 static NEXT_SCHEMA: AtomicUsize = AtomicUsize::new(0);
 
 struct Factory {
@@ -501,10 +503,7 @@ fn pg_open_refuses_missing_or_mismatched_schema() {
 fn pg_sqlstate_policy_is_phase_sensitive() {
     use super::sqlstate::classify;
     for code in ["40001", "40P01", "55P03", "57014"] {
-        assert_eq!(
-            classify(Some(code), false),
-            StorageError::Busy
-        );
+        assert_eq!(classify(Some(code), false), StorageError::Busy);
     }
     assert_eq!(classify(Some("23505"), false), StorageError::Unavailable);
     for code in [
@@ -516,19 +515,10 @@ fn pg_sqlstate_policy_is_phase_sensitive() {
         Some("42501"),
         None,
     ] {
-        assert_eq!(
-            classify(code, false),
-            StorageError::Unavailable
-        );
-        assert_eq!(
-            classify(code, true),
-            StorageError::CommitUncertain
-        );
+        assert_eq!(classify(code, false), StorageError::Unavailable);
+        assert_eq!(classify(code, true), StorageError::CommitUncertain);
     }
-    assert_eq!(
-        classify(Some("40001"), true),
-        StorageError::CommitUncertain
-    );
+    assert_eq!(classify(Some("40001"), true), StorageError::CommitUncertain);
 }
 
 #[test]
@@ -541,9 +531,13 @@ fn pg_full_namespace_bytes_roundtrip_and_rls_isolation() {
     let mut other = bytes.clone();
     other.replace_range(4095..4096, "b");
     let b = ns(&other);
-    assert_eq!(&a.as_str().as_bytes()[..1024], &b.as_str().as_bytes()[..1024]);
+    assert_eq!(
+        &a.as_str().as_bytes()[..1024],
+        &b.as_str().as_bytes()[..1024]
+    );
     for namespace in [&a, &b] {
-        pool.apply_operation(namespace, &identity(), &control, effect).unwrap();
+        pool.apply_operation(namespace, &identity(), &control, effect)
+            .unwrap();
         pool.transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
             let rows = tx.driver.query("SELECT namespace, namespace_digest = sha256(namespace) FROM semon_pg_operations", &[]).unwrap();
             assert_eq!(rows.len(), 1);
@@ -551,11 +545,24 @@ fn pg_full_namespace_bytes_roundtrip_and_rls_isolation() {
             assert!(rows[0].get::<_, bool>(1));
             Ok(())
         }).unwrap();
-        assert_eq!(pool.reconcile(namespace, &identity(), &control), Ok(Reconciliation::Committed(json!({"receipt": 1}))));
+        assert_eq!(
+            pool.reconcile(namespace, &identity(), &control),
+            Ok(Reconciliation::Committed(json!({"receipt": 1})))
+        );
     }
     assert_eq!(count(&factory), 2);
-    assert_eq!(LogicalSourceNamespace::new("x".repeat(4097)), Err(StorageError::InvalidArguments));
-    assert_eq!(factory.client().query_one("SELECT count(*) FROM semon_pg_operations", &[]).unwrap().get::<_, i64>(0), 0);
+    assert_eq!(
+        LogicalSourceNamespace::new("x".repeat(4097)),
+        Err(StorageError::InvalidArguments)
+    );
+    assert_eq!(
+        factory
+            .client()
+            .query_one("SELECT count(*) FROM semon_pg_operations", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
 }
 
 fn session_witness(tx: &mut super::txn::PgTxn<'_>, schema: &str) -> i32 {
@@ -573,23 +580,50 @@ fn pg_schema_queries_survive_discard_all_and_error_replacement() {
     pool.apply_operation(&ns("a"), &identity(), &control, |tx| {
         write_pid = session_witness(tx, &factory.schema);
         effect(tx)
-    }).unwrap();
-    let read_pid = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
-        let pid = session_witness(tx, &factory.schema);
-        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_operations", &[]).unwrap().get::<_, i64>(0), 1);
-        Ok(pid)
-    }).unwrap();
-    assert_eq!(write_pid, read_pid, "successful connection was reused after DISCARD ALL");
+    })
+    .unwrap();
+    let read_pid = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            let pid = session_witness(tx, &factory.schema);
+            assert_eq!(
+                tx.driver
+                    .query_one("SELECT count(*) FROM semon_pg_operations", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                1
+            );
+            Ok(pid)
+        })
+        .unwrap();
+    assert_eq!(
+        write_pid, read_pid,
+        "successful connection was reused after DISCARD ALL"
+    );
     let mut error_pid = 0;
-    assert_eq!(pool.transaction::<()>(&ns("a"), TxnKind::Write, &control, |tx| {
-        error_pid = session_witness(tx, &factory.schema);
+    assert_eq!(
+        pool.transaction::<()>(&ns("a"), TxnKind::Write, &control, |tx| {
+            error_pid = session_witness(tx, &factory.schema);
+            Err(StorageError::Conflict)
+        }),
         Err(StorageError::Conflict)
-    }), Err(StorageError::Conflict));
+    );
     assert_eq!(error_pid, read_pid);
-    assert_eq!(pool.accounted(), 0, "error connection is conservatively discarded");
-    let replacement = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    assert_eq!(
+        pool.accounted(),
+        0,
+        "error connection is conservatively discarded"
+    );
+    let replacement = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     assert_ne!(replacement, error_pid);
-    let reused = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    let reused = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     assert_eq!(reused, replacement);
 }
 
@@ -597,18 +631,41 @@ fn pg_schema_queries_survive_discard_all_and_error_replacement() {
 fn pg_known_commit_ack_survives_cleanup_failure() {
     let (pool, factory) = fixture(|_| {});
     FAIL_CLEAN.with(|flag| flag.set(true));
-    assert_eq!(pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), effect), Ok(json!({"receipt": 1})));
-    assert_eq!(pool.accounted(), 0, "cleanup failure discarded the known committed connection");
+    assert_eq!(
+        pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), effect),
+        Ok(json!({"receipt": 1}))
+    );
+    assert_eq!(
+        pool.accounted(),
+        0,
+        "cleanup failure discarded the known committed connection"
+    );
     assert_eq!(count(&factory), 1);
-    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| panic!("known commit must replay")).unwrap();
+    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| {
+        panic!("known commit must replay")
+    })
+    .unwrap();
 }
 
 #[test]
 fn pg_f1_schema_is_refused_without_upgrade_or_reset() {
     let (_, factory) = fixture(|_| {});
-    factory.client().batch_execute("UPDATE semon_pg_schema SET version = 1").unwrap();
-    assert!(matches!(PgPool::open(factory.clone(), limits()), Err(StorageError::ScopeChanged)));
-    assert_eq!(factory.client().query_one("SELECT version FROM semon_pg_schema", &[]).unwrap().get::<_, i32>(0), 1);
+    factory
+        .client()
+        .batch_execute("UPDATE semon_pg_schema SET version = 1")
+        .unwrap();
+    assert!(matches!(
+        PgPool::open(factory.clone(), limits()),
+        Err(StorageError::ScopeChanged)
+    ));
+    assert_eq!(
+        factory
+            .client()
+            .query_one("SELECT version FROM semon_pg_schema", &[])
+            .unwrap()
+            .get::<_, i32>(0),
+        1
+    );
 }
 
 #[test]
@@ -616,14 +673,30 @@ fn pg_digest_collision_refuses_without_alias_or_effect() {
     let (pool, factory) = fixture(|_| {});
     // No SHA-256 collision is manufactured. Test-only schema corruption creates
     // the same digest/full-bytes mismatch that the defensive RLS guard handles.
-    factory.client().batch_execute("ALTER TABLE semon_pg_operations ALTER COLUMN namespace_digest DROP EXPRESSION").unwrap();
+    factory
+        .client()
+        .batch_execute(
+            "ALTER TABLE semon_pg_operations ALTER COLUMN namespace_digest DROP EXPRESSION",
+        )
+        .unwrap();
     pool.transaction(&ns("b"), TxnKind::Write, &PgCancellation::default(), |tx| {
         tx.driver.execute("INSERT INTO semon_pg_operations(namespace, namespace_digest, operation_id, kind, request_digest, outcome) VALUES ($1, sha256($2::bytea), $3, $4, $5, '1')",
             &[&b"b".as_slice(), &b"a".as_slice(), &identity().operation_id, &identity().kind, &&identity().request_digest[..]]).unwrap();
         Ok(())
     }).unwrap();
-    assert_eq!(pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()), Err(StorageError::Unavailable));
-    assert!(matches!(pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| panic!("collision must not execute")), Err(StorageError::Unavailable | StorageError::ScopeChanged)));
+    assert_eq!(
+        pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
+        Err(StorageError::Unavailable)
+    );
+    assert!(matches!(
+        pool.apply_operation(
+            &ns("a"),
+            &identity(),
+            &PgCancellation::default(),
+            |_| panic!("collision must not execute")
+        ),
+        Err(StorageError::Unavailable | StorageError::ScopeChanged)
+    ));
     assert_eq!(count(&factory), 0);
 }
 
@@ -633,13 +706,18 @@ fn deferred_commit_fixture() -> (PgPool, Arc<Factory>) {
         bounds.statement_timeout = Duration::from_secs(10);
         bounds.txn_deadline = Duration::from_secs(15);
     });
-    factory.client().batch_execute("
+    factory
+        .client()
+        .batch_execute(
+            "
         CREATE TABLE commit_delays(value integer NOT NULL);
         CREATE FUNCTION commit_pause() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN PERFORM pg_sleep(5); RETURN NEW; END; $$;
         CREATE CONSTRAINT TRIGGER pause_during_commit AFTER INSERT ON commit_delays
         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION commit_pause();
-    ").unwrap();
+    ",
+        )
+        .unwrap();
     (pool, factory)
 }
 
@@ -647,8 +725,13 @@ fn wait_for_commit_sleep(client: &mut ::postgres::Client, pid: i32) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let row = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active' AND query = 'COMMIT' AND wait_event = 'PgSleep')", &[&pid]).unwrap();
-        if row.get::<_, bool>(0) { return; }
-        assert!(Instant::now() < deadline, "backend did not enter the deferred COMMIT trigger");
+        if row.get::<_, bool>(0) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "backend did not enter the deferred COMMIT trigger"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -659,14 +742,22 @@ fn commit_phase_fault(terminate: bool) {
     let calls = AtomicUsize::new(0);
     let (send, receive) = mpsc::sync_channel(1);
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| pool.apply_operation(&ns("a"), &identity(), &control, |tx| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let outcome = effect(tx)?;
-            tx.driver.execute("INSERT INTO commit_delays VALUES (1)", &[]).map_err(super::sqlstate::error)?;
-            let pid: i32 = tx.driver.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-            send.send(pid).unwrap();
-            Ok(outcome)
-        }));
+        let worker = scope.spawn(|| {
+            pool.apply_operation(&ns("a"), &identity(), &control, |tx| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let outcome = effect(tx)?;
+                tx.driver
+                    .execute("INSERT INTO commit_delays VALUES (1)", &[])
+                    .map_err(super::sqlstate::error)?;
+                let pid: i32 = tx
+                    .driver
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .unwrap()
+                    .get(0);
+                send.send(pid).unwrap();
+                Ok(outcome)
+            })
+        });
         let pid = receive.recv_timeout(Duration::from_secs(3)).unwrap();
         let mut controller = factory.client();
         wait_for_commit_sleep(&mut controller, pid);
@@ -674,29 +765,56 @@ fn commit_phase_fault(terminate: bool) {
         if terminate {
             // The restricted role may terminate its own backend. No superuser
             // credentials or pg_signal_backend grant is needed in the fixture.
-            assert!(controller.query_one("SELECT pg_terminate_backend($1, 2000)", &[&pid]).unwrap().get::<_, bool>(0));
+            assert!(
+                controller
+                    .query_one("SELECT pg_terminate_backend($1, 2000)", &[&pid])
+                    .unwrap()
+                    .get::<_, bool>(0)
+            );
         } else {
             control.cancel();
         }
         assert_eq!(worker.join().unwrap(), Err(StorageError::CommitUncertain));
     });
-    assert_eq!(pool.accounted(), 0, "discard released the slot after driver completion");
+    assert_eq!(
+        pool.accounted(),
+        0,
+        "discard released the slot after driver completion"
+    );
     // The interrupted deferred trigger prevented the server from committing.
     // Reconciliation observes the real rollback without executing the effect.
-    assert_eq!(pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()), Ok(Reconciliation::Absent));
+    assert_eq!(
+        pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
+        Ok(Reconciliation::Absent)
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(count(&factory), 0);
-    assert_eq!(factory.client().query_one("SELECT count(*) FROM commit_delays", &[]).unwrap().get::<_, i64>(0), 0);
-    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), effect).unwrap();
-    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| panic!("replay must not duplicate")).unwrap();
+    assert_eq!(
+        factory
+            .client()
+            .query_one("SELECT count(*) FROM commit_delays", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), effect)
+        .unwrap();
+    pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| {
+        panic!("replay must not duplicate")
+    })
+    .unwrap();
     assert_eq!(count(&factory), 1);
 }
 
 #[test]
-fn pg_backend_termination_during_commit_requires_reconciliation() { commit_phase_fault(true); }
+fn pg_backend_termination_during_commit_requires_reconciliation() {
+    commit_phase_fault(true);
+}
 
 #[test]
-fn pg_cancel_racing_commit_requires_reconciliation() { commit_phase_fault(false); }
+fn pg_cancel_racing_commit_requires_reconciliation() {
+    commit_phase_fault(false);
+}
 
 #[test]
 fn pg_dead_idle_connection_is_validated_discarded_and_replaced() {
@@ -705,16 +823,34 @@ fn pg_dead_idle_connection_is_validated_discarded_and_replaced() {
         bounds.idle_timeout = Duration::from_millis(1);
     });
     let control = PgCancellation::default();
-    let old_pid = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    let old_pid = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     assert_eq!(pool.accounted(), 1);
-    assert!(factory.client().query_one("SELECT pg_terminate_backend($1, 2000)", &[&old_pid]).unwrap().get::<_, bool>(0));
+    assert!(
+        factory
+            .client()
+            .query_one("SELECT pg_terminate_backend($1, 2000)", &[&old_pid])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
     std::thread::sleep(Duration::from_millis(5));
-    let fresh_pid = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    let fresh_pid = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     assert_ne!(fresh_pid, old_pid);
     assert_eq!(pool.accounted(), 1);
     let lease = pool.acquire(&control).unwrap();
     drop(lease);
-    assert_eq!(pool.accounted(), 0, "no over-release after validation and replacement");
+    assert_eq!(
+        pool.accounted(),
+        0,
+        "no over-release after validation and replacement"
+    );
 }
 
 #[test]
@@ -724,9 +860,17 @@ fn pg_connection_max_lifetime_retires_healthy_idle_client() {
         bounds.max_lifetime = Duration::from_millis(5);
     });
     let control = PgCancellation::default();
-    let old_pid = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    let old_pid = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     std::thread::sleep(Duration::from_millis(10));
-    let fresh_pid = pool.transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| Ok(session_witness(tx, &factory.schema))).unwrap();
+    let fresh_pid = pool
+        .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(session_witness(tx, &factory.schema))
+        })
+        .unwrap();
     assert_ne!(fresh_pid, old_pid);
     assert_eq!(pool.accounted(), 1);
 }
