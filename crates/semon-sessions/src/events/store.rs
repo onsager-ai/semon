@@ -2497,8 +2497,15 @@ impl SourceObservationStore for SqliteStore {
                 .map_err(source_journal::local_failure)?;
         let committed =
             DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        // Intent triggers cannot smuggle a changed current contract into a witness.
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        // Intent triggers cannot smuggle a changed physical contract into a
+        // committed witness. The admission qualification remains mandatory;
+        // this same-TX delta avoids re-probing an unchanged layout.
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         if recovery_complete {
             self.discovery.recovery = Some(committed);
