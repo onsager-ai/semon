@@ -50,10 +50,20 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     tx.check()?;
-    let role = tx.driver.query_one("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=CURRENT_USER", &[]).map_err(sqlstate::error)?;
-    if role.get::<_, bool>(0) { return Err(StorageError::ScopeChanged); }
+    let role = tx
+        .driver
+        .query_one(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=CURRENT_USER",
+            &[],
+        )
+        .map_err(sqlstate::error)?;
+    if role.get::<_, bool>(0) {
+        return Err(StorageError::ScopeChanged);
+    }
     let ownership: bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='semon_pg_native_meta'::regclass AND conname='semon_pg_meta_source_owner' AND contype='c' AND convalidated AND pg_get_expr(conbin,conrelid)=$1)", &[&"(key <> convert_to('pricing_recompute_target'::text, 'UTF8'::name))"]).map_err(sqlstate::error)?.get(0);
-    if !ownership { return Err(StorageError::ScopeChanged); }
+    if !ownership {
+        return Err(StorageError::ScopeChanged);
+    }
     for (table, columns, key) in TABLES {
         let name = format!("semon_pg_store_{table}");
         let rows = tx.driver.query("SELECT c.relrowsecurity AND c.relforcerowsecurity AND c.relkind='r' AND has_table_privilege(c.oid,'SELECT'),pg_get_userbyid(c.relowner)::text,
@@ -107,22 +117,42 @@ pub(super) fn lock(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageErr
     tx.check()?;
     // current_schema is the host-authorized search_path. Its OID only selects
     // a lock domain; it never grants ownership or store mutation authority.
-    let sql=if exclusive { "SELECT pg_advisory_xact_lock(current_schema()::regnamespace::oid::int, 477110)" } else { "SELECT pg_advisory_xact_lock_shared(current_schema()::regnamespace::oid::int, 477110)" };
-    tx.driver.query_one(sql,&[]).map_err(sqlstate::error)?;
+    let sql = if exclusive {
+        "SELECT pg_advisory_xact_lock(current_schema()::regnamespace::oid::int, 477110)"
+    } else {
+        "SELECT pg_advisory_xact_lock_shared(current_schema()::regnamespace::oid::int, 477110)"
+    };
+    tx.driver.query_one(sql, &[]).map_err(sqlstate::error)?;
     // Real row locking also fences independently authorized SQL writers that
     // obey PostgreSQL row locks without using this adapter's advisory lock.
     // Read-only snapshots cannot take row locks; repeatable-read remains their
     // snapshot lifetime. Every publication/control transaction is writable.
     if exclusive {
-        let rows=tx.driver.query("SELECT revision FROM semon_pg_store_state WHERE singleton FOR UPDATE", &[]).map_err(sqlstate::error)?;
-        if rows.len()!=1 { return Err(StorageError::ScopeChanged); }
+        let rows = tx
+            .driver
+            .query(
+                "SELECT revision FROM semon_pg_store_state WHERE singleton FOR UPDATE",
+                &[],
+            )
+            .map_err(sqlstate::error)?;
+        if rows.len() != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
     }
     tx.check()
 }
 
 pub(super) fn lock_publication(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
-    let rows=tx.driver.query("SELECT revision FROM semon_pg_store_state WHERE singleton FOR SHARE", &[]).map_err(sqlstate::error)?;
-    if rows.len()!=1 { return Err(StorageError::ScopeChanged); }
+    let rows = tx
+        .driver
+        .query(
+            "SELECT revision FROM semon_pg_store_state WHERE singleton FOR SHARE",
+            &[],
+        )
+        .map_err(sqlstate::error)?;
+    if rows.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
     tx.check()
 }
 
@@ -209,31 +239,59 @@ fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::postgres::tests::{fixture, ns, LOSE_ACK};
+    use crate::storage::postgres::tests::{LOSE_ACK, fixture, ns};
 
     #[test]
     fn pg_store_metadata_optional_owner_qualified_ack_replay_and_namespace_cannot_mint_owner() {
-        let (pool,_) =fixture(|b|b.max_connections=1);
-        let control=PgCancellation::default();
-        let host=PgStoreMetadata::open(pool.clone(),&control).unwrap();
-        pool.transaction(&ns("source\0🦀"),TxnKind::ReadSnapshot,&control,|tx| {
-            assert_eq!(read(tx)?,(0,None));Ok(())
-        }).unwrap();
-        LOSE_ACK.with(|p|p.set(true));
-        assert_eq!(host.set_pricing_target(&[9;32],0,Some("p\0🦀"),&control),Err(StorageError::CommitUncertain));
-        assert_eq!(host.set_pricing_target(&[9;32],0,Some("p\0🦀"),&control),Ok(1));
-        assert_eq!(host.set_pricing_target(&[9;32],0,Some("different"),&control),Err(StorageError::InvalidArguments));
-        assert_eq!(host.set_pricing_target(&[8;32],0,None,&control),Err(StorageError::Conflict));
-        for source in ["host-control","schema","source\0🦀","other"] {
-            let result=pool.transaction(&ns(source),TxnKind::Write,&control,|tx| {
-                tx.driver.execute("INSERT INTO semon_pg_store_owner VALUES(true,CURRENT_USER,1,1)", &[]).map_err(sqlstate::error)?;Ok(())
+        let (pool, _) = fixture(|b| b.max_connections = 1);
+        let control = PgCancellation::default();
+        let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
+        pool.transaction(&ns("source\0🦀"), TxnKind::ReadSnapshot, &control, |tx| {
+            assert_eq!(read(tx)?, (0, None));
+            Ok(())
+        })
+        .unwrap();
+        LOSE_ACK.with(|p| p.set(true));
+        assert_eq!(
+            host.set_pricing_target(&[9; 32], 0, Some("p\0🦀"), &control),
+            Err(StorageError::CommitUncertain)
+        );
+        assert_eq!(
+            host.set_pricing_target(&[9; 32], 0, Some("p\0🦀"), &control),
+            Ok(1)
+        );
+        assert_eq!(
+            host.set_pricing_target(&[9; 32], 0, Some("different"), &control),
+            Err(StorageError::InvalidArguments)
+        );
+        assert_eq!(
+            host.set_pricing_target(&[8; 32], 0, None, &control),
+            Err(StorageError::Conflict)
+        );
+        for source in ["host-control", "schema", "source\0🦀", "other"] {
+            let result = pool.transaction(&ns(source), TxnKind::Write, &control, |tx| {
+                tx.driver
+                    .execute(
+                        "INSERT INTO semon_pg_store_owner VALUES(true,CURRENT_USER,1,1)",
+                        &[],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok(())
             });
-            assert!(result.is_err(),"GUC cannot mint store owner");
-            pool.transaction(&ns(source),TxnKind::ReadSnapshot,&control,|tx| {assert_eq!(read(tx)?,(1,Some("p\0🦀".into())));Ok(())}).unwrap();
+            assert!(result.is_err(), "GUC cannot mint store owner");
+            pool.transaction(&ns(source), TxnKind::ReadSnapshot, &control, |tx| {
+                assert_eq!(read(tx)?, (1, Some("p\0🦀".into())));
+                Ok(())
+            })
+            .unwrap();
         }
-        let cancelled=PgCancellation::default();cancelled.cancel();
-        assert!(host.set_pricing_target(&[7;32],1,None,&cancelled).is_err());
-        assert_eq!(host.set_pricing_target(&[7;32],1,None,&control),Ok(2));
+        let cancelled = PgCancellation::default();
+        cancelled.cancel();
+        assert!(
+            host.set_pricing_target(&[7; 32], 1, None, &cancelled)
+                .is_err()
+        );
+        assert_eq!(host.set_pricing_target(&[7; 32], 1, None, &control), Ok(2));
     }
 
     #[test]
@@ -243,36 +301,58 @@ mod tests {
             "ALTER TABLE semon_pg_store_state ADD COLUMN extra boolean",
             "DROP POLICY write_store ON semon_pg_store_state",
         ] {
-            let (pool,factory)=fixture(|b|b.max_connections=1);
-            let control=PgCancellation::default();
-            assert!(PgStoreMetadata::open(pool.clone(),&control).is_ok());
+            let (pool, factory) = fixture(|b| b.max_connections = 1);
+            let control = PgCancellation::default();
+            assert!(PgStoreMetadata::open(pool.clone(), &control).is_ok());
             factory.client().batch_execute(corrupt).unwrap();
-            let mut entered=false;
-            assert!(pool.transaction(&ns("source"),TxnKind::Write,&control,|_| {entered=true;Ok(())}).is_err());
+            let mut entered = false;
+            assert!(
+                pool.transaction(&ns("source"), TxnKind::Write, &control, |_| {
+                    entered = true;
+                    Ok(())
+                })
+                .is_err()
+            );
             assert!(!entered);
         }
     }
 
     #[test]
     fn pg_store_metadata_pricing_waits_for_source_publication_lock() {
-        let (pool,_) =fixture(|_|{});
-        let control=PgCancellation::default();
-        let host=PgStoreMetadata::open(pool.clone(),&control).unwrap();
-        let (captured_tx,captured_rx)=std::sync::mpsc::sync_channel(1);
-        let (release_tx,release_rx)=std::sync::mpsc::sync_channel(1);
+        let (pool, _) = fixture(|_| {});
+        let control = PgCancellation::default();
+        let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
+        let (captured_tx, captured_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| {
-            let reader_pool=&pool; let reader_control=&control;
-            let reader=scope.spawn(move ||reader_pool.transaction(&ns("source"),TxnKind::Write,reader_control,|tx| {
-                assert_eq!(read(tx)?,(0,None));captured_tx.send(()).unwrap();release_rx.recv().unwrap();assert_eq!(read(tx)?,(0,None));Ok(())
-            }));
+            let reader_pool = &pool;
+            let reader_control = &control;
+            let reader = scope.spawn(move || {
+                reader_pool.transaction(&ns("source"), TxnKind::Write, reader_control, |tx| {
+                    assert_eq!(read(tx)?, (0, None));
+                    captured_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    assert_eq!(read(tx)?, (0, None));
+                    Ok(())
+                })
+            });
             captured_rx.recv().unwrap();
-            let (done_tx,done_rx)=std::sync::mpsc::sync_channel(1);
-            let host_ref=&host; let writer_control=&control;
-            let writer=scope.spawn(move || {let result=host_ref.set_pricing_target(&[1;32],0,Some("next"),writer_control);done_tx.send(()).unwrap();result});
-            assert!(done_rx.recv_timeout(std::time::Duration::from_millis(50)).is_err());
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let host_ref = &host;
+            let writer_control = &control;
+            let writer = scope.spawn(move || {
+                let result = host_ref.set_pricing_target(&[1; 32], 0, Some("next"), writer_control);
+                done_tx.send(()).unwrap();
+                result
+            });
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_millis(50))
+                    .is_err()
+            );
             release_tx.send(()).unwrap();
             reader.join().unwrap().unwrap();
-            assert_eq!(writer.join().unwrap(),Ok(1));
+            assert_eq!(writer.join().unwrap(), Ok(1));
         });
     }
 }
