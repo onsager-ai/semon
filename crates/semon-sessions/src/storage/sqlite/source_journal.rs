@@ -435,9 +435,6 @@ impl SourceJournal {
         self.config.namespace.as_str()
     }
 
-    pub(crate) fn operation(&self, kind: &str, payload: &[u8]) -> SourceOperation {
-        SourceOperation::capture(self.namespace(), kind, payload)
-    }
 }
 
 impl SourceObservationStore for SourceJournal {

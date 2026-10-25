@@ -2586,16 +2586,6 @@ impl IndexStore for SqliteStore {
         Ok(Some(sources.into_iter().collect()))
     }
 
-    fn backfill_state(&self) -> Result<Option<String>, StoreError> {
-        self.connection
-            .query_row(
-                configured::metadata_sql(&self.connection, "SELECT value FROM meta WHERE key='catalog_backfill_state'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_backfill_state') AND key='catalog_backfill_state'").map_err(failure)?,
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(failure)
-    }
     fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
         let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
         let cached = self.discovery.recovery.take();
@@ -2634,117 +2624,6 @@ impl IndexStore for SqliteStore {
             counts.committed_changes += committed.changes - before
         });
         Ok(complete)
-    }
-    fn discover_catalog_sources(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<(), StoreError> {
-        let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
-        let timing = crate::native_timing::enabled();
-        let mut measurements = crate::native_timing::Measurements::new(timing);
-        let cached = self.discovery.publication.take();
-        if !self.connection.is_autocommit() {
-            self.discovery.recovery = None;
-            return Err(StoreError::Data(
-                "discovery requires committed owner connection".into(),
-            ));
-        }
-        crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
-        let started = measurements.start();
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        measurements.record("immediate_transaction", started, 1);
-        let started = measurements.start();
-        let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
-        measurements.record("witness_before", started, 1);
-        if cached.as_ref().is_some_and(|(old, inputs, done)| {
-            *old == witness && inputs == paths && *done == complete
-        }) {
-            tx.commit().map_err(failure)?;
-            self.discovery.publication = cached;
-            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
-            return Ok(());
-        }
-        let started = measurements.start();
-        if self.discovery.recovery != Some(witness) {
-            require_current_sql(&tx).map_err(failure)?;
-        }
-        measurements.record("qualification", started, 1);
-        let before = tx.total_changes();
-        let started = measurements.start();
-        crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
-            .map_err(failure)?;
-        measurements.record("source_journal_inclusive", started, paths.len());
-        let started = measurements.start();
-        let recovery_still_complete = if self.discovery.recovery == Some(witness) {
-            crate::native_timing::discovery_count(|counts| counts.statements += 1);
-            tx.query_row(configured::metadata_sql(&tx,"SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')","SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after')").map_err(failure)?,[],|r|r.get::<_,bool>(0)).map_err(failure)?
-        } else {
-            false
-        };
-        measurements.record("recovery_marker", started, 1);
-        let started = measurements.start();
-        let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
-        measurements.record("witness_after", started, 1);
-        let started = measurements.start();
-        if committed.contract != witness.contract
-            || committed.main_schema != witness.main_schema
-            || committed.temp_schema != witness.temp_schema
-        {
-            require_current_sql(&tx).map_err(failure)?;
-        }
-        measurements.record("contract_requalification", started, 1);
-        let started = measurements.start();
-        tx.commit().map_err(failure)?;
-        measurements.record("commit", started, 1);
-        if timing {
-            measurements.emit(
-                &crate::native_timing::id(&self.path),
-                "discovery_publication_work",
-            );
-        }
-        // Only advance after rechecking the durable marker under this same
-        // lock, including effects of authored or fault-injected triggers.
-        if recovery_still_complete {
-            self.discovery.recovery = Some(committed);
-        }
-        if paths.len() <= 256 && paths.iter().map(String::len).sum::<usize>() <= 1024 * 1024 {
-            self.discovery.publication = Some((committed, paths.to_vec(), complete));
-        }
-        crate::native_timing::discovery_count(|counts| {
-            counts.committed_changes += committed.changes - before
-        });
-        Ok(())
-    }
-    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        let generation: Option<String> = tx
-            .query_row(
-                configured::metadata_sql(&tx, "SELECT value FROM meta WHERE key='catalog_generation'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'").map_err(failure)?,
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        let pending: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(failure)?;
-        if generation.as_deref() != expected || pending {
-            return Ok(Outcome::Conflict);
-        }
-        tx.execute_batch(configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';").map_err(failure)?).map_err(failure)?;
-        tx.commit().map_err(failure)?;
-        Ok(Outcome::Written)
     }
 
     fn resolve_catalog_input(
@@ -2810,31 +2689,6 @@ impl IndexStore for SqliteStore {
         read_append_evidence(&self.connection, path).map_err(failure)
     }
 
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
-        require_current_sql(&transaction).map_err(failure)?;
-        let mut selected = transaction.prepare(configured::metadata_sql(&transaction, "SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1", "SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.namespace=semon_namespace() AND m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?).map_err(failure)?;
-        let paths = selected
-            .query_map([limit as i64], |row| row.get(0))
-            .map_err(failure)?
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(failure)?;
-        if !paths.is_empty() {
-            drop(selected);
-            transaction.commit().map_err(failure)?;
-            return Ok(paths);
-        }
-        drop(selected);
-        let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
-        let paths = statement
-            .query_map([limit as i64], |row| row.get(0))
-            .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        drop(statement);
-        transaction.commit().map_err(failure)?;
-        Ok(paths)
-    }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
@@ -2859,10 +2713,6 @@ impl IndexStore for SqliteStore {
         self.connection.query_row(configured::metadata_sql(&self.connection, "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", "SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')").map_err(failure)?, [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
     }
 
-    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-        crate::storage::sqlite::source_journal::claims(&self.connection, None, paths)
-            .map_err(failure)
-    }
 
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
         ledger_row(&self.connection, path)
@@ -7637,6 +7487,88 @@ mod tests {
     use crate::events::{
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
+    use crate::storage::source_observations::{
+        SourceMutationReceipt, SourceObservationStore, SourceOperation,
+    };
+
+    // These tests exercise the same typed port as EventCache.  The legacy
+    // IndexStore forwarding surface is intentionally absent from production.
+    trait TestSourceObservations {
+        fn discover_catalog_sources(
+            &self,
+            paths: &[String],
+            complete: bool,
+        ) -> Result<(), StoreError>;
+        fn finish_catalog_backfill(&self, expected: Option<&str>) -> Result<Outcome, StoreError>;
+        fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+        fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
+        fn backfill_state(&self) -> Result<Option<String>, StoreError>;
+        fn invalidate_catalog_sources(
+            &self,
+            expected: &[(String, Option<i64>)],
+        ) -> Result<bool, StoreError>;
+    }
+
+    fn test_observations(store: &SqliteStore) -> Box<dyn SourceObservationStore> {
+        crate::storage::sqlite::source_journal::legacy(store.path.clone())
+    }
+
+    fn test_operation(kind: &str, payload: Vec<u8>) -> SourceOperation {
+        SourceOperation::capture("legacy", kind, &payload)
+    }
+
+    impl TestSourceObservations for SqliteStore {
+        fn discover_catalog_sources(
+            &self,
+            paths: &[String],
+            complete: bool,
+        ) -> Result<(), StoreError> {
+            let operation = test_operation("discover", serde_json::to_vec(&(paths, complete)).unwrap());
+            match test_observations(self)
+                .discover(&operation, paths, complete)
+                .map_err(StoreError::Configured)?
+            {
+                SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(()),
+                SourceMutationReceipt::Conflict => Err(StoreError::Configured(
+                    crate::storage::StorageError::Conflict,
+                )),
+            }
+        }
+
+        fn finish_catalog_backfill(&self, expected: Option<&str>) -> Result<Outcome, StoreError> {
+            let operation = test_operation("finish_backfill", serde_json::to_vec(&expected).unwrap());
+            match test_observations(self)
+                .finish_backfill(&operation, expected)
+                .map_err(StoreError::Configured)?
+            {
+                SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(Outcome::Written),
+                SourceMutationReceipt::Conflict => Ok(Outcome::Conflict),
+            }
+        }
+
+        fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
+            test_observations(self).pending(limit).map_err(StoreError::Configured)
+        }
+
+        fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
+            test_observations(self).claims(paths).map_err(StoreError::Configured)
+        }
+
+        fn backfill_state(&self) -> Result<Option<String>, StoreError> {
+            test_observations(self).backfill_state().map_err(StoreError::Configured)
+        }
+
+        fn invalidate_catalog_sources(
+            &self,
+            expected: &[(String, Option<i64>)],
+        ) -> Result<bool, StoreError> {
+            let operation = test_operation("invalidate", serde_json::to_vec(expected).unwrap());
+            test_observations(self)
+                .invalidate(&operation, expected)
+                .map(|receipt| receipt != SourceMutationReceipt::Conflict)
+                .map_err(StoreError::Configured)
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
