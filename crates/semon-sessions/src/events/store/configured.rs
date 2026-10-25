@@ -7463,7 +7463,9 @@ mod tests {
                 // its semantic_record contract accepts only earlier phases.
                 if cache.explicit_store || batch.phase != Phase::Publication {
                     assert_eq!(
-                        cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                        cache
+                            .record_semantic_batch(&batch, model.prepared())
+                            .unwrap(),
                         Outcome::Written
                     );
                 }
