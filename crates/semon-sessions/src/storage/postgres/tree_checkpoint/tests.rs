@@ -59,6 +59,23 @@ fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> (i32, String) 
     }
 }
 
+fn held_cancel_diagnostic(client: &mut ::postgres::Client, pid: i32, expected: &str, stage: &str) {
+    let row = client.query_one("SELECT state,wait_event_type,wait_event,backend_xid IS NOT NULL,xact_start IS NOT NULL,left(query,80),length(query),query=$2,(SELECT count(*) FROM pg_locks WHERE pid=$1 AND granted),(SELECT count(*) FROM pg_locks WHERE pid=$1 AND NOT granted) FROM pg_stat_activity WHERE pid=$1", &[&pid, &expected]).unwrap();
+    eprintln!(
+        "HELD_CANCEL stage={stage} pid={pid} state={:?} wait={:?}/{:?} xid={} xact={} sql={:?} len={} same={} locks={}/{}",
+        row.get::<_, Option<String>>(0),
+        row.get::<_, Option<String>>(1),
+        row.get::<_, Option<String>>(2),
+        row.get::<_, bool>(3),
+        row.get::<_, bool>(4),
+        row.get::<_, String>(5),
+        row.get::<_, i32>(6),
+        row.get::<_, bool>(7),
+        row.get::<_, i64>(8),
+        row.get::<_, i64>(9),
+    );
+}
+
 struct HeldCancelFactory {
     real: Arc<super::super::tests::Factory>,
     started: mpsc::SyncSender<()>,
@@ -149,6 +166,7 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
             result
         });
         let (pid, blocked_query) = wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
+        held_cancel_diagnostic(&mut lock, pid, &blocked_query, "blocked");
         cancelled.store(true, Ordering::Release);
         cancelling.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(
@@ -157,10 +175,14 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
         );
         // Let SQL complete while the inline cancel transport remains pending.
         lock.batch_execute("ROLLBACK").unwrap();
+        held_cancel_diagnostic(&mut lock, pid, &blocked_query, "unlocked");
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if lock.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='idle in transaction' AND query=$2)", &[&pid, &blocked_query]).unwrap().get::<_, bool>(0) {
                 break;
+            }
+            if Instant::now() >= deadline {
+                held_cancel_diagnostic(&mut lock, pid, &blocked_query, "timeout");
             }
             assert!(
                 Instant::now() < deadline,
