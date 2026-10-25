@@ -434,6 +434,7 @@ fn lifecycle_current(prepared: &PreparedSources) -> bool {
 struct ScopedProjection<'a> {
     db: &'a Connection,
     ns: &'a str,
+    layout: &'a FrontierLayout<'a>,
 }
 impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProjection<'_> {
     fn paths(&self) -> rusqlite::Result<Vec<String>> {
@@ -498,13 +499,272 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         self.db.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge='' WHERE catalog_semantic_frontier.done=1",params![self.ns,kind,value])?;
         Ok(())
     }
-    fn native(&self, _id: &str) -> rusqlite::Result<()> {
-        // The preflight gives this unported discovery family a typed refusal.
-        Err(rusqlite::Error::InvalidQuery)
+    fn native(&self, id: &str) -> rusqlite::Result<()> {
+        crate::events::store::semantic_stage::native_frontier_with(
+            &self.layout.frontier(self.ns),
+            "claude",
+            id,
+        )
     }
     fn done(&self) -> rusqlite::Result<bool> {
         self.db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0)",[self.ns],|r|r.get(0))
     }
+}
+
+/// A page-local choice of authored physical statements. Never retained by a
+/// Stage, connection or profile: bind after custody validation in its owner TX,
+/// use only the fixed DML below, and drop before that TX ends. No page runs DDL.
+struct FrontierLayout<'tx> {
+    db: &'tx Connection,
+    header_scoped: bool,
+    support_scoped: bool,
+}
+impl<'tx> FrontierLayout<'tx> {
+    fn bind(tx: &'tx rusqlite::Transaction<'_>) -> rusqlite::Result<Self> {
+        let db: &Connection = tx;
+        Ok(Self {
+            db,
+            header_scoped: crate::events::store::configured::metadata_sql(db, "", "namespace")?
+                == "namespace",
+            support_scoped: crate::events::store::semantic_stage::support_sql(db, "", "namespace")?
+                == "namespace",
+        })
+    }
+    fn support<'a>(&self, singleton: &'a str, scoped: &'a str) -> &'a str {
+        if self.support_scoped {
+            scoped
+        } else {
+            singleton
+        }
+    }
+    fn frontier<'a>(&'a self, ns: &'a str) -> ScopedNativeFrontier<'a> {
+        ScopedNativeFrontier {
+            db: self.db,
+            ns,
+            layout: self,
+        }
+    }
+}
+
+struct ScopedNativeFrontier<'a> {
+    db: &'a Connection,
+    ns: &'a str,
+    layout: &'a FrontierLayout<'a>,
+}
+impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFrontier<'_> {
+    fn needed_native(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources own WHERE own.namespace=?1 AND own.harness=?2 AND own.native_id=?3 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=own.source_path))",params![self.ns,harness,id],|r|r.get(0))
+    }
+    fn needed_dependency(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
+        let sql = self.layout.support(
+            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))",
+            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE d.namespace=?1 AND d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))",
+        );
+        self.db
+            .query_row(sql, params![self.ns, harness, id], |r| r.get(0))
+    }
+    fn needed_nativeall(&self, id: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources own WHERE own.namespace=?1 AND own.native_id=?2 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=own.source_path))",params![self.ns,id],|r|r.get(0))
+    }
+    fn needed_filename(&self, copilot: bool, value: &str) -> rusqlite::Result<bool> {
+        let predicate = if copilot {
+            "source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2"
+        } else {
+            "substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2"
+        };
+        let files = predicate.replace("source_path", "f.path");
+        let invalidations = predicate.replace("source_path", "i.source_path");
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND {files} AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=f.path) UNION ALL SELECT 1 FROM main.session_catalog_invalidations i WHERE i.namespace=?1 AND {invalidations} AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=i.source_path))"
+        );
+        self.db
+            .query_row(&sql, params![self.ns, value], |r| r.get(0))
+    }
+    fn needed_header(&self, parent: bool, qualified: bool, id: &str) -> rusqlite::Result<bool> {
+        let field = if parent {
+            "metadata.parent_thread"
+        } else {
+            "id"
+        };
+        let dependency = if parent { "parent" } else { "native" };
+        // These authored partial indexes match the JSON expression and native
+        // key predicate below. Pin the access path: the namespace/key primary
+        // key is also eligible, but scans unrelated native headers.
+        let index = if parent {
+            "semantic_codex_header_parent"
+        } else {
+            "semantic_codex_header_native"
+        };
+        let header_scoped = self.layout.header_scoped;
+        let support_scoped = self.layout.support_scoped;
+        let owner = if header_scoped {
+            ""
+        } else {
+            "JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0"
+        };
+        let guard = if header_scoped {
+            "m.namespace=?1 AND"
+        } else {
+            ""
+        };
+        let dependencies = if support_scoped {
+            "d.namespace=?1 AND"
+        } else {
+            "EXISTS(SELECT 1 FROM storage_event_tables dependency_owner WHERE dependency_owner.namespace=?1 AND dependency_owner.table_name='catalog_native_dependencies' AND dependency_owner.qualification=0) AND"
+        };
+        let qualification = if qualified {
+            format!(
+                "AND NOT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE {dependencies} d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?2 AND d.harness='semantic-{dependency}:codex')"
+            )
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM main.meta m INDEXED BY {index} {owner} WHERE {guard} m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})"
+        );
+        self.db.query_row(&sql, params![self.ns, id], |r| r.get(0))
+    }
+    fn queue(&self, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> {
+        self.db.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge='' WHERE catalog_semantic_frontier.done=1",params![self.ns,kind,value,harness])?;
+        Ok(())
+    }
+}
+
+// Measure the actual physical adapter, not a parallel EXPLAIN-only query.
+#[cfg(test)]
+pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Vec<(String, usize)> {
+    use crate::events::store::semantic_stage::NativeFrontierPort;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let tx = c.unchecked_transaction().unwrap();
+    let mut result = Vec::new();
+    c.execute_batch("SAVEPOINT native_layout_probe").unwrap();
+    for family in ["metadata", "support"] {
+        let started = std::time::Instant::now();
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        c.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        if family == "metadata" {
+            crate::events::store::configured::metadata_sql(c, "", "namespace").unwrap();
+        } else {
+            crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
+        }
+        c.progress_handler(0, None::<fn() -> bool>);
+        let elapsed = started.elapsed();
+        let steps = steps.load(Ordering::Relaxed);
+        eprintln!(
+            "native_frontier_layout family={family} vm_steps={steps} elapsed_us={}",
+            elapsed.as_micros()
+        );
+        // Wall time also includes the validator's reference-connection work,
+        // which this real-connection progress handler cannot observe.
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        // Setup is measured independently, never hidden as uncharged work.
+        // This fixed qualification budget is additional to the unchanged
+        // 4096 operation budget, and must not grow with native history.
+        assert!(
+            steps > 0 && steps < 32768,
+            "{family} layout qualification: {steps}"
+        );
+        result.push((format!("setup:{family}"), steps));
+    }
+    c.execute_batch("ROLLBACK TO native_layout_probe; RELEASE native_layout_probe")
+        .unwrap();
+    // Bind the same fully validated choices used by the production page.
+    // Charge this actual combined setup too, rather than assuming its cost.
+    let setup = Arc::new(AtomicUsize::new(0));
+    let observed = setup.clone();
+    let started = std::time::Instant::now();
+    c.progress_handler(
+        1,
+        Some(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    );
+    let layout = FrontierLayout::bind(&tx).unwrap();
+    c.progress_handler(0, None::<fn() -> bool>);
+    let elapsed = started.elapsed();
+    let setup = setup.load(Ordering::Relaxed);
+    eprintln!(
+        "native_frontier_layout family=page vm_steps={setup} elapsed_us={}",
+        elapsed.as_micros()
+    );
+    assert!(elapsed < std::time::Duration::from_secs(1));
+    assert!(
+        setup > 0 && setup < 32768,
+        "page layout qualification: {setup}"
+    );
+    result.push(("setup:page".to_owned(), setup));
+    // Each read/page starts from exactly the same source/stage state.
+    for kind in [
+        "filename",
+        "copilot",
+        "header",
+        "parent",
+        "claudeid",
+        "copilotid",
+        "headerid",
+        "headerparent",
+    ] {
+        c.execute_batch("SAVEPOINT native_vm_probe").unwrap();
+        let port = layout.frontier(ns);
+        if !matches!(kind, "filename" | "copilot" | "header" | "parent") {
+            let value = if kind == "claudeid" {
+                format!("{id}.jsonl")
+            } else {
+                id.to_owned()
+            };
+            port.queue(kind, &value, "").unwrap();
+        }
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        let started = std::time::Instant::now();
+        c.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        match kind {
+            "filename" => {
+                port.needed_filename(false, &format!("{id}.jsonl")).unwrap();
+            }
+            "copilot" => {
+                port.needed_filename(true, id).unwrap();
+            }
+            "header" => {
+                port.needed_header(false, false, id).unwrap();
+            }
+            "parent" => {
+                port.needed_header(true, true, id).unwrap();
+            }
+            _ => {
+                frontier_page(&layout, ns).unwrap();
+            }
+        }
+        c.progress_handler(0, None::<fn() -> bool>);
+        let elapsed = started.elapsed();
+        let steps = steps.load(Ordering::Relaxed);
+        eprintln!(
+            "native_frontier_query kind={kind} vm_steps={steps} elapsed_us={}",
+            elapsed.as_micros()
+        );
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        result.push((kind.to_owned(), steps));
+        c.execute_batch("ROLLBACK TO native_vm_probe; RELEASE native_vm_probe")
+            .unwrap();
+    }
+    result
 }
 
 struct ScopedQualification<'a> {
@@ -530,17 +790,13 @@ impl crate::events::store::semantic_stage::QualificationPort for ScopedQualifica
     }
 }
 
-fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+fn event_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError> {
+    let c = layout.db;
     let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported {
         return Err(refuse("semantic_nonprimitive_event_harness"));
     }
-    let predicate = crate::events::store::semantic_stage::projection_predicate("e.");
-    let peer: bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND {predicate})"),[ns],|r|r.get(0)).map_err(error)?;
-    if peer {
-        return Err(refuse("semantic_claude_native_frontier_pending"));
-    }
-    crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns })
+    crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns, layout })
         .map_err(error)
 }
 
@@ -565,7 +821,8 @@ fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     Ok(true)
 }
 
-fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError> {
+    let c = layout.db;
     let mut budget = 64usize;
     while budget > 0 {
         let task: Option<(String,String,String,String)>=c.query_row("SELECT kind,value,harness,after_key FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0 ORDER BY kind,value,harness LIMIT 1",[ns],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(error)?;
@@ -579,10 +836,10 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
             "native" => {
                 // Both are authored current profiles. The singleton family is
                 // read only through its admitted physical owner, never unscoped.
-                crate::events::store::semantic_stage::support_sql(c,
+                layout.support(
                     "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4",
                     "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
-                ).map_err(error)?
+                )
             }
             "receipt" => {
                 "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='xsm' AND e.id=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
@@ -591,29 +848,27 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
                 "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='tool' AND e.n='SendMessage' AND e.reply_m=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
             }
             "dependency" => {
-                "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+                layout.support(
+                    "SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness=?5 AND d.source_path>?3 GROUP BY d.source_path ORDER BY d.source_path LIMIT ?4",
+                    "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4")
             }
+            "claudeid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND substr(path,length(rtrim(path,replace(path,'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
+            "copilotid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
             "nativeall" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
             "headerid" => {
-                if crate::events::store::configured::metadata_sql(c, "", "namespace")
-                    .map_err(error)?
-                    == "namespace"
-                {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                if layout.header_scoped {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 }
             }
             "headerparent" => {
-                if crate::events::store::configured::metadata_sql(c, "", "namespace")
-                    .map_err(error)?
-                    == "namespace"
-                {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                if layout.header_scoped {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 }
             }
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
@@ -1856,8 +2111,12 @@ impl Stage {
                     StorageError::NamespaceUpgradePending,
                 ));
             }
-            let events = event_page(&tx, ns)?;
-            let frontier = frontier_page(&tx, ns)?;
+            // The source/epoch/schema/ownership fences above remain mandatory
+            // on every batch. Only statement selection is reused within this
+            // transaction's fixed pages; it conveys no Source authority.
+            let layout = FrontierLayout::bind(&tx).map_err(error)?;
+            let events = event_page(&layout, ns)?;
+            let frontier = frontier_page(&layout, ns)?;
             paths=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
             if paths.is_empty() && events && frontier && native_keys_page(&tx, ns)? {
                 tx.execute("UPDATE main.catalog_semantic_stage SET phase='identity' WHERE namespace=?1 AND phase='indexing'",[ns]).map_err(error)?;
@@ -1988,17 +2247,25 @@ impl Stage {
             || head(&tx).map_err(error)? != batch.base_generation
             || self.source.generation != batch.base_generation
         {
+            #[cfg(test)]
+            eprintln!("semantic_record_conflict: stage_binding");
             return Ok(Outcome::Conflict);
         }
         let claims = super::source_journal::claims(&tx, Some(ns), &batch.paths).map_err(error)?;
         if claims != prepared.claims {
+            #[cfg(test)]
+            eprintln!("semantic_record_conflict: source_claims");
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
             if !lifecycle_current(prepared) {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: publication_lifecycle");
                 return Ok(Outcome::Conflict);
             }
             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: publication_witness");
                 return Ok(Outcome::Conflict);
             }
             if (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
@@ -2012,10 +2279,14 @@ impl Stage {
             let mut keys = std::collections::BTreeSet::new();
             for row in &prepared.rows {
                 if !keys.insert(&row.key) || row.sources.is_empty() {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: publication_owner_shape");
                     return Ok(Outcome::Conflict);
                 }
                 let staged: Option<String> = tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
                 let Some(staged) = staged else {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: publication_staged_owner");
                     return Ok(Outcome::Conflict);
                 };
                 let _ = staged;
@@ -2031,6 +2302,8 @@ impl Stage {
                     != serde_json::to_string(&endpoint.row)
                         .map_err(|e| StoreError::Data(e.to_string()))?
                 {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: publication_identity");
                     return Ok(Outcome::Conflict);
                 }
                 covered.extend(
@@ -2042,6 +2315,8 @@ impl Stage {
                     .push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
             }
             if covered != batch.paths.iter().cloned().collect() {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: publication_source_coverage");
                 return Ok(Outcome::Conflict);
             }
             if self.source.owner.is_some() {
@@ -2065,6 +2340,8 @@ impl Stage {
         }
         if batch.phase != Phase::Indexing {
             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: reduction_witness");
                 return Ok(Outcome::Conflict);
             }
             for path in &batch.paths {
@@ -2077,6 +2354,8 @@ impl Stage {
                     .query_row(sql, params![ns, path], |r| r.get(0))
                     .map_err(error)?;
                 if !pending {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: phase_pending_path");
                     return Ok(Outcome::Conflict);
                 }
             }
@@ -2108,11 +2387,15 @@ impl Stage {
                             .map(String::as_str)
                             .collect::<std::collections::BTreeSet<_>>()
                     {
+                        #[cfg(test)]
+                        eprintln!("semantic_record_conflict: identity_native_membership");
                         return Ok(Outcome::Conflict);
                     }
                     for source in &endpoint.row.sources {
                         let path = source.path.to_string_lossy().into_owned();
                         if !batch.paths.contains(&path) {
+                            #[cfg(test)]
+                            eprintln!("semantic_record_conflict: identity_batch_membership");
                             return Ok(Outcome::Conflict);
                         }
                         let stored: String=tx.query_row("SELECT metadata FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2 AND harness=?3",params![ns,path,endpoint.row.harness],|r|r.get(0)).map_err(error)?;
@@ -2124,12 +2407,16 @@ impl Stage {
                             || (endpoint.row.harness != "claude" && key != endpoint.row.key)
                             || !endpoint.row.native_ids.contains(&source.native_id)
                         {
+                            #[cfg(test)]
+                            eprintln!("semantic_record_conflict: identity_source_binding");
                             return Ok(Outcome::Conflict);
                         }
                         covered.insert(path);
                     }
                     let canonical: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND session_key=?3 AND native_id IN (SELECT json_each.value FROM json_each(?4)))",params![ns,endpoint.row.harness,endpoint.row.key,serde_json::to_string(&endpoint.row.native_ids).map_err(|e|StoreError::Data(e.to_string()))?],|r|r.get(0)).map_err(error)?;
                     if !canonical {
+                        #[cfg(test)]
+                        eprintln!("semantic_record_conflict: identity_canonical_key");
                         return Ok(Outcome::Conflict);
                     }
                     let text = serde_json::to_string(endpoint)
@@ -2141,6 +2428,8 @@ impl Stage {
                     encoded.push((endpoint, text));
                 }
                 if batch.paths.iter().any(|p| !covered.contains(p)) {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: identity_source_coverage");
                     return Ok(Outcome::Conflict);
                 }
                 for (endpoint, text) in encoded {
@@ -2168,6 +2457,8 @@ impl Stage {
                 for endpoint in prepared.relationships.endpoints.values() {
                     let own: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,endpoint.row.key],|r|r.get(0)).map_err(error)?;
                     if !own {
+                        #[cfg(test)]
+                        eprintln!("semantic_record_conflict: relation_staged_owner");
                         return Ok(Outcome::Conflict);
                     }
                     let text = serde_json::to_string(endpoint)
@@ -2196,6 +2487,8 @@ impl Stage {
                     {
                         #[cfg(test)]
                         eprintln!("semantic_record_conflict: relation_endpoint_evidence");
+                        #[cfg(test)]
+                        eprintln!("semantic_record_conflict: relation_endpoint_evidence");
                         return Ok(Outcome::Conflict);
                     }
                     effects.relation(relation).map_err(error)?;
@@ -2218,16 +2511,22 @@ impl Stage {
             return Ok(Outcome::Written);
         }
         if prepared.indexed_sources.len() + prepared.withdrawals.len() != batch.paths.len() {
+            #[cfg(test)]
+            eprintln!("semantic_record_conflict: indexing_source_coverage");
             return Ok(Outcome::Conflict);
         }
         let mut seen = std::collections::BTreeSet::new();
         for (_, source) in &prepared.indexed_sources {
             let path = source.path.to_string_lossy().into_owned();
             if !batch.paths.contains(&path) || !seen.insert(path.clone()) {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_batch_membership");
                 return Ok(Outcome::Conflict);
             }
             let Some((_, ledger)) = crate::events::store::ledger_row(&tx, &path).map_err(error)?
             else {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_ledger_absent");
                 return Ok(Outcome::Conflict);
             };
             let mut expected = ledger.source(&source.path, &source.native_id);
@@ -2235,6 +2534,8 @@ impl Stage {
             if expected != *source
                 || crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
             {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_ledger_changed");
                 return Ok(Outcome::Conflict);
             }
             if !crate::events::store::admitted_roles_current(
@@ -2244,10 +2545,14 @@ impl Stage {
             )
             .map_err(error)?
             {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_role_changed");
                 return Ok(Outcome::Conflict);
             }
             let captured: Option<Option<i64>> = tx.query_row("SELECT claim FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path], |r| r.get(0)).optional().map_err(error)?;
             if captured != claims.iter().find(|(p, _)| p == &path).map(|(_, c)| *c) {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_claim_changed");
                 return Ok(Outcome::Conflict);
             }
         }
@@ -2259,6 +2564,8 @@ impl Stage {
                 || !withdrawal_runtime_matches(&self.source, batch, withdrawal)?
                 || !withdrawal.current().unwrap_or(false)
             {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: withdrawal_evidence");
                 return Ok(Outcome::Conflict);
             }
             owners::Owners {
@@ -2270,6 +2577,8 @@ impl Stage {
         }
         for (path, harness, native) in &prepared.indexed_native_parents {
             if !seen.contains(path) {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: parent_source_membership");
                 return Ok(Outcome::Conflict);
             }
             owners::Owners {
