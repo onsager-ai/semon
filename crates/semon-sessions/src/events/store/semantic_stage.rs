@@ -327,7 +327,7 @@ fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub(super) fn support_sql<'a>(
+pub(crate) fn support_sql<'a>(
     c: &Connection,
     singleton: &'a str,
     scoped: &'a str,

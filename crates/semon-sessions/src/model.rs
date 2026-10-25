@@ -1275,7 +1275,15 @@ fn scan(
     machine: &MachineFacts,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
-    scan_selected(options, cache, dirty, texts, cutoff, machine, ScanSelection::Current(selected))
+    scan_selected(
+        options,
+        cache,
+        dirty,
+        texts,
+        cutoff,
+        machine,
+        ScanSelection::Current(selected),
+    )
 }
 
 fn scan_selected(
@@ -7421,11 +7429,20 @@ pub(crate) fn prepare_semantic_batch(
     }
     // Preserve the shared parser's input order. Only the typed claim witness
     // follows the storage batch order; claim values and membership stay exact.
-    let claim_paths = prepared.claims.iter().map(|(path, _)| path.clone()).collect::<BTreeSet<_>>();
+    let claim_paths = prepared
+        .claims
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
     if prepared.claims.len() != paths.len() || claim_paths != paths {
         return Err(io::Error::other("semantic model claim membership changed"));
     }
-    let ranks = batch.paths.iter().enumerate().map(|(rank, path)| (path.clone(), rank)).collect::<BTreeMap<_, _>>();
+    let ranks = batch
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(rank, path)| (path.clone(), rank))
+        .collect::<BTreeMap<_, _>>();
     prepared.claims.sort_by_key(|(path, _)| ranks[path]);
     if prepared.base_generation != batch.base_generation {
         return Err(io::Error::other("semantic model generation changed"));
