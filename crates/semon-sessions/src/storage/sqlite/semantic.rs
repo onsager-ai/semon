@@ -121,7 +121,9 @@ impl SemanticStaging {
     /// Same typed custody used by the producer; no public qualification grant.
     #[allow(dead_code)] // Private producer/reader qualification; no public factory.
     pub(crate) fn reader_binding(&self) -> Result<NativeReaderBinding, StorageError> {
-        self.owner.clone().map(NativeReaderBinding::Semantic)
+        self.owner
+            .clone()
+            .map(NativeReaderBinding::Semantic)
             .ok_or(StorageError::NamespaceUpgradePending)
     }
     /// Explicit private admission into the authored composite native profile.
@@ -815,7 +817,11 @@ impl Stage {
         tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,crate::model::now_ms().to_string()]).map_err(error)?;
         // Readiness is solely for the private listing cohort. No global
         // completeness claim can qualify selected/proof/search readers.
-        tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='semantic_listing_generation'",[ns]).map_err(error)?;
+        tx.execute(
+            "DELETE FROM main.meta WHERE namespace=?1 AND key='semantic_listing_generation'",
+            [ns],
+        )
+        .map_err(error)?;
         if prepared.rows.iter().all(|row| row.query.is_some())
             && projection_keys.len() == prepared.rows.len()
         {

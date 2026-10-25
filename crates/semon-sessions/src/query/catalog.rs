@@ -238,7 +238,10 @@ impl Query {
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
         if self.sources.machines.len() != 1 || tool != "list_sessions" {
-            return Err(QueryError::new("namespace_upgrade_pending", "Admitted Query selector is not qualified"));
+            return Err(QueryError::new(
+                "namespace_upgrade_pending",
+                "Admitted Query selector is not qualified",
+            ));
         }
         self.execute_catalog_store_at(
             tool,
@@ -419,7 +422,10 @@ impl Query {
                 continue;
             };
             if bound.is_some() {
-                return Err(QueryError::new("namespace_upgrade_pending", "Admitted selected question reader is not qualified"));
+                return Err(QueryError::new(
+                    "namespace_upgrade_pending",
+                    "Admitted selected question reader is not qualified",
+                ));
             }
             let (index, id) = &owner[row["id"].as_str().expect("summary id")];
             let (key, source) = &self.sources.machines[*index];
