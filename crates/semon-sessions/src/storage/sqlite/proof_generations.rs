@@ -113,7 +113,16 @@ pub(super) fn publish(
         };
         // Validate precisely the same typed values that are persisted; the
         // SQLite transaction still owns the write and its constraints.
-        let (record, _) = proof_codec::decode_generation(record)?;
+        let (record, _) = proof_codec::decode_generation(
+            record,
+            proof_codec::ExpectedGeneration {
+                namespace,
+                id: &id,
+                admission,
+                stream,
+                proof,
+            },
+        )?;
         tx.execute(
             "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
@@ -380,26 +389,35 @@ impl ReaderRuntime {
             .map_err(failed)?;
             (expected.0.clone(), serial)
         };
-        let (publication, proof, metadata, prefix, admission, stream): (String, String, String, String, i64, String) = tx.query_row("SELECT publication,proof,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).map_err(failed)?;
-        if ProofGenerationId::derive(ns, owner.admission(), &stream, &proof)
-            != ProofGenerationId(id.clone())
-        {
-            return Err(StorageError::ScopeChanged);
-        }
+        let (publication, proof, metadata, slots, prefix, admission, stream): (String, String, String, String, String, i64, String) = tx.query_row("SELECT g.publication,p.proof_digest,g.metadata,g.slots,g.prefix,g.admission,g.stream FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(failed)?;
         let admission = u64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
         if admission != owner.admission()
             || Some(&stream) != owner.config().expected_stream_epoch.as_ref()
         {
             return Err(StorageError::ScopeChanged);
         }
-        let row: CatalogRow =
-            serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
-        if crate::retention::source_generation(&row.sources)
-            .map_err(|_| StorageError::Unavailable)?
-            != prefix
-        {
-            return Err(StorageError::ScopeChanged);
-        }
+        let (record, row) = proof_codec::decode_generation(
+            proof_codec::GenerationRecord {
+                namespace: ns.into(),
+                id: ProofGenerationId(id.clone()),
+                session_key: key.into(),
+                publication: publication.clone(),
+                proof: proof.clone(),
+                admission,
+                stream: stream.clone(),
+                metadata,
+                slots,
+                prefix: prefix.clone(),
+            },
+            proof_codec::ExpectedGeneration {
+                namespace: ns,
+                id: expected,
+                admission: owner.admission(),
+                stream: owner.config().expected_stream_epoch.as_deref().ok_or(StorageError::ScopeChanged)?,
+                proof: &proof,
+            },
+        )?;
+        let prefix = record.prefix;
         let lease = Lease {
             owner: owner.clone(),
             owner_epoch: self.epoch,
