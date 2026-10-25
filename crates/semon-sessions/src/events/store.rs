@@ -11526,7 +11526,7 @@ mod tests {
             }))
         });
         let reads = super::super::FILE_READS.with(std::cell::Cell::get);
-        let (observed, metadata) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        let (observed, mut metadata) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
         assert_eq!(observed, old);
         assert_eq!(
             metadata.summary.models,
