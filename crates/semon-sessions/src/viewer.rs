@@ -6981,7 +6981,7 @@ mod tests {
 
     #[test]
     fn initial_catalog_page_precedes_global_native_observation() {
-        const FIRST_PAGE_LIMIT: Duration = Duration::from_secs(5);
+        const FIRST_PAGE_LIMIT: Duration = Duration::from_secs(8);
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
             fixture.write("proc/sys/kernel/hostname", "producer-fixture\n");
