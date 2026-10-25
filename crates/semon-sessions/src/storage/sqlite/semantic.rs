@@ -542,7 +542,8 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
         let sql = format!(
             "SELECT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND {files} AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=f.path) UNION ALL SELECT 1 FROM main.session_catalog_invalidations i WHERE i.namespace=?1 AND {invalidations} AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=i.source_path))"
         );
-        self.db.query_row(&sql, params![self.ns, value], |r| r.get(0))
+        self.db
+            .query_row(&sql, params![self.ns, value], |r| r.get(0))
     }
     fn needed_header(&self, parent: bool, qualified: bool, id: &str) -> rusqlite::Result<bool> {
         let field = if parent {
