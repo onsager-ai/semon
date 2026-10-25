@@ -87,6 +87,7 @@ struct HeldCancelFactory {
     real: Arc<super::super::tests::Factory>,
     started: mpsc::SyncSender<()>,
     release: Arc<tokio::sync::Notify>,
+    held: Arc<AtomicBool>,
 }
 impl super::super::PgConnectionFactory for HeldCancelFactory {
     fn connect(&self) -> super::super::ConnectFuture<'_> {
@@ -95,13 +96,23 @@ impl super::super::PgConnectionFactory for HeldCancelFactory {
             let cancel = connection.client.cancel.clone();
             let started = self.started.clone();
             let release = self.release.clone();
+            let held = self.held.clone();
             connection.client.cancel = Arc::new(move || {
                 let cancel = cancel.clone();
                 let started = started.clone();
                 let release = release.clone();
+                let held = held.clone();
                 Box::pin(async move {
-                    started.send(()).unwrap();
-                    release.notified().await;
+                    // Hold exactly the observed transport. Later cancellation
+                    // during schema admission must not refill a blocking test
+                    // channel or wait for an already-consumed release permit.
+                    if !held.swap(true, Ordering::AcqRel) {
+                        eprintln!("HELD_CANCEL transport=first");
+                        started.send(()).unwrap();
+                        release.notified().await;
+                    } else {
+                        eprintln!("HELD_CANCEL transport=repeated");
+                    }
                     cancel().await
                 })
             });
@@ -121,6 +132,7 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
             real: real.clone(),
             started,
             release: release.clone(),
+            held: Arc::new(AtomicBool::new(false)),
         }),
         super::super::PoolLimits {
             max_connections: 1,
@@ -202,11 +214,13 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
             matches!(finished.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "worker returned before cancellation I/O stopped"
         );
+        held_cancel_diagnostic(&mut lock, pid, &blocked_query, "owned-before-release");
         release.notify_one();
         assert_eq!(
             worker.join().unwrap().unwrap_err().kind(),
             io::ErrorKind::Interrupted
         );
+        eprintln!("HELD_CANCEL worker=interrupted-after-release");
     });
     assert!(begin.elapsed() < Duration::from_secs(4));
     assert_eq!(pool.accounted(), 0, "tainted connection must be retired");
