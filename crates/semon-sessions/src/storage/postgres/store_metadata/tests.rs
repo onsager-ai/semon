@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::postgres::{
     PgSourceJournal,
-    tests::{Factory, LOSE_ACK, fixture, limits, ns, source_factory},
+    tests::{Factory, LOSE_ACK, admin_factory, fixture, limits, ns, source_factory},
 };
 use crate::storage::source_observations::conformance::shared_source_observation_conformance;
 use std::time::Duration;
@@ -14,6 +14,20 @@ fn snapshot(factory: &Factory) -> Vec<String> {
         result.extend(rows.iter().map(|r| r.get::<_, String>(0)));
     }
     result
+}
+
+// Only the isolated ephemeral CI administrator observes byte equality across
+// every namespace, including intentionally broken RLS/ACL fixtures. This
+// connection is never injected into the library or used as an application role.
+fn full_snapshot(factory: &Factory) -> Vec<(String, Vec<String>)> {
+    let mut client = admin_factory(factory).client();
+    let tables = client.query("SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r' ORDER BY relname", &[]).unwrap();
+    tables.iter().map(|r| {
+        let name: String = r.get(0);
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        let rows = client.query(&format!("SELECT to_jsonb(t)::text FROM {name} t ORDER BY to_jsonb(t)::text"), &[]).unwrap();
+        (name, rows.iter().map(|r| r.get(0)).collect())
+    }).collect()
 }
 
 #[test]
@@ -34,6 +48,12 @@ fn pg_store_metadata_distinct_source_principal_journal_cold_warm_cannot_control(
             &namespace,
         );
         assert!(PgStoreMetadata::open(pool.clone(), &control).is_err());
+        let operation_id = "1f".repeat(32);
+        let source_operation = crate::storage::postgres::OperationIdentity {
+            operation_id: &operation_id, kind: "store-pricing", request_digest: &[31; 32],
+        };
+        pool.apply_operation(&ns(&namespace), &source_operation, &control, |_| Ok(serde_json::json!({"source":true}))).unwrap();
+        assert!(snapshot(&factory) == before, "Source receipt cannot masquerade as STORE receipt");
         for name in ["host-control", "schema", "semon_f1", "source\0🦀", ""] {
             let logical = if name.is_empty() { ns("empty-guc") } else { ns(name) };
             pool.transaction(&logical, TxnKind::Write, &control, |tx| {
@@ -63,17 +83,17 @@ fn pg_store_metadata_fault_boundaries_restart_replay_and_value_domain() {
     let control = PgCancellation::default();
     let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
     for point in 1..=3 {
-        let before = snapshot(&factory);
+        let before = full_snapshot(&factory);
         FAIL_MUTATION.with(|p| p.set(point));
         let result = host.set_pricing_target(&[point; 32], 0, Some("fault"), &control);
         FAIL_MUTATION.with(|p| p.set(0));
         assert_eq!(result, Err(StorageError::Busy));
-        assert!(snapshot(&factory) == before, "state and receipt rollback");
+        assert!(full_snapshot(&factory) == before, "state and receipt rollback");
     }
     let too_large = "x".repeat(1048577);
-    let before = snapshot(&factory);
+    let before = full_snapshot(&factory);
     assert_eq!(host.set_pricing_target(&[10; 32], 0, Some(&too_large), &control), Err(StorageError::InvalidArguments));
-    assert!(snapshot(&factory) == before);
+    assert!(full_snapshot(&factory) == before);
     let maximum = "🦀".repeat(1048576 / 4);
     for (index, target) in [Some(""), Some("\0🦀\n\""), Some(maximum.as_str()), None].into_iter().enumerate() {
         let revision = index as i64;
@@ -115,22 +135,26 @@ fn pg_store_metadata_warm_corruption_matrix_refuses_without_mutation() {
         "ALTER TABLE semon_pg_store_owner NO FORCE ROW LEVEL SECURITY; DELETE FROM semon_pg_store_owner; ALTER TABLE semon_pg_store_owner FORCE ROW LEVEL SECURITY",
         "ALTER TABLE semon_pg_store_owner NO FORCE ROW LEVEL SECURITY; UPDATE semon_pg_store_owner SET owner='semon_source'; ALTER TABLE semon_pg_store_owner FORCE ROW LEVEL SECURITY",
         "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_epoch_check; ALTER TABLE semon_pg_store_owner NO FORCE ROW LEVEL SECURITY; UPDATE semon_pg_store_owner SET epoch=2; ALTER TABLE semon_pg_store_owner FORCE ROW LEVEL SECURITY",
-        "REVOKE SELECT ON semon_pg_store_state FROM CURRENT_USER",
-        "REVOKE UPDATE ON semon_pg_store_state FROM CURRENT_USER",
-        "REVOKE INSERT ON semon_pg_store_operations FROM CURRENT_USER",
+        "REVOKE SELECT ON semon_pg_store_state FROM semon_f1",
+        "REVOKE UPDATE ON semon_pg_store_state FROM semon_f1",
+        "REVOKE INSERT ON semon_pg_store_operations FROM semon_f1",
+        "REVOKE SELECT ON semon_pg_store_owner FROM semon_f1",
+        "ALTER TABLE semon_pg_store_state OWNER TO semon_source",
+        "ALTER TABLE semon_pg_store_operations OWNER TO semon_source",
+        "UPDATE semon_pg_store_state SET owner='semon_source'",
+        "INSERT INTO semon_pg_store_operations VALUES(decode(repeat('de',32),'hex'),'semon_source',decode(repeat('ad',32),'hex'),0)",
+        "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_pkey; INSERT INTO semon_pg_store_owner VALUES(true,'semon_f1',1,1)",
+        "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_contract_check; UPDATE semon_pg_store_owner SET contract=2",
+        "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_epoch_check; UPDATE semon_pg_store_owner SET epoch=2",
+        "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_contract_check; ALTER TABLE semon_pg_store_owner ADD CHECK(contract>0)",
     ] {
         let (pool, factory) = fixture(|b| b.max_connections = 1);
         let control = PgCancellation::default();
         let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
-        let before = snapshot(&factory);
-        factory.client().batch_execute(corrupt).unwrap();
+        admin_factory(&factory).client().batch_execute(corrupt).unwrap();
+        let before = full_snapshot(&factory);
         assert!(host.set_pricing_target(&[40; 32], 0, Some("refused"), &control).is_err(), "warm corruption refused");
-        // Restore only SELECT for observing bytes after an explicit revoke.
-        factory.client().batch_execute("GRANT SELECT ON semon_pg_store_state TO CURRENT_USER").unwrap();
-        let after = snapshot(&factory);
-        if !corrupt.contains("UPDATE semon_pg_store_") && !corrupt.contains("DELETE FROM") {
-            assert!(before == after, "refusal leaves durable bytes unchanged");
-        }
+        assert!(before == full_snapshot(&factory), "all namespace/store bytes unchanged after refusal");
     }
 }
 
