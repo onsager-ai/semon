@@ -153,10 +153,18 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
             // Production Copilot input has no Tree summary. Do not manufacture
             // one to satisfy another family's test fixture or readiness gate.
             pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-                let count: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_headers WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
+                let count: i64 = tx
+                    .driver
+                    .query_one(
+                        "SELECT count(*) FROM semon_pg_native_tree_headers WHERE namespace=$1",
+                        &[&tx.namespace.as_str().as_bytes()],
+                    )
+                    .map_err(sqlstate::error)?
+                    .get(0);
                 assert_eq!(count, 0, "Copilot has no native Tree header");
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
             drop(pool);
             drop(factory);
             std::fs::remove_dir_all(data.root).unwrap();
@@ -353,7 +361,10 @@ fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
     let after = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
         .unwrap();
-    assert!(before == after, "Tree retirement refuses before any effects");
+    assert!(
+        before == after,
+        "Tree retirement refuses before any effects"
+    );
     drop(pool);
     drop(factory);
     std::fs::remove_dir_all(codex.root).unwrap();
