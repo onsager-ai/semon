@@ -104,12 +104,18 @@ pub(crate) struct SourceJournal {
 }
 #[allow(non_snake_case)]
 pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
-    SourceJournal { config, owner: None }
+    SourceJournal {
+        config,
+        owner: None,
+    }
 }
 
 impl SourceJournal {
     pub(crate) fn owned(owner: crate::events::store::configured::NativeOwnership) -> Self {
-        Self { config: owner.config().clone(), owner: Some(owner) }
+        Self {
+            config: owner.config().clone(),
+            owner: Some(owner),
+        }
     }
     pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         if self
@@ -133,7 +139,14 @@ impl SourceJournal {
             .map_err(failed)?;
         catalog_namespace::register(&db, &self.config.namespace)?;
         if self.owner.is_some() {
-            db.create_scalar_function("semon_event_writer", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).map_err(failed)?;
+            db.create_scalar_function(
+                "semon_event_writer",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .map_err(failed)?;
         }
         Ok(db)
     }
@@ -142,7 +155,9 @@ impl SourceJournal {
         if let Some(owner) = &self.owner {
             return owner.validate(db);
         }
-        if !NativeReaderBinding::Admitted(self.config.clone()).validate(db, &self.config.namespace)? {
+        if !NativeReaderBinding::Admitted(self.config.clone())
+            .validate(db, &self.config.namespace)?
+        {
             return Err(StorageError::NamespaceUpgradePending);
         }
         Ok(())
@@ -241,7 +256,8 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
             return Ok(false);
         }
         for path in paths {
-            invalidate(&tx, Some(self.config.namespace.as_str()), &path, "changed").map_err(failed)?;
+            invalidate(&tx, Some(self.config.namespace.as_str()), &path, "changed")
+                .map_err(failed)?;
         }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(true)

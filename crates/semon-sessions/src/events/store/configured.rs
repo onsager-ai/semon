@@ -430,16 +430,22 @@ pub(crate) struct NativeOwnership {
 }
 
 impl NativeOwnership {
-    pub(crate) fn config(&self) -> &StoreConfig { &self.config }
-    pub(crate) fn admission(&self) -> u64 { self.admission as u64 }
+    pub(crate) fn config(&self) -> &StoreConfig {
+        &self.config
+    }
+    pub(crate) fn admission(&self) -> u64 {
+        self.admission as u64
+    }
 
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
-        if metadata_sql(db,"singleton","composite").map_err(failed)? != "composite"
-            || semantic_stage::support_sql(db,"singleton","composite").map_err(failed)? != "composite"
-            || copied_usage_sql(db,"singleton","composite").map_err(failed)? != "composite"
-            || native_usage::sql(db,"singleton","composite").map_err(failed)? != "composite"
-            || tree_state::sql(db,"singleton","composite").map_err(failed)? != "composite" {
+        if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
+            || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
+                != "composite"
+            || copied_usage_sql(db, "singleton", "composite").map_err(failed)? != "composite"
+            || native_usage::sql(db, "singleton", "composite").map_err(failed)? != "composite"
+            || tree_state::sql(db, "singleton", "composite").map_err(failed)? != "composite"
+        {
             return Err(StorageError::NamespaceUpgradePending);
         }
         Ok(())
@@ -448,30 +454,76 @@ impl NativeOwnership {
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
         self.validate(db)?;
         let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
-        if !bound { return Err(StorageError::NamespaceUpgradePending); }
-        let count: i64 = db.query_row("SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=0", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        if count != (TABLES.len()+1) as i64 { return Err(StorageError::NamespaceUpgradePending); }
+        if !bound {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=0",
+                [self.config.namespace.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        if count != (TABLES.len() + 1) as i64 {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         for table in TABLES.iter().copied().chain(["pricing_recompute_pending"]) {
             let owned: bool=db.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=?1 AND table_name=?2 AND qualification=0)",params![self.config.namespace.as_str(),table],|r|r.get(0)).map_err(failed)?;
-            if !owned { return Err(StorageError::ScopeChanged); }
+            if !owned {
+                return Err(StorageError::ScopeChanged);
+            }
         }
-        for table in TABLES.iter().copied().chain(["storage_event_tables","storage_event_operations","session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"]) {
+        for table in TABLES.iter().copied().chain([
+            "storage_event_tables",
+            "storage_event_operations",
+            "session_catalog_invalidations",
+            "catalog_backfill_sources",
+            "pricing_recompute_pending",
+        ]) {
             let guards: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN('storage_owned_guard_'||?1||'_INSERT','storage_owned_guard_'||?1||'_UPDATE','storage_owned_guard_'||?1||'_DELETE')", [table], |r| r.get(0)).map_err(failed)?;
-            if guards != 3 { return Err(StorageError::NamespaceUpgradePending); }
+            if guards != 3 {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
         Ok(())
     }
 
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         Self::validate_physical(db)?;
-        let admission = crate::storage::sqlite::namespace::require_semantic_admitted(db,&self.config.namespace)?;
-        if admission.generation != self.admission as u64 { return Err(StorageError::ScopeChanged); }
-        let epoch: String = db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).map_err(failed)?;
-        if self.config.expected_stream_epoch.as_deref() != Some(epoch.as_str()) { return Err(StorageError::ScopeChanged); }
-        if !current_contract(db).map_err(failed)? { return Err(StorageError::NamespaceUpgradePending); }
-        for table in TABLES.iter().copied().chain(semantic_stage::STAGE_TABLES.iter().copied()).chain(["session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"]) {
+        let admission = crate::storage::sqlite::namespace::require_semantic_admitted(
+            db,
+            &self.config.namespace,
+        )?;
+        if admission.generation != self.admission as u64 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let epoch: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        if self.config.expected_stream_epoch.as_deref() != Some(epoch.as_str()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        if !current_contract(db).map_err(failed)? {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        for table in TABLES
+            .iter()
+            .copied()
+            .chain(semantic_stage::STAGE_TABLES.iter().copied())
+            .chain([
+                "session_catalog_invalidations",
+                "catalog_backfill_sources",
+                "pricing_recompute_pending",
+            ])
+        {
             let scoped: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |r| r.get(0)).map_err(failed)?;
-            if !scoped { return Err(StorageError::NamespaceUpgradePending); }
+            if !scoped {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
         Ok(())
     }
@@ -480,36 +532,103 @@ impl NativeOwnership {
     /// conversion, singleton adoption, or public qualification is performed.
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
         let mut db = connection(config)?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         Self::validate_physical(&tx)?;
-        for table in TABLES.iter().copied().chain(semantic_stage::STAGE_TABLES.iter().copied()).chain(["session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"]) {
+        for table in TABLES
+            .iter()
+            .copied()
+            .chain(semantic_stage::STAGE_TABLES.iter().copied())
+            .chain([
+                "session_catalog_invalidations",
+                "catalog_backfill_sources",
+                "pricing_recompute_pending",
+            ])
+        {
             let scoped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |r| r.get(0)).map_err(failed)?;
-            if !scoped { return Err(StorageError::NamespaceUpgradePending); }
+            if !scoped {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
-        let bound: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_namespaces')", [], |r| r.get(0)).map_err(failed)?;
+        let bound: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_namespaces')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
         if !bound {
             // Fresh profile only: existing native data requires migration.
-            let source_meta: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace<>'')",[],|r|r.get(0)).map_err(failed)?;
-            if source_meta { return Err(StorageError::NamespaceUpgradePending); }
-            for table in TABLES.iter().copied().chain(semantic_stage::STAGE_TABLES.iter().copied()).chain(["session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"]).filter(|table| *table != "meta") {
-                let present: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"), [], |r| r.get(0)).map_err(failed)?;
-                if present { return Err(StorageError::NamespaceUpgradePending); }
+            let source_meta: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace<>'')",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(failed)?;
+            if source_meta {
+                return Err(StorageError::NamespaceUpgradePending);
             }
-            tx.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA).map_err(failed)?;
+            for table in TABLES
+                .iter()
+                .copied()
+                .chain(semantic_stage::STAGE_TABLES.iter().copied())
+                .chain([
+                    "session_catalog_invalidations",
+                    "catalog_backfill_sources",
+                    "pricing_recompute_pending",
+                ])
+                .filter(|table| *table != "meta")
+            {
+                let present: bool = tx
+                    .query_row(
+                        &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(failed)?;
+                if present {
+                    return Err(StorageError::NamespaceUpgradePending);
+                }
+            }
+            tx.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA)
+                .map_err(failed)?;
             let tables=tx.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'storage_%' ORDER BY name LIMIT 129").map_err(failed)?.query_map([],|r|r.get::<_,String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-            if tables.len()>128 { return Err(StorageError::NamespaceUpgradePending); }
-            for (index,table) in tables.iter().enumerate() {
-                if TABLES.contains(&table.as_str()) || semantic_stage::STAGE_TABLES.contains(&table.as_str()) || ["session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"].contains(&table.as_str()) { continue; }
+            if tables.len() > 128 {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
+            for (index, table) in tables.iter().enumerate() {
+                if TABLES.contains(&table.as_str())
+                    || semantic_stage::STAGE_TABLES.contains(&table.as_str())
+                    || [
+                        "session_catalog_invalidations",
+                        "catalog_backfill_sources",
+                        "pricing_recompute_pending",
+                    ]
+                    .contains(&table.as_str())
+                {
+                    continue;
+                }
                 // Unported Catalog, history, descriptions, trace and pricing
                 // consumers are fenced even on this private fresh profile.
-                for operation in ["INSERT","UPDATE","DELETE"] {
+                for operation in ["INSERT", "UPDATE", "DELETE"] {
                     tx.execute_batch(&format!("CREATE TRIGGER storage_private_unported_{index}_{operation} BEFORE {operation} ON \"{}\" BEGIN SELECT RAISE(ABORT,'private native family unported'); END;",table.replace('"',"\"\""))).map_err(failed)?;
                 }
             }
         }
         tx.execute("INSERT INTO storage_namespaces(namespace,admission_generation,admitted_at,format_version,writer_qualification) SELECT ?1,coalesce(max(admission_generation),0)+1,?2,1,0 FROM storage_namespaces WHERE true ON CONFLICT(namespace) DO NOTHING", params![config.namespace.as_str(),crate::model::now_ms()]).map_err(failed)?;
-        let admission = tx.query_row("SELECT admission_generation FROM storage_namespaces WHERE namespace=?1", [config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        let owner = Self { config: config.clone(), admission };
+        let admission = tx
+            .query_row(
+                "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                [config.namespace.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        let owner = Self {
+            config: config.clone(),
+            admission,
+        };
         owner.validate(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         prepare_owned(&owner)?;
@@ -519,30 +638,69 @@ impl NativeOwnership {
 
 #[allow(dead_code)]
 pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageError> {
-    create_with_layout(config, PhysicalLayout { core:true,metadata:true,catalog:true,trace:false,copied_usage:true,native_usage:true,tree:true,pricing_queue:true,semantic_support:true,semantic_stage:true })
+    create_with_layout(
+        config,
+        PhysicalLayout {
+            core: true,
+            metadata: true,
+            catalog: true,
+            trace: false,
+            copied_usage: true,
+            native_usage: true,
+            tree: true,
+            pricing_queue: true,
+            semantic_support: true,
+            semantic_stage: true,
+        },
+    )
 }
 
 fn prepare_owned(owner: &NativeOwnership) -> Result<(), StorageError> {
     let journal = SourceJournal::owned(owner.clone());
     journal.prepare()?;
     let mut db = connection(owner.config())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
     owner.validate(&tx)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);
 CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalidations(namespace,revision,source_path);").map_err(failed)?;
-    for table in TABLES.iter().copied().chain(["storage_event_tables","storage_event_operations","session_catalog_invalidations","catalog_backfill_sources","pricing_recompute_pending"]) {
-        for (operation,predicate) in [("INSERT","NEW.namespace IS NOT semon_namespace()"),("UPDATE","OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),("DELETE","OLD.namespace IS NOT semon_namespace()")] {
-            let metadata = if table=="meta" {
-                let rows: &[&str]=match operation { "UPDATE"=>&["OLD","NEW"],"DELETE"=>&["OLD"],_=>&["NEW"] };
+    for table in TABLES.iter().copied().chain([
+        "storage_event_tables",
+        "storage_event_operations",
+        "session_catalog_invalidations",
+        "catalog_backfill_sources",
+        "pricing_recompute_pending",
+    ]) {
+        for (operation, predicate) in [
+            ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
+            (
+                "UPDATE",
+                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
+            ),
+            ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
+        ] {
+            let metadata = if table == "meta" {
+                let rows: &[&str] = match operation {
+                    "UPDATE" => &["OLD", "NEW"],
+                    "DELETE" => &["OLD"],
+                    _ => &["NEW"],
+                };
                 rows.iter().map(|row|format!(" OR NOT ({row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             tx.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS storage_owned_guard_{table}_{operation} BEFORE {operation} ON {table} WHEN semon_event_writer()<>1 OR {predicate}{metadata} BEGIN SELECT RAISE(ABORT,'private native ownership refused'); END;")).map_err(failed)?;
         }
     }
     for table in TABLES.iter().copied().chain(["pricing_recompute_pending"]) {
-        tx.execute("INSERT OR IGNORE INTO storage_event_tables VALUES(?1,?2,0)", params![owner.config.namespace.as_str(),table]).map_err(failed)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO storage_event_tables VALUES(?1,?2,0)",
+            params![owner.config.namespace.as_str(), table],
+        )
+        .map_err(failed)?;
     }
     tx.commit().map_err(|_| StorageError::CommitUncertain)
 }
@@ -736,13 +894,19 @@ impl Writer {
     }
 
     pub(crate) fn owned(owner: NativeOwnership) -> Self {
-        Self { config: owner.config.clone(), owner: Some(owner), intents: BTreeMap::new() }
+        Self {
+            config: owner.config.clone(),
+            owner: Some(owner),
+            intents: BTreeMap::new(),
+        }
     }
 
     fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
             owner.validate_ready(db)
-        } else { validate(db, &self.config) }
+        } else {
+            validate(db, &self.config)
+        }
     }
 
     fn request_digest(&self, path: &str, harness: &str) -> Result<String, StorageError> {
@@ -2346,143 +2510,270 @@ mod tests {
         crate::storage::sqlite::configured_index::open_semantic(capability).unwrap()
     }
 
-    fn shared_state(f: &Fixture) -> BTreeMap<String,Vec<Vec<rusqlite::types::Value>>> {
-        let db=f.db();
+    fn shared_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        let db = f.db();
         let tables=db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 129").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert!(tables.len()<=128);
-        tables.into_iter().map(|table| {
-            let quoted=table.replace('"',"\"\"");
-            let columns=db.prepare(&format!("SELECT * FROM \"{quoted}\"")).unwrap().column_count();
-            let order=(1..=columns).map(|i|i.to_string()).collect::<Vec<_>>().join(",");
-            let mut statement=db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY {order}")).unwrap();
-            let rows=statement.query_map([],|row|(0..columns).map(|i|row.get(i)).collect()).unwrap().collect::<rusqlite::Result<Vec<Vec<rusqlite::types::Value>>>>().unwrap();
-            (table,rows)
-        }).collect()
+        assert!(tables.len() <= 128);
+        tables
+            .into_iter()
+            .map(|table| {
+                let quoted = table.replace('"', "\"\"");
+                let columns = db
+                    .prepare(&format!("SELECT * FROM \"{quoted}\""))
+                    .unwrap()
+                    .column_count();
+                let order = (1..=columns)
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut statement = db
+                    .prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY {order}"))
+                    .unwrap();
+                let rows = statement
+                    .query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<Vec<rusqlite::types::Value>>>>()
+                    .unwrap();
+                (table, rows)
+            })
+            .collect()
     }
 
     fn same_db_sources() -> (Fixture, StoreConfig, PathBuf) {
         use crate::storage::native_events::NativeEventStore;
         let mut a = Fixture::new();
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
-        a.config.backend = StoreBackend::Sqlite { database:a.root.join("composite.sqlite3") };
+        a.config.backend = StoreBackend::Sqlite {
+            database: a.root.join("composite.sqlite3"),
+        };
         create_semantic_store(&a.config).unwrap();
         let mut b = a.config.clone();
         b.namespace = LogicalSourceNamespace::new("source-b").unwrap();
         let b_raw = a.root.join("native-b.jsonl");
         fs::write(&b_raw, concat!("{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-b\",\"cwd\":\"/sanitized/b\"}}\n", "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"source B fixture\"}]}}\n")).unwrap();
-        for (config,path) in [(&a.config,&a.raw),(&b,&b_raw)] {
-            let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        for (config, path) in [(&a.config, &a.raw), (&b, &b_raw)] {
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
             let mut cache = EventCache::open_semantic(capability).unwrap();
             // Reuse the operation ID deliberately: completion is source-owned.
-            let receipt=cache.ingest(&"a".repeat(64),path,"codex").unwrap();
+            let receipt = cache.ingest(&"a".repeat(64), path, "codex").unwrap();
             assert!(!receipt.replayed);
         }
-        (a,b,b_raw)
+        (a, b, b_raw)
     }
 
     #[test]
     fn configured_two_sources_same_db_ingest_and_stage_isolated() {
-        let (a,b,b_raw)=same_db_sources();
-        let mut stores=[owned_semantic(&a.config),owned_semantic(&b)];
-        for (i,path) in [&a.raw,&b_raw].into_iter().enumerate() {
-            let store=&mut stores[i];
-            let paths=vec![path.to_string_lossy().into_owned()];
-            let claims=store.catalog_claims(&paths).unwrap();
+        let (a, b, b_raw) = same_db_sources();
+        let mut stores = [owned_semantic(&a.config), owned_semantic(&b)];
+        for (i, path) in [&a.raw, &b_raw].into_iter().enumerate() {
+            let store = &mut stores[i];
+            let paths = vec![path.to_string_lossy().into_owned()];
+            let claims = store.catalog_claims(&paths).unwrap();
             assert!(claims[0].1.is_some());
-            assert_eq!(store.session_catalog_generation().unwrap(),None);
-            assert_eq!(store.begin_semantic_stage(&paths,"runtime",true).unwrap(),Outcome::Written);
-            let batch=store.semantic_batch(64).unwrap().unwrap();
-            assert_eq!(batch.paths,paths);
-            assert_eq!(batch.base_generation,None);
+            assert_eq!(store.session_catalog_generation().unwrap(), None);
+            assert_eq!(
+                store.begin_semantic_stage(&paths, "runtime", true).unwrap(),
+                Outcome::Written
+            );
+            let batch = store.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(batch.paths, paths);
+            assert_eq!(batch.base_generation, None);
             // The shared test preparation reads the real namespace-bound ledger.
-            let prepared=semantic_prepared_path(&mut **store,path,&batch);
-            assert_eq!(store.record_semantic_batch(&batch,&prepared).unwrap(),Outcome::Written);
-            let identity=store.semantic_batch(64).unwrap().unwrap();
-            assert_eq!(identity.phase,crate::model::relation_stage::Phase::Identity);
-            let mut prepared=semantic_prepared_path(&mut **store,path,&identity);
+            let prepared = semantic_prepared_path(&mut **store, path, &batch);
+            assert_eq!(
+                store.record_semantic_batch(&batch, &prepared).unwrap(),
+                Outcome::Written
+            );
+            let identity = store.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(
+                identity.phase,
+                crate::model::relation_stage::Phase::Identity
+            );
+            let mut prepared = semantic_prepared_path(&mut **store, path, &identity);
             add_primitive_endpoint(&mut prepared);
-            assert_eq!(store.record_semantic_batch(&identity,&prepared).unwrap(),Outcome::Written);
-            assert_eq!(store.catalog_claims(&paths).unwrap(),claims);
+            assert_eq!(
+                store.record_semantic_batch(&identity, &prepared).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(store.catalog_claims(&paths).unwrap(), claims);
         }
-        let db=a.db();
-        for (ns,path,native) in [("source-a",&a.raw,"native-session"),("source-b",&b_raw,"native-b")] {
-            assert_eq!(db.query_row("SELECT count(*) FROM files WHERE namespace=?1 AND path=?2",params![ns,path.to_str().unwrap()],|r|r.get::<_,i64>(0)).unwrap(),1);
-            assert!(db.query_row("SELECT count(*) FROM events WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap()>0);
-            assert_eq!(db.query_row("SELECT count(*) FROM native_usage_sources WHERE namespace=?1 AND source_id=1",[ns],|r|r.get::<_,i64>(0)).unwrap(),1);
-            assert!(db.query_row("SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_*'",[ns],|r|r.get::<_,i64>(0)).unwrap()>0);
-            assert_eq!(db.query_row("SELECT count(*) FROM storage_event_tables WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap(),(TABLES.len()+1) as i64);
+        let db = a.db();
+        for (ns, path, native) in [
+            ("source-a", &a.raw, "native-session"),
+            ("source-b", &b_raw, "native-b"),
+        ] {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM files WHERE namespace=?1 AND path=?2",
+                    params![ns, path.to_str().unwrap()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert!(
+                db.query_row(
+                    "SELECT count(*) FROM events WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    > 0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM native_usage_sources WHERE namespace=?1 AND source_id=1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert!(
+                db.query_row(
+                    "SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_*'",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    > 0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM storage_event_tables WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                (TABLES.len() + 1) as i64
+            );
             assert_eq!(db.query_row("SELECT count(*) FROM storage_event_operations WHERE namespace=?1 AND state='complete'",[ns],|r|r.get::<_,i64>(0)).unwrap(),1);
             assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2",params![ns,native],|r|r.get::<_,i64>(0)).unwrap(),1);
             assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace=?1 AND source_path<>?2",params![ns,path.to_str().unwrap()],|r|r.get::<_,i64>(0)).unwrap(),0);
-            assert!(db.query_row("SELECT count(*) FROM catalog_semantic_frontier WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap()>0);
+            assert!(
+                db.query_row(
+                    "SELECT count(*) FROM catalog_semantic_frontier WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    > 0
+            );
         }
     }
 
     #[test]
     fn configured_two_sources_same_db_rollback_and_reopen_isolated() {
         use crate::storage::native_events::NativeEventStore;
-        let (a,b,b_raw)=same_db_sources();
-        let mut store=owned_semantic(&a.config);
-        let mut other=owned_semantic(&b);
-        let paths=vec![a.raw.to_string_lossy().into_owned()];
-        store.begin_semantic_stage(&paths,"runtime",true).unwrap();
-        other.begin_semantic_stage(&[b_raw.to_string_lossy().into_owned()],"runtime",true).unwrap();
-        let batch=store.semantic_batch(64).unwrap().unwrap();
-        let prepared=semantic_prepared(&mut *store,&a,&batch);
-        let before=shared_state(&a);
-        FAIL_EFFECT.with(|fault|fault.set(Some("semantic_record")));
-        assert!(store.record_semantic_batch(&batch,&prepared).is_err());
-        assert_eq!(shared_state(&a),before,"A rollback must preserve the entire shared database, including B");
+        let (a, b, b_raw) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let mut other = owned_semantic(&b);
+        let paths = vec![a.raw.to_string_lossy().into_owned()];
+        store.begin_semantic_stage(&paths, "runtime", true).unwrap();
+        other
+            .begin_semantic_stage(&[b_raw.to_string_lossy().into_owned()], "runtime", true)
+            .unwrap();
+        let batch = store.semantic_batch(64).unwrap().unwrap();
+        let prepared = semantic_prepared(&mut *store, &a, &batch);
+        let before = shared_state(&a);
+        FAIL_EFFECT.with(|fault| fault.set(Some("semantic_record")));
+        assert!(store.record_semantic_batch(&batch, &prepared).is_err());
+        assert_eq!(
+            shared_state(&a),
+            before,
+            "A rollback must preserve the entire shared database, including B"
+        );
         drop(store);
-        let mut reopened=owned_semantic(&a.config);
-        assert_eq!(reopened.semantic_batch(64).unwrap().unwrap().epoch,batch.epoch);
-        assert_eq!(reopened.record_semantic_batch(&batch,&prepared).unwrap(),Outcome::Written);
-        let before=shared_state(&a);
-        FAIL_EFFECT.with(|fault|fault.set(Some("semantic_reduction")));
+        let mut reopened = owned_semantic(&a.config);
+        assert_eq!(
+            reopened.semantic_batch(64).unwrap().unwrap().epoch,
+            batch.epoch
+        );
+        assert_eq!(
+            reopened.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written
+        );
+        let before = shared_state(&a);
+        FAIL_EFFECT.with(|fault| fault.set(Some("semantic_reduction")));
         assert!(reopened.semantic_batch(64).is_err());
-        assert_eq!(shared_state(&a),before);
+        assert_eq!(shared_state(&a), before);
         drop(other);
-        let mut other=owned_semantic(&b);
-        assert_eq!(other.semantic_batch(64).unwrap().unwrap().paths,vec![b_raw.to_string_lossy().into_owned()]);
-        assert_eq!(reopened.semantic_batch(64).unwrap().unwrap().phase,crate::model::relation_stage::Phase::Identity);
-        for (config,path) in [(&a.config,&a.raw),(&b,&b_raw)] {
-            let capability=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
-            let mut cache=EventCache::open_semantic(capability).unwrap();
-            let before=shared_state(&a);
-            assert!(cache.ingest(&"a".repeat(64),path,"codex").unwrap().replayed);
-            assert_eq!(shared_state(&a),before,"completion replay must not mutate either Source");
+        let mut other = owned_semantic(&b);
+        assert_eq!(
+            other.semantic_batch(64).unwrap().unwrap().paths,
+            vec![b_raw.to_string_lossy().into_owned()]
+        );
+        assert_eq!(
+            reopened.semantic_batch(64).unwrap().unwrap().phase,
+            crate::model::relation_stage::Phase::Identity
+        );
+        for (config, path) in [(&a.config, &a.raw), (&b, &b_raw)] {
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+            let mut cache = EventCache::open_semantic(capability).unwrap();
+            let before = shared_state(&a);
+            assert!(
+                cache
+                    .ingest(&"a".repeat(64), path, "codex")
+                    .unwrap()
+                    .replayed
+            );
+            assert_eq!(
+                shared_state(&a),
+                before,
+                "completion replay must not mutate either Source"
+            );
         }
     }
 
     #[test]
     fn configured_two_sources_cross_namespace_capability_refused_zero_writes() {
-        let (a,b,b_raw)=same_db_sources();
-        let mut store=owned_semantic(&a.config);
-        let mut other=owned_semantic(&b);
-        store.begin_semantic_stage(&[a.raw.to_string_lossy().into_owned()],"same-runtime",true).unwrap();
-        other.begin_semantic_stage(&[b_raw.to_string_lossy().into_owned()],"same-runtime",true).unwrap();
-        let batch=store.semantic_batch(64).unwrap().unwrap();
-        let prepared=semantic_prepared(&mut *store,&a,&batch);
-        let before=shared_state(&a);
-        assert_eq!(other.record_semantic_batch(&batch,&prepared).unwrap(),Outcome::Conflict);
-        assert_eq!(shared_state(&a),before);
+        let (a, b, b_raw) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let mut other = owned_semantic(&b);
+        store
+            .begin_semantic_stage(
+                &[a.raw.to_string_lossy().into_owned()],
+                "same-runtime",
+                true,
+            )
+            .unwrap();
+        other
+            .begin_semantic_stage(
+                &[b_raw.to_string_lossy().into_owned()],
+                "same-runtime",
+                true,
+            )
+            .unwrap();
+        let batch = store.semantic_batch(64).unwrap().unwrap();
+        let prepared = semantic_prepared(&mut *store, &a, &batch);
+        let before = shared_state(&a);
+        assert_eq!(
+            other.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
         a.db().execute("UPDATE storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='source-b'",[]).unwrap();
-        let before=shared_state(&a);
+        let before = shared_state(&a);
         assert!(other.semantic_batch(64).is_err());
-        assert_eq!(shared_state(&a),before);
+        assert_eq!(shared_state(&a), before);
     }
 
     #[test]
     fn configured_public_factory_still_refuses_second_source() {
-        let (a,b,_)=same_db_sources();
-        let before=shared_state(&a);
+        let (a, b, _) = same_db_sources();
+        let before = shared_state(&a);
         assert!(a.config.native_events().is_err());
         assert!(b.native_events().is_err());
         assert!(b.admit_namespace().is_err());
         assert!(crate::storage::sqlite::configured_index::open(&b).is_err());
         assert!(crate::storage::sqlite::open_private_semantic(&b).is_err());
-        assert_eq!(shared_state(&a),before);
-        assert_eq!(crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,0);
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(
+            crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
+            0
+        );
     }
 
     fn add_primitive_endpoint(prepared: &mut crate::model::PreparedSources) {

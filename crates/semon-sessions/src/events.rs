@@ -1563,7 +1563,12 @@ impl EventCache {
         capability: crate::storage::sqlite::semantic::SemanticStaging,
     ) -> Result<Self, crate::storage::StorageError> {
         let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
-        Ok(Self { store:Some(store), scoped:true, explicit_store:true, ..Self::default() })
+        Ok(Self {
+            store: Some(store),
+            scoped: true,
+            explicit_store: true,
+            ..Self::default()
+        })
     }
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
