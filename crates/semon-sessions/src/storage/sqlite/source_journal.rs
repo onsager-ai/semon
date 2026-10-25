@@ -2074,7 +2074,9 @@ mod tests {
         f.assign();
         let mut store = f.config.source_observations().unwrap();
         let db = f.db();
-        let before: i64 = db.pragma_query_value(None, "data_version", |row| row.get(0)).unwrap();
+        let before: i64 = db
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .unwrap();
         let operation = SourceOperation::capture(
             f.config.namespace.as_str(),
             "recover",
@@ -2086,10 +2088,18 @@ mod tests {
         };
         assert_eq!(store.recovery_is_current(), Err(StorageError::Unavailable));
         assert_eq!(store.recovery_cursor(), Err(StorageError::Unavailable));
-        assert_eq!(store.persist_intent(&intent), Err(StorageError::Unavailable));
-        assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Unavailable));
+        assert_eq!(
+            store.persist_intent(&intent),
+            Err(StorageError::Unavailable)
+        );
+        assert_eq!(
+            store.recover(&operation, Some("")),
+            Err(StorageError::Unavailable)
+        );
         assert_eq!(intent.apply(store.as_mut()), Err(StorageError::Unavailable));
-        let after: i64 = db.pragma_query_value(None, "data_version", |row| row.get(0)).unwrap();
+        let after: i64 = db
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .unwrap();
         assert_eq!(before, after);
     }
 

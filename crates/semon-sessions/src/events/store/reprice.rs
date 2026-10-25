@@ -1465,6 +1465,7 @@ CREATE TABLE IF NOT EXISTS source_observation_receipts (
     operation_id TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),
+    recovery_done INTEGER CHECK(recovery_done IN (0,1)),
     PRIMARY KEY(namespace,operation_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS source_observation_intents (
