@@ -5168,6 +5168,16 @@ mod tests {
             assert_eq!(crate::storage::sqlite::proof_generations::collect(&tx, config.namespace.as_str(), 1).unwrap(), 1);
             tx.commit().unwrap();
             assert!(runtime.selected_generation(&key, &second_id, &"9".repeat(64), 60_000).is_err());
+            // The next actual Index mutation must collect L2's retained chunk
+            // namespace, while original History L1 remains readable.
+            let old_prefix = format!("native_published_chunks:{}:{}:", crate::source_carrier::source_hash(path.to_str().unwrap()), crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&second.row().sources[0])));
+            let fourth = extra.replace("S2 appended", "S2 fourth").replace("s2-next", "s2-fourth");
+            fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(fourth.as_bytes()).unwrap();
+            cache.ingest(&"7".repeat(64), &path, inputs[i].root.as_str()).unwrap();
+            let remaining: i64 = db.query_row("SELECT count(*) FROM main.meta WHERE namespace=?1 AND key>=?2 AND key<?3", params![config.namespace.as_str(), old_prefix, format!("{old_prefix}~")], |r| r.get(0)).unwrap();
+            assert_eq!(remaining, 0);
+            let history = runtime.selected_generation(&key, &id, &token, 60_000).unwrap();
+            assert_eq!(history.read_record(&options[i], None, &path, 0).unwrap(), first);
             assert!(path.exists(), "metadata GC cannot delete Raw");
             assert!(!EventCache::path(&options[i].cache).exists(), "owned selected reads cannot open Options.cache");
         }
