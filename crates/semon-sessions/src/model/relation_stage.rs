@@ -90,6 +90,104 @@ pub(crate) struct Context {
     pub(crate) matching_locations: Option<Vec<Location>>,
     /// Final replay reads incident relationships in bounded, read-only pages.
     pub(crate) replay_owners: Vec<String>,
+    /// Captured Current owners, not authority inferred from SQL absence.
+    pub(crate) prior_owners: BTreeMap<String, summary::CatalogRow>,
+    /// Exact outgoing observations included in the durable model witness.
+    pub(crate) retired_owners: Vec<summary::CatalogRow>,
+    pub(crate) lifecycle_authority: Option<LifecycleAuthority>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LifecycleAuthority {
+    pub(crate) facts: PathBuf,
+    pub(crate) identity: crate::facts::source_authority::Identity,
+    pub(crate) claude_home: PathBuf,
+    pub(crate) runtime: String,
+}
+
+impl LifecycleAuthority {
+    pub(crate) fn capture(options: &Options) -> io::Result<Self> {
+        let facts = options
+            .facts
+            .clone()
+            .ok_or_else(|| io::Error::other("semantic_affected_owner_local_authority_pending"))?;
+        let authority = Self {
+            identity: crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&facts)?)?,
+            facts,
+            claude_home: options.claude_home.clone(),
+            runtime: crate::native_evidence::query_runtime_generation(options)?,
+        };
+        if !authority.current()? {
+            return Err(io::Error::other(
+                "semantic_affected_owner_authority_changed",
+            ));
+        }
+        Ok(authority)
+    }
+    pub(crate) fn current(&self) -> io::Result<bool> {
+        let identity =
+            || crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts)?);
+        if identity()? != self.identity {
+            return Ok(false);
+        }
+        let facts = crate::facts::source_authority::CurrentSources::open(&self.facts)?;
+        if !facts.facts_known() {
+            return Ok(false);
+        }
+        facts.validate()?;
+        // The recorded runtime algorithm consumes Facts and Claude PID records
+        // only. No EventCache path or storage engine is reconstructed here.
+        let options = Options {
+            facts: Some(self.facts.clone()),
+            claude_home: self.claude_home.clone(),
+            ..Default::default()
+        };
+        let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime
+            && identity()? == self.identity;
+        facts.validate()?;
+        Ok(current)
+    }
+}
+
+/// Physical lookup port for a bounded affected-owner closure. This traverses
+/// recorded ownership only; native identity and relationships are still reduced
+/// by the existing parser/matcher over the resulting complete Raw cohort.
+pub(crate) trait LifecycleStore {
+    fn path_owners(&self, path: &str) -> io::Result<Vec<String>>;
+    fn owner(&self, key: &str) -> io::Result<summary::CatalogRow>;
+    fn neighbors(&self, key: &str) -> io::Result<Vec<String>>;
+}
+
+pub(crate) fn affected_owners(
+    store: &impl LifecycleStore,
+    paths: &[String],
+) -> io::Result<BTreeMap<String, summary::CatalogRow>> {
+    let mut pending = BTreeSet::new();
+    for path in paths {
+        pending.extend(store.path_owners(path)?);
+    }
+    let mut owners = BTreeMap::new();
+    let mut bytes = 0usize;
+    while let Some(key) = pending.pop_first() {
+        if owners.contains_key(&key) {
+            continue;
+        }
+        if owners.len() == 64 {
+            return Err(io::Error::other("semantic_affected_owner_budget"));
+        }
+        let row = store.owner(&key)?;
+        if row.key != key || row.sources.is_empty() || row.sources.len() > 64 {
+            return Err(io::Error::other("semantic_affected_owner_invalid"));
+        }
+        bytes = bytes.saturating_add(serde_json::to_vec(&row)?.len());
+        if bytes > 1048576 {
+            return Err(io::Error::other("semantic_affected_owner_bytes"));
+        }
+        pending.extend(store.neighbors(&key)?);
+        owners.insert(key, row);
+    }
+    Ok(owners)
 }
 
 pub(crate) struct RelationOrigin {
@@ -135,6 +233,141 @@ pub(crate) struct Selection {
     pub(crate) endpoint: Option<Endpoint>,
     pub(crate) location: Option<Location>,
     pub(crate) key: Option<String>,
+}
+
+/// Bounded physical lookups only. Native matching and selection assembly live
+/// in `select_with`, shared by ordinary and admitted stores.
+pub(crate) trait SelectorLookup {
+    type Error;
+    fn invalid(&self, message: &'static str) -> Self::Error;
+    fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
+    fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
+    fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
+    fn event_metadata(&self, path: &str, key: &str) -> Result<Option<String>, Self::Error>;
+    fn event_owner(&self, path: &str) -> Result<String, Self::Error>;
+    fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, Self::Error>;
+    fn root_alive(&self, key: &str) -> Result<bool, Self::Error>;
+    fn name_candidates(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn name_hints(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn request_members_replay(&mut self, keys: Vec<String>) -> Result<(), Self::Error>;
+    fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_relay(&self, root: &str, target: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_wait(
+        &self,
+        root: &str,
+        target: &str,
+        exclude: &str,
+    ) -> Result<Vec<String>, Self::Error>;
+}
+
+pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
+
+pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
+    text: Option<String>,
+    used: &mut usize,
+) -> io::Result<T> {
+    let text = text.ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    *used = used
+        .checked_add(text.len())
+        .ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    if *used > 1048576 {
+        return Err(io::Error::other("semantic_selector_metadata_budget"));
+    }
+    serde_json::from_str(&text).map_err(io::Error::other)
+}
+
+pub(crate) fn selector_event<P: SelectorLookup>(
+    port: &P,
+    text: Option<String>,
+    used: &mut usize,
+) -> Result<NativeEvent, P::Error> {
+    let mut native: NativeEvent = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
+    Ok(native)
+}
+
+pub(crate) fn selector_endpoint<P: SelectorLookup>(
+    port: &P,
+    key: &str,
+    used: &mut usize,
+    require_root: bool,
+) -> Result<Endpoint, P::Error> {
+    let (text, parent, root) = port.endpoint_row(key)?;
+    if require_root && root.is_none() {
+        return Err(port.invalid("semantic_selector_root_missing"));
+    }
+    let mut endpoint: Endpoint = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    endpoint.parent = parent.clone();
+    endpoint.row.parent = parent;
+    endpoint.root = root.unwrap_or_else(|| key.to_owned());
+    endpoint.root_alive = port.root_alive(&endpoint.root)?;
+    Ok(endpoint)
+}
+
+pub(crate) fn select_with<P: SelectorLookup>(
+    port: &mut P,
+    selector: &Selector,
+) -> Result<Selection, P::Error> {
+    let (keys, endpoint) = match selector {
+        Selector::NativeKey { native, harness } => return port.native_key(native, harness),
+        Selector::ClaudeReceipt { id } => {
+            let Some(text) = port.receipt_first(id)? else {
+                return Ok(Selection::default());
+            };
+            let native = selector_event(port, text, &mut 0)?;
+            return Ok(Selection {
+                count: 1,
+                location: Some(native.at),
+                ..Default::default()
+            });
+        }
+        Selector::ClaudeCall { id } => {
+            let keys = port.call_owners(id)?;
+            if keys.len() != 1 {
+                return Ok(Selection {
+                    count: keys.len(),
+                    ..Default::default()
+                });
+            }
+            let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
+            let mut used = 0;
+            let native = selector_event(port, text, &mut used)?;
+            let endpoint = selector_endpoint(port, &native.owner, &mut used, false)?;
+            return Ok(Selection {
+                count: 1,
+                endpoint: Some(endpoint),
+                location: Some(native.at),
+                ..Default::default()
+            });
+        }
+        Selector::ClaudeName { name } => {
+            let hints = port.name_hints(name)?;
+            if !hints.is_empty() {
+                port.request_members_replay(hints)?;
+                return Err(port.invalid("native name companion requires semantic replay"));
+            }
+            (port.name_candidates(name)?, true)
+        }
+        Selector::CodexSibling { parent, task } => (port.codex_sibling(parent, task)?, false),
+        Selector::CodexRelay { root, target } => (port.codex_relay(root, target)?, true),
+        Selector::CodexWait {
+            root,
+            target,
+            exclude,
+        } => (port.codex_wait(root, target, exclude)?, true),
+    };
+    let found = if endpoint && keys.len() == 1 {
+        Some(selector_endpoint(port, &keys[0], &mut 0, true)?)
+    } else {
+        None
+    };
+    Ok(Selection {
+        count: keys.len(),
+        endpoint: found,
+        ..Default::default()
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,6 +503,7 @@ pub(crate) trait OwnerStore {
     fn relation(&self, relation: &Relation) -> Result<(), Self::Error>;
     fn dependency(&self, path: &str, harness: &str, native: &str) -> Result<(), Self::Error>;
     fn withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Self::Error>;
+    fn retire(&self, key: &str, withdrawal: bool) -> Result<(), Self::Error>;
 }
 
 impl Relation {

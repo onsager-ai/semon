@@ -493,13 +493,15 @@ fn root_alive(c: &Connection, key: &str) -> rusqlite::Result<bool> {
     c.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|r.get(0)).optional().map(|v|v.unwrap_or(false))
 }
 fn normalized_endpoint(c: &Connection, key: &str, used: &mut usize) -> rusqlite::Result<Endpoint> {
-    let(text,parent,root):(Option<String>,Option<String>,Option<String>)=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-    let mut endpoint: Endpoint = bounded(text, used)?;
-    endpoint.parent = parent.clone();
-    endpoint.row.parent = parent;
-    endpoint.root = root.unwrap_or_else(|| key.to_owned());
-    endpoint.root_alive = root_alive(c, &endpoint.root)?;
-    Ok(endpoint)
+    crate::model::relation_stage::selector_endpoint(
+        &OrdinaryLookup {
+            db: c,
+            replay: Vec::new(),
+        },
+        key,
+        used,
+        false,
+    )
 }
 fn native_key(c: &Connection, native: &str, harness: &str) -> rusqlite::Result<String> {
     let ready: bool = c.query_row(
@@ -982,81 +984,125 @@ fn owner_closure(c: &Connection, seed: &str) -> rusqlite::Result<Vec<String>> {
     }
     Ok(paths.into_iter().collect())
 }
-fn qualify_events(c: &Connection) -> rusqlite::Result<bool> {
-    let candidates=c.prepare("SELECT source_path,event_key,copy_key FROM catalog_semantic_events WHERE qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
-    for (path, key, identity) in &candidates {
+/// Qualification is a separate bounded Identity sub-phase after reduction.
+pub(crate) trait QualificationPort {
+    fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>>;
+    fn copied(&self, path: &str, identity: &str) -> rusqlite::Result<bool>;
+    fn owner(&self, path: &str) -> rusqlite::Result<String>;
+    fn qualify(&self, path: &str, key: &str, owner: &str, copied: bool) -> rusqlite::Result<()>;
+    fn done(&self) -> rusqlite::Result<bool>;
+}
+pub(crate) fn qualify_with(port: &impl QualificationPort) -> rusqlite::Result<bool> {
+    for (path, key, identity) in port.pending()? {
         let copied = if let Some(identity) = identity {
-            c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_inputs target JOIN catalog_semantic_owner_sources own ON own.source_path=target.source_path JOIN catalog_semantic_owner_sources predecessor ON predecessor.session_key=own.session_key AND predecessor.source_path<>target.source_path JOIN files source ON source.path=predecessor.source_path JOIN events event ON event.file_id=source.file_id WHERE target.source_path=?1 AND target.is_top=1 AND event.extra=0 AND COALESCE(event.u,CASE WHEN event.k IN ('tool','xsm') THEN event.id END)=?2 AND EXISTS(SELECT 1 FROM json_each(source.links,'$.continued_in') WHERE value=target.native_id))",params![path,identity],|r|r.get::<_,bool>(0))?
+            port.copied(&path, &identity)?
         } else {
             false
         };
-        let owner: String = c.query_row(
+        let owner = port.owner(&path)?;
+        port.qualify(&path, &key, &owner, copied)?;
+    }
+    port.done()
+}
+struct OrdinaryQualification<'a>(&'a Connection);
+impl QualificationPort for OrdinaryQualification<'_> {
+    fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
+        self.0.prepare("SELECT source_path,event_key,copy_key FROM catalog_semantic_events WHERE qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
+    }
+    fn copied(&self, path: &str, identity: &str) -> rusqlite::Result<bool> {
+        self.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_inputs target JOIN catalog_semantic_owner_sources own ON own.source_path=target.source_path JOIN catalog_semantic_owner_sources predecessor ON predecessor.session_key=own.session_key AND predecessor.source_path<>target.source_path JOIN files source ON source.path=predecessor.source_path JOIN events event ON event.file_id=source.file_id WHERE target.source_path=?1 AND target.is_top=1 AND event.extra=0 AND COALESCE(event.u,CASE WHEN event.k IN ('tool','xsm') THEN event.id END)=?2 AND EXISTS(SELECT 1 FROM json_each(source.links,'$.continued_in') WHERE value=target.native_id))",params![path,identity],|r|r.get(0))
+    }
+    fn owner(&self, path: &str) -> rusqlite::Result<String> {
+        self.0.query_row(
             "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
             [path],
             |r| r.get(0),
-        )?;
-        c.execute("UPDATE catalog_semantic_events SET owner=?3,copied=?4,qualified=1 WHERE source_path=?1 AND event_key=?2",params![path,key,owner,copied])?;
+        )
     }
-    c.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE qualified=0)",
-        [],
-        |r| r.get(0),
-    )
+    fn qualify(&self, path: &str, key: &str, owner: &str, copied: bool) -> rusqlite::Result<()> {
+        self.0.execute("UPDATE catalog_semantic_events SET owner=?3,copied=?4,qualified=1 WHERE source_path=?1 AND event_key=?2",params![path,key,owner,copied])?;
+        Ok(())
+    }
+    fn done(&self) -> rusqlite::Result<bool> {
+        self.0.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE qualified=0)",
+            [],
+            |r| r.get(0),
+        )
+    }
 }
+fn qualify_events(c: &Connection) -> rusqlite::Result<bool> {
+    qualify_with(&OrdinaryQualification(c))
+}
+
 fn decode_event(
     c: &Connection,
     text: Option<String>,
     used: &mut usize,
 ) -> rusqlite::Result<crate::model::relation_stage::NativeEvent> {
-    let mut native: crate::model::relation_stage::NativeEvent = bounded(text, used)?;
-    native.owner = c.query_row(
-        "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
-        [native.at.source.path.to_string_lossy().as_ref()],
-        |r| r.get(0),
-    )?;
-    Ok(native)
+    crate::model::relation_stage::selector_event(
+        &OrdinaryLookup {
+            db: c,
+            replay: Vec::new(),
+        },
+        text,
+        used,
+    )
 }
-/// Read candidates one row at a time. Both the persistent cursor and accepted
-/// encoded page stay within the existing 64-row / 1MiB metadata budgets.
-fn event_page(c: &Connection) -> rusqlite::Result<bool> {
-    let paths=c.prepare("SELECT source_path FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+pub(crate) struct ProjectedEvent {
+    pub(crate) native: crate::model::relation_stage::NativeEvent,
+    pub(crate) key: String,
+    pub(crate) kind: &'static str,
+    pub(crate) msg: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) encoded: String,
+    pub(crate) seq: i64,
+}
+
+/// Physical operations only; the shared recipe owns decoding, page accounting,
+/// event classification and frontier decisions.
+pub(crate) trait EventProjectionPort {
+    fn paths(&self) -> rusqlite::Result<Vec<String>>;
+    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, Option<String>)>>;
+    fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)>;
+    fn candidates(
+        &self,
+        file: i64,
+        after: i64,
+        limit: usize,
+        visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()>;
+    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool>;
+    fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()>;
+    fn put(&self, row: &ProjectedEvent) -> rusqlite::Result<()>;
+    fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()>;
+    fn native(&self, id: &str) -> rusqlite::Result<()>;
+    fn done(&self) -> rusqlite::Result<bool>;
+}
+
+pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Result<bool> {
     let mut budget = 64usize;
     let mut bytes = 0usize;
-    for path in paths {
+    for path in port.paths()? {
         if budget == 0 {
             break;
         }
-        let input:Option<(String,Option<String>)>=c.query_row("SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_inputs WHERE source_path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let input = port.input(&path)?;
         let Some((harness, text)) = input else {
-            c.execute(
-                "UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",
-                [&path],
-            )?;
+            port.finish(&path, None, true)?;
             budget -= 1;
             continue;
         };
         if harness != "claude" {
-            c.execute(
-                "UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",
-                [&path],
-            )?;
+            port.finish(&path, None, true)?;
             budget -= 1;
             continue;
         }
         let source: crate::model::summary::CatalogSource = bounded(text, &mut 0)?;
-        let (file,after):(i64,i64)=c.query_row("SELECT f.file_id,s.event_after FROM files f JOIN catalog_semantic_sources s ON s.source_path=f.path WHERE f.path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let sql = format!(
-            "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')) ORDER BY seq LIMIT ?3"
-        );
-        let mut q = c.prepare(&sql)?;
-        let mut rows = q.query(params![file, after, budget as i64])?;
+        let (file, after) = port.cursor(&path)?;
         let mut end = after;
         let mut stopped = false;
-        while let Some(row) = rows.next()? {
-            let (_, seq, event) = read_event(row)?;
-            let occurrence:i64=c.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,int(event.o),event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
-            let occurrence =
-                usize::try_from(occurrence).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        port.candidates(file, after, budget, &mut |seq, event, occurrence| {
             let native = crate::model::relation_stage::NativeEvent {
                 owner: path.clone(),
                 at: crate::model::relation_stage::Location {
@@ -1074,7 +1120,7 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
             }
             if bytes + encoded.len() > MAX_CONTEXT {
                 stopped = true;
-                break;
+                return Ok(false);
             }
             let kind = if native.event.k == super::super::Kind::Xsm {
                 "xsm"
@@ -1095,42 +1141,137 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
                 "other"
             };
             let msg = if kind == "xsm" {
-                native.event.id.as_deref()
+                native.event.id.clone()
             } else if kind == "send" {
-                native.event.r.as_ref().and_then(|r| r.m.as_deref())
+                native.event.r.as_ref().and_then(|r| r.m.clone())
             } else {
                 None
             };
             let name = (kind == "xsm")
                 .then(|| native.event.n.as_deref().map(crate::model::plain_name))
                 .flatten();
-            c.execute("INSERT OR REPLACE INTO catalog_semantic_events(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![path,location_key(&native.at)?,path,kind,msg,native.event.id,name,encoded,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?,crate::model::native_copy_identity(&native.event)])?;
-            if let Some(msg) = msg {
-                queue(c, "receipt", msg, "")?;
-                queue(c, "sender", msg, "")?;
+            let row = ProjectedEvent {
+                key: location_key(&native.at)?,
+                native,
+                kind,
+                msg,
+                name,
+                encoded,
+                seq: i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            };
+            port.put(&row)?;
+            if let Some(msg) = &row.msg {
+                port.enqueue("receipt", msg)?;
+                port.enqueue("sender", msg)?;
             }
-            if let Some(peer) = native
+            if let Some(peer) = row
+                .native
                 .event
                 .peer
                 .as_ref()
                 .and_then(|peer| peer.sock.as_deref())
             {
-                native_frontier(c, "claude", peer)?;
+                port.native(peer)?;
             }
-            end = i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            end = row.seq;
             budget -= 1;
-            bytes += encoded.len();
-        }
-        drop(rows);
-        drop(q);
-        let more:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')))",params![file,end],|r|r.get(0))?;
-        c.execute("UPDATE catalog_semantic_sources SET event_after=?2,events_done=?3 WHERE source_path=?1",params![path,end,!more])?;
+            bytes += row.encoded.len();
+            Ok(true)
+        })?;
+        port.finish(&path, Some(end), !port.more(file, end)?)?;
         if stopped {
             break;
         }
     }
-    c.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0)",[],|r|r.get(0))
+    port.done()
 }
+
+/// Decode the same physical event columns in both SQLite adapters.
+pub(crate) fn projection_candidate(row: &Row<'_>) -> rusqlite::Result<(usize, Event)> {
+    let (_, seq, event) = read_event(row)?;
+    Ok((seq, event))
+}
+/// One candidate predicate, expanded by each physical SQL adapter.
+pub(crate) fn projection_predicate(alias: &str) -> String {
+    format!(
+        "({alias}k IN ('xsm','agm','tn') OR {alias}k='tool' AND {alias}n IN ('SendMessage','Task','Agent'))"
+    )
+}
+pub(crate) fn projection_columns() -> &'static str {
+    EVENT_COLUMNS
+}
+
+struct OrdinaryProjection<'a>(&'a Connection);
+impl EventProjectionPort for OrdinaryProjection<'_> {
+    fn paths(&self) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT source_path FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([],|r|r.get(0))?.collect()
+    }
+    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, Option<String>)>> {
+        self.0.query_row("SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_inputs WHERE source_path=?1",[path],|r|Ok((r.get(0)?,r.get(1)?))).optional()
+    }
+    fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)> {
+        self.0.query_row("SELECT f.file_id,s.event_after FROM files f JOIN catalog_semantic_sources s ON s.source_path=f.path WHERE f.path=?1",[path],|r|Ok((r.get(0)?,r.get(1)?)))
+    }
+    fn candidates(
+        &self,
+        file: i64,
+        after: i64,
+        limit: usize,
+        visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()> {
+        let predicate = projection_predicate("");
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate} ORDER BY seq LIMIT ?3"
+        );
+        let mut q = self.0.prepare(&sql)?;
+        let mut rows = q.query(params![file, after, limit as i64])?;
+        while let Some(row) = rows.next()? {
+            let (seq, event) = projection_candidate(row)?;
+            let occurrence: i64 = self.0.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,int(event.o),event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
+            if !visit(
+                seq,
+                event,
+                usize::try_from(occurrence).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            )? {
+                break;
+            }
+        }
+        Ok(())
+    }
+    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
+        let predicate = projection_predicate("");
+        self.0.query_row(&format!("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate})"),params![file,after],|r|r.get(0))
+    }
+    fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
+        if let Some(after) = after {
+            self.0.execute("UPDATE catalog_semantic_sources SET event_after=?2,events_done=?3 WHERE source_path=?1",params![path,after,done])?;
+        } else {
+            self.0.execute(
+                "UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",
+                [path],
+            )?;
+        }
+        Ok(())
+    }
+    fn put(&self, row: &ProjectedEvent) -> rusqlite::Result<()> {
+        let native = &row.native;
+        self.0.execute("INSERT OR REPLACE INTO catalog_semantic_events(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![native.owner,row.key,native.owner,row.kind,row.msg,native.event.id,row.name,row.encoded,row.seq,crate::model::native_copy_identity(&native.event)])?;
+        Ok(())
+    }
+    fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()> {
+        queue(self.0, kind, value, "")
+    }
+    fn native(&self, id: &str) -> rusqlite::Result<()> {
+        native_frontier(self.0, "claude", id)
+    }
+    fn done(&self) -> rusqlite::Result<bool> {
+        self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0)",[],|r|r.get(0))
+    }
+}
+fn event_page(c: &Connection) -> rusqlite::Result<bool> {
+    event_page_with(&OrdinaryProjection(c))
+}
+
 fn reset(c: &Connection, runtime: &str) -> rusqlite::Result<()> {
     c.execute(metadata_increment(c)?, ["semantic_epoch"])?;
     c.execute(configured::metadata_sql(c,
@@ -1285,14 +1426,8 @@ pub(super) fn batch_rejection(c: &Connection, b: &Batch) -> rusqlite::Result<Opt
     witness_rejection(c)
 }
 fn bounded<T: DeserializeOwned>(text: Option<String>, used: &mut usize) -> rusqlite::Result<T> {
-    let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
-    *used = used
-        .checked_add(text.len())
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    if *used > MAX_CONTEXT {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)
+    crate::model::relation_stage::selector_metadata(text, used)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 /// Advance at most one existing 64-record metadata page. Parent, root and
 /// descendant-cost reductions survive replacement of the producer owner.
@@ -2814,7 +2949,7 @@ impl SqliteStore {
     pub(super) fn semantic_selection(
         &mut self,
         epoch: i64,
-        s: &Selector,
+        selector: &Selector,
     ) -> Result<Selection, StoreError> {
         let actual: Option<i64> = self
             .connection
@@ -2824,157 +2959,104 @@ impl SqliteStore {
         if actual != Some(epoch) {
             return Err(StoreError::Data("stale semantic selector".into()));
         }
-        if let Selector::NativeKey { native, harness } = s {
-            return Ok(Selection {
-                count: 1,
-                key: Some(native_key(&self.connection, native, harness).map_err(failure)?),
-                ..Selection::default()
-            });
-        }
-        if let Selector::ClaudeReceipt { id } = s {
-            let text: Option<Option<String>> = self.connection.query_row(
-                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",
-                [id], |r| r.get(0),
-            ).optional().map_err(failure)?;
-            let Some(text) = text else {
-                return Ok(Selection::default());
-            };
-            let native = decode_event(&self.connection, text, &mut 0).map_err(failure)?;
-            return Ok(Selection {
-                count: 1,
-                location: Some(native.at),
-                ..Selection::default()
-            });
-        }
-        if let Selector::ClaudeCall { id } = s {
-            let keys=self.connection.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2").map_err(failure)?.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
-            if keys.len() != 1 {
-                return Ok(Selection {
-                    count: keys.len(),
-                    ..Selection::default()
-                });
-            }
-            let text:Option<String>=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE source_path=?1 AND event_key=?2",params![keys[0].0,keys[0].1],|r|r.get(0)).map_err(failure)?;
-            let mut used = 0usize;
-            let native = decode_event(&self.connection, text, &mut used).map_err(failure)?;
-            let endpoint =
-                normalized_endpoint(&self.connection, &native.owner, &mut used).map_err(failure)?;
-            return Ok(Selection {
-                count: 1,
-                endpoint: Some(endpoint),
-                location: Some(native.at),
-                ..Selection::default()
-            });
-        }
-        if let Selector::ClaudeName { name } = s {
-            // Old description caches can identify a still-unseen native name
-            // companion. They are discovery hints, never endpoint authority.
-            let external=self.connection.prepare("SELECT d.session_key FROM session_descriptions d JOIN session_catalog owner USING(session_key) WHERE owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?1) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints stage WHERE stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64").map_err(failure)?.query_map([name],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
-            if !external.is_empty() {
-                let tx = self
-                    .connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(failure)?;
-                let runtime: String = tx
-                    .query_row(
-                        "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1",
-                        [epoch],
-                        |r| r.get(0),
-                    )
-                    .map_err(failure)?;
-                for key in external {
-                    queue(&tx, "members", &key, "").map_err(failure)?;
-                }
-                // Keep the newly requested memberships as durable source seeds;
-                // resetting clears derived work only after this bounded page.
-                frontier_page(&tx).map_err(failure)?;
-                reset(&tx, &runtime).map_err(failure)?;
-                tx.commit().map_err(failure)?;
-                return Err(StoreError::Data(
-                    "native name companion requires semantic replay".into(),
-                ));
-            }
-            let keys=self.connection.prepare("SELECT session_key FROM (SELECT n.session_key FROM catalog_semantic_names n JOIN catalog_semantic_endpoints e USING(session_key) WHERE n.name=?1 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM catalog_semantic_events sent JOIN catalog_semantic_events receipt ON receipt.msg_id=sent.msg_id JOIN catalog_semantic_endpoints e ON e.session_key=sent.owner JOIN catalog_semantic_endpoints root ON root.session_key=e.root_key WHERE sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?1 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM catalog_semantic_events first WHERE first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2").map_err(failure)?.query_map([name],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
-            if keys.len() != 1 {
-                return Ok(Selection {
-                    count: keys.len(),
-                    ..Selection::default()
-                });
-            }
-            let (text,parent,root):(Option<String>,Option<String>,String)=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[&keys[0]],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failure)?;
-            let mut endpoint: Endpoint = bounded(text, &mut 0).map_err(failure)?;
-            endpoint.parent = parent.clone();
-            endpoint.row.parent = parent;
-            endpoint.root = root;
-            endpoint.root_alive = root_alive(&self.connection, &endpoint.root).map_err(failure)?;
-            return Ok(Selection {
-                count: 1,
-                endpoint: Some(endpoint),
-                location: None,
-                ..Selection::default()
-            });
-        }
-        let (sql, first, target, endpoint) = match s {
-            Selector::NativeKey { .. }
-            | Selector::ClaudeName { .. }
-            | Selector::ClaudeCall { .. }
-            | Selector::ClaudeReceipt { .. } => {
-                unreachable!("Claude selectors returned above")
-            }
-            Selector::CodexSibling { parent, task } => (
-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND parent_native=?1 AND task=?2 LIMIT 2",
-                parent,
-                task,
-                false,
-            ),
-            Selector::CodexRelay { root, target } => (
-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND (nickname=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2",
-                root,
-                target,
-                true,
-            ),
-            Selector::CodexWait { root, target, .. } => (
-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND session_key<>?3 AND (session_key=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2",
-                root,
-                target,
-                true,
-            ),
+        let mut lookup = OrdinaryLookup {
+            db: &self.connection,
+            replay: Vec::new(),
         };
-        let mut q = self.connection.prepare(sql).map_err(failure)?;
-        let exclude = match s {
-            Selector::CodexWait { exclude, .. } => Some(exclude),
-            _ => None,
-        };
-        let keys = if let Some(exclude) = exclude {
-            q.query_map(params![first, target, exclude], |r| r.get::<_, String>(0))
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?
-        } else {
-            q.query_map(params![first, target], |r| r.get::<_, String>(0))
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?
-        };
-
-        let mut found = None;
-        if endpoint && keys.len() == 1 {
-            let (text,parent,root):(Option<String>,Option<String>,String)=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[&keys[0]],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failure)?;
-            let mut e: Endpoint = bounded(text, &mut 0).map_err(failure)?;
-            e.parent = parent.clone();
-            e.row.parent = parent;
-            e.root = root;
-            e.root_alive = root_alive(&self.connection, &e.root).map_err(failure)?;
-            found = Some(e);
+        let result = crate::model::relation_stage::select_with(&mut lookup, selector);
+        let replay = lookup.replay;
+        if !replay.is_empty() {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            let runtime: String = tx
+                .query_row(
+                    "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1",
+                    [epoch],
+                    |r| r.get(0),
+                )
+                .map_err(failure)?;
+            for key in replay {
+                queue(&tx, "members", &key, "").map_err(failure)?;
+            }
+            frontier_page(&tx).map_err(failure)?;
+            reset(&tx, &runtime).map_err(failure)?;
+            tx.commit().map_err(failure)?;
+            return Err(StoreError::Data(
+                "native name companion requires semantic replay".into(),
+            ));
         }
-        Ok(Selection {
-            count: keys.len(),
-            endpoint: found,
-            location: None,
-            ..Selection::default()
-        })
+        result.map_err(failure)
     }
 }
+struct OrdinaryLookup<'a> {
+    db: &'a Connection,
+    replay: Vec<String>,
+}
+
+impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
+    type Error = rusqlite::Error;
+    fn invalid(&self, message: &'static str) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
+    }
+    fn native_key(
+        &self,
+        native: &str,
+        harness: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::Selection> {
+        Ok(Selection {
+            count: 1,
+            key: Some(native_key(self.db, native, harness)?),
+            ..Default::default()
+        })
+    }
+    fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![id], |r| r.get(0)).optional()
+    }
+    fn call_owners(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        self.db.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2")?.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+    }
+    fn event_metadata(&self, path: &str, key: &str) -> rusqlite::Result<Option<String>> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE source_path=?1 AND event_key=?2", params![path, key], |r| r.get(0))
+    }
+    fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
+        self.db.query_row(
+            "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
+            params![path],
+            |r| r.get(0),
+        )
+    }
+    fn endpoint_row(
+        &self,
+        key: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1", params![key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    }
+    fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM catalog_semantic_endpoints WHERE session_key=?1", params![key], |r| r.get(0)).optional().map(|v| v.unwrap_or(false))
+    }
+    fn name_candidates(&self, name: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM catalog_semantic_names n JOIN catalog_semantic_endpoints e USING(session_key) WHERE n.name=?1 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM catalog_semantic_events sent JOIN catalog_semantic_events receipt ON receipt.msg_id=sent.msg_id JOIN catalog_semantic_endpoints e ON e.session_key=sent.owner JOIN catalog_semantic_endpoints root ON root.session_key=e.root_key WHERE sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?1 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM catalog_semantic_events first WHERE first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![name], |r| r.get(0))?.collect()
+    }
+    fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT d.session_key FROM session_descriptions d JOIN session_catalog owner USING(session_key) WHERE owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?1) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints stage WHERE stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64")?.query_map(params![name], |r| r.get(0))?.collect()
+    }
+    fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND parent_native=?1 AND task=?2 LIMIT 2")?.query_map(params![parent, task], |r| r.get(0))?.collect()
+    }
+    fn codex_relay(&self, root: &str, target: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND (nickname=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2")?.query_map(params![root, target], |r| r.get(0))?.collect()
+    }
+    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND session_key<>?3 AND (session_key=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2")?.query_map(params![root, target, exclude], |r| r.get(0))?.collect()
+    }
+    fn request_members_replay(&mut self, keys: Vec<String>) -> rusqlite::Result<()> {
+        self.replay = keys;
+        Ok(())
+    }
+}
+
 /// Each owner's complete incident projection is certified before this source
 /// acknowledgement. Later announced changes remain fenced by the retained
 /// normalized ledger/claim witness across all previously acknowledged pages.
