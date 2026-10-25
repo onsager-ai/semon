@@ -8,8 +8,8 @@ pub mod native_events;
 pub(crate) mod navigation;
 #[cfg(feature = "postgres")]
 pub mod postgres;
-pub(crate) mod proof_lifetime;
 pub(crate) mod proof_codec;
+pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub(crate) mod selected;
 pub mod source_observations;

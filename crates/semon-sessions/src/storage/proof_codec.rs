@@ -3,7 +3,7 @@
 //! Physical stores own transactions, SQL dialects, row identifiers and RLS.
 //! This module owns only the stable value representation and its validation.
 #![allow(dead_code)] // PG physical adapter is intentionally not connected yet.
-use super::{proof_lifetime::ProofGenerationId, StorageError};
+use super::{StorageError, proof_lifetime::ProofGenerationId};
 use crate::model::summary::CatalogRow;
 
 pub(crate) const TTL_MAX: u32 = 60_000;
@@ -72,8 +72,10 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn presentation_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
-    Ok(digest(&serde_json::to_vec(&("selected-presentation-v2", base, manifest))
-        .map_err(|_| StorageError::Unavailable)?))
+    Ok(digest(
+        &serde_json::to_vec(&("selected-presentation-v2", base, manifest))
+            .map_err(|_| StorageError::Unavailable)?,
+    ))
 }
 
 pub(crate) fn presentation_entry(
@@ -81,14 +83,13 @@ pub(crate) fn presentation_entry(
     slots: &str,
     text: &str,
 ) -> Result<String, StorageError> {
-    if metadata.len() > METADATA_MAX
-        || slots.len() > METADATA_MAX
-        || text.len() > PRESENTATION_MAX
+    if metadata.len() > METADATA_MAX || slots.len() > METADATA_MAX || text.len() > PRESENTATION_MAX
     {
         return Err(StorageError::ScopeChanged);
     }
-    Ok(digest(&serde_json::to_vec(&(metadata, slots, text))
-        .map_err(|_| StorageError::Unavailable)?))
+    Ok(digest(
+        &serde_json::to_vec(&(metadata, slots, text)).map_err(|_| StorageError::Unavailable)?,
+    ))
 }
 
 pub(crate) fn decode_generation(
@@ -112,7 +113,8 @@ pub(crate) fn decode_generation(
     let row: CatalogRow =
         serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
     if row.key != record.session_key
-        || crate::retention::source_generation(&row.sources).map_err(|_| StorageError::Unavailable)?
+        || crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::Unavailable)?
             != record.prefix
     {
         return Err(StorageError::ScopeChanged);
