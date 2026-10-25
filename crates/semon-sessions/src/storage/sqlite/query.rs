@@ -26,12 +26,17 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .listing_snapshot(namespace)
             .map_err(storage_error)?;
         let runtime_binding = match &self.binding {
-            crate::storage::NativeReaderBinding::Semantic(owner) => Some(crate::storage::QueryRuntimeBinding {
-                namespace: owner.config().namespace.clone(),
-                admission: owner.admission(),
-                stream_epoch: owner.config().expected_stream_epoch.clone()
-                    .ok_or_else(|| unavailable("Missing source incarnation"))?,
-            }),
+            crate::storage::NativeReaderBinding::Semantic(owner) => {
+                Some(crate::storage::QueryRuntimeBinding {
+                    namespace: owner.config().namespace.clone(),
+                    admission: owner.admission(),
+                    stream_epoch: owner
+                        .config()
+                        .expected_stream_epoch
+                        .clone()
+                        .ok_or_else(|| unavailable("Missing source incarnation"))?,
+                })
+            }
             _ => None,
         };
         read(

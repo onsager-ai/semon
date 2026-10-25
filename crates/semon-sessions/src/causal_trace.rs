@@ -280,7 +280,10 @@ pub(crate) fn publish_measured(
     }
     publish_record(
         &crate::storage::sqlite::trace::TraceWriter::unbound(tx),
-        row, projection, record, measurements,
+        row,
+        projection,
+        record,
+        measurements,
     )?;
     measurements.record("trace_total_inclusive", total_started, 1);
     Ok(())
@@ -295,7 +298,10 @@ fn publication_record(
     let session = publication_session(row, projection);
     measurements.record("trace_session", started, 1);
     let started = measurements.start();
-    let digest = format!("{:x}", Sha256::digest(generation_bytes(&session, projection)));
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(generation_bytes(&session, projection))
+    );
     measurements.record("trace_digest", started, 1);
     let started = measurements.start();
     let source = crate::retention::source_generation(&row.sources)?;
@@ -305,7 +311,11 @@ fn publication_record(
 
 fn publication_session(row: &crate::model::summary::CatalogRow, projection: &Projection) -> Value {
     let mut session = projection.session.clone();
-    session["content_generation"] = json!(row.overview.as_ref().map(crate::overview::content_generation));
+    session["content_generation"] = json!(
+        row.overview
+            .as_ref()
+            .map(crate::overview::content_generation)
+    );
     session
 }
 
@@ -316,7 +326,12 @@ pub(crate) fn is_published<P: crate::storage::catalog::TracePublicationStore>(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> Result<bool, P::Error> {
-    let (digest, source, _) = publication_record(row, projection, &mut crate::native_timing::Measurements::default()).map_err(P::invalid)?;
+    let (digest, source, _) = publication_record(
+        row,
+        projection,
+        &mut crate::native_timing::Measurements::default(),
+    )
+    .map_err(P::invalid)?;
     store.matches_header(&row.key, &digest, &source)
 }
 
@@ -354,7 +369,12 @@ fn publish_record<P: crate::storage::catalog::TracePublicationStore>(
         let metadata = turn.to_string();
         measurements.record("trace_turn_serialization", started, 1);
         let started = measurements.start();
-        store.turn(&row.key, turn["id"].as_str(), turn["start"].as_str(), &metadata)?;
+        store.turn(
+            &row.key,
+            turn["id"].as_str(),
+            turn["start"].as_str(),
+            &metadata,
+        )?;
         measurements.record("trace_turn_sql", started, 1);
     }
     for edge in &projection.edges {

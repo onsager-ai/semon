@@ -24,7 +24,10 @@ impl ScopedRuntimeObservations {
 impl RuntimeObservations {
     /// Configured producers/readers use the captured aggregate runtime under a
     /// validated logical fence. They never reopen an Options-derived database.
-    pub(crate) fn bound(binding: &crate::storage::QueryRuntimeBinding, runtime: &str) -> io::Result<Self> {
+    pub(crate) fn bound(
+        binding: &crate::storage::QueryRuntimeBinding,
+        runtime: &str,
+    ) -> io::Result<Self> {
         Ok(Self {
             facts: None,
             local: false,
