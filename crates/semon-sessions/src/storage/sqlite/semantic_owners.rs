@@ -48,6 +48,16 @@ impl OwnerStore for Owners<'_> {
             .filter(|p| !p.is_empty())
             .map(str::to_owned)
             .or_else(|| endpoint.nickname.clone());
+        let prior: Option<(String, String)> = self.db.query_row(
+            "SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",
+            params![self.namespace, endpoint.row.key], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        if let Some((harness, text)) = prior {
+            let prior: Endpoint = serde_json::from_str(&text).map_err(invalid)?;
+            if harness != endpoint.row.harness || prior.row.harness != harness || prior.row.key != endpoint.row.key {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         let metadata = serde_json::to_string(endpoint).map_err(invalid)?;
         self.db.execute("INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,parent_native,parent_native_harness,parent_key,task,nickname,cost,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,parent_native=excluded.parent_native,parent_native_harness=excluded.parent_native_harness,parent_key=excluded.parent_key,task=excluded.task,nickname=excluded.nickname,cost=excluded.cost",params![self.namespace,endpoint.row.key,endpoint.row.harness,parent.map(|p|&p.1),parent.map(|p|&p.0),endpoint.parent,task,endpoint.nickname,endpoint.row.cost.usd,metadata])?;
         for path in &endpoint.paths {
@@ -68,8 +78,9 @@ impl OwnerStore for Owners<'_> {
         Ok(())
     }
     fn relation(&self, relation: &Relation) -> rusqlite::Result<()> {
-        let old: Option<String> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional()?;
+        let old: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional()?;
         let merged = if let Some(old) = old {
+            let old = old.ok_or(rusqlite::Error::InvalidQuery)?;
             relation
                 .merge_prior(&serde_json::from_str(&old).map_err(invalid)?)
                 .map_err(invalid)?
@@ -122,7 +133,30 @@ impl OwnerStore for Owners<'_> {
     }
 }
 
+enum ReplayEndpoint {
+    Staged(Box<Endpoint>),
+    Unpublished,
+    Virtual,
+}
+
 impl Owners<'_> {
+    fn replay_endpoint(&self, key: &str, virtual_owner: bool) -> rusqlite::Result<ReplayEndpoint> {
+        let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![self.namespace,key],|r|r.get(0))?;
+        if exists {
+            return self.endpoint(key).map(|endpoint| ReplayEndpoint::Staged(Box::new(endpoint)));
+        }
+        if virtual_owner {
+            return Ok(ReplayEndpoint::Virtual);
+        }
+        // Only an allocated identity whose real indexed source is still
+        // awaiting identity reduction is positively known to be unpublished.
+        let pending: bool = self.db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=?1 AND session_key=?2) AND EXISTS(SELECT 1 FROM main.catalog_semantic_keys k JOIN main.catalog_semantic_inputs i ON i.namespace=k.namespace AND i.harness=k.harness AND i.native_id=k.native_id JOIN main.catalog_semantic_sources s ON s.namespace=i.namespace AND s.source_path=i.source_path WHERE k.namespace=?1 AND k.session_key=?2 AND s.index_done=1 AND s.identity_done=0)",params![self.namespace,key],|r|r.get(0))?;
+        if pending {
+            Ok(ReplayEndpoint::Unpublished)
+        } else {
+            Err(rusqlite::Error::InvalidQuery)
+        }
+    }
     pub(super) fn replay(
         &self,
         epoch: i64,
@@ -150,11 +184,11 @@ impl Owners<'_> {
         let mut bytes = 0usize;
         if after.is_empty() {
             for owner in owners {
-                let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![self.namespace,owner],|r|r.get(0))?;
-                if !exists {
-                    continue;
-                }
-                let endpoint = self.endpoint(owner)?;
+                let endpoint = match self.replay_endpoint(owner, false)? {
+                    ReplayEndpoint::Staged(endpoint) => *endpoint,
+                    ReplayEndpoint::Unpublished => continue,
+                    ReplayEndpoint::Virtual => return Err(rusqlite::Error::InvalidQuery),
+                };
                 bytes = bytes.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
                 if bytes > 1048576 {
                     return Err(rusqlite::Error::InvalidQuery);
@@ -173,12 +207,13 @@ impl Owners<'_> {
                 if out.endpoints.contains_key(key) || endpoints.contains_key(key) {
                     continue;
                 }
-                let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![self.namespace,key],|r|r.get(0))?;
-                if exists {
-                    let endpoint = self.endpoint(key)?;
-                    next =
-                        next.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
-                    endpoints.insert(key.clone(), endpoint);
+                match self.replay_endpoint(key, relation.stubs.iter().any(|stub| &stub.key == key))? {
+                    ReplayEndpoint::Staged(endpoint) => {
+                        next = next.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
+                        endpoints.insert(key.clone(), *endpoint);
+                    }
+                    ReplayEndpoint::Virtual => {}
+                    ReplayEndpoint::Unpublished => return Err(rusqlite::Error::InvalidQuery),
                 }
             }
             if next > 1048576 {
@@ -195,13 +230,12 @@ impl Owners<'_> {
     }
 
     pub(super) fn endpoint(&self, key: &str) -> rusqlite::Result<Endpoint> {
-        let (text,parent,root,cost):(String,Option<String>,Option<String>,Option<f64>) = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key,family_cost FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        let (text,parent,root):(String,Option<String>,Option<String>) = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let mut endpoint: Endpoint = serde_json::from_str(&text).map_err(invalid)?;
         endpoint.parent = parent.clone();
         endpoint.row.parent = parent;
         endpoint.root = root.unwrap_or_else(|| key.to_owned());
-        endpoint.root_alive = self.db.query_row("SELECT coalesce(json_extract(metadata,'$.alive'),0) FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,endpoint.root],|r|r.get(0)).optional()?.unwrap_or(false);
-        let _ = cost;
+        endpoint.root_alive = self.db.query_row("SELECT coalesce(json_extract(metadata,'$.alive'),0) FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,endpoint.root],|r|r.get(0)).optional()?.ok_or(rusqlite::Error::InvalidQuery)?;
         Ok(endpoint)
     }
 }
