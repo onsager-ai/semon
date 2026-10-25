@@ -202,19 +202,33 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         Ok(history.or(current))
     }
     fn history_exists(&self, key: &str) -> rusqlite::Result<bool> {
-        <Self as OriginalHistoryStore>::retained(self,key)
+        <Self as OriginalHistoryStore>::retained(self, key)
     }
-    fn retain_source(&self, row: &CatalogRow, source: &crate::model::summary::CatalogSource) -> rusqlite::Result<()> {
+    fn retain_source(
+        &self,
+        row: &CatalogRow,
+        source: &crate::model::summary::CatalogSource,
+    ) -> rusqlite::Result<()> {
         self.db.execute(self.sql("INSERT INTO main.session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?2,'retained',?3,?4,?5) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='retained'","INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'retained',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='retained'"),params![self.namespace,row.key,row.harness,source.native_id,source.path.to_string_lossy()])?;
         Ok(())
     }
-    fn relocated(&self, old: &crate::model::summary::CatalogSource, current: &[crate::model::summary::CatalogSource]) -> rusqlite::Result<bool> {
+    fn relocated(
+        &self,
+        old: &crate::model::summary::CatalogSource,
+        current: &[crate::model::summary::CatalogSource],
+    ) -> rusqlite::Result<bool> {
         // The existing relocation witness reader already scopes metadata and
         // ledger reads through the admitted connection's native binding.
-        crate::events::store::relocated_catalog_source(self.db,old,current)
+        crate::events::store::relocated_catalog_source(self.db, old, current)
     }
     fn clear(&self, key: &str) -> rusqlite::Result<()> {
-        self.db.execute(self.sql("DELETE FROM main.meta WHERE key=?2","DELETE FROM main.meta WHERE namespace=?1 AND key=?2"),params![self.namespace,format!("history_transfer:{key}")])?;
+        self.db.execute(
+            self.sql(
+                "DELETE FROM main.meta WHERE key=?2",
+                "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
+            ),
+            params![self.namespace, format!("history_transfer:{key}")],
+        )?;
         for sql in [
             self.sql("DELETE FROM main.session_history_slot_parts WHERE session_key=?2","DELETE FROM main.session_history_slot_parts WHERE namespace=?1 AND session_key=?2"),
             self.sql("DELETE FROM main.session_history_slots WHERE session_key=?2","DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2"),
@@ -223,33 +237,71 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         ] { self.db.execute(sql,params![self.namespace,key])?; }
         Ok(())
     }
-    fn previous_recipe(&self, key: &str) -> rusqlite::Result<(bool,Option<crate::storage::catalog::HistoryRecipeHeader>)> {
+    fn previous_recipe(
+        &self,
+        key: &str,
+    ) -> rusqlite::Result<(bool, Option<crate::storage::catalog::HistoryRecipeHeader>)> {
         let header=self.db.query_row(self.sql("SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE session_key=?2","SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2"),params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if header.is_some() { return Ok((true,header)); }
+        if header.is_some() {
+            return Ok((true, header));
+        }
         let header=self.db.query_row(self.sql("SELECT version,source_generation,0 FROM main.session_slot_projections WHERE session_key=?2","SELECT version,source_generation,0 FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2"),params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        Ok((false,header))
+        Ok((false, header))
     }
     fn recipe_slots(&self, key: &str, history: bool) -> rusqlite::Result<Vec<String>> {
-        let sql=match (self.namespace.is_some(),history) {
-            (true,true)=>"SELECT metadata FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65",
-            (true,false)=>"SELECT metadata FROM main.session_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65",
-            (false,true)=>"SELECT metadata FROM main.session_history_slots WHERE session_key=?2 ORDER BY slot",
-            (false,false)=>"SELECT metadata FROM main.session_slots WHERE session_key=?2 ORDER BY slot",
+        let sql = match (self.namespace.is_some(), history) {
+            (true, true) => {
+                "SELECT metadata FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65"
+            }
+            (true, false) => {
+                "SELECT metadata FROM main.session_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65"
+            }
+            (false, true) => {
+                "SELECT metadata FROM main.session_history_slots WHERE session_key=?2 ORDER BY slot"
+            }
+            (false, false) => {
+                "SELECT metadata FROM main.session_slots WHERE session_key=?2 ORDER BY slot"
+            }
         };
-        let texts=self.db.prepare(sql)?.query_map(params![self.namespace,key],|r|r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-        if self.namespace.is_some() && texts.len()>64 { return Err(rusqlite::Error::InvalidQuery); }
+        let texts = self
+            .db
+            .prepare(sql)?
+            .query_map(params![self.namespace, key], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        if self.namespace.is_some() && texts.len() > 64 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         Ok(texts)
     }
-    fn composed(&self, key: &str, generation: &str, sources: &str, metadata: &str, texts: &[String], incomplete: bool) -> rusqlite::Result<()> {
-        let total=i64::try_from(texts.len()).map_err(|_|rusqlite::Error::InvalidQuery)?;
+    fn composed(
+        &self,
+        key: &str,
+        generation: &str,
+        sources: &str,
+        metadata: &str,
+        texts: &[String],
+        incomplete: bool,
+    ) -> rusqlite::Result<()> {
+        let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed=self.db.execute(self.sql("INSERT INTO main.session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?2,?3,?4,?5,?6,?7) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation","INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation"),params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
         self.db.execute(self.sql("INSERT INTO main.session_history_catalog(session_key,metadata) VALUES(?2,?3) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata WHERE session_history_catalog.metadata != excluded.metadata","INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata WHERE session_history_catalog.metadata != excluded.metadata"),params![self.namespace,key,metadata])?;
-        if changed>0 {
+        if changed > 0 {
             self.db.execute(self.sql("INSERT OR REPLACE INTO main.meta(key,value) VALUES(?2,'1')","INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'"),params![self.namespace,format!("overview_needed:{key}")])?;
-            self.db.execute(self.sql("DELETE FROM main.session_history_slots WHERE session_key=?2","DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2"),params![self.namespace,key])?;
+            self.db.execute(
+                self.sql(
+                    "DELETE FROM main.session_history_slots WHERE session_key=?2",
+                    "DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2",
+                ),
+                params![self.namespace, key],
+            )?;
             let mut put=self.db.prepare(self.sql("INSERT INTO main.session_history_slots(session_key,slot,metadata) VALUES(?2,?3,?4)","INSERT INTO main.session_history_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)"))?;
-            for (slot,text) in texts.iter().enumerate() {
-                put.execute(params![self.namespace,key,i64::try_from(slot).map_err(|_|rusqlite::Error::InvalidQuery)?,text])?;
+            for (slot, text) in texts.iter().enumerate() {
+                put.execute(params![
+                    self.namespace,
+                    key,
+                    i64::try_from(slot).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    text
+                ])?;
             }
         }
         Ok(())

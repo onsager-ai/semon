@@ -263,21 +263,44 @@ fn publish_current_rows_order(
     owners: usize,
     #[cfg(test)] probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
 ) -> rusqlite::Result<()> {
-    publish_current_rows_effects(transaction, &crate::storage::sqlite::search::SearchWriter::unbound(transaction), rows, owners, #[cfg(test)] probe)
+    publish_current_rows_effects(
+        transaction,
+        &crate::storage::sqlite::search::SearchWriter::unbound(transaction),
+        rows,
+        owners,
+        #[cfg(test)]
+        probe,
+    )
 }
 
-pub(crate) fn publish_current_rows_with_store<P: crate::storage::catalog::SearchPublicationStore<Error=rusqlite::Error>>(
-    transaction: &Transaction<'_>, rows: &[&CatalogRow], store: &P,
+pub(crate) fn publish_current_rows_with_store<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+    store: &P,
 ) -> rusqlite::Result<()> {
-    publish_current_rows_effects(transaction, store, rows, 64, #[cfg(test)] None)
+    publish_current_rows_effects(
+        transaction,
+        store,
+        rows,
+        64,
+        #[cfg(test)]
+        None,
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn publish_current_rows_original(transaction: &Transaction<'_>, rows: &[&CatalogRow]) -> rusqlite::Result<()> {
+pub(crate) fn publish_current_rows_original(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+) -> rusqlite::Result<()> {
     publish_current_rows_original_order(transaction, rows, 64, None)
 }
 
-fn publish_current_rows_effects<P: crate::storage::catalog::SearchPublicationStore<Error=rusqlite::Error>>(
+fn publish_current_rows_effects<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
     transaction: &Transaction<'_>,
     store: &P,
     rows: &[&CatalogRow],
@@ -305,7 +328,10 @@ fn publish_current_rows_effects<P: crate::storage::catalog::SearchPublicationSto
         for row in rows {
             store.validate(&row.key)?;
         }
-        for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
             store.remove(scope)?;
         }
         measurements.record("removal", started, 2);
@@ -317,7 +343,10 @@ fn publish_current_rows_effects<P: crate::storage::catalog::SearchPublicationSto
         measurements.record("normalization", started, rows.len());
         let started = measurements.start();
         for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
-            for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+            for scope in [
+                crate::CatalogReadScope::Current,
+                crate::CatalogReadScope::RetainedHistory,
+            ] {
                 store.document(scope, row, encoded, *complete)?;
             }
         }
@@ -349,7 +378,10 @@ fn publish_current_rows_effects<P: crate::storage::catalog::SearchPublicationSto
         measurements.record("postings", started, postings.len() * 2);
         measurements.count("posting_rows", postings.len());
         let started = measurements.start();
-        for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
             store.counts(scope)?;
         }
         measurements.record("counts", started, 2);

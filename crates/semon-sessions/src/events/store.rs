@@ -3332,7 +3332,6 @@ fn catalog_batch_bytes(
     Some(bytes)
 }
 
-
 impl SqliteStore {
     fn publish_catalog_with_generation(
         &mut self,
@@ -3570,7 +3569,8 @@ impl SqliteStore {
             }
             #[cfg(test)]
             if matches!(writer, CatalogWriter::OriginalPorts) {
-                crate::history_projection::publish_original(&transaction, publication).map_err(failure)?;
+                crate::history_projection::publish_original(&transaction, publication)
+                    .map_err(failure)?;
             } else {
                 crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             }
@@ -3637,7 +3637,8 @@ impl SqliteStore {
                     } else {
                         None
                     };
-                    let current_effects = crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction);
+                    let current_effects =
+                        crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction);
                     #[cfg(test)]
                     let mut remove_sources = transaction
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
@@ -3679,8 +3680,12 @@ impl SqliteStore {
                             sample.stage("overview_and_members", &transaction);
                         }
                         let started = metadata_measurements.start();
-                        let changed =
-                            crate::storage::sqlite::publication::put_catalog_batch(&transaction, rows, &metadata).map_err(failure)?;
+                        let changed = crate::storage::sqlite::publication::put_catalog_batch(
+                            &transaction,
+                            rows,
+                            &metadata,
+                        )
+                        .map_err(failure)?;
                         metadata_measurements.record("catalog_rows", started, rows.len());
                         if let Some(sample) = metadata_sample.as_mut() {
                             sample.stage("catalog_rows", &transaction);
@@ -3733,23 +3738,36 @@ impl SqliteStore {
                             }
                             #[cfg(test)]
                             let changed = if matches!(writer, CatalogWriter::OriginalPorts) {
-put
-                                .as_mut()
-                                .expect("row_wise writer statement")
-                                .execute(params![
-                                    row.key,
-                                    row.last.unwrap_or(0),
-                                    row.harness,
-                                    row.repo,
-                                    row.parent,
-                                    metadata
-                                ])
-                                .map_err(failure)?
+                                put.as_mut()
+                                    .expect("row_wise writer statement")
+                                    .execute(params![
+                                        row.key,
+                                        row.last.unwrap_or(0),
+                                        row.harness,
+                                        row.repo,
+                                        row.parent,
+                                        metadata
+                                    ])
+                                    .map_err(failure)?
                             } else {
-                                usize::from(crate::storage::catalog::CurrentPublicationStore::current(&current_effects, row, metadata).map_err(failure)?)
+                                usize::from(
+                                    crate::storage::catalog::CurrentPublicationStore::current(
+                                        &current_effects,
+                                        row,
+                                        metadata,
+                                    )
+                                    .map_err(failure)?,
+                                )
                             };
                             #[cfg(not(test))]
-                            let changed = usize::from(crate::storage::catalog::CurrentPublicationStore::current(&current_effects, row, metadata).map_err(failure)?);
+                            let changed = usize::from(
+                                crate::storage::catalog::CurrentPublicationStore::current(
+                                    &current_effects,
+                                    row,
+                                    metadata,
+                                )
+                                .map_err(failure)?,
+                            );
                             if !rebuild_search
                                 && (changed > 0
                                     || initialize_search
@@ -3781,64 +3799,77 @@ put
                             search_rows.push(row);
                         }
                         if changed || previous_version.as_deref() != Some(&version) {
+                            #[cfg(test)]
                             let started = metadata_measurements.start();
                             #[cfg(test)]
                             if matches!(writer, CatalogWriter::OriginalPorts) {
-                            remove_sources.execute([&row.key]).map_err(failure)?;
-                            metadata_measurements.record("source_retirement", started, 1);
-                            if let Some(sample) = sample.as_mut() {
-                                sample.stage("source_retirement", &transaction);
-                            }
-                            for source in &row.sources {
-                                let started = metadata_measurements.start();
-                                let path = source.path.to_string_lossy();
-                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
-                                let parent = source.native_role.as_ref().and_then(|role| {
-                                    role.pointer("/Agent/parent")
-                                        .and_then(Value::as_str)
-                                        .or_else(|| {
-                                            (role
-                                                .pointer("/Codex/guardian_review")
-                                                .and_then(Value::as_bool)
-                                                != Some(true))
-                                            .then(|| {
-                                                role.pointer("/Codex/parent_thread")
-                                                    .and_then(Value::as_str)
+                                remove_sources.execute([&row.key]).map_err(failure)?;
+                                metadata_measurements.record("source_retirement", started, 1);
+                                if let Some(sample) = sample.as_mut() {
+                                    sample.stage("source_retirement", &transaction);
+                                }
+                                for source in &row.sources {
+                                    let started = metadata_measurements.start();
+                                    let path = source.path.to_string_lossy();
+                                    transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
+                                    let parent = source.native_role.as_ref().and_then(|role| {
+                                        role.pointer("/Agent/parent")
+                                            .and_then(Value::as_str)
+                                            .or_else(|| {
+                                                (role
+                                                    .pointer("/Codex/guardian_review")
+                                                    .and_then(Value::as_bool)
+                                                    != Some(true))
+                                                .then(|| {
+                                                    role.pointer("/Codex/parent_thread")
+                                                        .and_then(Value::as_str)
+                                                })
+                                                .flatten()
                                             })
-                                            .flatten()
-                                        })
-                                });
-                                if let Some(observations) = row
-                                    .query
-                                    .as_ref()
-                                    .and_then(|query| query["rows"].as_object())
-                                {
-                                    for observation in observations.values() {
-                                        if let Some(pid) = observation["summary"]["pid"].as_u64() {
-                                            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)",params![path.as_ref(),pid.to_string()]).map_err(failure)?;
+                                    });
+                                    if let Some(observations) = row
+                                        .query
+                                        .as_ref()
+                                        .and_then(|query| query["rows"].as_object())
+                                    {
+                                        for observation in observations.values() {
+                                            if let Some(pid) =
+                                                observation["summary"]["pid"].as_u64()
+                                            {
+                                                transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)",params![path.as_ref(),pid.to_string()]).map_err(failure)?;
+                                            }
                                         }
                                     }
+                                    if let Some(parent) = parent {
+                                        transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",params![path.as_ref(),row.harness,parent]).map_err(failure)?;
+                                    }
+                                    metadata_measurements.record("native_dependencies", started, 1);
+                                    let started = metadata_measurements.start();
+                                    put_source
+                                        .execute(params![
+                                            row.key,
+                                            row.harness,
+                                            source.native_id,
+                                            source.path.to_string_lossy()
+                                        ])
+                                        .map_err(failure)?;
+                                    metadata_measurements.record("catalog_sources", started, 1);
                                 }
-                                if let Some(parent) = parent {
-                                    transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",params![path.as_ref(),row.harness,parent]).map_err(failure)?;
-                                }
-                                metadata_measurements.record("native_dependencies", started, 1);
-                                let started = metadata_measurements.start();
-                                put_source
-                                    .execute(params![
-                                        row.key,
-                                        row.harness,
-                                        source.native_id,
-                                        source.path.to_string_lossy()
-                                    ])
-                                    .map_err(failure)?;
-                                metadata_measurements.record("catalog_sources", started, 1);
-                            }
                             } else {
-                                crate::storage::catalog::publish_current_sources_measured(&current_effects, row, &mut metadata_measurements).map_err(failure)?;
+                                crate::storage::catalog::publish_current_sources_measured(
+                                    &current_effects,
+                                    row,
+                                    &mut metadata_measurements,
+                                )
+                                .map_err(failure)?;
                             }
                             #[cfg(not(test))]
-                            crate::storage::catalog::publish_current_sources_measured(&current_effects, row, &mut metadata_measurements).map_err(failure)?;
+                            crate::storage::catalog::publish_current_sources_measured(
+                                &current_effects,
+                                row,
+                                &mut metadata_measurements,
+                            )
+                            .map_err(failure)?;
                         } else if let Some(sample) = sample.as_mut() {
                             sample.stage("source_retirement", &transaction);
                         }
@@ -5031,7 +5062,11 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         reprice::file_schema(false, false)
     };
     Ok([
-        if p.semantic_stage { crate::storage::sqlite::publication::SLOT_SCHEMA } else { SLOT_SCHEMA },
+        if p.semantic_stage {
+            crate::storage::sqlite::publication::SLOT_SCHEMA
+        } else {
+            SLOT_SCHEMA
+        },
         catalog_schema(p.catalog),
         semantic_stage::support_schema(p.semantic_support, p.semantic_stage),
         metadata_schema(p.metadata),
@@ -5054,8 +5089,16 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         crate::overview::SCHEMA,
         crate::causal_trace::header_schema(p.trace),
         crate::causal_trace::SCHEMA,
-        if p.semantic_stage { crate::storage::sqlite::history::SCHEMA } else { crate::history_projection::SCHEMA },
-        if p.semantic_stage { crate::storage::sqlite::search::SCHEMA } else { crate::catalog_search::SCHEMA },
+        if p.semantic_stage {
+            crate::storage::sqlite::history::SCHEMA
+        } else {
+            crate::history_projection::SCHEMA
+        },
+        if p.semantic_stage {
+            crate::storage::sqlite::search::SCHEMA
+        } else {
+            crate::catalog_search::SCHEMA
+        },
         crate::storage::sqlite::changes::schema(p.metadata, p.catalog),
         reprice::queue_schema(p.pricing_queue),
         reprice::catalog_schema(p.pricing_queue, p.catalog, p.metadata),
@@ -9036,8 +9079,23 @@ mod tests {
                 Sha256::digest(format!("{b:?}").as_bytes())
             );
         }
-        for table in ["session_catalog", "session_catalog_sources", "catalog_native_dependencies", "session_search_documents", "session_search_memberships", "session_search_counts"] {
-            assert!(typed.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get::<_,i64>(0)).unwrap()>0, "the frozen oracle must exercise {table}");
+        for table in [
+            "session_catalog",
+            "session_catalog_sources",
+            "catalog_native_dependencies",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+        ] {
+            assert!(
+                typed
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap()
+                    > 0,
+                "the frozen oracle must exercise {table}"
+            );
         }
         assert!(
             typed
