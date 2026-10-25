@@ -1530,6 +1530,14 @@ impl Stage {
             namespace: ns,
         };
         for endpoint in prepared.relationships.endpoints.values() {
+            // Current membership replacement clears runtime dependencies. Add
+            // hints only from this newly qualified native projection, inside
+            // the same publication fence, rather than retaining stale names.
+            crate::model::relation_stage::native_name_hints_with(
+                endpoint,
+                || rusqlite::Error::InvalidQuery,
+                |path, name| owner_effects.dependency(path, "name:claude", name),
+            ).map_err(error)?;
             for source in &endpoint.row.sources {
                 if let Some(pid) = endpoint.pid {
                     owner_effects
