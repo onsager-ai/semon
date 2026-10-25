@@ -57,6 +57,8 @@ jobs:
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
       - name: Native frontier physical-work qualification
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
+      - name: Native Claude name and owned member replay qualification
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture

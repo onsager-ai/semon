@@ -7746,7 +7746,9 @@ mod tests {
             let options = &options[1];
             let inputs = named_claude_inputs(options, 2);
             let initiator = inputs[0].full_path(options);
-            let raw = fs::read_to_string(&initiator).unwrap().replace("\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"");
+            let raw = fs::read_to_string(&initiator)
+                .unwrap()
+                .replace("\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"");
             fs::write(initiator, raw).unwrap();
             let mut cache = open(&f.config);
             let mut other = open(&foreign);
@@ -7762,7 +7764,10 @@ mod tests {
             let selector = Selector::ClaudeName {
                 name: "worker".into(),
             };
-            let native_rows: i64 = f.db().query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
+            let native_rows: i64 = f
+                .db()
+                .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+                .unwrap();
             let before_fault = shared_state(&f);
             FAIL_EFFECT.with(|p| p.set(Some("semantic_name_members_reset")));
             assert!(cache.semantic_select(batch.epoch, &selector).is_err());
@@ -7784,7 +7789,12 @@ mod tests {
                 Outcome::Conflict
             );
             assert_eq!(shared_state(&f), after_replay);
-            assert_eq!(f.db().query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), native_rows);
+            assert_eq!(
+                f.db()
+                    .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                native_rows
+            );
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
             drop(cache);
             let mut cache = open(&f.config);
@@ -7794,7 +7804,12 @@ mod tests {
                 cache.semantic_select(fresh.epoch, &selector).unwrap().count,
                 1
             );
-            assert_eq!(f.db().query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), native_rows);
+            assert_eq!(
+                f.db()
+                    .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                native_rows
+            );
             oracle(&cache, options, &inputs, fresh_model.prepared());
             publish(&mut cache, &f, &fresh, &fresh_model);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
@@ -7807,19 +7822,34 @@ mod tests {
             let inputs = named_claude_inputs(options, 2);
             let mut cache = open(&f.config);
             let _foreign = open(&foreign);
-            let (first, first_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
+            let (first, first_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
             publish(&mut cache, &f, &first, &first_model);
             cache.finish_semantic_stage(first.epoch).unwrap();
             let _ = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let db = f.db();
             for function in ["semon_event_writer", "semon_semantic_writer"] {
-                db.create_scalar_function(function, 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).unwrap();
+                db.create_scalar_function(
+                    function,
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    |_| Ok(1_i64),
+                )
+                .unwrap();
             }
             let bind = |namespace: &str| {
                 let namespace = namespace.to_owned();
-                db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, move |_| Ok(namespace.clone())).unwrap();
+                db.create_scalar_function(
+                    "semon_namespace",
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    move |_| Ok(namespace.clone()),
+                )
+                .unwrap();
             };
-            let bodies: i64 = db.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
+            let bodies: i64 = db
+                .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+                .unwrap();
             let mut baseline: Option<Vec<(String, usize, usize)>> = None;
             let mut previous = 0;
             for count in [0, 256, 2048] {
@@ -7833,20 +7863,32 @@ mod tests {
                 db.execute_batch("COMMIT").unwrap();
                 bind("source-a");
                 let before = shared_state(&f);
-                let actual = crate::storage::sqlite::semantic::name_members_vm_probe(&db, "source-a", "worker");
-                assert_eq!(actual.iter().skip(1).map(|row| row.2).collect::<Vec<_>>(), [1,1,2]);
+                let actual = crate::storage::sqlite::semantic::name_members_vm_probe(
+                    &db, "source-a", "worker",
+                );
+                assert_eq!(
+                    actual.iter().skip(1).map(|row| row.2).collect::<Vec<_>>(),
+                    [1, 1, 2]
+                );
                 if let Some(base) = &baseline {
                     for (current, original) in actual.iter().zip(base) {
                         assert_eq!(current.0, original.0);
                         assert_eq!(current.2, original.2);
-                        assert!(current.1.abs_diff(original.1) <= 64, "noise={count} current={current:?} original={original:?}");
+                        assert!(
+                            current.1.abs_diff(original.1) <= 64,
+                            "noise={count} current={current:?} original={original:?}"
+                        );
                     }
                 } else {
                     baseline = Some(actual.clone());
                 }
                 eprintln!("name_members_vm unrelated_same_and_foreign={count}: {actual:?}");
                 assert_eq!(shared_state(&f), before);
-                assert_eq!(db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), bodies);
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    bodies
+                );
                 previous = count;
             }
         }
@@ -7898,7 +7940,16 @@ mod tests {
             }
             let (batch, _) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let before = shared_state(&f);
-            assert!(cache.semantic_select(batch.epoch, &Selector::ClaudeName { name: "worker".into() }).is_err());
+            assert!(
+                cache
+                    .semantic_select(
+                        batch.epoch,
+                        &Selector::ClaudeName {
+                            name: "worker".into()
+                        }
+                    )
+                    .is_err()
+            );
             assert_eq!(shared_state(&f), before);
         }
 

@@ -284,7 +284,12 @@ pub(crate) fn native_name_hints_with<E>(
     mut put: impl FnMut(&str, &str) -> Result<(), E>,
 ) -> Result<(), E> {
     if endpoint.row.harness == "claude" {
-        if endpoint.names.len().saturating_mul(endpoint.row.sources.len()) > 64 {
+        if endpoint
+            .names
+            .len()
+            .saturating_mul(endpoint.row.sources.len())
+            > 64
+        {
             return Err(invalid());
         }
         for source in &endpoint.row.sources {
