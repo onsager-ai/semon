@@ -4,6 +4,10 @@ use crate::storage::selected::HostSourceBinding;
 use crate::transcript_range::{read_bound, SessionSourceReadMode};
 use serde_json::{Value, json};
 
+mod selected60 {
+    include!("configured_selected60.rs");
+}
+
 fn body(reply: crate::ViewerReply) -> Value {
     assert_eq!(reply.status,200,"{}",String::from_utf8_lossy(&reply.body));
     serde_json::from_slice(&reply.body).unwrap()
@@ -12,6 +16,22 @@ fn read(lease: &crate::storage::sqlite::proof_generations::Lease, options: &crat
     let (snapshot,reply)=read_bound(lease,options,host,query,None,SessionSourceReadMode::LocalOrPinnedProvider,&crate::SelectedReadControl::default()).unwrap();
     assert_eq!(snapshot.proof_generation,lease.snapshot().proof_generation);
     body(reply)
+}
+
+// The two producers have different physical publication coordinates. Derive
+// the expected identity from the actual publication, including qualification;
+// no product field is discarded from the comparison.
+fn publication_oracle(expected: &mut Value, db: &Connection, namespace: &str) {
+    let meta = |key: &str| -> String {
+        db.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key=?2", params![namespace,key], |r| r.get(0)).unwrap()
+    };
+    expected["identity"]["generation"] = json!(meta("catalog_generation"));
+    expected["identity"]["observed_at"] = json!(meta("catalog_observed_at").parse::<i64>().unwrap());
+    let provisional = meta("catalog_completeness") == "partial";
+    expected["identity"]["owner_qualification"] = json!(if provisional {"provisional"} else {"qualified"});
+    expected["identity"]["native_id"] = if !provisional && expected["identity"]["native_ids"].as_array().unwrap().len() == 1 {
+        expected["identity"]["native_ids"][0].clone()
+    } else {Value::Null};
 }
 
 #[test]
@@ -35,39 +55,24 @@ fn configured_semantic_selected57_real_two_source_native_range_and_field_oracle(
         ordinary.publish_catalog_projection(&crate::slot_projection::Publication{rows:&original.rows,transcripts:Some(&original.transcripts)},original.base_generation.as_deref()).unwrap();
         let query=format!("sid={key}&after=0&limit=1");
         let actual=read(&lease,&options[i],&host,&query);
-        let expected=body(crate::session_transcript_range_with_mode(&options[i],&host.source_key,&query,None,SessionSourceReadMode::LocalOrPinnedProvider));
+        let mut expected=body(crate::session_transcript_range_with_mode(&options[i],&host.source_key,&query,None,SessionSourceReadMode::LocalOrPinnedProvider));
         // Product data, header, complete context and bounded accounting match.
         for field in ["api","projection","range","entries","freshness","content_observation","relationship_context","limits","observation"] {
             assert_eq!(actual[field],expected[field],"{field}, source {i}");
         }
-        let mut actual_identity=actual["identity"].clone();
-        let mut expected_identity=expected["identity"].clone();
-        // Physical publication roots and observation timestamps belong to
-        // independently published stores. Check them, then compare every other
-        // identity field without deriving an oracle from Selection.
-        assert_eq!(actual_identity["generation"],lease.snapshot().publication_generation);
-        assert!(actual_identity["observed_at"].as_i64().is_some());
-        assert!(expected_identity["generation"].as_str().is_some_and(|s|s.len()==64));
-        assert!(expected_identity["observed_at"].as_i64().is_some());
-        for identity in [&mut actual_identity,&mut expected_identity] {
-            identity.as_object_mut().unwrap().remove("generation");
-            identity.as_object_mut().unwrap().remove("observed_at");
-            // The configured cohort deliberately advertises partial membership.
-            identity.as_object_mut().unwrap().remove("owner_qualification");
-            identity.as_object_mut().unwrap().remove("native_id");
-        }
-        assert_eq!(actual_identity,expected_identity);
-        assert_eq!(actual["session"],expected["session"]);
+        let db=SourceJournal::owned(NativeOwnership::admit(config).unwrap()).connection().unwrap();
+        publication_oracle(&mut expected,&db,config.namespace.as_str());
+        assert_eq!(actual,expected,"complete range reply, source {i}");
         let generation=actual["projection"]["generation"].as_str().unwrap();
         let field_query=format!("{query}&generation={generation}&field_chunk=0");
         let (_,field)=read_bound(&lease,&options[i],&host,&field_query,None,SessionSourceReadMode::LocalOrPinnedProvider,&crate::SelectedReadControl::default()).unwrap();
         let ordinary_field=crate::session_entry_field_with_mode(&options[i],&host.source_key,&field_query,None,SessionSourceReadMode::LocalOrPinnedProvider);
         assert_eq!(field.status,ordinary_field.status);
-        let mut field:Value=serde_json::from_slice(&field.body).unwrap();
+        let field:Value=serde_json::from_slice(&field.body).unwrap();
         let mut oracle:Value=serde_json::from_slice(&ordinary_field.body).unwrap();
-        // Same independent identity-coordinate assertions as the range above.
-        field.as_object_mut().unwrap().remove("identity");
-        oracle.as_object_mut().unwrap().remove("identity");
+        if oracle.get("identity").is_some() {
+            publication_oracle(&mut oracle,&db,config.namespace.as_str());
+        }
         assert_eq!(field,oracle);
         let mut foreign=host.clone();
         foreign.snapshot.namespace=LogicalSourceNamespace::new("foreign").unwrap();

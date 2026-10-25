@@ -417,6 +417,7 @@ pub(crate) trait CatalogPublicationHead {
 }
 
 pub(crate) trait CatalogSnapshot {
+    fn presentation_observations(&self) -> Option<&crate::storage::selected::PresentationObservations> { None }
     fn source_state(&self, _source: &CatalogSource) -> Option<&'static str> { None }
     fn runtime_binding(&self) -> Option<super::QueryRuntimeBinding> { None }
     fn require_current(&self) -> io::Result<()>;

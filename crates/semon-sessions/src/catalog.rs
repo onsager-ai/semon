@@ -663,7 +663,7 @@ pub(crate) fn source_state(source: &CatalogSource) -> &'static str {
     }
 }
 
-fn recorded_status(
+pub(crate) fn recorded_status(
     row: &CatalogRow,
     runtime: Option<&str>,
     cached: bool,
@@ -778,24 +778,25 @@ pub(crate) fn read_page_snapshot(
             false,
         ));
     }
-    let runtime = crate::native_evidence::query_runtime_generation(options).ok();
+    let pinned = transaction.presentation_observations();
+    let runtime = if pinned.is_some() { None } else { crate::native_evidence::query_runtime_generation(options).ok() };
     let runtime_binding = transaction.runtime_binding();
-    let runtime_observations = match runtime_binding.as_ref() {
-        Some(binding) => crate::native_evidence::RuntimeObservations::bound(binding, runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?)?,
-        None => crate::native_evidence::RuntimeObservations::new(options),
+    let runtime_observations = match (pinned, runtime_binding.as_ref()) {
+        (Some(_), _) => None,
+        (None, Some(binding)) => Some(crate::native_evidence::RuntimeObservations::bound(binding, runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?)?),
+        (None, None) => Some(crate::native_evidence::RuntimeObservations::new(options)),
     };
     // Share the same custody capture with selected family status qualification.
     // Its existing final validation still fences the whole response.
-    let recorded = options
-        .facts
-        .as_ref()
+    let recorded = pinned.is_none().then_some(options)
+        .and_then(|options| options.facts.as_ref())
         .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-    let facts_known =
-        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
-    let codex_selection_known = options.facts.is_none()
+    let facts_known = pinned.map_or_else(||
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known()), |saved| saved.facts_known);
+    let codex_selection_known = pinned.map_or_else(|| options.facts.is_none()
         || recorded
             .as_ref()
-            .is_some_and(|source| source.selection_known());
+            .is_some_and(|source| source.selection_known()), |saved| saved.selection_known);
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
@@ -970,7 +971,8 @@ pub(crate) fn read_page_snapshot(
             .first()
             .map(|row| {
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
-                    relative_status(options, &runtime_observations, recorded.as_ref(), relative)
+                    // ImmutableCatalog supplies its pinned relative inputs.
+                    runtime_observations.as_ref().map(|runtime| relative_status(options, runtime, recorded.as_ref(), relative)).unwrap_or(Value::Null)
                 })
             })
             .transpose()?
@@ -995,9 +997,12 @@ pub(crate) fn read_page_snapshot(
     };
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
-    let machine_label = match &options.facts {
-        None => Some(crate::facts::MachineFacts::Local.hostname(options)),
-        Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
+    let machine_label = match pinned {
+        Some(saved) => saved.machine_label.clone(),
+        None => match &options.facts {
+            None => Some(crate::facts::MachineFacts::Local.hostname(options)),
+            Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
+        },
     };
     let mut page_state = if facts_known || request.scope == CatalogReadScope::RetainedHistory {
         "cached"
@@ -1026,7 +1031,9 @@ pub(crate) fn read_page_snapshot(
                     true,
                 ));
             };
-            let retired = if row.harness == "codex" {
+            let retired = if row.harness == "codex" && pinned.is_some() {
+                pinned.is_some_and(|saved| saved.retired(source))
+            } else if row.harness == "codex" {
                 match recorded
                     .as_ref()
                     .map(|snapshot| snapshot.codex_current(&relative))
@@ -1095,7 +1102,7 @@ pub(crate) fn read_page_snapshot(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
-        let runtime = runtime_observations.expected(&row);
+        let runtime = pinned.map(|saved| saved.runtime.clone()).or_else(|| runtime_observations.as_ref().and_then(|runtime| runtime.expected(&row)));
         let runtime_pending = current
             && facts_known
             && !retired_native
