@@ -260,6 +260,38 @@ pub(crate) trait SelectorLookup {
     ) -> Result<Vec<String>, Self::Error>;
 }
 
+/// Names only schedule native membership observation. They never supply an
+/// endpoint or establish a negative selection result.
+pub(crate) fn replay_members_with<E>(
+    keys: &[String],
+    invalid: impl Fn() -> E,
+    mut queue: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    if keys.len() > 64 || keys.iter().map(String::len).sum::<usize>() > 1048576 {
+        return Err(invalid());
+    }
+    for key in keys {
+        queue(key)?;
+    }
+    Ok(())
+}
+
+/// Persist native-derived name hints through the adapter's owned dependency
+/// family. The current Catalog membership qualifies their use at lookup time.
+pub(crate) fn native_name_hints_with<E>(
+    endpoint: &Endpoint,
+    mut put: impl FnMut(&str, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    if endpoint.row.harness == "claude" {
+        for source in &endpoint.row.sources {
+            for name in &endpoint.names {
+                put(source.path.to_string_lossy().as_ref(), name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
 
 pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
