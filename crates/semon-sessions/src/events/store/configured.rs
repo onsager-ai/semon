@@ -522,6 +522,7 @@ impl NativeOwnership {
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
         crate::storage::sqlite::trace::validate(db)?;
+        crate::storage::sqlite::semantic::validate_owners(db)?;
         if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
             || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
                 != "composite"
@@ -5095,4 +5096,174 @@ mod tests {
         );
         assert_eq!(committed, f.state());
     }
+
+    // Worker43 domain gates. Kept separate from S2's appended test reservation.
+    mod domain43 {
+        use super::*;
+        use crate::model::relation_stage::Phase;
+
+        fn ready(cache: &mut EventCache, f: &Fixture, options: &crate::Options, inputs: &[crate::Input]) -> (crate::model::relation_stage::Batch, crate::model::SemanticModelBatch) {
+            let paths = inputs.iter().map(|input|input.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(cache.begin_semantic_stage_with_journal(&paths,&runtime,true).unwrap(),Outcome::Written);
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() { continue; }
+                let selected = inputs.iter().filter(|input|batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                assert_eq!(selected.len(),batch.paths.len(),"all discovered Raw inputs must be supplied");
+                let model = crate::model::prepare_semantic_batch(options,cache,&selected,&batch,1_790_000_000_000).unwrap();
+                let point = match batch.phase { Phase::Indexing=>"semantic_record_owners",Phase::Identity=>"semantic_record",Phase::Relations=>"semantic_record_relations",Phase::Publication=>"semantic_model_record" };
+                let before = shared_state(f);
+                FAIL_EFFECT.with(|p|p.set(Some(point)));
+                assert!(cache.record_semantic_batch(&batch,model.prepared()).is_err());
+                FAIL_EFFECT.with(|p|p.set(None));
+                assert_eq!(shared_state(f),before,"new owner effects roll back with their stage");
+                assert_eq!(cache.record_semantic_batch(&batch,model.prepared()).unwrap(),Outcome::Written);
+                if batch.phase == Phase::Publication { return (batch,model); }
+            }
+            panic!("domain producer did not reach publication");
+        }
+
+        fn publish(cache: &mut EventCache, f: &Fixture, batch: &crate::model::relation_stage::Batch, model: &crate::model::SemanticModelBatch) {
+            for point in ["semantic_publish_history","semantic_publish_slots","semantic_publish_rows","semantic_publish_owners","semantic_publish_retirement","semantic_publish_trace","semantic_publish_search","semantic_publish_proof","semantic_publish_ack","semantic_publish_head"] {
+                let before = shared_state(f);
+                FAIL_EFFECT.with(|p|p.set(Some(point)));
+                assert!(cache.publish_semantic_catalog(batch,model.prepared()).is_err(),"{point}");
+                FAIL_EFFECT.with(|p|p.set(None));
+                assert_eq!(shared_state(f),before,"{point} must roll back every family");
+            }
+            assert_eq!(cache.publish_semantic_catalog(batch,model.prepared()).unwrap().0,Outcome::Written);
+        }
+
+        fn oracle(cache: &mut EventCache, options: &crate::Options, inputs: &[crate::Input], prepared: &crate::model::PreparedSources) {
+            let mut unbound = EventCache::default();
+            let mut expected = crate::model::prepare_sources(options,&mut unbound,inputs,1_790_000_000_000).unwrap();
+            let binding = cache.query_runtime_binding().unwrap().unwrap();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            use sha2::{Digest,Sha256};
+            let witness = format!("source-runtime-v1:{:x}",Sha256::digest(serde_json::to_vec(&("semon-source-runtime-v1",binding.namespace.as_str(),binding.admission,binding.stream_epoch.as_str(),runtime)).unwrap()));
+            for row in &mut expected.rows {
+                assert_eq!(prepared.rows.iter().find(|r|r.key==row.key).unwrap().query.as_ref().unwrap()["runtime"],witness);
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(witness);
+            }
+            assert_eq!(serde_json::to_value(&prepared.rows).unwrap(),serde_json::to_value(&expected.rows).unwrap());
+            assert_eq!(serde_json::to_value(&prepared.relationships.relations).unwrap(),serde_json::to_value(&expected.relationships.relations).unwrap(),"every relation field, including turn witnesses and placements");
+            assert_eq!(prepared.staged_projection_witness().unwrap(),expected.staged_projection_witness().unwrap());
+        }
+
+        #[test]
+        fn configured_semantic_domain_parent_relations_and_pid_collisions_are_source_owned() {
+            let (f,b,options,_) = model_sources();
+            let options = &options[0]; // Deliberate identical absolute Raw paths across Sources.
+            let inputs = [crate::Input{root:crate::InputRoot::Codex,path:"sessions/parent.jsonl".into()},crate::Input{root:crate::InputRoot::Codex,path:"sessions/child.jsonl".into()}];
+            for (i,input) in inputs.iter().enumerate() {
+                let payload = if i==0 { serde_json::json!({"id":"parent","cwd":"/sanitized"}) } else { serde_json::json!({"id":"child","cwd":"/sanitized","parent_thread_id":"parent","thread_source":"subagent","agent_path":"root/child","agent_nickname":"child"}) };
+                fs::write(input.full_path(options),format!("{}\n{}\n",serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized domain work"}]}}))).unwrap();
+            }
+            crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts{version:2,hostname:"domain".into(),codex_locks:std::collections::BTreeMap::from([("parent".into(),77),("child".into(),88)]),..Default::default()}).unwrap();
+            for (config,foreign) in [(&f.config,"source-b"),(&b,"source-a")] {
+                let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+                for (i,input) in inputs.iter().enumerate() { cache.ingest(&format!("{:064x}",i+900),&input.full_path(options),"codex").unwrap(); }
+                let before = namespace_state(&f,foreign);
+                let (batch,model) = ready(&mut cache,&f,options,&inputs);
+                assert!(!model.prepared().relationships.relations.is_empty(),"actual parent-derived relation");
+                oracle(&mut cache,options,&inputs,model.prepared());
+                let mut next = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+                let (next_batch,next_model) = ready(&mut next,&f,options,&inputs);
+                let before_stale = shared_state(&f);
+                assert_eq!(cache.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
+                assert_eq!(shared_state(&f),before_stale,"foreign epoch holder makes zero writes across the new families");
+                cache = next;
+                let (batch,model) = (next_batch,next_model);
+                publish(&mut cache,&f,&batch,&model);
+                let db = f.db();
+                let parent:(String,String,String) = db.query_row("SELECT parent_native,parent_key,root_key FROM catalog_semantic_endpoints WHERE namespace=?1 AND session_key='child'",[config.namespace.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+                assert_eq!(parent,("parent".into(),"parent".into(),"parent".into()));
+                for relation in model.prepared().relationships.relations.values() {
+                    let stored:String = db.query_row("SELECT metadata FROM catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![config.namespace.as_str(),relation.id],|r|r.get(0)).unwrap();
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(&stored).unwrap(),serde_json::to_value(relation).unwrap());
+                }
+                let pid:String = db.query_row("SELECT native_id FROM catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness='runtime:pid'",params![config.namespace.as_str(),inputs[0].full_path(options).to_string_lossy()],|r|r.get(0)).unwrap();
+                assert_eq!(pid,"77");
+                assert_eq!(namespace_state(&f,foreign),before);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain_claude_pid_and_continuation_are_source_owned() {
+            let (f,b,options,_) = model_sources();
+            let options = &options[1];
+            let inputs = [crate::Input{root:crate::InputRoot::Claude,path:"projects/sanitized/old.jsonl".into()},crate::Input{root:crate::InputRoot::Claude,path:"projects/sanitized/new.jsonl".into()}];
+            fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
+            fs::write(options.claude_home.join("sessions/123.json"),r#"{"sessionId":"new","status":"idle"}"#).unwrap();
+            for (i,input) in inputs.iter().enumerate() {
+                let id = if i==0 {"old"} else {"new"};
+                let mut raw = format!("{}\n",serde_json::json!({"type":"user","sessionId":id,"uuid":format!("user-{id}"),"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":"native continuation"}}));
+                if i==0 { raw.push_str(&format!("{}\n",serde_json::json!({"type":"continued-in","sessionId":"old","continuedInSessionId":"new","timestamp":"2026-10-01T00:01:00Z"}))); }
+                fs::write(input.full_path(options),raw).unwrap();
+            }
+            for (config,foreign) in [(&f.config,"source-b"),(&b,"source-a")] {
+                let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+                for (i,input) in inputs.iter().enumerate() { cache.ingest(&format!("{:064x}",i+1000),&input.full_path(options),"claude").unwrap(); }
+                let before = namespace_state(&f,foreign);
+                let (batch,model) = ready(&mut cache,&f,options,&inputs);
+                assert!(model.prepared().pids.contains(&123));
+                assert!(!model.prepared().lineage_dependencies.is_empty());
+                oracle(&mut cache,options,&inputs,model.prepared());
+                publish(&mut cache,&f,&batch,&model);
+                let db=f.db();
+                let links:i64=db.query_row("SELECT count(*) FROM catalog_native_dependencies WHERE namespace=?1 AND harness='lineage:claude' AND native_id IN ('old','new')",[config.namespace.as_str()],|r|r.get(0)).unwrap();
+                assert!(links>0);
+                let pid:i64=db.query_row("SELECT count(*) FROM catalog_native_dependencies WHERE namespace=?1 AND harness='runtime:pid' AND native_id='123'",[config.namespace.as_str()],|r|r.get(0)).unwrap();
+                assert!(pid>0);
+                assert_eq!(namespace_state(&f,foreign),before);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain_unsupported_owner_profile_refuses_before_enrollment() {
+            let (f,_,_,_)=model_sources();
+            f.db().execute_batch("ALTER TABLE catalog_native_dependencies RENAME TO kept_dependencies; CREATE TABLE catalog_native_dependencies(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id INTEGER NOT NULL,PRIMARY KEY(namespace,source_path,harness,native_id)) STRICT, WITHOUT ROWID; INSERT INTO catalog_native_dependencies VALUES('unattributable','/kept','runtime:pid',123);").unwrap();
+            let before=shared_state(&f);
+            assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).is_err());
+            assert_eq!(shared_state(&f),before,"nonempty unsupported facts are never adopted, rewritten or reset");
+        }
+
+        #[test]
+        fn configured_semantic_domain_withdrawal_retires_only_owned_current_and_keeps_recipes() {
+            let (f,b,options,inputs)=model_sources();
+            let options=&options[0];
+            let input=&inputs[0];
+            for config in [&f.config,&b] {
+                let mut cache=EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+                cache.ingest(&"b".repeat(64),&input.full_path(options),"codex").unwrap();
+                let (batch,model)=ready(&mut cache,&f,options,std::slice::from_ref(input));
+                publish(&mut cache,&f,&batch,&model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            let foreign=namespace_state(&f,"source-b");
+            let slots:Vec<String>=f.db().prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert!(!slots.is_empty());
+            crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts{version:2,hostname:"domain".into(),codex_rollouts:Some(Default::default()),..Default::default()}).unwrap();
+            let mut cache=EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap()).unwrap();
+            let (batch,model)=ready(&mut cache,&f,options,std::slice::from_ref(input));
+            assert!(model.prepared().rows.is_empty());
+            assert_eq!(model.prepared().withdrawals.len(),1);
+            publish(&mut cache,&f,&batch,&model);
+            let db=f.db();
+            assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
+            let retained:String=db.query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get(0)).unwrap();
+            let retained:crate::model::summary::CatalogRow=serde_json::from_str(&retained).unwrap();
+            assert_eq!(retained.lifecycle,crate::model::summary::CatalogLifecycle::Retained);
+            assert!(!retained.sources.is_empty());
+            let after:Vec<String>=db.prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert_eq!(after,slots);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='retained_history'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
+            assert_eq!(namespace_state(&f,"source-b"),foreign);
+        }
+    }
+
 }
