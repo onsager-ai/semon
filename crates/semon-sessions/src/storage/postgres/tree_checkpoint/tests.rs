@@ -47,7 +47,7 @@ fn lock_table(factory: &super::super::tests::Factory, table: &str) -> ::postgres
 fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let blocked = client.query_opt("SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::regclass AND NOT l.granted AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
+        let blocked = client.query_opt("SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::text::regclass AND NOT l.granted AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
         if let Some(row) = blocked {
             return row.get(0);
         }
