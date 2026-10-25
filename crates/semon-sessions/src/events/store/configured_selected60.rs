@@ -839,9 +839,6 @@ fn configured_semantic_selected80_capture_ignores_unrelated_facts_history() {
         observations.capture_relative_status(&model.prepared().rows[0]),
         json!({"state":null,"observation":"unavailable"})
     );
-    // A valid producer contributes at most 128 rows * 64 sources, so the
-    // 8192 guard is structurally unreachable without invalid admission.
-    assert!(128usize * 64usize <= 8192);
 }
 
 #[test]
