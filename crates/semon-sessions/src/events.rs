@@ -1558,6 +1558,13 @@ enum Base {
 }
 
 impl EventCache {
+    #[allow(dead_code)]
+    pub(crate) fn open_semantic(
+        capability: crate::storage::sqlite::semantic::SemanticStaging,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
+        Ok(Self { store:Some(store), scoped:true, explicit_store:true, ..Self::default() })
+    }
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
     ) -> Result<Self, crate::storage::StorageError> {
