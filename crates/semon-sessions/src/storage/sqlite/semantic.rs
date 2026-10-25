@@ -924,7 +924,7 @@ struct AdmittedLookup<'a> {
     replay: Vec<String>,
 }
 
-fn member_capacity(c: &Connection, ns: &str, replay: &[String]) -> Result<usize, StoreError> {
+fn member_capacity(c: &Connection, ns: &str, replay: &[String]) -> Result<i64, StoreError> {
     let keys = serde_json::to_string(replay).map_err(|e| StoreError::Data(e.to_string()))?;
     c.query_row("SELECT count(*) FROM (SELECT DISTINCT source_path FROM (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 UNION ALL SELECT member.source_path FROM json_each(?2) requested JOIN main.session_catalog_sources member ON member.namespace=?1 AND member.session_key=requested.value AND member.lifecycle='current') LIMIT 65)", params![ns,keys], |r| r.get(0)).map_err(error)
 }
@@ -984,7 +984,7 @@ pub(crate) fn name_members_vm_probe(
                 targets.len()
             }
             "candidates" => lookup.name_candidates(name).unwrap().len(),
-            "capacity" => member_capacity(&tx, ns, &targets).unwrap(),
+            "capacity" => member_capacity(&tx, ns, &targets).unwrap() as usize,
             _ => {
                 for target in &targets {
                     tx.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'members',?2,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key=''", params![ns,target]).unwrap();
