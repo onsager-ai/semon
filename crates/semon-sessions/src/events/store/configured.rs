@@ -6893,11 +6893,7 @@ mod tests {
                 .map(|input| input.full_path(options).to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
             cache
-                .begin_semantic_stage_with_journal(
-                    &paths,
-                    &runtime,
-                    true,
-                )
+                .begin_semantic_stage_with_journal(&paths, &runtime, true)
                 .unwrap();
             for _ in 0..128 {
                 let before = shared_state(&f);
