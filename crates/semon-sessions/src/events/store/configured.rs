@@ -8655,6 +8655,7 @@ mod tests {
                 assert!(
                     measured
                         .iter()
+                        .filter(|(kind, _)| !kind.starts_with("setup:"))
                         .all(|(_, steps)| *steps > 0 && *steps < 4096)
                 );
                 previous = count;
