@@ -64,6 +64,8 @@ struct Proxy {
     stop: Arc<Notify>,
     reset: Arc<Notify>,
     reset_done: Arc<AtomicUsize>,
+    startups: Arc<AtomicUsize>,
+    commits: Arc<AtomicUsize>,
     task: Option<tokio::task::JoinHandle<()>>,
     runtime: Option<tokio::runtime::Runtime>,
 }
@@ -82,6 +84,9 @@ impl Proxy {
         let stop = Arc::new(Notify::new());
         let reset = Arc::new(Notify::new());
         let reset_done = Arc::new(AtomicUsize::new(0));
+        let startups = Arc::new(AtomicUsize::new(0));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let (startup_events, commit_events) = (startups.clone(), commits.clone());
         let (r, c, s, arm, reset_event, reset_epoch) = (
             replies.clone(),
             cancels.clone(),
@@ -102,9 +107,12 @@ impl Proxy {
                     Some(_) = children.join_next(), if !children.is_empty() => (),
                     accepted = listener.accept() => {
                         let (mut client, _) = accepted.unwrap(); let r = r.clone(); let c = c.clone(); let arm = arm.clone();
+                        client.set_nodelay(true).unwrap();
+                        let startups = startup_events.clone(); let commits = commit_events.clone();
                         let connection_ordinal = ordinal; ordinal += 1;
                         children.spawn(async move {
                             let mut server = TcpStream::connect(target).await.unwrap();
+                            server.set_nodelay(true).unwrap();
                             let mut header = [0u8; 8];
                             if client.read_exact(&mut header).await.is_err() { return; }
                             let code = u32::from_be_bytes(header[4..8].try_into().unwrap());
@@ -113,11 +121,10 @@ impl Proxy {
                             // the main client and the second is cancellation;
                             // withhold its SSL negotiation response explicitly.
                             if code == 80877102 || (code == 80877103 && connection_ordinal > 0) { c.wait().await; }
-                            if server.write_all(&header).await.is_err() { return; }
                             let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
                             if !(8..=65536).contains(&len) { return; }
-                            let mut rest = vec![0; len - 8];
-                            if client.read_exact(&mut rest).await.is_err() || server.write_all(&rest).await.is_err() { return; }
+                            let mut startup = vec![0; len]; startup[..8].copy_from_slice(&header);
+                            if client.read_exact(&mut startup[8..]).await.is_err() || server.write_all(&startup).await.is_err() { return; }
                             if code == 80877102 { return; }
                             let (mut cr, mut cw) = client.into_split(); let (mut sr, mut sw) = server.into_split();
                             let upstream = async {
@@ -140,13 +147,36 @@ impl Proxy {
                                     let len = cr.read_u32().await?;
                                     if !(4..=1048576).contains(&len) { return std::io::Result::Ok(()); }
                                     let mut body = vec![0; len as usize - 4]; cr.read_exact(&mut body).await?;
-                                    if tag == b'Q' && body == b"COMMIT\0" && arm.frozen.load(Ordering::SeqCst) {
-                                        r.set(true); arm.observed.fetch_add(1, Ordering::SeqCst);
-                                    }
-                                    sw.write_u8(tag).await?; sw.write_u32(len).await?; sw.write_all(&body).await?;
+                                    let commit = tag == b'Q' && body == b"COMMIT\0";
+                                    let armed = commit && arm.frozen.load(Ordering::SeqCst);
+                                    if armed { r.set(true); }
+                                    let mut frame = Vec::with_capacity(1 + len as usize);
+                                    frame.push(tag); frame.extend_from_slice(&len.to_be_bytes()); frame.extend_from_slice(&body);
+                                    sw.write_all(&frame).await?;
+                                    if commit { commits.fetch_add(1, Ordering::SeqCst); }
+                                    // Witness only after the real COMMIT frame is forwarded.
+                                    if armed { arm.observed.fetch_add(1, Ordering::SeqCst); }
                                 }
                             };
                             let downstream = async {
+                                // TLS stays opaque. Plain PostgreSQL frames let us
+                                // witness the first actual ReadyForQuery, not accept().
+                                if code != 80877103 {
+                                    let mut startup = true;
+                                    loop {
+                                        let tag = sr.read_u8().await?;
+                                        let len = sr.read_u32().await?;
+                                        if !(4..=1048576).contains(&len) { return std::io::Result::Ok(()); }
+                                        let mut frame = vec![0; 1 + len as usize];
+                                        frame[0] = tag; frame[1..5].copy_from_slice(&len.to_be_bytes());
+                                        sr.read_exact(&mut frame[5..]).await?;
+                                        r.wait().await;
+                                        cw.write_all(&frame).await?;
+                                        if startup && tag == b'Z' {
+                                            startup = false; startups.fetch_add(1, Ordering::SeqCst);
+                                        }
+                                    }
+                                }
                                 let mut bytes = [0u8; 8192];
                                 loop {
                                     let n = sr.read(&mut bytes).await?; if n == 0 { return std::io::Result::Ok(()); }
@@ -169,6 +199,8 @@ impl Proxy {
             stop,
             reset,
             reset_done,
+            startups,
+            commits,
             task: Some(task),
             runtime: Some(runtime),
         }
@@ -230,7 +262,7 @@ impl PgConnectionFactory for ProxyFactory {
             )
             .parse()
             .unwrap();
-            config.options(&format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.real.schema));
+            config.options(format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.real.schema));
             PgConnection::connect(config, tokio_postgres::NoTls).await
         })
     }
@@ -270,6 +302,80 @@ fn quiesce(real: &Factory, pid: i32) {
         std::thread::yield_now();
     }
 }
+
+// A read-only control on the exact fault pool/proxy/namespace. It cannot create
+// the target receipt or effect, so the later apply_operation must run its callback.
+fn live_control(
+    pool: &PgPool,
+    proxy: &Proxy,
+    label: &str,
+    startups_before: usize,
+    expected_receipts: i64,
+) -> i32 {
+    let calls = AtomicUsize::new(0);
+    let commits_before = proxy.commits.load(Ordering::SeqCst);
+    let start = Instant::now();
+    let result = pool.transaction(
+        &ns("a"),
+        super::txn::TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let pid = tx
+                .driver
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map_err(super::sqlstate::error)?
+                .get::<_, i32>(0);
+            let receipts = tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_operations WHERE operation_id=$1",
+                    &[&identity().operation_id],
+                )
+                .map_err(super::sqlstate::error)?
+                .get::<_, i64>(0);
+            assert_eq!(receipts, expected_receipts, "{label}: target receipts");
+            Ok(pid)
+        },
+    );
+    let startups = proxy.startups.load(Ordering::SeqCst);
+    let commits = proxy.commits.load(Ordering::SeqCst);
+    eprintln!("{label}: result={result:?} callbacks={} startups={startups} commits={commits} elapsed={:?}",
+        calls.load(Ordering::SeqCst), start.elapsed());
+    assert!(result.is_ok(), "{label}: no-fault control failed: {result:?}");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(startups > startups_before, "{label}: no fresh ReadyForQuery");
+    assert_eq!(
+        commits,
+        commits_before + 1,
+        "{label}: control COMMIT not forwarded"
+    );
+    assert_eq!(
+        pool.accounted(),
+        1,
+        "{label}: clean control must remain reusable"
+    );
+    result.unwrap()
+}
+
+fn target_receipts(real: &Factory) -> i64 {
+    let mut client = real.client();
+    client
+        .query_one(
+            "SELECT set_config('semon.namespace', $1, false)",
+            &[&super::namespace_context(&ns("a"))],
+        )
+        .unwrap();
+    client
+        .query_one(
+            "SELECT count(*) FROM semon_pg_operations WHERE operation_id=$1",
+            &[&identity().operation_id],
+        )
+        .unwrap()
+        .get(0)
+}
+
 #[test]
 fn pg_proxy_startup_reply_freeze_bounds_acquisition() {
     let (_, real) = fixture(|_| {});
@@ -300,6 +406,9 @@ fn pg_proxy_read_and_write_reply_freeze_never_submits_commit() {
         let (_, real) = fixture(|_| {});
         let proxy = Proxy::new(target(&real), false);
         let pool = proxy_pool(real.clone(), &proxy);
+        let control_pid = live_control(&pool, &proxy, "precommit control", 0, 0);
+        assert_eq!(count(&real), 0);
+        let commits_before = proxy.commits.load(Ordering::SeqCst);
         let calls = AtomicUsize::new(0);
         let mut pid = 0;
         let start = Instant::now();
@@ -331,37 +440,34 @@ fn pg_proxy_read_and_write_reply_freeze_never_submits_commit() {
                 fault,
             )
         };
-        assert_eq!(result, Err(crate::storage::StorageError::Busy));
         proxy.replies.witness();
         proxy.cancels.witness();
+        eprintln!("precommit write={write}: result={result:?} callbacks={} commits={} elapsed={:?}",
+            calls.load(Ordering::SeqCst), proxy.commits.load(Ordering::SeqCst), start.elapsed());
+        assert_eq!(result, Err(crate::storage::StorageError::Busy));
         assert!(start.elapsed() < Duration::from_secs(3));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pid, control_pid, "fault must use the controlled connection");
+        assert_eq!(
+            proxy.commits.load(Ordering::SeqCst),
+            commits_before,
+            "precommit fault must never forward COMMIT"
+        );
         assert_eq!(pool.accounted(), 0);
         eprintln!(
             "frozen remote residual pid={pid}: {} (local bound excludes remote PIDs)",
             residuals(&real, pid)
         );
+        let startups_before = proxy.startups.load(Ordering::SeqCst);
         proxy.recover();
         quiesce(&real, pid);
         assert_eq!(count(&real), 0);
+        assert_eq!(target_receipts(&real), 0);
+        let replacement = live_control(&pool, &proxy, "precommit recovered", startups_before, 0);
         assert_eq!(
             pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
             Ok(Reconciliation::Absent)
         );
-        let replacement = pool
-            .transaction(
-                &ns("a"),
-                super::txn::TxnKind::ReadSnapshot,
-                &PgCancellation::default(),
-                |tx| {
-                    Ok(tx
-                        .driver
-                        .query_one("SELECT pg_backend_pid()", &[])
-                        .unwrap()
-                        .get::<_, i32>(0))
-                },
-            )
-            .unwrap();
         assert_ne!(replacement, pid);
         assert_eq!(pool.accounted(), 1);
         let reused = pool
@@ -380,13 +486,20 @@ fn pg_proxy_read_and_write_reply_freeze_never_submits_commit() {
             .unwrap();
         assert_eq!(replacement, reused);
         if write {
-            pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), effect)
-                .unwrap();
+            let retry_calls = AtomicUsize::new(0);
+            pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |tx| {
+                retry_calls.fetch_add(1, Ordering::SeqCst);
+                effect(tx)
+            })
+            .unwrap();
             pool.apply_operation(&ns("a"), &identity(), &PgCancellation::default(), |_| {
                 panic!("explicit retry must apply exactly once")
             })
             .unwrap();
             assert_eq!(count(&real), 1);
+            assert_eq!(target_receipts(&real), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(retry_calls.load(Ordering::SeqCst), 1);
         }
     }
 }
@@ -395,6 +508,10 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
     let (_, real) = fixture(|_| {});
     let proxy = Proxy::new(target(&real), false);
     let pool = proxy_pool(real.clone(), &proxy);
+    let control_pid = live_control(&pool, &proxy, "durable control", 0, 0);
+    assert_eq!(count(&real), 0);
+    assert_eq!(target_receipts(&real), 0);
+    let commits_before = proxy.commits.load(Ordering::SeqCst);
     let calls = AtomicUsize::new(0);
     let mut pid = 0;
     let start = Instant::now();
@@ -411,14 +528,20 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
         proxy.commit.set(true);
         Ok(value)
     });
-    assert_eq!(result, Err(crate::storage::StorageError::CommitUncertain));
     proxy.commit.witness();
+    eprintln!("durable armed COMMIT forwarded: {}; result={result:?} callbacks={} elapsed={:?}",
+        proxy.commit.observed.load(Ordering::SeqCst), calls.load(Ordering::SeqCst), start.elapsed());
+    assert_eq!(proxy.commit.observed.load(Ordering::SeqCst), 1);
+    assert_eq!(proxy.commits.load(Ordering::SeqCst), commits_before + 1);
+    assert_eq!(result, Err(crate::storage::StorageError::CommitUncertain));
     proxy.replies.witness();
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(pid, control_pid, "fault must use the controlled connection");
     assert_eq!(pool.accounted(), 0);
     // Direct same-role witness: COMMIT is durable while its ACK is withheld.
     assert_eq!(count(&real), 1);
+    assert_eq!(target_receipts(&real), 1);
     let row = real
         .client()
         .query_one(
@@ -432,8 +555,11 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
         "frozen committed remote residual pid={pid}: {}",
         residuals(&real, pid)
     );
+    let startups_before = proxy.startups.load(Ordering::SeqCst);
     proxy.recover();
     quiesce(&real, pid);
+    let fresh = live_control(&pool, &proxy, "durable recovered", startups_before, 1);
+    assert_ne!(pid, fresh);
     assert_eq!(
         pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
         Ok(Reconciliation::Committed(serde_json::json!({"receipt": 1})))
@@ -443,6 +569,8 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
     })
     .unwrap();
     assert_eq!(count(&real), 1);
+    assert_eq!(target_receipts(&real), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     let replacement = pool
         .transaction(
             &ns("a"),
@@ -458,6 +586,7 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
         )
         .unwrap();
     assert_ne!(pid, replacement);
+    assert_eq!(fresh, replacement);
     assert_eq!(pool.accounted(), 1);
 }
 
@@ -476,7 +605,7 @@ pub(super) fn tls_cancel_handshake_freeze(
         fn connect(&self) -> ConnectFuture<'_> {
             Box::pin(async move {
                 let mut config: tokio_postgres::Config = self.dsn.parse().unwrap();
-                config.options(&format!("-c search_path={} -c idle_session_timeout=10000 -c idle_in_transaction_session_timeout=10000 -c statement_timeout=10000", self.schema));
+                config.options(format!("-c search_path={} -c idle_session_timeout=10000 -c idle_in_transaction_session_timeout=10000 -c statement_timeout=10000", self.schema));
                 PgConnection::connect(config, self.tls.clone()).await
             })
         }

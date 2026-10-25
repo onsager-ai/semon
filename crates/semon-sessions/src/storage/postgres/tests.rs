@@ -38,7 +38,7 @@ impl PgConnectionFactory for Factory {
     fn connect(&self) -> ConnectFuture<'_> {
         Box::pin(async move {
             let mut config: tokio_postgres::Config = self.dsn.parse().unwrap();
-            config.options(&format!("-c search_path={} -c idle_session_timeout=10000 -c idle_in_transaction_session_timeout=10000 -c statement_timeout=10000", self.schema));
+            config.options(format!("-c search_path={} -c idle_session_timeout=10000 -c idle_in_transaction_session_timeout=10000 -c statement_timeout=10000", self.schema));
             config.connect_timeout(Duration::from_secs(2));
             PgConnection::connect(config, tokio_postgres::NoTls).await
         })
@@ -902,7 +902,7 @@ impl PgConnectionFactory for TlsFactory {
     fn connect(&self) -> ConnectFuture<'_> {
         Box::pin(async move {
             let mut config: tokio_postgres::Config = self.dsn.parse().unwrap();
-            config.options(&format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.schema));
+            config.options(format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.schema));
             config.ssl_mode(tokio_postgres::config::SslMode::Require);
             if config.get_hostaddrs().is_empty() {
                 config.hostaddr("127.0.0.1".parse().unwrap());
