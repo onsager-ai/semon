@@ -22,6 +22,7 @@
 pub(crate) mod chunk_proofs;
 pub(crate) mod configured;
 mod launch_calls;
+pub(crate) mod native_commit;
 pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
@@ -6887,8 +6888,6 @@ fn write_index_changes_with_usage_deletes<'tx>(
     semantic_stage::support_sql(transaction, "", "")?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
     // The source ledger fences raw bytes; the sidecar is an independent
     // interpretation dependency. Re-encoding derived proofs changes neither.
     let semantic_change = expected != Some(ledger)
@@ -6897,144 +6896,10 @@ fn write_index_changes_with_usage_deletes<'tx>(
             read_claude_sidecar(&mut statement, path, ledger)?.as_ref()
                 != index.claude_sidecar.as_ref()
         });
-    relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
-    native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
-    measurements.record("relocation", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "relocation_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("relocation")?;
-    let started = measurements.start();
-    let full = super::DirtyRows {
-        usage: if changes.is_none() {
-            index.usage_by_id.keys().cloned().collect()
-        } else {
-            Default::default()
-        },
-        ..super::DirtyRows::default()
-    };
-    measurements.record("dirty_rows", started, 1);
-    write_file_with_usage_deletes(
-        transaction,
-        path,
-        ledger,
-        changes.unwrap_or(&full),
-        index,
-        measurements,
-        usage_deletes,
+    crate::events::native_commit::write(
+        &mut native_commit::Writer { transaction, measurements, namespace, usage_deletes, relationship_started: None, relationship_rows_before: None },
+        crate::events::native_commit::Input { path, ledger, index, changes, expected, semantic_change },
     )?;
-    native_usage::write(transaction, path, ledger, index)?;
-    #[cfg(test)]
-    configured::effect("native_usage")?;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(semantic_stage::support_sql(transaction,
-        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
-        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')")?, [path])?;
-    for id in index
-        .links
-        .session_ids
-        .iter()
-        .chain(&index.links.continued_in)
-    {
-        transaction.execute(
-            semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'lineage:claude',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'lineage:claude',?2)")?,
-            params![path, id],
-        )?;
-    }
-    for id in &index.links.bridges {
-        transaction.execute(
-            semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'bridge:claude',?2)")?,
-            params![path, id],
-        )?;
-    }
-    measurements.record("dependencies", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "dependencies_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("dependencies")?;
-
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(semantic_stage::support_sql(transaction,
-        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
-        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')")?, [path])?;
-    if let Some(header) = &index.codex_header {
-        if let Some(id) = header.native_id(Path::new(path)) {
-            transaction.execute(semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-native:codex',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-native:codex',?2)")?, params![path,id])?;
-        }
-        let metadata =
-            serde_json::to_value(&header.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true)
-            && let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str)
-        {
-            transaction.execute(semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-parent:codex',?2)")?, params![path,parent])?;
-        }
-    }
-    measurements.record("semantic_dependencies", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "semantic_dependencies_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("semantic_dependencies")?;
-    let started = measurements.start();
-    transaction.execute(
-        native_metadata_delete(transaction)?,
-        [archive_index_key(path)],
-    )?;
-    measurements.record("archive_metadata", started, 1);
-    #[cfg(test)]
-    configured::effect("archive_metadata")?;
-    let started = measurements.start();
-    if semantic_change {
-        crate::storage::sqlite::source_journal::invalidate(
-            transaction,
-            namespace,
-            path,
-            "changed",
-        )?;
-        measurements.record("invalidation", started, 1);
-        #[cfg(test)]
-        configured::effect("invalidation")?;
-    } else {
-        measurements.record("representation_repair", started, 1);
-    }
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(
-        semantic_stage::support_sql(transaction,
-            "DELETE FROM session_source_mutations WHERE source_path=?1",
-            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,
-        [path],
-    )?;
-    measurements.record("mutation_retirement", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "mutation_retirement_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("mutation_retirement")?;
     #[cfg(test)]
     {
         let written_after: i64 =

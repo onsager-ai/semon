@@ -489,6 +489,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/source_authority.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
