@@ -383,6 +383,11 @@ struct SourceObservation {
     cached: bool,
 }
 impl PresentationObservations {
+    #[cfg(test)]
+    pub(crate) fn captured_source_count(&self) -> usize {
+        self.sources.len()
+    }
+
     pub(crate) fn capture<'a>(
         options: &crate::Options,
         binding: Option<&crate::storage::QueryRuntimeBinding>,
