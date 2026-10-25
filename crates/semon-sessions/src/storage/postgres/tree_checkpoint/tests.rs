@@ -37,19 +37,24 @@ fn cancellation_fixture() -> (Fixture, PgPool, Arc<super::super::tests::Factory>
 fn lock_table(factory: &super::super::tests::Factory, table: &str) -> ::postgres::Client {
     let mut client = factory.client();
     client
-        .batch_execute(&format!("BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+        ))
         .unwrap();
     client
 }
 
-fn wait_for_lock(client: &mut ::postgres::Client, table: &str) {
+fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let blocked: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::regclass AND NOT l.granted AND a.wait_event_type='Lock')", &[&table]).unwrap().get(0);
-        if blocked {
-            return;
+        let blocked = client.query_opt("SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::regclass AND NOT l.granted AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
+        if let Some(row) = blocked {
+            return row.get(0);
         }
-        assert!(Instant::now() < deadline, "real checkpoint SQL never blocked");
+        assert!(
+            Instant::now() < deadline,
+            "real checkpoint SQL never blocked"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -112,8 +117,14 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
     let host = PgCancellation::default();
     let mut summary = {
         let _scope = selected_read::Scope::enter(&old);
-        Snapshot::restore(pool.clone(), ns("tree\0🦀"), &data.path, &data.ledger, host.clone())
-            .unwrap()
+        Snapshot::restore(
+            pool.clone(),
+            ns("tree\0🦀"),
+            &data.path,
+            &data.ledger,
+            host.clone(),
+        )
+        .unwrap()
     };
     old_cancel.store(true, Ordering::Release);
     let mut lock = lock_table(&real, "semon_pg_native_tree_tools");
@@ -137,31 +148,46 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
             done.send(()).unwrap();
             result
         });
-        wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
+        let pid = wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
         cancelled.store(true, Ordering::Release);
         cancelling.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(!host.is_cancelled(), "request cancellation must not cancel the host");
+        assert!(
+            !host.is_cancelled(),
+            "request cancellation must not cancel the host"
+        );
         // Let SQL complete while the inline cancel transport remains pending.
         lock.batch_execute("ROLLBACK").unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            if lock.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='idle in transaction' AND query LIKE 'SELECT coalesce(octet_length(name)%')", &[]).unwrap().get::<_, bool>(0) {
+            if lock.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='idle in transaction' AND query LIKE 'SELECT coalesce(octet_length(name)%')", &[&pid]).unwrap().get::<_, bool>(0) {
                 break;
             }
-            assert!(Instant::now() < deadline, "query did not finish during held cancel");
+            assert!(
+                Instant::now() < deadline,
+                "query did not finish during held cancel"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(pool.accounted(), 1, "pending I/O must retain the pool slot");
-        assert!(matches!(finished.try_recv(), Err(mpsc::TryRecvError::Empty)), "worker returned before cancellation I/O stopped");
+        assert!(
+            matches!(finished.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "worker returned before cancellation I/O stopped"
+        );
         release.notify_one();
-        assert_eq!(worker.join().unwrap().unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
     });
     assert!(begin.elapsed() < Duration::from_secs(4));
     assert_eq!(pool.accounted(), 0, "tainted connection must be retired");
     // Same deferred checkpoint, new request, fresh connection; neither prior
     // request cancellation may poison it or mutate the independent host token.
     assert_oracle(&mut summary, &data.oracle);
-    assert_eq!(summary.tool_name("tool\0🦀").unwrap(), Some("Bash'\0🦀".into()));
+    assert_eq!(
+        summary.tool_name("tool\0🦀").unwrap(),
+        Some("Bash'\0🦀".into())
+    );
     host.cancel();
     assert!(summary.tool_name("tool\0🦀").is_err());
     std::fs::remove_dir_all(data.root).unwrap();
@@ -170,7 +196,10 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
 #[test]
 fn pg_tree_request_deadline_interrupts_real_usage_and_capture_queries() {
     let (data, pool, factory) = cancellation_fixture();
-    for table in ["semon_pg_native_tree_copied_identities", "semon_pg_native_tree_headers"] {
+    for table in [
+        "semon_pg_native_tree_copied_identities",
+        "semon_pg_native_tree_headers",
+    ] {
         let mut summary = restore(&pool, &data);
         let mut lock = lock_table(&factory, table);
         let begin = Instant::now();
@@ -182,15 +211,28 @@ fn pg_tree_request_deadline_interrupts_real_usage_and_capture_queries() {
                 );
                 let _scope = selected_read::Scope::enter(&control);
                 if table.ends_with("headers") {
-                    Snapshot::restore(pool.clone(), ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).map(|_| ())
+                    Snapshot::restore(
+                        pool.clone(),
+                        ns("tree\0🦀"),
+                        &data.path,
+                        &data.ledger,
+                        PgCancellation::default(),
+                    )
+                    .map(|_| ())
                 } else {
                     summary.load_shared_usage()
                 }
             });
             wait_for_lock(&mut lock, table);
             assert_eq!(pool.accounted(), 1);
-            assert_eq!(worker.join().unwrap().unwrap_err().kind(), io::ErrorKind::TimedOut);
-            assert!(begin.elapsed() < Duration::from_secs(4), "request must expire before 6s statement/lock/acquire limits");
+            assert_eq!(
+                worker.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+            assert!(
+                begin.elapsed() < Duration::from_secs(4),
+                "request must expire before 6s statement/lock/acquire limits"
+            );
             assert_eq!(pool.accounted(), 0);
             lock.batch_execute("ROLLBACK").unwrap();
         });
@@ -211,7 +253,10 @@ fn pg_tree_request_deadline_bounds_acquire_and_precancel_keeps_capacity() {
     let begin = Instant::now();
     {
         let _scope = selected_read::Scope::enter(&control);
-        assert_eq!(summary.tool_name("tool\0🦀").unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            summary.tool_name("tool\0🦀").unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
     }
     assert!(begin.elapsed() < Duration::from_secs(1));
     assert_eq!(pool.accounted(), 1);
@@ -222,11 +267,26 @@ fn pg_tree_request_deadline_bounds_acquire_and_precancel_keeps_capacity() {
     );
     {
         let _scope = selected_read::Scope::enter(&control);
-        assert_eq!(summary.tool_name("tool\0🦀").unwrap_err().kind(), io::ErrorKind::Interrupted);
-        assert!(Snapshot::restore(pool.clone(), ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).is_err());
+        assert_eq!(
+            summary.tool_name("tool\0🦀").unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(
+            Snapshot::restore(
+                pool.clone(),
+                ns("tree\0🦀"),
+                &data.path,
+                &data.ledger,
+                PgCancellation::default()
+            )
+            .is_err()
+        );
     }
     assert_eq!(pool.accounted(), 0);
-    assert_eq!(summary.tool_name("tool\0🦀").unwrap(), Some("Bash'\0🦀".into()));
+    assert_eq!(
+        summary.tool_name("tool\0🦀").unwrap(),
+        Some("Bash'\0🦀".into())
+    );
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
@@ -234,7 +294,14 @@ fn pg_tree_request_deadline_bounds_acquire_and_precancel_keeps_capacity() {
 fn pg_tree_host_cancellation_interrupts_io_without_cancelling_request() {
     let (data, pool, factory) = cancellation_fixture();
     let host = PgCancellation::default();
-    let summary = Snapshot::restore(pool.clone(), ns("tree\0🦀"), &data.path, &data.ledger, host.clone()).unwrap();
+    let summary = Snapshot::restore(
+        pool.clone(),
+        ns("tree\0🦀"),
+        &data.path,
+        &data.ledger,
+        host.clone(),
+    )
+    .unwrap();
     let current = selected_read::SelectedReadControl::default();
     let mut lock = lock_table(&factory, "semon_pg_native_tree_tools");
     let begin = Instant::now();
@@ -245,7 +312,10 @@ fn pg_tree_host_cancellation_interrupts_io_without_cancelling_request() {
         });
         wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
         host.cancel();
-        assert_eq!(worker.join().unwrap().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         assert!(begin.elapsed() < Duration::from_secs(3));
         assert!(current.check().is_ok());
         assert_eq!(pool.accounted(), 0);
