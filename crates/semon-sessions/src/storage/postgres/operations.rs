@@ -1,4 +1,7 @@
-use super::{PgPool, PgCancellation, sqlstate, txn::{PgTxn, TxnKind}};
+use super::{
+    PgCancellation, PgPool, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use serde_json::Value;
 
@@ -12,8 +15,12 @@ pub struct OperationIdentity<'a> {
 
 impl OperationIdentity<'_> {
     fn validate(&self) -> Result<(), StorageError> {
-        if self.operation_id.len() != 64 || !self.operation_id.bytes().all(|b| b.is_ascii_hexdigit())
-            || self.kind.is_empty() || self.kind.len() > 128 || self.kind.contains('\0') {
+        if self.operation_id.len() != 64
+            || !self.operation_id.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.kind.is_empty()
+            || self.kind.len() > 128
+            || self.kind.contains('\0')
+        {
             return Err(StorageError::InvalidArguments);
         }
         Ok(())
@@ -21,36 +28,56 @@ impl OperationIdentity<'_> {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Reconciliation { Committed(Value), Absent }
+pub enum Reconciliation {
+    Committed(Value),
+    Absent,
+}
 
 impl PgTxn<'_> {
-    fn lookup_operation(&mut self, id: &OperationIdentity<'_>) -> Result<Reconciliation, StorageError> {
+    fn lookup_operation(
+        &mut self,
+        id: &OperationIdentity<'_>,
+    ) -> Result<Reconciliation, StorageError> {
         self.check()?;
         let rows = self.driver.query("SELECT kind, request_digest, outcome FROM semon_pg_operations WHERE namespace = $1 AND operation_id = $2",
             &[&self.namespace.as_str(), &id.operation_id]).map_err(sqlstate::error)?;
-        let Some(row) = rows.first() else { return Ok(Reconciliation::Absent); };
+        let Some(row) = rows.first() else {
+            return Ok(Reconciliation::Absent);
+        };
         let kind: String = row.try_get(0).map_err(|_| StorageError::Unavailable)?;
         let digest: Vec<u8> = row.try_get(1).map_err(|_| StorageError::Unavailable)?;
         if kind != id.kind || digest.as_slice() != &id.request_digest[..] {
             return Err(StorageError::InvalidArguments);
         }
-        Ok(Reconciliation::Committed(row.try_get(2).map_err(|_| StorageError::Unavailable)?))
+        Ok(Reconciliation::Committed(
+            row.try_get(2).map_err(|_| StorageError::Unavailable)?,
+        ))
     }
 }
 
 impl PgPool {
-    pub fn reconcile(&self, namespace: &LogicalSourceNamespace, identity: &OperationIdentity<'_>, control: &PgCancellation)
-        -> Result<Reconciliation, StorageError> {
+    pub fn reconcile(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        identity: &OperationIdentity<'_>,
+        control: &PgCancellation,
+    ) -> Result<Reconciliation, StorageError> {
         identity.validate()?;
-        self.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| tx.lookup_operation(identity))
+        self.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
+            tx.lookup_operation(identity)
+        })
     }
 
     // Intentionally private until #478 supplies the typed native effects. This
     // primitive is exercised against real PG, but is not a public SQL callback.
     #[allow(dead_code)]
-    pub(super) fn apply_operation(&self, namespace: &LogicalSourceNamespace, id: &OperationIdentity<'_>,
-        control: &PgCancellation, effect: impl FnOnce(&mut PgTxn<'_>) -> Result<Value, StorageError>)
-        -> Result<Value, StorageError> {
+    pub(super) fn apply_operation(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        id: &OperationIdentity<'_>,
+        control: &PgCancellation,
+        effect: impl FnOnce(&mut PgTxn<'_>) -> Result<Value, StorageError>,
+    ) -> Result<Value, StorageError> {
         id.validate()?;
         self.transaction(namespace, TxnKind::Write, control, |tx| {
             tx.check()?;
