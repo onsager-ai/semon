@@ -60,8 +60,14 @@ pub(crate) fn parser_fixture(harness: &str) -> Fixture {
     }
     cache.flush_cold_writes().unwrap();
     drop(cache);
+    capture_fixture(root, harness)
+}
+fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
+    let cache_path = root.join("index.json");
+    let path = root.join("one.jsonl");
     let mut cache = EventCache::open(&cache_path).unwrap();
     let index = scan_file(&path, harness, &mut cache, &mut false).unwrap();
+    cache.flush_cold_writes().unwrap();
     let mut oracle = index.tree_summary.clone().unwrap();
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
@@ -147,6 +153,22 @@ pub(crate) fn parser_fixture(harness: &str) -> Fixture {
         sources,
         rows,
     }
+}
+pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
+    use std::io::Write;
+    let body = match harness {
+        "claude" => format!("{}\n{}\n",
+            serde_json::json!({"type":"user","uuid":"result🦀","timestamp":"2026-09-29T00:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool\0🦀","content":"done"}]}}),
+            serde_json::json!({"type":"assistant","uuid":"new-record🦀","timestamp":"2026-09-29T00:00:04Z","message":{"id":"new-message🦀","role":"assistant","model":"claude-new🦀","content":[{"type":"tool_use","id":"new-tool\0\u{1f}🦀","name":"Write\n\t'🦀","input":{}}],"usage":{"input_tokens":8,"output_tokens":5}}})
+        ),
+        "codex" => format!("{}\n{}\n",
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-new🦀","cwd":"/new🦀"}}),
+            serde_json::json!({"type":"token_usage_record","timestamp":"2026-09-29T00:00:03Z","payload":{"thread_id":"t\0🦀","session_id":"s\0🦀","turn_id":"new-turn","response_id":"new-response","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18,"cached_input_tokens":2,"reasoning_output_tokens":0}}})
+        ),
+        _ => unreachable!(),
+    };
+    std::fs::OpenOptions::new().append(true).open(data.root.join("one.jsonl")).unwrap().write_all(body.as_bytes()).unwrap();
+    capture_fixture(data.root.clone(),harness)
 }
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.

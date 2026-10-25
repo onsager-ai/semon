@@ -2,7 +2,7 @@ use super::*;
 use crate::storage::postgres::{
     PgCancellation, PgPool,
     tests::{fixture, limits, ns},
-    tree_checkpoint::{Snapshot, tests::{Fixture, OracleValue as Value, install, install_without_tree, oracle_witness, parser_fixture}},
+    tree_checkpoint::{Snapshot, tests::{Fixture, OracleValue as Value, append_fixture, install, install_without_tree, oracle_witness, parser_fixture}},
     txn::TxnKind,
 };
 
@@ -29,7 +29,7 @@ fn assert_dimensions(tx: &mut PgTxn<'_>, data: &Fixture, id: i64) {
             if *key=="closed" { Value::Integer(i64::from(r.get::<_,bool>(at))) }
             else {r.get::<_,Option<Vec<u8>>>(at).map(|v|Value::Text(String::from_utf8(v).unwrap())).unwrap_or(Value::Null)}
         }).collect::<Vec<_>>()).collect::<Vec<_>>();
-        let mut expected = data.rows.iter().find(|(f,_)|*f==family).unwrap().1.iter().filter(|row|row.iter().any(|(k,v)|k=="projection_id" && v==&Value::Integer(oracle_id))).map(|row|columns.iter().map(|key|row.iter().find(|(k,_)|k==key).unwrap().1.clone()).collect::<Vec<_>>()).collect::<Vec<_>>();
+        let mut expected = data.rows.iter().find(|(f,_)|*f==family).unwrap().1.iter().filter(|row|row.iter().any(|(k,v)|k=="projection_id" && v==&Value::Integer(oracle_id))).map(|row|columns.iter().map(|key|row.iter().find(|(k,_)|k.as_str()==*key).unwrap().1.clone()).collect::<Vec<_>>()).collect::<Vec<_>>();
         expected.sort_by(|a,b|match (&a[0],&b[0]) { (Value::Text(a),Value::Text(b))=>a.as_bytes().cmp(b.as_bytes()),_=>panic!("text dimension key") });
         assert_eq!(actual,expected,"{family}");
     }
@@ -91,7 +91,15 @@ fn pg_tree_writer_every_effect_fault_rolls_back_usage_dimensions_and_foreign_sou
     let mut boundaries = 0;
     for fault in 1..64 {
         FAIL_AFTER.with(|p|p.set(Some(fault)));
-        let result = pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|stage_fixture(tx,&data));
+        let result = pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+            // A preceding NativeUsage replacement is part of the SAME borrowed
+            // transaction and must roll back with each failing Tree effect.
+            let index = &data.sources.iter().find(|(path,_,_)|path==&data.path).unwrap().2;
+            let mut usage = crate::storage::postgres::native_usage::Usage::new(tx)?;
+            crate::events::store::native_usage::algorithm::begin(&mut usage,&data.path,None,&data.ledger,false)?;
+            crate::events::store::native_usage::algorithm::write(&mut usage,&data.path,&data.ledger,index)?;
+            stage_fixture(tx,&data)
+        });
         let remaining = FAIL_AFTER.with(|p|p.replace(None));
         if result.is_ok() {
             assert!(remaining.is_some());
@@ -102,6 +110,53 @@ fn pg_tree_writer_every_effect_fault_rolls_back_usage_dimensions_and_foreign_sou
         assert_eq!(baseline("tree\0é"),foreign);
     }
     assert!(boundaries>=7,"must fault generation and each emitted dimension");
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_tree_writer_same_source_retains_closed_names_models_and_replacement_is_new() {
+    let data = parser_fixture("claude");
+    let (pool,_) = fixture(|_|{});
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+        install(tx,&data)?;
+        let original: i64 = tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&data.path.as_bytes()]).unwrap().get(0);
+        let before = state(tx);
+        tx.driver.batch_execute("SAVEPOINT staged").unwrap();
+        let source = source(tx,&data.path)?;
+        let mut delta = Summary::default();
+        delta.closed_tools.insert("tool\0🦀".into());
+        delta.closed_tools.insert("null-name\0🦀".into());
+        delta.tools.insert("new\0\u{1f}'🦀".into(),"Read\n\t🦀".into());
+        delta.models.insert("new-model🦀".into());
+        delta.cwd=Some("/control\0\u{1f}\n🦀".into());
+        let (id,digest) = stage(tx,&data.path,&data.ledger,Some(&data.ledger),source,&delta)?;
+        assert_eq!(id,original);
+        let old = tx.driver.query_one("SELECT name,closed FROM semon_pg_native_tree_tools WHERE projection_id=$1 AND tool_id=$2",&[&id,&"tool\0🦀".as_bytes()]).unwrap();
+        assert_eq!(old.get::<_,Vec<u8>>(0),"Bash'\0🦀".as_bytes());
+        assert!(old.get::<_,bool>(1));
+        assert!(tx.driver.query_one("SELECT name FROM semon_pg_native_tree_tools WHERE projection_id=$1 AND tool_id=$2",&[&id,&"null-name\0🦀".as_bytes()]).unwrap().get::<_,Option<Vec<u8>>>(0).is_none());
+        assert!(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_models WHERE projection_id=$1",&[&id]).unwrap().get::<_,i64>(0)>=2);
+        // The persisted digest includes old models/labels and open tools, not
+        // merely the rows supplied by this delta.
+        assert_eq!(digest,persisted_witness(tx,id)?);
+        let input_rows = TreeRows::new(&delta).unwrap();
+        let delta_digest = witness::digest(input_rows.labels(),input_rows.models.iter().map(String::as_str),input_rows.tools.iter().map(|(k,v)|(k.as_str(),v.as_str())));
+        assert_ne!(digest,delta_digest);
+        // Incomplete staged rows can never be promoted by another stage call.
+        assert!(stage(tx,&data.path,&data.ledger,Some(&data.ledger),source,&delta).is_err());
+        tx.driver.batch_execute("ROLLBACK TO SAVEPOINT staged").unwrap();
+        assert_eq!(state(tx),before);
+        // Real shared NativeUsage replacement, rather than editing a source ID.
+        let index = &data.sources.iter().find(|(path,_,_)|path==&data.path).unwrap().2;
+        let mut usage = crate::storage::postgres::native_usage::Usage::new(tx)?;
+        let replacement = crate::events::store::native_usage::algorithm::begin(&mut usage,&data.path,None,&data.ledger,false)?;
+        crate::events::store::native_usage::algorithm::write(&mut usage,&data.path,&data.ledger,index)?;
+        assert_ne!(replacement,source);
+        let (id,_) = stage(tx,&data.path,&data.ledger,Some(&data.ledger),replacement,input(&data))?;
+        assert_ne!(id,original);
+        assert_dimensions(tx,&data,id);
+        Ok(())
+    }).unwrap();
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
@@ -153,5 +208,53 @@ fn pg_tree_writer_witness_charges_before_decode_and_obeys_cancel_deadline() {
     let cancelled = PgCancellation::default();
     cancelled.cancel();
     assert!(pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&cancelled,|tx|stage_fixture(tx,&data)).is_err());
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_tree_writer_real_append_reuses_generation_matches_sqlite_closed_history() {
+    for harness in ["claude","codex"] {
+        let initial = parser_fixture(harness);
+        let appended = append_fixture(&initial,harness);
+        assert!(appended.ledger.offset>initial.ledger.offset);
+        let expected = oracle_witness(&appended);
+        let (pool,_) = fixture(|_|{});
+        pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+            install(tx,&initial)?;
+            let original: i64 = tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&initial.path.as_bytes()]).unwrap().get(0);
+            let old_source = source(tx,&initial.path)?;
+            let index = &appended.sources.iter().find(|(path,_,_)|path==&appended.path).unwrap().2;
+            let mut usage = crate::storage::postgres::native_usage::Usage::new(tx)?;
+            let reused = crate::events::store::native_usage::algorithm::begin(&mut usage,&initial.path,Some(&initial.ledger),&appended.ledger,true)?;
+            crate::events::store::native_usage::algorithm::write(&mut usage,&appended.path,&appended.ledger,index)?;
+            assert_eq!(reused,old_source);
+            // Test-only physical file import models the preceding core family.
+            // No production file writer/ledger ACK is introduced by Tree.
+            let l = &appended.ledger;
+            tx.driver.execute("UPDATE semon_pg_native_files SET dev=$2::text::numeric,ino=$3::text::numeric,size=$4::text::numeric,mtime_ns=$5,ctime_ns=$6,resume_at=$7::text::numeric,head_sha256=$8,tail_sha256=$9 WHERE path=$1",&[&appended.path.as_bytes(),&l.stat.dev.to_string(),&l.stat.ino.to_string(),&l.stat.size.to_string(),&l.stat.modified_ns.to_be_bytes().as_slice(),&l.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&l.offset.to_string(),&l.prefix.as_slice(),&l.tail.as_slice()]).map_err(sqlstate::error)?;
+            let (id,digest) = stage(tx,&appended.path,l,Some(&initial.ledger),reused,input(&appended))?;
+            assert_eq!(id,original);
+            assert_eq!(digest,expected);
+            assert_dimensions(tx,&appended,id);
+            if harness=="claude" {
+                let old = tx.driver.query_one("SELECT name,closed FROM semon_pg_native_tree_tools WHERE projection_id=$1 AND tool_id=$2",&[&id,&"tool\0🦀".as_bytes()]).unwrap();
+                assert_eq!(old.get::<_,Vec<u8>>(0),"Bash'\0🦀".as_bytes());
+                assert!(old.get::<_,bool>(1));
+            }
+            Ok(())
+        }).unwrap();
+        std::fs::remove_dir_all(initial.root).unwrap();
+    }
+}
+
+#[test]
+fn pg_tree_writer_warm_schema_drift_refuses_before_family_callback() {
+    let data = parser_fixture("claude");
+    let (pool,factory) = fixture(|b|b.max_connections=1);
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install_without_tree(tx,&data)).unwrap();
+    factory.client().batch_execute("ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY").unwrap();
+    let mut entered = false;
+    assert!(pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {entered=true;stage_fixture(tx,&data)}).is_err());
+    assert!(!entered);
     std::fs::remove_dir_all(data.root).unwrap();
 }
