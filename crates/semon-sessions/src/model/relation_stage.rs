@@ -913,6 +913,11 @@ impl Context {
                         let receipt = builder.placed.iter().find_map(|(at, entries)| {
                             (h.out.kind == "relay"
                                 && outgoing.is_none()
+                                && h.previews.as_ref().is_some_and(|previews| {
+                                    previews.values().any(|preview| {
+                                        matches!(preview.kind, "received_cross" | "received_agent")
+                                    })
+                                })
                                 && builder.files[at.0].harness() == "claude"
                                 && entries.iter().any(|(handoff, place)| {
                                     *handoff == index && *place == Place::In
