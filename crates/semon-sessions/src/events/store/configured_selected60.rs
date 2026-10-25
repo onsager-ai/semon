@@ -1,5 +1,166 @@
 use super::*;
 
+// Both stores run the native producer independently. Only the independently
+// committed publication coordinates enter the existing publication oracle.
+fn selected75_native(
+    records: &[Value],
+    check: impl FnOnce(
+        &crate::storage::sqlite::proof_generations::Lease,
+        &crate::Options,
+        &HostSourceBinding,
+        &str,
+        &Connection,
+    ),
+) {
+    use std::io::Write;
+
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let path = input.full_path(options);
+    let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for record in records {
+        writeln!(raw, "{record}").unwrap();
+    }
+    drop(raw);
+    cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected75-native");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
+    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let prepared = crate::model::prepare_sources(options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
+    ordinary.publish_catalog_projection(&crate::slot_projection::Publication {
+        rows: &prepared.rows,
+        transcripts: Some(&prepared.transcripts),
+    }, prepared.base_generation.as_deref()).unwrap();
+    let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    check(&lease, options, &host, key, &db);
+    cache.finish_semantic_stage(batch.epoch).unwrap();
+}
+
+fn selected75_json_oracle(
+    lease: &crate::storage::sqlite::proof_generations::Lease,
+    options: &crate::Options,
+    host: &HostSourceBinding,
+    db: &Connection,
+    query: &str,
+    status: u16,
+) -> Value {
+    let (snapshot, actual) = read_bound(lease, options, host, query, None, SessionSourceReadMode::LocalOrPinnedProvider, &crate::SelectedReadControl::default()).unwrap();
+    assert_eq!(snapshot.namespace, lease.snapshot().namespace);
+    assert_eq!(snapshot.admission, lease.snapshot().admission);
+    assert_eq!(snapshot.stream_epoch, lease.snapshot().stream_epoch);
+    assert_eq!(snapshot.publication_generation, lease.snapshot().publication_generation);
+    assert_eq!(snapshot.proof_generation, lease.snapshot().proof_generation);
+    assert_eq!(snapshot.consumed_prefix, lease.snapshot().consumed_prefix);
+    let expected = crate::session_transcript_range_with_mode(options, &host.source_key, query, None, SessionSourceReadMode::LocalOrPinnedProvider);
+    assert_eq!(actual.status, status, "{}", String::from_utf8_lossy(&actual.body));
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.content_type, expected.content_type);
+    assert_eq!(actual.etag, expected.etag);
+    let actual: Value = serde_json::from_slice(&actual.body).unwrap();
+    let mut expected: Value = serde_json::from_slice(&expected.body).unwrap();
+    if expected.get("identity").is_some() {
+        publication_oracle(&mut expected, db, &host.source_key);
+        assert_eq!(actual["identity"]["generation"], lease.snapshot().publication_generation);
+    }
+    assert_eq!(actual, expected, "full native reply for {query}");
+    actual
+}
+
+#[test]
+fn configured_semantic_selected75_native_long_output_walks_every_scalar_chunk() {
+    let text = "scalar 中😀 quote\" slash\\ newline\n".repeat(9_000);
+    assert!(text.len() > 3 * crate::json_string::JSON_STRING_CHECKPOINT_BYTES as usize);
+    let record = |time, payload| json!({"timestamp":time,"type":"response_item","payload":payload});
+    selected75_native(&[
+        record("2026-10-01T00:02:00Z", json!({"type":"function_call","call_id":"selected75-long","name":"selected75_long_output","arguments":"{}"})),
+        record("2026-10-01T00:02:01Z", json!({"type":"function_call_output","call_id":"selected75-long","output":text})),
+    ], |lease, options, host, key, db| {
+        let page = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&after=0&limit=32"), 200);
+        let entry = page["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "selected75_long_output").unwrap();
+        let slot = entry["slot"].as_u64().unwrap();
+        let generation = page["projection"]["generation"].as_str().unwrap();
+        let mut joined = String::new();
+        let mut chunks = 0;
+        for chunk in 0..32 {
+            let query = format!("sid={key}&generation={generation}&after={slot}&limit=1&field_chunk={chunk}");
+            let reply = selected75_json_oracle(lease, options, host, db, &query, 200);
+            assert_eq!(reply["projection"]["generation"], generation);
+            assert_eq!(reply["slot"], slot);
+            assert_eq!(reply["field"]["chunk"], chunk);
+            assert_eq!(reply["field"]["name"], "out");
+            joined.push_str(reply["text"].as_str().unwrap());
+            chunks += 1;
+            if reply["field"]["complete"] == true {
+                assert!(reply["field"]["next"].is_null());
+                break;
+            }
+            assert_eq!(reply["field"]["next"], chunk + 1);
+        }
+        assert!(chunks >= 3);
+        assert_eq!(joined.as_bytes(), text.as_bytes());
+        let invalid = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&generation={generation}&after={slot}&limit=1&field_chunk={chunks}"), 400);
+        assert_eq!(invalid["error"]["code"], "invalid_arguments");
+    });
+}
+
+#[test]
+fn configured_semantic_selected75_native_script_output_and_image_parts() {
+    let script = "text(await tools.exec_command({cmd:'printf selected75'}));";
+    let output = "selected75 command output\n中😀\n";
+    // The existing attachment fixture accepts this recorded PNG header. It is
+    // decoded only by the native attachment reader, without image processing.
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    let record = |time, kind, payload| json!({"timestamp":time,"type":kind,"payload":payload});
+    selected75_native(&[
+        record("2026-10-01T00:02:00Z", "response_item", json!({"type":"custom_tool_call","call_id":"selected75-script","name":"exec","status":"completed","input":script})),
+        record("2026-10-01T00:02:01Z", "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"selected75-item","command":["/bin/zsh","-lc","printf selected75"],"cwd":"file:///sanitized","exit_code":0,"duration":{"secs":1,"nanos":0},"aggregated_output":output}})),
+        record("2026-10-01T00:02:02Z", "response_item", json!({"type":"custom_tool_call_output","call_id":"selected75-script","output":[{"type":"input_text","text":"Script completed"}]})),
+        record("2026-10-01T00:03:00Z", "response_item", json!({"type":"message","role":"user","content":[{"type":"input_text","text":"recorded image"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}]})),
+    ], |lease, options, host, key, db| {
+        let page = selected75_json_oracle(lease, options, host, db, &format!("sid={key}&after=0&limit=32"), 200);
+        let entries = page["entries"].as_array().unwrap();
+        let command = entries.iter().find(|entry| entry["arg"] == "printf selected75").unwrap();
+        let generation = page["projection"]["generation"].as_str().unwrap();
+        let slot = command["slot"].as_u64().unwrap();
+        let query = format!("sid={key}&generation={generation}&after={slot}&limit=1");
+        let expanded = selected75_json_oracle(lease, options, host, db, &format!("{query}&part=script"), 200);
+        assert_eq!(expanded["entries"][0]["scriptText"], script);
+        assert_eq!(expanded["entries"][0]["scriptTruncated"], false);
+        let expanded = selected75_json_oracle(lease, options, host, db, &format!("{query}&part=output"), 200);
+        assert_eq!(expanded["entries"][0]["out"], output);
+        assert_eq!(expanded["entries"][0]["outputTruncated"], false);
+        let unsupported = selected75_json_oracle(lease, options, host, db, &format!("{query}&field_chunk=0"), 422);
+        assert_eq!(unsupported["error"]["code"], "field_unsupported");
+
+        let image = entries.iter().find(|entry| entry["img"].as_array().is_some_and(|images| !images.is_empty())).unwrap();
+        let slot = image["slot"].as_u64().unwrap();
+        let images = image["img"].as_array().unwrap();
+        for ordinal in 0..images.len() {
+            let query = format!("sid={key}&generation={generation}&after={slot}&limit=1&part=attachment&image={ordinal}");
+            let (snapshot, actual) = read_bound(lease, options, host, &query, None, SessionSourceReadMode::LocalOrPinnedProvider, &crate::SelectedReadControl::default()).unwrap();
+            assert_eq!(snapshot.proof_generation, lease.snapshot().proof_generation);
+            assert_eq!(snapshot.publication_generation, lease.snapshot().publication_generation);
+            let expected = crate::session_transcript_range_with_mode(options, &host.source_key, &query, None, SessionSourceReadMode::LocalOrPinnedProvider);
+            assert_eq!(actual.status, 200);
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(actual.content_type, "image/png");
+            assert_eq!(actual.content_type, expected.content_type);
+            assert_eq!(actual.etag, expected.etag);
+            assert_eq!(actual.body, expected.body);
+            assert_eq!(actual.body, png.as_slice());
+        }
+    });
+}
+
 fn bytes(
     lease: &crate::storage::sqlite::proof_generations::Lease,
     options: &crate::Options,
