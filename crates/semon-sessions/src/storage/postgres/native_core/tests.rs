@@ -379,7 +379,9 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageErr
             let rows = tx
                 .driver
                 .query(
-                    &format!("SELECT row_to_json(t)::text FROM semon_pg_native_{family} t WHERE namespace=$1 ORDER BY row_to_json(t)::text"),
+                    // Events, signals and Codex usage have a scalar `t` column.
+                    // Explicit whole-row syntax prevents it shadowing the alias.
+                    &format!("SELECT row_to_json(t.*)::text FROM semon_pg_native_{family} t WHERE namespace=$1 ORDER BY row_to_json(t.*)::text"),
                     &[&tx.namespace.as_str().as_bytes()],
                 )
                 .map_err(|error| {
