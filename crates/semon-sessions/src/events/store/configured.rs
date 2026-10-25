@@ -8106,8 +8106,7 @@ mod tests {
                 claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
             publish(&mut cache, &f, &peers, &peers_model);
             cache.finish_semantic_stage(peers.epoch).unwrap();
-            let (old, old_model) =
-                claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            let (old, old_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let selector = Selector::ClaudeName {
                 name: "worker".into(),
             };
@@ -8123,56 +8122,130 @@ mod tests {
             };
             let native_before = event_rows();
             assert_eq!(
-                cache.semantic_select(old.epoch, &selector).unwrap_err().to_string(),
+                cache
+                    .semantic_select(old.epoch, &selector)
+                    .unwrap_err()
+                    .to_string(),
                 "semantic_claude_name_members_pending"
             );
             let saved = cursors();
-            let unfinished = saved.iter().find(|(_, after, done)| !after.is_empty() && !done).unwrap().clone();
-            assert!(saved.iter().any(|(_, after, done)| after.is_empty() && !done));
+            let unfinished = saved
+                .iter()
+                .find(|(_, after, done)| !after.is_empty() && !done)
+                .unwrap()
+                .clone();
+            assert!(
+                saved
+                    .iter()
+                    .any(|(_, after, done)| after.is_empty() && !done)
+            );
             assert_eq!(saved.len(), 33);
             let committed = shared_state(&f);
-            assert_eq!(cache.publish_semantic_catalog(&old, old_model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&old, old_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
             assert_eq!(shared_state(&f), committed);
             assert_eq!(event_rows(), native_before, "discovery does not replay Raw");
             drop(cache);
             let mut cache = open(&f.config);
-            assert_eq!(cursors(), saved, "unfinished progress was committed before close");
+            assert_eq!(
+                cursors(),
+                saved,
+                "unfinished progress was committed before close"
+            );
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            cache.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap();
+            cache
+                .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+                .unwrap();
             let mut advanced = false;
             for _ in 0..256 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
                 let current = cursors();
                 if current.contains(&(unfinished.0.clone(), unfinished.1.clone(), true)) {
-                    assert!(current.iter().all(|(_, after, done)| !after.is_empty() && *done));
+                    assert!(
+                        current
+                            .iter()
+                            .all(|(_, after, done)| !after.is_empty() && *done)
+                    );
                     assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'", [], |r| r.get::<_, i64>(0)).unwrap(), 34);
                     advanced = true;
                     break;
                 }
-                assert_eq!(current, saved, "reset pages preserve the unfinished member keyset");
+                assert_eq!(
+                    current, saved,
+                    "reset pages preserve the unfinished member keyset"
+                );
                 if !batch.paths.is_empty() {
-                    let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
-                    let model = crate::model::prepare_semantic_batch(options, &mut cache, &selected, &batch, 1_790_000_000_000).unwrap();
-                    assert_eq!(cache.record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+                    let selected = inputs
+                        .iter()
+                        .filter(|input| {
+                            batch
+                                .paths
+                                .contains(&input.full_path(options).to_string_lossy().into_owned())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let model = crate::model::prepare_semantic_batch(
+                        options,
+                        &mut cache,
+                        &selected,
+                        &batch,
+                        1_790_000_000_000,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        cache
+                            .record_semantic_batch(&batch, model.prepared())
+                            .unwrap(),
+                        Outcome::Written
+                    );
                 }
             }
-            assert!(advanced, "the reopened producer consumes the remaining member suffix");
+            assert!(
+                advanced,
+                "the reopened producer consumes the remaining member suffix"
+            );
             let (fresh, fresh_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let resumed = cursors();
-            assert!(resumed.iter().all(|(_, after, done)| !after.is_empty() && *done));
-            assert!(resumed.contains(&(unfinished.0, unfinished.1, true)), "the exhausted keyset completes without restarting its prefix");
+            assert!(
+                resumed
+                    .iter()
+                    .all(|(_, after, done)| !after.is_empty() && *done)
+            );
+            assert!(
+                resumed.contains(&(unfinished.0, unfinished.1, true)),
+                "the exhausted keyset completes without restarting its prefix"
+            );
             for (key, after, done) in saved.iter().filter(|(_, _, done)| *done) {
-                assert!(resumed.contains(&(key.clone(), after.clone(), *done)), "completed prefixes stay unchanged");
+                assert!(
+                    resumed.contains(&(key.clone(), after.clone(), *done)),
+                    "completed prefixes stay unchanged"
+                );
             }
-            assert_eq!(event_rows(), native_before, "restart does not duplicate native history");
+            assert_eq!(
+                event_rows(),
+                native_before,
+                "restart does not duplicate native history"
+            );
             assert_ne!(fresh.epoch, old.epoch);
             let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 2, "ambiguity is bounded to two candidates");
-            assert_eq!(selector_value(actual), selector_value(ordinary.semantic_select(reference.epoch, &selector).unwrap()));
+            assert_eq!(
+                selector_value(actual),
+                selector_value(
+                    ordinary
+                        .semantic_select(reference.epoch, &selector)
+                        .unwrap()
+                )
+            );
             oracle(&cache, options, &inputs, fresh_model.prepared());
             publish(&mut cache, &f, &fresh, &fresh_model);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
