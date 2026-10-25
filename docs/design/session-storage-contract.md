@@ -1453,3 +1453,48 @@ qualifications remain 0/None; generic catalog completeness remains partial.
 Affected-owner retirement, complete History/slot/search lifetimes, native
 PID/lineage/relations/withdrawals/incidents, S2-S4, complete PG selection,
 migration/cutover/rollback, Hub #313 and the #380 merge hold remain outstanding.
+
+## S2 private immutable generations and reader custody
+
+The private, owned composite SQLite producer writes immutable selected metadata,
+original slot recipes and path/ledger references in the same transaction as its
+publication proof, Current/History effects and claim ACK. Generation identity is
+SHA-256 over a domain-separated tuple of logical namespace, admission, stream
+epoch and the real producer publication proof digest. Existing durable publication
+identity reconciles uncertain write ACKs; lease expiry never implies completion.
+
+A host opens one private `ReaderRuntime`, cloning it for concurrent requests.
+Explicit runtime takeover advances a durable epoch and fences every old reader.
+Writer batch advancement does not change this reader epoch. A reader first names
+an exact generation, then acquires a token-bound lease (maximum 60 seconds, 64
+leases per namespace). Renewal checks admission, stream and runtime ownership;
+release is explicit and fenced. Retrying an uncertain acquire uses the same token
+and expected generation, so it cannot accidentally bind to a newer Current.
+Expired/fenced lease cleanup is bounded and cannot authorize a remote write.
+
+`ProofReaderLease` exposes the pinned snapshot and private record/recipe-page
+reads. The adapter uses existing `Sources`, `Focused`, `Records::finish` and native
+record parsing, with database coordinates supplied only by NativeOwnership.
+Options and SessionSourceReader retain their existing, independent Raw authority.
+Reads check their lease before I/O and freshly before response publication;
+providers reauthorize through the existing contract. All page records are buffered
+and all touched blocks rechecked before success. The response carries exactly the
+pinned proof-generation root. This qualification cohort admits eight recipes per
+page, 1 MiB per native record and 2 MiB of returned record JSON; over-budget work
+refuses rather than replaying history. Host deadline/cancellation is checked at
+each provider-neutral range boundary.
+
+The existing outgoing-proof preservation algorithm now includes the union of
+Current, actual retained-source ledger references and live epoch-valid leases.
+Publication collects at most 16 unreferenced generation rows; proof mutation
+collects at most 16 obsolete manifest generations per pass. GC never deletes Raw.
+Reader handles hold no SQL connection between calls, so continued L1 reads after
+L2/L3 do not rely solely on a long MVCC transaction. Each individual call still
+uses a short coherent metadata/proof snapshot.
+
+This is a private connected implementation increment, not complete #478 or #477.
+Tests are authored under the existing configured CI prefix and have not run
+locally. Exact-head CI, formatting/clippy, PostgreSQL parity, full-domain selected
+presentation and retained lifecycle qualification, hosted custody/RLS, migration,
+performance and fresh independent review remain required. Public qualifications
+remain zero. #380 completion still precedes any #477 main merge.

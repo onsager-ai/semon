@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 mod conformance;
 pub mod native_events;
 pub(crate) mod navigation;
+pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub mod source_observations;
 pub(crate) mod sqlite;
