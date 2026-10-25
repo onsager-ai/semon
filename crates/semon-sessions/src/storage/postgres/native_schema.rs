@@ -38,6 +38,15 @@ const TABLES: &[Table] = &[
     Table { name: "recovery", columns: "cursor bytea,done boolean", key: "cursor" },
 ];
 
+const FOUNDATION: &[Table] = &[
+    Table { name: "operations", columns: "operation_id character(64),kind text,request_digest bytea,outcome jsonb,committed_at timestamp with time zone", key: "operation_id" },
+    Table { name: "source_state", columns: "revision bigint,backfill_state text?,catalog_generation text?,semantic_pending boolean,catalog_completeness text?,search_backfill_complete boolean,recovery_reason text?", key: "" },
+    Table { name: "source_members", columns: "source_path bytea", key: "source_path" },
+    Table { name: "source_invalidations", columns: "source_path bytea,revision bigint,reason text,observed_at bigint", key: "source_path" },
+    Table { name: "source_receipts", columns: "operation_id text,payload_digest text,outcome text", key: "operation_id" },
+    Table { name: "source_intents", columns: "operation_id text,payload_digest text,payload text,sequence bigint", key: "operation_id" },
+];
+
 // Indexes are part of the same authoritative manifest, including key order.
 const INDEXES: &[(&str, &str, &str, bool)] = &[
     ("files_path", "files", "path", true),
@@ -57,7 +66,7 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
     hash.update(b"semon-private-native-v3");
-    for table in TABLES {
+    for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value.as_bytes());
@@ -104,19 +113,25 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || pg_get_expr(p.polwithcheck,p.polrelid) FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
         (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attname='namespace_digest' AND a.attgenerated='s'),
         ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname)
-        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_native_%' AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
-    if rows.len() != TABLES.len() { return Err(StorageError::ScopeChanged); }
-    for table in TABLES {
-        let name = format!("semon_pg_native_{}",table.name);
+        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND c.relname<>'semon_pg_schema' AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
+    if rows.len() != TABLES.len()+FOUNDATION.len() { return Err(StorageError::ScopeChanged); }
+    for (table,native) in TABLES.iter().map(|table|(table,true)).chain(FOUNDATION.iter().map(|table|(table,false))) {
+        let prefix=if native { "semon_pg_native_" } else { "semon_pg_" };
+        let name = format!("{prefix}{}",table.name);
         let row = rows.iter().find(|r| r.get::<_, String>(0)==name).ok_or(StorageError::ScopeChanged)?;
         let mut columns = vec!["namespace bytea".to_owned(), "namespace_digest bytea".to_owned()];
         columns.extend(table.columns.split(',').map(str::to_owned));
-        let key = format!("namespace_digest,{}",table.key).split(',').map(str::to_owned).collect::<Vec<_>>();
-        let policy = format!("native_namespace:*:true:{{0}}:{POLICY}:{POLICY}");
-        let mut indexes = vec![format!("{name}_pkey:true:true:true:namespace_digest,{}:",table.key)];
+        let keys=if table.key.is_empty() { "namespace_digest".to_owned() } else { format!("namespace_digest,{}",table.key) };
+        let key = keys.split(',').map(str::to_owned).collect::<Vec<_>>();
+        let policy_name=if native { "native_namespace".to_owned() } else if table.name=="operations" { "semon_pg_operation_namespace".to_owned() } else { format!("{name}_namespace") };
+        let check=if !native && table.name=="operations" { "(namespace = decode(current_setting('semon.namespace'::text, true), 'hex'::text))" } else { POLICY };
+        let policy = format!("{policy_name}:*:true:{{0}}:{POLICY}:{check}");
+        let mut indexes = vec![format!("{name}_pkey:true:true:true:{keys}:")];
         for (index, target, keys, unique) in INDEXES {
-            if *target==table.name { indexes.push(format!("semon_pg_native_{index}:{unique}:true:true:namespace_digest,{keys}:")); }
+            if native && *target==table.name { indexes.push(format!("semon_pg_native_{index}:{unique}:true:true:namespace_digest,{keys}:")); }
         }
+        if !native && table.name=="source_invalidations" { indexes.push("semon_pg_source_pending:false:true:true:namespace_digest,revision,source_path:".to_owned()); }
+        if !native && table.name=="source_intents" { indexes.push("semon_pg_source_intent_order:false:true:true:namespace_digest,sequence:".to_owned()); }
         indexes.sort();
         if !row.get::<_, bool>(1) || row.get::<_, Vec<String>>(2)!=columns || row.get::<_, Vec<String>>(3)!=key || row.get::<_, Vec<String>>(4)!=vec![policy] || row.get::<_, Option<String>>(5).as_deref()!=Some("sha256(namespace)") || row.get::<_, Vec<String>>(6)!=indexes {
             return Err(StorageError::ScopeChanged);
