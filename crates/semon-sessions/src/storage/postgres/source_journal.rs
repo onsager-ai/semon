@@ -1,11 +1,17 @@
 //! Typed Source observation family only. There is deliberately no StoreConfig
 //! selector or public constructor: native ledger/publication TX ports are not PG
 //! yet. Tests inject this exact port into the normal EventCache producer.
-use super::{PgCancellation, PgPool, sqlstate, txn::{PgTxn, TxnKind}};
-use crate::storage::{LogicalSourceNamespace, StorageError, source_observations::{
-    SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore,
-    SourceOperation, validate_intent, validate_paths,
-}};
+use super::{
+    PgCancellation, PgPool, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
+use crate::storage::{
+    LogicalSourceNamespace, StorageError,
+    source_observations::{
+        SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        validate_intent, validate_paths,
+    },
+};
 
 /// PostgreSQL implementation of the shared typed observation contract. It owns
 /// no SQLite handle, parser, Catalog publisher, credential or backend selector.
@@ -16,10 +22,17 @@ pub struct PgSourceJournal {
 }
 
 impl PgSourceJournal {
-    fn read<T>(&self, f: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>) -> Result<T, StorageError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, f)
+    fn read<T>(
+        &self,
+        f: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        self.pool
+            .transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, f)
     }
-    fn write<T>(&self, f: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>) -> Result<T, StorageError> {
+    fn write<T>(
+        &self,
+        f: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
         self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
             let namespace = tx.namespace.as_str().as_bytes();
             tx.driver.execute("INSERT INTO semon_pg_source_state(namespace) VALUES($1) ON CONFLICT(namespace_digest) DO NOTHING", &[&namespace]).map_err(sqlstate::error)?;
@@ -37,7 +50,11 @@ impl PgSourceJournal {
         // Shared validation binds the namespace, kind, payload and operation ID.
         // Foreign/rebound operations return Conflict without acquiring a writer.
         if let Err(error) = validate_intent(Some(self.namespace.as_str()), intent) {
-            return if error == StorageError::Conflict { Ok(SourceMutationReceipt::Conflict) } else { Err(error) };
+            return if error == StorageError::Conflict {
+                Ok(SourceMutationReceipt::Conflict)
+            } else {
+                Err(error)
+            };
         }
         self.write(|tx| {
             let operation = intent.operation();
@@ -82,19 +99,32 @@ impl PgSourceJournal {
     }
 }
 
-fn receipt(tx: &mut PgTxn<'_>, operation: &SourceOperation) -> Result<Option<SourceMutationReceipt>, StorageError> {
+fn receipt(
+    tx: &mut PgTxn<'_>,
+    operation: &SourceOperation,
+) -> Result<Option<SourceMutationReceipt>, StorageError> {
     let namespace = tx.namespace.as_str().as_bytes();
     let rows = tx.driver.query("SELECT payload_digest FROM semon_pg_source_intents WHERE namespace_digest=sha256($1::bytea) AND operation_id=$2", &[&namespace, &operation.id]).map_err(sqlstate::error)?;
     if let Some(row) = rows.first() {
         let digest: String = row.try_get(0).map_err(|_| StorageError::Unavailable)?;
-        if digest != operation.payload_digest { return Ok(Some(SourceMutationReceipt::Conflict)); }
+        if digest != operation.payload_digest {
+            return Ok(Some(SourceMutationReceipt::Conflict));
+        }
     }
     let rows = tx.driver.query("SELECT payload_digest,outcome FROM semon_pg_source_receipts WHERE namespace_digest=sha256($1::bytea) AND operation_id=$2", &[&namespace, &operation.id]).map_err(sqlstate::error)?;
-    rows.first().map(|row| {
-        let digest: String = row.try_get(0).map_err(|_| StorageError::Unavailable)?;
-        let outcome: String = row.try_get(1).map_err(|_| StorageError::Unavailable)?;
-        Ok(if digest == operation.payload_digest && outcome == "applied" { SourceMutationReceipt::AlreadyApplied } else { SourceMutationReceipt::Conflict })
-    }).transpose()
+    rows.first()
+        .map(|row| {
+            let digest: String = row.try_get(0).map_err(|_| StorageError::Unavailable)?;
+            let outcome: String = row.try_get(1).map_err(|_| StorageError::Unavailable)?;
+            Ok(
+                if digest == operation.payload_digest && outcome == "applied" {
+                    SourceMutationReceipt::AlreadyApplied
+                } else {
+                    SourceMutationReceipt::Conflict
+                },
+            )
+        })
+        .transpose()
 }
 
 fn claims(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<SourceClaims, StorageError> {
@@ -107,7 +137,11 @@ fn claims(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<SourceClaims, StorageE
 fn invalidate(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageError> {
     let namespace = tx.namespace.as_str().as_bytes();
     let rows = tx.driver.query("UPDATE semon_pg_source_state SET revision=revision+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND revision<9223372036854775807 RETURNING revision", &[&namespace]).map_err(sqlstate::error)?;
-    let revision: i64 = rows.first().ok_or(StorageError::Unavailable)?.try_get(0).map_err(|_| StorageError::Unavailable)?;
+    let revision: i64 = rows
+        .first()
+        .ok_or(StorageError::Unavailable)?
+        .try_get(0)
+        .map_err(|_| StorageError::Unavailable)?;
     tx.driver.execute("INSERT INTO semon_pg_source_invalidations(namespace,source_path,revision,reason,observed_at) VALUES($1,$2,$3,'changed',$4) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET revision=excluded.revision,reason=excluded.reason,observed_at=excluded.observed_at", &[&namespace, &path.as_bytes(), &revision, &crate::model::now_ms()]).map_err(sqlstate::error)?;
     Ok(())
 }
@@ -116,7 +150,9 @@ impl SourceObservationStore for PgSourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
         validate_intent(Some(self.namespace.as_str()), intent)?;
         let payload = serde_json::to_string(intent).map_err(|_| StorageError::InvalidArguments)?;
-        if payload.len() > 2 * 1024 * 1024 { return Err(StorageError::InvalidArguments); }
+        if payload.len() > 2 * 1024 * 1024 {
+            return Err(StorageError::InvalidArguments);
+        }
         self.write(|tx| {
             let operation = intent.operation();
             let namespace = tx.namespace.as_str().as_bytes();
@@ -150,7 +186,9 @@ impl SourceObservationStore for PgSourceJournal {
         })
     }
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
-        if operation.namespace != self.namespace.as_str() { return Err(StorageError::Conflict); }
+        if operation.namespace != self.namespace.as_str() {
+            return Err(StorageError::Conflict);
+        }
         self.write(|tx| {
             let namespace = tx.namespace.as_str().as_bytes();
             let rows = tx.driver.query("SELECT 1 FROM semon_pg_source_receipts WHERE namespace_digest=sha256($1::bytea) AND operation_id=$2 AND payload_digest=$3 AND outcome IN ('applied','conflict')", &[&namespace, &operation.id, &operation.payload_digest]).map_err(sqlstate::error)?;
@@ -159,20 +197,40 @@ impl SourceObservationStore for PgSourceJournal {
             Ok(())
         })
     }
-    fn discover(&mut self, operation: &SourceOperation, paths: &[String], complete: bool) -> Result<SourceMutationReceipt, StorageError> {
+    fn discover(
+        &mut self,
+        operation: &SourceOperation,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<SourceMutationReceipt, StorageError> {
         validate_paths(paths)?;
-        self.apply(&SourceIntent::Discover { operation: operation.clone(), paths: paths.to_vec(), complete })
+        self.apply(&SourceIntent::Discover {
+            operation: operation.clone(),
+            paths: paths.to_vec(),
+            complete,
+        })
     }
-    fn invalidate(&mut self, operation: &SourceOperation, expected: &[(String, Option<i64>)]) -> Result<SourceMutationReceipt, StorageError> {
-        if expected.len() > 256 { return Err(StorageError::InvalidArguments); }
-        self.apply(&SourceIntent::Invalidate { operation: operation.clone(), expected: expected.to_vec() })
+    fn invalidate(
+        &mut self,
+        operation: &SourceOperation,
+        expected: &[(String, Option<i64>)],
+    ) -> Result<SourceMutationReceipt, StorageError> {
+        if expected.len() > 256 {
+            return Err(StorageError::InvalidArguments);
+        }
+        self.apply(&SourceIntent::Invalidate {
+            operation: operation.clone(),
+            expected: expected.to_vec(),
+        })
     }
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
         validate_paths(paths)?;
         self.read(|tx| claims(tx, paths))
     }
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        if limit == 0 || limit > 256 { return Err(StorageError::InvalidArguments); }
+        if limit == 0 || limit > 256 {
+            return Err(StorageError::InvalidArguments);
+        }
         self.read(|tx| {
             let rows = tx.driver.query("SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) ORDER BY revision,source_path LIMIT $2", &[&tx.namespace.as_str().as_bytes(), &(limit as i64)]).map_err(sqlstate::error)?;
             rows.iter().map(|row| {
@@ -186,9 +244,18 @@ impl SourceObservationStore for PgSourceJournal {
             Ok(rows.first().map(|row| row.try_get::<_, Option<String>>(0).map_err(|_| StorageError::Unavailable)).transpose()?.flatten())
         })
     }
-    fn finish_backfill(&mut self, operation: &SourceOperation, expected_generation: Option<&str>) -> Result<SourceMutationReceipt, StorageError> {
-        if expected_generation.is_some_and(|value| value.len() > 4096) { return Err(StorageError::InvalidArguments); }
-        self.apply(&SourceIntent::FinishBackfill { operation: operation.clone(), expected_generation: expected_generation.map(str::to_owned) })
+    fn finish_backfill(
+        &mut self,
+        operation: &SourceOperation,
+        expected_generation: Option<&str>,
+    ) -> Result<SourceMutationReceipt, StorageError> {
+        if expected_generation.is_some_and(|value| value.len() > 4096) {
+            return Err(StorageError::InvalidArguments);
+        }
+        self.apply(&SourceIntent::FinishBackfill {
+            operation: operation.clone(),
+            expected_generation: expected_generation.map(str::to_owned),
+        })
     }
 }
 

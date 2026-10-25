@@ -197,8 +197,10 @@ pub(crate) fn operation_replay(
     Ok(None)
 }
 
-
-pub(crate) fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) -> Result<(), StorageError> {
+pub(crate) fn validate_intent(
+    namespace: Option<&str>,
+    intent: &SourceIntent,
+) -> Result<(), StorageError> {
     let (kind, payload) = match intent {
         SourceIntent::Discover {
             paths, complete, ..
@@ -242,7 +244,6 @@ pub(crate) fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) ->
     Ok(())
 }
 
-
 pub(crate) fn validate_paths(paths: &[String]) -> Result<(), StorageError> {
     if paths.len() > 256 || paths.iter().any(|p| p.is_empty() || p.len() > 4096) {
         return Err(StorageError::InvalidArguments);
@@ -250,18 +251,32 @@ pub(crate) fn validate_paths(paths: &[String]) -> Result<(), StorageError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 pub(crate) mod conformance {
     use super::*;
     fn discover_operation(namespace: &str, paths: &[String], complete: bool) -> SourceOperation {
-        SourceOperation::capture(namespace, "discover", &serde_json::to_vec(&(paths, complete)).unwrap())
+        SourceOperation::capture(
+            namespace,
+            "discover",
+            &serde_json::to_vec(&(paths, complete)).unwrap(),
+        )
     }
-    fn invalidate_operation(namespace: &str, expected: &[(String, Option<i64>)]) -> SourceOperation {
-        SourceOperation::capture(namespace, "invalidate", &serde_json::to_vec(expected).unwrap())
+    fn invalidate_operation(
+        namespace: &str,
+        expected: &[(String, Option<i64>)],
+    ) -> SourceOperation {
+        SourceOperation::capture(
+            namespace,
+            "invalidate",
+            &serde_json::to_vec(expected).unwrap(),
+        )
     }
     fn finish_operation(namespace: &str, generation: Option<&str>) -> SourceOperation {
-        SourceOperation::capture(namespace, "finish_backfill", &serde_json::to_vec(&generation).unwrap())
+        SourceOperation::capture(
+            namespace,
+            "finish_backfill",
+            &serde_json::to_vec(&generation).unwrap(),
+        )
     }
     pub(crate) fn shared_source_observation_conformance(
         mut open: impl FnMut() -> Box<dyn SourceObservationStore>,
@@ -342,43 +357,72 @@ pub(crate) mod conformance {
         let intent_paths = vec!["durable-intent".to_owned()];
         let operation = discover_operation(namespace, &intent_paths, false);
         let intent = SourceIntent::Discover {
-            operation: operation.clone(), paths: intent_paths.clone(), complete: false,
+            operation: operation.clone(),
+            paths: intent_paths.clone(),
+            complete: false,
         };
         store.persist_intent(&intent).unwrap();
         store.persist_intent(&intent).unwrap();
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-        assert_eq!(store.acknowledge_intent(&operation), Err(StorageError::Conflict));
-        assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
+        assert_eq!(
+            store.acknowledge_intent(&operation),
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(
+            intent.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Applied
+        );
         let durable_claim = store.claims(&intent_paths).unwrap();
         drop(store);
         let mut store = open();
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
         for _ in 0..2 {
-            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
+            assert_eq!(
+                intent.apply(store.as_mut()).unwrap(),
+                SourceMutationReceipt::AlreadyApplied
+            );
         }
         assert_eq!(store.claims(&intent_paths).unwrap(), durable_claim);
         let rebound_paths = vec!["durable-rebound".to_owned()];
         let mut rebound_operation = discover_operation(namespace, &rebound_paths, true);
         rebound_operation.id = operation.id.clone();
         let rebound = SourceIntent::Discover {
-            operation: rebound_operation.clone(), paths: rebound_paths.clone(), complete: true,
+            operation: rebound_operation.clone(),
+            paths: rebound_paths.clone(),
+            complete: true,
         };
         assert_eq!(store.persist_intent(&rebound), Err(StorageError::Conflict));
-        assert_eq!(rebound.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
-        assert_eq!(store.acknowledge_intent(&rebound_operation), Err(StorageError::Conflict));
+        assert_eq!(
+            rebound.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(
+            store.acknowledge_intent(&rebound_operation),
+            Err(StorageError::Conflict)
+        );
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-        assert_eq!(store.claims(&rebound_paths).unwrap(), vec![(rebound_paths[0].clone(), None)]);
+        assert_eq!(
+            store.claims(&rebound_paths).unwrap(),
+            vec![(rebound_paths[0].clone(), None)]
+        );
         store.acknowledge_intent(&operation).unwrap();
         assert!(store.pending_intents().unwrap().is_empty());
         let failed_expected = vec![(intent_paths[0].clone(), None)];
         let failed = SourceIntent::Invalidate {
-            operation: invalidate_operation(namespace, &failed_expected), expected: failed_expected,
+            operation: invalidate_operation(namespace, &failed_expected),
+            expected: failed_expected,
         };
         store.persist_intent(&failed).unwrap();
-        assert_eq!(failed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(
+            failed.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
         drop(store);
         let mut store = open();
-        assert_eq!(failed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(
+            failed.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
         store.acknowledge_intent(failed.operation()).unwrap();
         assert!(store.pending_intents().unwrap().is_empty());
         assert_eq!(store.claims(&intent_paths).unwrap(), durable_claim);
@@ -401,5 +445,4 @@ pub(crate) mod conformance {
         );
         assert_eq!(store.backfill_state().unwrap(), before);
     }
-
 }

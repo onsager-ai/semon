@@ -6,14 +6,14 @@ mod cancel;
 mod operations;
 mod pool;
 mod schema;
-mod sqlstate;
 mod source_journal;
+mod sqlstate;
 mod txn;
 
 pub use cancel::PgCancellation;
-pub use source_journal::PgSourceJournal;
 pub use operations::{OperationIdentity, Reconciliation};
 pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLimits};
+pub use source_journal::PgSourceJournal;
 
 /// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
 fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
