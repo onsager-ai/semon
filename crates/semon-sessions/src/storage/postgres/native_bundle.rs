@@ -76,6 +76,14 @@ impl Effects for Writer<'_, '_> {
             return Err(StorageError::NamespaceUpgradePending);
         }
         let mut usage = Usage::new(self.tx)?;
+        use algorithm::Effects as _;
+        let current = usage.current(input.path)?;
+        match (input.expected, current) {
+            (None, None) => {}
+            (Some(expected), Some((_, receipt)))
+                if receipt == crate::events::store::header_ledger(expected) => {}
+            _ => return Err(StorageError::ScopeChanged),
+        }
         self.source = algorithm::begin(
             &mut usage,
             input.path,
@@ -123,9 +131,9 @@ impl Effects for Writer<'_, '_> {
             input.index,
         )?;
         self.boundary()?;
-        if let Some(summary) = &input.index.tree_summary {
+        if let Some(summary) = &input.index.tree_summary
             // Tree reads persisted Usage and current store pricing authority.
-            if !super::tree_writer::publish(
+            && !super::tree_writer::publish(
                 self.tx,
                 input.path,
                 input.ledger,
@@ -133,9 +141,9 @@ impl Effects for Writer<'_, '_> {
                 self.source,
                 summary,
                 input.index.native_usage_observations.is_some(),
-            )? {
-                return Err(StorageError::ScopeChanged);
-            }
+            )?
+        {
+            return Err(StorageError::ScopeChanged);
         }
         self.boundary()
     }
@@ -163,6 +171,9 @@ impl Effects for Writer<'_, '_> {
 /// families. This partial result must never acknowledge Raw or native ingest.
 #[allow(dead_code)] // Complete IndexStore remains closed pending the named families.
 pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile, StorageError> {
+    if input.index.tree_summary.is_none() {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
     shared::write(&mut Writer { tx, source: 0 }, input)?;
     Ok(PartialFile {
         missing: &[
