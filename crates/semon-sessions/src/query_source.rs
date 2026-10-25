@@ -297,14 +297,15 @@ impl Sources {
         options: &Options,
         sources: &[CatalogSource],
         db: rusqlite::Connection,
-        config: &crate::storage::StoreConfig,
+        owner: &crate::events::store::configured::NativeOwnership,
     ) -> io::Result<Self> {
         if sources.is_empty() || sources.len() > 64 {
             return Err(unavailable());
         }
-        crate::events::store::require_current(&db)?;
+        owner.validate_ready(&db).map_err(io::Error::other)?;
+        let config = owner.config();
         let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
-        let db = crate::events::store::chunk_proofs::Snapshot::new(db);
+        let db = crate::events::store::chunk_proofs::Snapshot::owned(db, owner.clone());
         let mut proofs = Vec::with_capacity(sources.len());
         for source in sources {
             let proof = crate::events::store::chunk_proofs::Focused::with_db(
