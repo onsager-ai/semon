@@ -5961,18 +5961,7 @@ fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static 
     )
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TreeSummaryRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    #[serde(default)]
-    projection_witness: Option<String>,
-    #[serde(default)]
-    interpretation_witness: Option<String>,
-    summary: crate::native_tree::Summary,
-}
+use super::tree_rows::TreeSummaryRecord;
 
 fn tree_summary_key(path: &str) -> String {
     format!("native_tree_summary:{path}")
@@ -6001,7 +5990,8 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
             r.get(0)
         })?;
     values.push(pricing);
-    Ok(format!("{:x}", Sha256::digest(json(&values)?.as_bytes())))
+    super::tree_rows::interpretation(&values.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn tree_reusable(
@@ -6098,14 +6088,13 @@ fn write_tree_summary(
     normalized_usage: bool,
 ) -> rusqlite::Result<()> {
     if let Some(summary) = summary {
-        let current = TreeSummaryRecord {
-            version: 3,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            projection_witness: tree_state::witness(transaction, path, ledger)?,
-            interpretation_witness: Some(tree_interpretation(transaction, path)?),
-            summary: summary.compact(normalized_usage),
-        };
+        let current = TreeSummaryRecord::new(
+            header_ledger(ledger),
+            tree_state::witness(transaction, path, ledger)?,
+            tree_interpretation(transaction, path)?,
+            summary,
+            normalized_usage,
+        );
         if current.projection_witness.is_some() {
             let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
@@ -6128,14 +6117,13 @@ fn write_tree_summary(
     let encoded = summary
         .map(|summary| {
             tree_state::write(transaction, path, ledger, summary)?;
-            json(&TreeSummaryRecord {
-                version: 3,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                projection_witness: tree_state::witness(transaction, path, ledger)?,
-                interpretation_witness: Some(tree_interpretation(transaction, path)?),
-                summary: summary.compact(normalized_usage),
-            })
+            json(&TreeSummaryRecord::new(
+                header_ledger(ledger),
+                tree_state::witness(transaction, path, ledger)?,
+                tree_interpretation(transaction, path)?,
+                summary,
+                normalized_usage,
+            ))
         })
         .transpose()?;
     if let Some(encoded) = encoded {
