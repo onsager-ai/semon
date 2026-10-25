@@ -7787,6 +7787,7 @@ mod tests {
                     }
                     Ok(Some(batch)) => {
                         let enrolled:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get(0)).unwrap();
+                        eprintln!("receipt_frontier_enrolled={enrolled} phase={:?}", batch.phase);
                         paged |= enrolled == 64;
                         if !batch.paths.is_empty() {
                             assert_eq!(batch.phase, Phase::Indexing);
