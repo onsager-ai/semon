@@ -4,21 +4,22 @@ use crate::{
     storage::postgres::tests::{fixture, limits, ns},
 };
 use rusqlite::types::Value;
+pub(crate) use rusqlite::types::Value as OracleValue;
 
 type OracleRows = Vec<(&'static str, Vec<Vec<(String, Value)>>)>;
 
-struct Fixture {
-    root: std::path::PathBuf,
-    path: String,
-    ledger: Ledger,
-    oracle: Summary,
-    sources: Vec<(String, Ledger, crate::events::FileIndex)>,
-    rows: OracleRows,
+pub(crate) struct Fixture {
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) path: String,
+    pub(crate) ledger: Ledger,
+    pub(crate) oracle: Summary,
+    pub(crate) sources: Vec<(String, Ledger, crate::events::FileIndex)>,
+    pub(crate) rows: OracleRows,
 }
 fn read_ledger(sqlite: &rusqlite::Connection, path: &str) -> Ledger {
     sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
 }
-fn parser_fixture(harness: &str) -> Fixture {
+pub(crate) fn parser_fixture(harness: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "pg100-{}-{}-{harness}",
         std::process::id(),
@@ -149,7 +150,19 @@ fn parser_fixture(harness: &str) -> Fixture {
 }
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
-fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+    install_families(tx, fixture, true)
+}
+pub(crate) fn install_without_tree(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+    install_families(tx, fixture, false)
+}
+pub(crate) fn oracle_witness(data: &Fixture) -> String {
+    let db = rusqlite::Connection::open(EventCache::path(&data.root.join("index.json"))).unwrap();
+    let path = data.path.strip_suffix("\0🦀").unwrap();
+    let encoded: String = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("native_tree_summary:{path}")], |r| r.get(0)).unwrap();
+    serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["projection_witness"].as_str().unwrap().into()
+}
+fn install_families(tx: &mut PgTxn<'_>, fixture: &Fixture, tree: bool) -> Result<(), StorageError> {
     {
         let mut effects = super::super::native_usage::Usage::new(tx)?;
         for (path, ledger, index) in &fixture.sources {
@@ -170,6 +183,9 @@ fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
     }
     for (family, rows) in &fixture.rows {
         if matches!(*family, "usage_sources" | "usage_current") {
+            continue;
+        }
+        if !tree && family.starts_with("tree_") {
             continue;
         }
         let table = format!("semon_pg_native_{family}");

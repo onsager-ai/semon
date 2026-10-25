@@ -79,17 +79,17 @@ pub(crate) mod witness {
             self.0.update(row.as_bytes());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn label(&mut self, key: &str, value: &str) {
             self.encoded(&serde_json::to_string(&[key, value]).unwrap());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn model(&mut self, model: &str) {
             self.encoded(&serde_json::to_string(&[model]).unwrap());
         }
 
-        #[cfg(test)]
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn tool(&mut self, id: &str, name: &str) {
             self.encoded(&serde_json::to_string(&[id, name]).unwrap());
         }
