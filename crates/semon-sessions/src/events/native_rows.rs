@@ -15,7 +15,10 @@ use super::{
 use crate::Tokens;
 
 pub(crate) fn full_changes(index: &FileIndex) -> DirtyRows {
-    DirtyRows { usage: index.usage_by_id.keys().cloned().collect(), ..DirtyRows::default() }
+    DirtyRows {
+        usage: index.usage_by_id.keys().cloned().collect(),
+        ..DirtyRows::default()
+    }
 }
 
 pub(crate) struct NativeRowPlan<'a> {

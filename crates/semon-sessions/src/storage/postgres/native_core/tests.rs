@@ -78,14 +78,19 @@ fn pg_native_core_real_parser_initial_append_replacement_restart_oracle() {
         let id=pool.transaction(&namespace,TxnKind::Write,&control,|tx|{let id=write(tx,path,None,&first.ledger,&first.index,None)?;assert_rows(tx,&first)?;Ok(id)}).unwrap();
         pool.transaction(&namespace,TxnKind::Write,&control,|tx|{assert_eq!(write(tx,path,Some(&first.ledger),&second.ledger,&second.index,Some(&changes))?,id);assert_rows(tx,&second)}).unwrap();
         assert_eq!(pool.transaction(&namespace,TxnKind::Write,&control,|tx|write(tx,path,Some(&first.ledger),&second.ledger,&second.index,Some(&changes))),Err(StorageError::Conflict));
-        pool.transaction(&namespace,TxnKind::Write,&control,|tx|{write(tx,path,Some(&second.ledger),&replacement.ledger,&replacement.index,None)?;assert_rows(tx,&replacement)}).unwrap();
+        // Core-only synthetic truncation exercises the existing RowChanges cut
+        // contract; this is not a qualified append/truncation ingest operation.
+        let cut=DirtyRows::between(&second.index,&first.index);
+        pool.transaction(&namespace,TxnKind::Write,&control,|tx|{write(tx,path,Some(&second.ledger),&first.ledger,&first.index,Some(&cut))?;assert_rows(tx,&first)}).unwrap();
+        pool.transaction(&namespace,TxnKind::Write,&control,|tx|{write(tx,path,Some(&first.ledger),&replacement.ledger,&replacement.index,None)?;assert_rows(tx,&replacement)}).unwrap();
         let limits=pool.inner.limits;drop(pool);let reopened=super::super::PgPool::open(factory,limits).unwrap();
         reopened.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx|assert_rows(tx,&replacement)).unwrap();
     }
 }
 #[test]
 fn pg_native_core_every_effect_rollback_and_original_family_ack() {
-    let root=root();let path=root.join("source.jsonl");let cache=root.join("cache.json");std::fs::write(&path,body("claude",false)).unwrap();let first=phase(&cache,&path,"claude");
+    for harness in ["claude", "codex", "copilot"] {
+    let root=root();let path=root.join("source.jsonl");let cache=root.join("cache.json");std::fs::write(&path,body(harness,false)).unwrap();let first=phase(&cache,&path,harness);
     let (pool,_)=fixture(|l|l.max_connections=1);let namespace=ns("fault-core\0🦀");let control=PgCancellation::default();let path=path.to_str().unwrap();
     // Sweep each mutation/mid-row boundary until the first non-failing run.
     let mut completed=false;
@@ -100,9 +105,10 @@ fn pg_native_core_every_effect_rollback_and_original_family_ack() {
     assert!(completed);
     // This durable receipt is explicitly core-family-only, never native-ingest ACK.
     super::super::tests::LOSE_ACK.with(|f|f.set(true));
-    let op=identity();
+    let mut op=identity(); op.kind="core-family-only";
     assert_eq!(pool.apply_operation(&namespace,&op,&control,|tx| {write(tx,path,Some(&first.ledger),&first.ledger,&first.index,None)?;Ok(serde_json::json!({"core_family_only":true}))}),Err(StorageError::CommitUncertain));
     pool.apply_operation(&namespace,&op,&control,|_|panic!("original family receipt must prevent Raw or writer replay")).unwrap();
+    }
 }
 
 fn snapshot(tx:&mut PgTxn<'_>) -> Result<Vec<(String,Vec<String>)>,StorageError> {
@@ -131,7 +137,7 @@ fn pg_native_core_replacement_every_boundary_preserves_existing_bytes() {
 }
 #[test]
 fn pg_native_core_unsigned_nul_and_copied_identity_foreign_warm_pool() {
-    let root=root();let path=root.join("source.jsonl");let cache=root.join("cache.json");std::fs::write(&path,body("claude",false)).unwrap();let mut first=phase(&cache,&path,"claude");
+    let root=root();let path=root.join("source.jsonl");let cache=root.join("cache.json");let edge_body=body("claude",false).replace("\"input_tokens\":3", &format!("\"input_tokens\":{}",u64::MAX-100));std::fs::write(&path,edge_body).unwrap();let mut first=phase(&cache,&path,"claude");
     let edge=Ledger {stat:Stat {dev:u64::MAX,ino:u64::MAX-1,size:u64::MAX,modified_ns:u128::MAX,changed_ns:Some(i128::MIN)},offset:u64::MAX,prefix:[1;32],tail:[2;32]};
     first.index.events[0].o=u64::MAX;
     let (pool,_)=fixture(|l|l.max_connections=1);let own=ns("own\0🦀");let foreign=ns("foreign\0🦀");let control=PgCancellation::default();let path="same'\0🦀";
@@ -142,6 +148,7 @@ fn pg_native_core_unsigned_nul_and_copied_identity_foreign_warm_pool() {
         for (i,v) in [u64::MAX,u64::MAX-1,u64::MAX,u64::MAX].iter().enumerate() {assert_eq!(r.get::<_,String>(i),v.to_string());}
         assert_eq!(r.get::<_,Vec<u8>>(4),u128::MAX.to_be_bytes());assert_eq!(r.get::<_,Vec<u8>>(5),i128::MIN.to_be_bytes());assert_eq!(r.get::<_,Vec<u8>>(6),path.as_bytes());
         let offset:String=tx.driver.query_one("SELECT o::text FROM semon_pg_native_events WHERE namespace=$1 AND file_id=$2 AND NOT extra AND seq=0",&[&own.as_str().as_bytes(),&id]).map_err(sqlstate::error)?.get(0);assert_eq!(offset,u64::MAX.to_string());
+        let billing:String=tx.driver.query_one("SELECT billing_input::text FROM semon_pg_native_usage WHERE namespace=$1 AND file_id=$2",&[&own.as_str().as_bytes(),&id]).map_err(sqlstate::error)?.get(0);assert_eq!(billing,(u64::MAX-100).to_string());
         write(tx,"copy\0🦀",None,&edge,&first.index,None)?;
         let count:i64=tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_copied_identities WHERE namespace=$1",&[&own.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);assert_eq!(count,2);
         write(tx,"copy\0🦀",Some(&edge),&edge,&FileIndex::default(),None)?;
@@ -161,4 +168,23 @@ fn pg_native_core_competing_append_exact_ledger_cas() {
     let index=std::sync::Arc::new(first.index);let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));
     let handles=(0..2).map(|_| {let (pool,namespace,index,old,next,barrier)=(pool.clone(),namespace.clone(),index.clone(),first.ledger.clone(),next.clone(),barrier.clone());std::thread::spawn(move || {barrier.wait();pool.transaction(&namespace,TxnKind::Write,&PgCancellation::default(),|tx|write(tx,path,Some(&old),&next,&index,Some(&DirtyRows::default())))})}).collect::<Vec<_>>();
     let results=handles.into_iter().map(|h|h.join().unwrap()).collect::<Vec<_>>();assert_eq!(results.iter().filter(|r|r.is_ok()).count(),1);assert_eq!(results.iter().filter(|r|**r==Err(StorageError::Conflict)).count(),1);
+}
+#[test]
+fn pg_native_core_every_ledger_field_and_warm_drift_refuse_before_effects() {
+    let root=root();let path=root.join("source.jsonl");let cache=root.join("cache.json");std::fs::write(&path,body("claude",false)).unwrap();let first=phase(&cache,&path,"claude");
+    let (pool,factory)=fixture(|l|l.max_connections=1);let namespace=ns("exact-cas\0🦀");let path="same\0🦀";let control=PgCancellation::default();
+    pool.transaction(&namespace,TxnKind::Write,&control,|tx|write(tx,path,None,&first.ledger,&first.index,None)).unwrap();
+    let before=pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap();
+    for field in 0..9 {
+        let mut wrong=first.ledger.clone();
+        match field {0=>wrong.stat.dev^=1,1=>wrong.stat.ino^=1,2=>wrong.stat.size^=1,3=>wrong.stat.modified_ns^=1,4=>wrong.stat.changed_ns=None,5=>wrong.offset^=1,6=>wrong.prefix[0]^=1,7=>wrong.tail[0]^=1,8=>wrong.stat.changed_ns=Some(wrong.stat.changed_ns.unwrap_or(0)^1),_=>unreachable!()}
+        assert_eq!(pool.transaction(&namespace,TxnKind::Write,&control,|tx|write(tx,path,Some(&wrong),&first.ledger,&first.index,None)),Err(StorageError::Conflict));
+        assert_eq!(pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap(),before);
+    }
+    assert_eq!(pool.transaction(&namespace,TxnKind::Write,&control,|tx|write(tx,path,None,&first.ledger,&first.index,None)),Err(StorageError::Conflict));
+    let cancelled=PgCancellation::default();cancelled.cancel();
+    assert_eq!(pool.transaction(&namespace,TxnKind::Write,&cancelled,|_|panic!("cancelled core callback")),Err::<(),_>(StorageError::Busy));
+    factory.client().batch_execute("CREATE INDEX pg107_core_drift ON semon_pg_native_files(title)").unwrap();
+    assert_eq!(pool.transaction(&namespace,TxnKind::Write,&control,|_|panic!("drifted core callback")),Err::<(),_>(StorageError::ScopeChanged));
+    pool.transaction_inner(&namespace,TxnKind::ReadSnapshot,&control,false,|tx|{assert_eq!(snapshot(tx)?,before);Ok(())}).unwrap();
 }

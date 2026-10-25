@@ -16,12 +16,19 @@ pub(crate) fn encoded_native_usage(index: &FileIndex) -> serde_json::Result<Opti
         tokens: Tokens,
         cost: crate::pricing::CostBuild,
     }
-    let Some(native) = &index.codex_native_usage else { return Ok(None) };
+    let Some(native) = &index.codex_native_usage else {
+        return Ok(None);
+    };
     let mut cost = index.codex_cost();
     cost.models.clear();
     cost.by_day.clear();
     cost.unpriced_models.clear();
-    serde_json::to_string(&Root { projection_version: 1, tokens: native.tokens(), cost }).map(Some)
+    serde_json::to_string(&Root {
+        projection_version: 1,
+        tokens: native.tokens(),
+        cost,
+    })
+    .map(Some)
 }
 
 /// Borrowed values in the existing `PUT_FILE` bind order.
