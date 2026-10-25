@@ -8442,7 +8442,7 @@ mod tests {
             let mut inputs = peer_inputs(options, 66, "peer81-target");
             for (i, input) in inputs.iter_mut().enumerate().skip(1) {
                 let old = input.full_path(options);
-                input.path = format!("projects/peer81-{i}/peer81-target.jsonl").into();
+                input.path = format!("projects/peer81-{i}/peer81-target.jsonl");
                 let path = input.full_path(options);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::rename(old, path).unwrap();
@@ -8452,7 +8452,7 @@ mod tests {
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             admitted
-                .begin_semantic_stage_with_journal(&[seed.clone()], &runtime, true)
+                .begin_semantic_stage_with_journal(std::slice::from_ref(&seed), &runtime, true)
                 .unwrap();
             let mut paged = false;
             let mut refused = false;
