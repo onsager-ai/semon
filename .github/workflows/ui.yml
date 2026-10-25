@@ -473,15 +473,17 @@ jobs:
         if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         continue-on-error: true
         env:
-          SEMON_VISUAL_PROPOSAL_PATH: ${{ runner.temp }}/visual-binding-proposal-${{ matrix.suite }}.patch
-        run: node tests/ui/visual-pathname-audit.mjs --propose
+          SEMON_VISUAL_PROPOSAL_SUITE: ${{ matrix.suite }}
+        run: node tests/ui/visual-binding-proposal.mjs
       - name: Upload exact visual binding proposal
         if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: viewer-visual-binding-proposal-${{ matrix.suite }}
-          path: ${{ runner.temp }}/visual-binding-proposal-${{ matrix.suite }}.patch
+          path: |
+            tests/ui/out/visual-acceptance-${{ matrix.suite }}-review.patch
+            tests/ui/out/visual-acceptance-${{ matrix.suite }}-proposal.json
           if-no-files-found: ignore
           retention-days: 1
       - name: Server logs

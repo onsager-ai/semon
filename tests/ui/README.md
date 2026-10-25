@@ -75,11 +75,15 @@ its completion witness is the native-publication success message in the CI log.
   excuses missing coverage/execution errors. A follow-up may refresh only
   justified exact bindings while preserving original review/decision/provenance/
   history; final CI and independent review still apply.
-  `visual-pathname-audit.mjs --propose` emits a CI-only patch only when every
-  report has `errorCount` 0 and `coverageFailures` null, with no refused rows.
+  `visual-binding-proposal.mjs` is the sole proposal generator. It consumes the
+  pathname audit and actual reports, requiring empty `errors` and nested
+  `failures.coverage` arrays, exact frame/region counts and unique states. Audit
+  report byte digests and runtime fingerprints must match the current reports;
+  every failing state must uniquely qualify against a record with an `accepted`
+  decision, with no refused or extra audit states.
   The patch changes only candidate fingerprints and candidate-evidence digests
   for existing qualified records, and records the Source SHA, runtime fingerprint
-  and report digests in a Runner temporary artifact; it does not edit the registry
+  and report digests in the uploaded proposal summary; it does not edit the registry
   or approve appearance. Root may
   adopt it only after independent qualification of final-candidate CI confirms
   the same image digests and runtime fingerprint; otherwise the bindings are redone.
