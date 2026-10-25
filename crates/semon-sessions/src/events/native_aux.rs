@@ -33,28 +33,49 @@ pub(crate) fn codex_header(
     ledger: &Ledger,
     header: Option<&crate::native_header::CodexHeader>,
 ) -> Result<Option<String>, serde_json::Error> {
-    header.map(|header| serde_json::to_string(&CodexHeaderRecord {
-        version: 1, parser_version: CACHE_VERSION,
-        ledger: header_ledger(ledger), header: header.clone(),
-    })).transpose().map(|value| value.filter(|text| text.len() <= 1048576))
+    header
+        .map(|header| {
+            serde_json::to_string(&CodexHeaderRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                header: header.clone(),
+            })
+        })
+        .transpose()
+        .map(|value| value.filter(|text| text.len() <= 1048576))
 }
 
 pub(crate) fn claude_sidecar(
     ledger: &Ledger,
     sidecar: Option<&crate::native_sidecar::ClaudeSidecar>,
 ) -> Result<Option<String>, serde_json::Error> {
-    sidecar.map(|sidecar| serde_json::to_string(&ClaudeSidecarRecord {
-        version: 1, parser_version: CACHE_VERSION,
-        ledger: header_ledger(ledger), sidecar: sidecar.clone(),
-    })).transpose().map(|value| value.filter(|text| text.len() <= 1048576))
+    sidecar
+        .map(|sidecar| {
+            serde_json::to_string(&ClaudeSidecarRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                sidecar: sidecar.clone(),
+            })
+        })
+        .transpose()
+        .map(|value| value.filter(|text| text.len() <= 1048576))
 }
 
 pub(crate) fn parent_marker(
     ledger: &Ledger,
     index: Option<&crate::native_marker::Index>,
 ) -> Result<Option<String>, serde_json::Error> {
-    index.filter(|index| index.valid(ledger)).map(|index| serde_json::to_string(&ParentMarkerRecord {
-        version: 1, parser_version: CACHE_VERSION,
-        ledger: header_ledger(ledger), index: index.clone(),
-    })).transpose()
+    index
+        .filter(|index| index.valid(ledger))
+        .map(|index| {
+            serde_json::to_string(&ParentMarkerRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                index: index.clone(),
+            })
+        })
+        .transpose()
 }

@@ -50,8 +50,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use super::Yield;
+use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
 use super::native_rows::EventState;
-use super::native_aux::{CodexHeaderRecord, ParentMarkerRecord, ClaudeSidecarRecord};
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
     MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
@@ -6158,8 +6158,6 @@ fn write_tree_summary(
     Ok(())
 }
 
-
-
 fn parent_marker_key(path: &str) -> String {
     format!("native_parent_marker:{path}")
 }
@@ -6205,7 +6203,8 @@ fn write_parent_marker(
     index: Option<&crate::native_marker::Index>,
 ) -> rusqlite::Result<()> {
     if let Some(encoded) = super::native_aux::parent_marker(ledger, index)
-        .map_err(|_| rusqlite::Error::InvalidQuery)? {
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+    {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![parent_marker_key(path), encoded])?;
@@ -6295,7 +6294,6 @@ fn write_codex_header(
     }
     Ok(())
 }
-
 
 fn claude_sidecar_key(path: &str) -> String {
     format!("native_claude_sidecar:{path}")

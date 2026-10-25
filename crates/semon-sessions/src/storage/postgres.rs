@@ -3,8 +3,8 @@
 //! Credentials, connect deadlines and TLS (including cancellation TLS) belong to
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
-mod native_commit;
 mod native_bundle;
+mod native_commit;
 mod native_core;
 mod native_usage;
 mod native_usage_identity;

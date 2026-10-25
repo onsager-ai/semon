@@ -2,7 +2,14 @@
 //! Chunk-proof generations, launch calls and relocation qualification remain
 //! prerequisites of the complete file commit; public qualification stays zero.
 use super::{native_core, native_usage::Usage, sqlstate, txn::PgTxn};
-use crate::{events::{DirtyRows, native_aux, native_commit::{self as shared, Effects, Input}, store::native_usage::algorithm}, storage::StorageError};
+use crate::{
+    events::{
+        DirtyRows, native_aux,
+        native_commit::{self as shared, Effects, Input},
+        store::native_usage::algorithm,
+    },
+    storage::StorageError,
+};
 
 /// Deliberately cannot be converted into an EventReceipt or operation ACK.
 #[derive(Debug)]
@@ -23,10 +30,18 @@ impl Writer<'_, '_> {
     fn boundary(&self) -> Result<(), StorageError> {
         #[cfg(test)]
         if FAIL_AFTER.with(|point| match point.get() {
-            Some(1) => { point.set(None); true }
-            Some(n) => { point.set(Some(n - 1)); false }
+            Some(1) => {
+                point.set(None);
+                true
+            }
+            Some(n) => {
+                point.set(Some(n - 1));
+                false
+            }
             None => false,
-        }) { return Err(StorageError::Unavailable); }
+        }) {
+            return Err(StorageError::Unavailable);
+        }
         self.tx.check()
     }
 
@@ -36,7 +51,13 @@ impl Writer<'_, '_> {
         if let Some(value) = value {
             self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
         } else {
-            self.tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key.as_bytes()]).map_err(sqlstate::error)?;
+            self.tx
+                .driver
+                .execute(
+                    "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+                    &[&ns, &key.as_bytes()],
+                )
+                .map_err(sqlstate::error)?;
         }
         self.boundary()
     }
@@ -51,40 +72,84 @@ impl Effects for Writer<'_, '_> {
         // SourceState. Reject the exact core CAS before any family effects.
         native_core::qualify(self.tx, input.path, input.expected)?;
         let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND new_path=$2 LIMIT 1", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
-        if !pending.is_empty() { return Err(StorageError::NamespaceUpgradePending); }
+        if !pending.is_empty() {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let mut usage = Usage::new(self.tx)?;
-        self.source = algorithm::begin(&mut usage, input.path, input.expected, input.ledger, input.changes.is_some())?;
+        self.source = algorithm::begin(
+            &mut usage,
+            input.path,
+            input.expected,
+            input.ledger,
+            input.changes.is_some(),
+        )?;
         self.boundary()
     }
     fn file(&mut self, input: &Input<'_>, changes: &DirtyRows) -> Result<(), StorageError> {
-        native_core::write(self.tx, input.path, input.expected, input.ledger, input.index, input.changes.map(|_| changes))?;
+        native_core::write(
+            self.tx,
+            input.path,
+            input.expected,
+            input.ledger,
+            input.index,
+            input.changes.map(|_| changes),
+        )?;
         self.boundary()?;
-        self.metadata(&format!("native_codex_header:{}",input.path), native_aux::codex_header(input.ledger,input.index.codex_header.as_ref()).map_err(|_| StorageError::Unavailable)?)?;
-        if input.index.claude_sidecar.is_some() || crate::native_sidecar::agent_path(std::path::Path::new(input.path)) {
-            self.metadata(&format!("native_claude_sidecar:{}",input.path), native_aux::claude_sidecar(input.ledger,input.index.claude_sidecar.as_ref()).map_err(|_| StorageError::Unavailable)?)?;
+        self.metadata(
+            &format!("native_codex_header:{}", input.path),
+            native_aux::codex_header(input.ledger, input.index.codex_header.as_ref())
+                .map_err(|_| StorageError::Unavailable)?,
+        )?;
+        if input.index.claude_sidecar.is_some()
+            || crate::native_sidecar::agent_path(std::path::Path::new(input.path))
+        {
+            self.metadata(
+                &format!("native_claude_sidecar:{}", input.path),
+                native_aux::claude_sidecar(input.ledger, input.index.claude_sidecar.as_ref())
+                    .map_err(|_| StorageError::Unavailable)?,
+            )?;
         }
-        self.metadata(&format!("native_parent_marker:{}",input.path), native_aux::parent_marker(input.ledger,input.index.marker_index.as_ref()).map_err(|_| StorageError::Unavailable)?)
+        self.metadata(
+            &format!("native_parent_marker:{}", input.path),
+            native_aux::parent_marker(input.ledger, input.index.marker_index.as_ref())
+                .map_err(|_| StorageError::Unavailable)?,
+        )
     }
     fn usage(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
-        algorithm::write(&mut Usage::new(self.tx)?,input.path,input.ledger,input.index)?;
+        algorithm::write(
+            &mut Usage::new(self.tx)?,
+            input.path,
+            input.ledger,
+            input.index,
+        )?;
         self.boundary()?;
         if let Some(summary) = &input.index.tree_summary {
             // Tree reads persisted Usage and current store pricing authority.
-            if !super::tree_writer::publish(self.tx,input.path,input.ledger,input.expected,self.source,summary,input.index.native_usage_observations.is_some())? {
+            if !super::tree_writer::publish(
+                self.tx,
+                input.path,
+                input.ledger,
+                input.expected,
+                self.source,
+                summary,
+                input.index.native_usage_observations.is_some(),
+            )? {
                 return Err(StorageError::ScopeChanged);
             }
         }
         self.boundary()
     }
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
-        super::native_commit::relationships(self.tx,input.path,input.index,false)?;
+        super::native_commit::relationships(self.tx, input.path, input.index, false)?;
         self.boundary()
     }
     fn archive(&mut self, path: &str) -> Result<(), StorageError> {
-        self.metadata(&format!("archive_event_index:{path}"),None)
+        self.metadata(&format!("archive_event_index:{path}"), None)
     }
     fn invalidate(&mut self, path: &str, changed: bool) -> Result<(), StorageError> {
-        if changed { super::source_journal::invalidate(self.tx,path)?; }
+        if changed {
+            super::source_journal::invalidate(self.tx, path)?;
+        }
         self.boundary()
     }
     fn retire_mutation(&mut self, path: &str) -> Result<(), StorageError> {
@@ -98,8 +163,15 @@ impl Effects for Writer<'_, '_> {
 /// families. This partial result must never acknowledge Raw or native ingest.
 #[allow(dead_code)] // Complete IndexStore remains closed pending the named families.
 pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile, StorageError> {
-    shared::write(&mut Writer { tx, source: 0 },input)?;
-    Ok(PartialFile { missing: &["immutable chunk-proof generations and reader lifetimes", "launch calls and EOF markers", "relocation qualification", "complete durable ingest receipt and Raw qualification"] })
+    shared::write(&mut Writer { tx, source: 0 }, input)?;
+    Ok(PartialFile {
+        missing: &[
+            "immutable chunk-proof generations and reader lifetimes",
+            "launch calls and EOF markers",
+            "relocation qualification",
+            "complete durable ingest receipt and Raw qualification",
+        ],
+    })
 }
 
 #[cfg(test)]
