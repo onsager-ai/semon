@@ -800,7 +800,10 @@ fn validate_presentation(
     let bytes =
         serde_json::to_vec(&(&metadata, &slots, &text)).map_err(|_| StorageError::Unavailable)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest.entries.iter().any(|(k, d)| k == key && *d == digest(&bytes))
+        || !manifest
+            .entries
+            .iter()
+            .any(|(k, d)| k == key && *d == digest(&bytes))
     {
         return Err(StorageError::ScopeChanged);
     }

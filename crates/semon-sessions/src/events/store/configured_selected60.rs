@@ -108,6 +108,15 @@ fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows
         assert!(row.query.as_ref().unwrap().get("selected_presentation_observations").is_none());
     }
     let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    // This admitted fixture connection deliberately corrupts the staged
+    // witness using the same writer role as Stage, with namespace guards kept.
+    db.create_scalar_function(
+        "semon_semantic_writer",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    ).unwrap();
     let saved: String = db.query_row(
         "SELECT projections FROM storage_semantic_model_batches WHERE namespace='source-a'",
         [], |row| row.get(0),
