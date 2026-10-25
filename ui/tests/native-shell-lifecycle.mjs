@@ -93,8 +93,7 @@ for (const width of [390, 1280])
               try {
                 if (!dialog.open) throw new Error('confirmation was not reopened');
                 document.querySelector('[value="cancel"]').click();
-                if (dialog.open)
-                  throw new Error('queued close detached the reopened confirmation');
+                if (dialog.open) throw new Error('queued close detached the reopened confirmation');
                 resolve();
               } catch (error) {
                 reject(error);
