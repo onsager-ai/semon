@@ -340,12 +340,21 @@ fn live_control(
     );
     let startups = proxy.startups.load(Ordering::SeqCst);
     let commits = proxy.commits.load(Ordering::SeqCst);
-    eprintln!("{label}: result={result:?} callbacks={} startups={startups} commits={commits} elapsed={:?}",
-        calls.load(Ordering::SeqCst), start.elapsed());
-    assert!(result.is_ok(), "{label}: no-fault control failed: {result:?}");
+    eprintln!(
+        "{label}: result={result:?} callbacks={} startups={startups} commits={commits} elapsed={:?}",
+        calls.load(Ordering::SeqCst),
+        start.elapsed()
+    );
+    assert!(
+        result.is_ok(),
+        "{label}: no-fault control failed: {result:?}"
+    );
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(startups > startups_before, "{label}: no fresh ReadyForQuery");
+    assert!(
+        startups > startups_before,
+        "{label}: no fresh ReadyForQuery"
+    );
     assert_eq!(
         commits,
         commits_before + 1,
@@ -442,8 +451,12 @@ fn pg_proxy_read_and_write_reply_freeze_never_submits_commit() {
         };
         proxy.replies.witness();
         proxy.cancels.witness();
-        eprintln!("precommit write={write}: result={result:?} callbacks={} commits={} elapsed={:?}",
-            calls.load(Ordering::SeqCst), proxy.commits.load(Ordering::SeqCst), start.elapsed());
+        eprintln!(
+            "precommit write={write}: result={result:?} callbacks={} commits={} elapsed={:?}",
+            calls.load(Ordering::SeqCst),
+            proxy.commits.load(Ordering::SeqCst),
+            start.elapsed()
+        );
         assert_eq!(result, Err(crate::storage::StorageError::Busy));
         assert!(start.elapsed() < Duration::from_secs(3));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -529,8 +542,12 @@ fn pg_proxy_durable_commit_withheld_reply_reconciles_without_callback_replay() {
         Ok(value)
     });
     proxy.commit.witness();
-    eprintln!("durable armed COMMIT forwarded: {}; result={result:?} callbacks={} elapsed={:?}",
-        proxy.commit.observed.load(Ordering::SeqCst), calls.load(Ordering::SeqCst), start.elapsed());
+    eprintln!(
+        "durable armed COMMIT forwarded: {}; result={result:?} callbacks={} elapsed={:?}",
+        proxy.commit.observed.load(Ordering::SeqCst),
+        calls.load(Ordering::SeqCst),
+        start.elapsed()
+    );
     assert_eq!(proxy.commit.observed.load(Ordering::SeqCst), 1);
     assert_eq!(proxy.commits.load(Ordering::SeqCst), commits_before + 1);
     assert_eq!(result, Err(crate::storage::StorageError::CommitUncertain));
