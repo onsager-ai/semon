@@ -16,7 +16,16 @@ use crate::{
 // A connected file commit needs the complete production scan, including the
 // auxiliary headers captured outside parse(). Finish all SQLite work before PG.
 fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
-    let mut cache = crate::events::EventCache::open(&data.root.join("index.json")).unwrap();
+    // Use a fresh producer store: a warm Tree-only restore intentionally omits
+    // parser accumulators such as line_count and is not a fresh ingest input.
+    let cache_path = data.root.join(format!(
+        "bundle-input-{}.json",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
     for (path, _, index) in &mut data.sources {
         let physical = path.strip_suffix("\0🦀").unwrap();
         let scanned = crate::events::scan_file(
@@ -27,7 +36,9 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
         )
         .unwrap();
         *index = (*scanned).clone();
-        assert!(index.tree_summary.is_some(), "production Tree input");
+        if harness != "copilot" {
+            assert!(index.tree_summary.is_some(), "production Tree input");
+        }
         if harness == "codex" {
             assert!(
                 index.codex_header.is_some(),
@@ -138,6 +149,19 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
         let bounds = pool.inner.limits;
         drop(pool);
         let pool = crate::storage::postgres::PgPool::open(factory.clone(), bounds).unwrap();
+        if harness == "copilot" {
+            // Production Copilot input has no Tree summary. Do not manufacture
+            // one to satisfy another family's test fixture or readiness gate.
+            pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                let count: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_headers WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
+                assert_eq!(count, 0, "Copilot has no native Tree header");
+                Ok(())
+            }).unwrap();
+            drop(pool);
+            drop(factory);
+            std::fs::remove_dir_all(data.root).unwrap();
+            continue;
+        }
         // Reopen before restoring the scalar/checkpoint through the PG reader.
         let restored = Snapshot::restore(
             pool.clone(),
