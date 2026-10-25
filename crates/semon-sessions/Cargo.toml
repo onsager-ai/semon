@@ -16,8 +16,10 @@ serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
 tiny_http.workspace = true
 zstd.workspace = true
+postgres = { version = "0.19.14", optional = true, default-features = false, features = ["with-serde_json-1"] }
 
 [features]
+postgres = ["dep:postgres"]
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
 # suite builds with it, to serve a fixture whose times must stand still.
 test-clock = []
