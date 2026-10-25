@@ -7746,9 +7746,10 @@ mod tests {
             let options = &options[1];
             let inputs = named_claude_inputs(options, 2);
             let initiator = inputs[0].full_path(options);
-            let raw = fs::read_to_string(&initiator)
-                .unwrap()
-                .replace("\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"");
+            let raw = fs::read_to_string(&initiator).unwrap().replace(
+                "\"customTitle\":\"worker\"",
+                "\"customTitle\":\"initiator\"",
+            );
             fs::write(initiator, raw).unwrap();
             let mut cache = open(&f.config);
             let mut other = open(&foreign);
