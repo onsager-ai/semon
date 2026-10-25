@@ -121,6 +121,17 @@ impl SourceIntent {
 }
 
 pub trait SourceObservationStore: Send {
+    /// Check an owner-connection committed witness before capturing new work.
+    /// True means the same discovery is already current; no intent is needed.
+    /// Backends without such a witness always take the durable mutation path.
+    fn discovery_is_current(
+        &mut self,
+        _paths: &[String],
+        _complete: bool,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
     /// Commit an intent before attempting its effect. Never replace another
     /// payload under the same key; enforce the bounded outstanding-work limit.
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError>;

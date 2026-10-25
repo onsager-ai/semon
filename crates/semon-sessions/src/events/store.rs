@@ -52,6 +52,14 @@ use super::{
     MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
     Yield,
 };
+use crate::storage::sqlite::source_journal;
+use crate::storage::{
+    StorageError,
+    source_observations::{
+        SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        operation_replay, validate_paths,
+    },
+};
 use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
@@ -2223,7 +2231,186 @@ pub(crate) fn failure(error: rusqlite::Error) -> StoreError {
     }
 }
 
+impl SourceObservationStore for SqliteStore {
+    fn discovery_is_current(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<bool, StorageError> {
+        validate_paths(paths)?;
+        let cached = self.discovery.publication.take();
+        if !self.connection.is_autocommit() {
+            self.discovery.recovery = None;
+            return Err(StorageError::Unavailable);
+        }
+        crate::native_timing::discovery_count(|counts| counts.statements += 2);
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(source_journal::local_failure)?;
+        let witness = DiscoveryWitness::read(&tx, &self.discovery)
+            .map_err(source_journal::local_failure)?;
+        let current = cached.as_ref().is_some_and(|(old, inputs, done)| {
+            *old == witness && inputs == paths && *done == complete
+        });
+        if !current {
+            require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        }
+        tx.commit().map_err(source_journal::local_failure)?;
+        if current {
+            self.discovery.publication = cached;
+            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
+        }
+        Ok(current)
+    }
+
+    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(source_journal::local_failure)?;
+        let witness = DiscoveryWitness::read(&tx, &self.discovery)
+            .map_err(source_journal::local_failure)?;
+        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        source_journal::persist_intent_sql(&tx, None, intent)?;
+        let recovery_complete = self.discovery.recovery == Some(witness)
+            && tx
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(source_journal::local_failure)?;
+        let committed = DiscoveryWitness::read(&tx, &self.discovery)
+            .map_err(source_journal::local_failure)?;
+        // Intent triggers cannot smuggle a changed current contract into a witness.
+        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        if recovery_complete {
+            self.discovery.recovery = Some(committed);
+        }
+        Ok(())
+    }
+
+    fn pending_intents(&self) -> Result<Vec<SourceIntent>, StorageError> {
+        source_journal::local_pending_intents(&self.connection)
+    }
+
+    fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
+        source_journal::local_acknowledge_intent(&mut self.connection, operation)
+    }
+
+    fn discover(
+        &mut self,
+        operation: &SourceOperation,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<SourceMutationReceipt, StorageError> {
+        validate_paths(paths)?;
+        let payload = serde_json::to_vec(&(paths, complete))
+            .map_err(|_| StorageError::InvalidArguments)?;
+        if let Some(receipt) = operation_replay(operation, None, "discover", &payload)? {
+            return Ok(receipt);
+        }
+        self.discovery.publication = None;
+        if !self.connection.is_autocommit() {
+            self.discovery.recovery = None;
+            return Err(StorageError::Unavailable);
+        }
+        crate::native_timing::discovery_count(|counts| counts.statements += 2);
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(source_journal::local_failure)?;
+        let witness = DiscoveryWitness::read(&tx, &self.discovery)
+            .map_err(source_journal::local_failure)?;
+        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        if let Some(receipt) = source_journal::stored_receipt(&tx, None, operation)? {
+            // Only a matching terminal receipt may consume a captured intent.
+            if receipt == SourceMutationReceipt::AlreadyApplied {
+                source_journal::acknowledge_intent_sql(&tx, None, operation)?;
+            }
+            tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+            return Ok(receipt);
+        }
+        let before = tx.total_changes();
+        source_journal::discover(&tx, None, paths, complete)
+            .map_err(source_journal::local_failure)?;
+        // Receipt, effect and removal of the intent share this owner TX.
+        source_journal::insert_receipt(&tx, None, operation)?;
+        source_journal::acknowledge_intent_sql(&tx, None, operation)?;
+        let recovery_complete = self.discovery.recovery == Some(witness)
+            && tx
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(source_journal::local_failure)?;
+        let committed = DiscoveryWitness::read(&tx, &self.discovery)
+            .map_err(source_journal::local_failure)?;
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        }
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        if recovery_complete {
+            self.discovery.recovery = Some(committed);
+        }
+        if paths.iter().map(String::len).sum::<usize>() <= 1024 * 1024 {
+            self.discovery.publication = Some((committed, paths.to_vec(), complete));
+        }
+        crate::native_timing::discovery_count(|counts| {
+            counts.committed_changes += committed.changes - before
+        });
+        Ok(SourceMutationReceipt::Applied)
+    }
+
+    fn invalidate(
+        &mut self,
+        operation: &SourceOperation,
+        expected: &[(String, Option<i64>)],
+    ) -> Result<SourceMutationReceipt, StorageError> {
+        source_journal::local_invalidate(&mut self.connection, operation, expected, true)
+    }
+
+    fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
+        source_journal::local_claims(&self.connection, paths)
+    }
+
+    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
+        source_journal::local_pending(&self.connection, limit)
+    }
+
+    fn backfill_state(&self) -> Result<Option<String>, StorageError> {
+        source_journal::local_backfill_state(&self.connection)
+    }
+
+    fn finish_backfill(
+        &mut self,
+        operation: &SourceOperation,
+        expected_generation: Option<&str>,
+    ) -> Result<SourceMutationReceipt, StorageError> {
+        source_journal::local_finish_backfill(
+            &mut self.connection,
+            operation,
+            expected_generation,
+            true,
+        )
+    }
+}
+
 impl IndexStore for SqliteStore {
+    fn source_observations(&self) -> Option<&dyn SourceObservationStore> {
+        Some(self)
+    }
+
+    fn source_observations_mut(&mut self) -> Option<&mut dyn SourceObservationStore> {
+        Some(self)
+    }
+
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -7491,82 +7678,36 @@ mod tests {
         SourceMutationReceipt, SourceObservationStore, SourceOperation,
     };
 
-    // These tests exercise the same typed port as EventCache.  The legacy
-    // IndexStore forwarding surface is intentionally absent from production.
+    // Exercise the production owner's typed port, including its committed
+    // witness preflight. No connection is opened by this test convenience API.
     trait TestSourceObservations {
         fn discover_catalog_sources(
-            &self,
+            &mut self,
             paths: &[String],
             complete: bool,
         ) -> Result<(), StoreError>;
-        fn finish_catalog_backfill(&self, expected: Option<&str>) -> Result<Outcome, StoreError>;
-        fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
-        fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
-        fn backfill_state(&self) -> Result<Option<String>, StoreError>;
-        fn invalidate_catalog_sources(
-            &self,
-            expected: &[(String, Option<i64>)],
-        ) -> Result<bool, StoreError>;
-    }
-
-    fn test_observations(store: &SqliteStore) -> Box<dyn SourceObservationStore> {
-        crate::storage::sqlite::source_journal::legacy(store.path.clone())
-    }
-
-    fn test_operation(kind: &str, payload: Vec<u8>) -> SourceOperation {
-        SourceOperation::capture("legacy", kind, &payload)
     }
 
     impl TestSourceObservations for SqliteStore {
         fn discover_catalog_sources(
-            &self,
+            &mut self,
             paths: &[String],
             complete: bool,
         ) -> Result<(), StoreError> {
-            let operation = test_operation("discover", serde_json::to_vec(&(paths, complete)).unwrap());
-            match test_observations(self)
-                .discover(&operation, paths, complete)
+            let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
+            if SourceObservationStore::discovery_is_current(self, paths, complete)
+                .map_err(StoreError::Configured)?
+            {
+                return Ok(());
+            }
+            let payload = serde_json::to_vec(&(paths, complete)).unwrap();
+            let operation = SourceOperation::capture("", "discover", &payload);
+            match SourceObservationStore::discover(self, &operation, paths, complete)
                 .map_err(StoreError::Configured)?
             {
                 SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(()),
-                SourceMutationReceipt::Conflict => Err(StoreError::Configured(
-                    crate::storage::StorageError::Conflict,
-                )),
+                SourceMutationReceipt::Conflict => Err(StoreError::Configured(StorageError::Conflict)),
             }
-        }
-
-        fn finish_catalog_backfill(&self, expected: Option<&str>) -> Result<Outcome, StoreError> {
-            let operation = test_operation("finish_backfill", serde_json::to_vec(&expected).unwrap());
-            match test_observations(self)
-                .finish_backfill(&operation, expected)
-                .map_err(StoreError::Configured)?
-            {
-                SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(Outcome::Written),
-                SourceMutationReceipt::Conflict => Ok(Outcome::Conflict),
-            }
-        }
-
-        fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-            test_observations(self).pending(limit).map_err(StoreError::Configured)
-        }
-
-        fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-            test_observations(self).claims(paths).map_err(StoreError::Configured)
-        }
-
-        fn backfill_state(&self) -> Result<Option<String>, StoreError> {
-            test_observations(self).backfill_state().map_err(StoreError::Configured)
-        }
-
-        fn invalidate_catalog_sources(
-            &self,
-            expected: &[(String, Option<i64>)],
-        ) -> Result<bool, StoreError> {
-            let operation = test_operation("invalidate", serde_json::to_vec(expected).unwrap());
-            test_observations(self)
-                .invalidate(&operation, expected)
-                .map(|receipt| receipt != SourceMutationReceipt::Conflict)
-                .map_err(StoreError::Configured)
         }
     }
 
@@ -8126,6 +8267,100 @@ mod tests {
         assert_eq!(store.connection.total_changes(), changes);
         drop(peer);
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_observation_owner_port_rolls_back_effect_and_receipt_on_temp_fault() {
+        let root = scratch("owner-observation-tx");
+        let (mut store, _) = opened(&root.join("index.sqlite3"));
+        let paths = vec!["/owner-source.jsonl".to_owned()];
+        let operation = SourceOperation::capture(
+            "",
+            "discover",
+            &serde_json::to_vec(&(&paths, false)).unwrap(),
+        );
+        let intent = SourceIntent::Discover {
+            operation: operation.clone(),
+            paths: paths.clone(),
+            complete: false,
+        };
+        IndexStore::source_observations_mut(&mut store)
+            .unwrap()
+            .persist_intent(&intent)
+            .unwrap();
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_owner_receipt BEFORE INSERT ON source_observation_receipts BEGIN SELECT RAISE(ABORT,'owner receipt fault'); END;").unwrap();
+        assert!(
+            intent
+                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
+                .is_err()
+        );
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM source_observation_receipts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            SourceObservationStore::pending_intents(&store).unwrap(),
+            vec![intent.clone()]
+        );
+        store.connection.execute_batch("DROP TRIGGER fail_owner_receipt;").unwrap();
+        assert_eq!(
+            intent
+                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
+                .unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        // Completion is already durable before the producer's final ACK call.
+        assert!(SourceObservationStore::pending_intents(&store).unwrap().is_empty());
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM source_observation_receipts", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        let changes = store.connection.total_changes();
+        SourceObservationStore::acknowledge_intent(&mut store, &operation).unwrap();
+        assert_eq!(store.connection.total_changes(), changes);
+        assert_eq!(
+            intent
+                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
+                .unwrap(),
+            SourceMutationReceipt::AlreadyApplied
+        );
+        assert_eq!(store.connection.total_changes(), changes);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn event_cache_uses_owner_committed_discovery_witness() {
+        let root = scratch("producer-owner-witness");
+        let path = root.join("index.sqlite3");
+        let (store, _) = opened(&path);
+        let options = crate::Options {
+            claude_home: root.join("claude"),
+            cache: root.join("index.json"),
+            ..crate::Options::default()
+        };
+        let inputs = vec![crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/owner.jsonl".into(),
+        }];
+        let mut cache = crate::events::EventCache {
+            store: Some(Box::new(store)),
+            observation_path: Some(path),
+            ..crate::events::EventCache::default()
+        };
+        let _recording = crate::native_timing::catalog_commit_tests::recording(true);
+        crate::native_timing::take_discovery_records();
+        assert!(cache.discover_recovery_sources().unwrap());
+        cache.discover_catalog_sources(&options, &inputs, false).unwrap();
+        crate::native_timing::take_discovery_records();
+        assert!(cache.discover_recovery_sources().unwrap());
+        cache.discover_catalog_sources(&options, &inputs, false).unwrap();
+        let records = crate::native_timing::take_discovery_records();
+        assert_eq!(records.len(), 2);
+        for (_, counts) in records {
+            assert_eq!(counts.skipped, 1);
+            assert_eq!(counts.statements, 7);
+            assert_eq!(counts.rows, 0);
+            assert_eq!(counts.factory_opens, 0);
+            assert_eq!(counts.committed_changes, 0);
+        }
+        drop(cache);
         fs::remove_dir_all(root).unwrap();
     }
 

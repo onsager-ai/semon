@@ -1023,6 +1023,20 @@ pub(crate) struct Loaded {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    /// Backend-specific borrowed port; native SQLite retains its owner
+    /// connection and committed discovery witness for the full producer call.
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        None
+    }
+
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        None
+    }
+
     fn event_receipt(
         &self,
         _path: &str,
@@ -1510,6 +1524,26 @@ enum Base {
 type PendingSourceOperation = crate::storage::source_observations::SourceIntent;
 
 impl EventCache {
+    fn observation_store(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        if let Some(store) = &self.source_observations {
+            Some(store.as_ref())
+        } else {
+            self.store.as_ref()?.source_observations()
+        }
+    }
+
+    fn observation_store_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        if let Some(ref mut store) = self.source_observations {
+            Some(store.as_mut())
+        } else {
+            self.store.as_mut()?.source_observations_mut()
+        }
+    }
+
     /// Test-only binding of the real producer without a native IndexStore.
     /// This is not a public PG backend factory or qualification.
     #[cfg(all(test, feature = "postgres"))]
@@ -1542,8 +1576,7 @@ impl EventCache {
         path: &str,
     ) -> Result<Outcome, StoreError> {
         let observations = self
-            .source_observations
-            .as_ref()
+            .observation_store()
             .expect("test source observation store");
         let revision = observations
             .claims(&[path.to_owned()])
@@ -1557,14 +1590,15 @@ impl EventCache {
     /// Reopen and replay the durable queue before capturing any new identity.
     /// A failed apply/ack leaves the original payload available to the next open.
     pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {
-        let Some(store) = self.source_observations.as_mut() else {
-            return if self.pending_source_operation.is_none() {
+        let pending_source_operation = self.pending_source_operation.clone();
+        let Some(store) = self.observation_store_mut() else {
+            return if pending_source_operation.is_none() {
                 Ok(())
             } else {
                 Err(io::Error::other("source observation producer unavailable"))
             };
         };
-        if let Some(pending) = &self.pending_source_operation {
+        if let Some(pending) = &pending_source_operation {
             store
                 .persist_intent(pending)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1574,7 +1608,7 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))?;
         for intent in pending {
             intent
-                .apply(store.as_mut())
+                .apply(store)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             store
                 .acknowledge_intent(intent.operation())
@@ -1591,8 +1625,7 @@ impl EventCache {
         let operation = intent.operation().clone();
         // Keep this copy even if committing the intent itself is uncertain.
         self.pending_source_operation = Some(intent.clone());
-        self.source_observations
-            .as_mut()
+        self.observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .persist_intent(&intent)
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1639,8 +1672,7 @@ impl EventCache {
         &mut self,
         operation: &crate::storage::source_observations::SourceOperation,
     ) -> io::Result<()> {
-        self.source_observations
-            .as_mut()
+        self.observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .acknowledge_intent(operation)
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1753,8 +1785,6 @@ impl EventCache {
                 crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
-                cache.source_observations =
-                    Some(crate::storage::sqlite::source_journal::legacy(path.clone()));
                 cache.observation_path = Some(path.clone());
                 cache
             }
@@ -1780,9 +1810,6 @@ impl EventCache {
         let (store, loaded) = store::open_scoped(&Self::path(v1_cache))?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
-        cache.source_observations = Some(crate::storage::sqlite::source_journal::legacy(
-            Self::path(v1_cache),
-        ));
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
         cache.lock_cache = Some(v1_cache.to_owned());
@@ -1885,8 +1912,7 @@ impl EventCache {
     }
 
     pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {
-        self.source_observations
-            .as_ref()
+        self.observation_store()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .backfill_state()
             .map_err(|error| io::Error::other(error.to_string()))
@@ -1919,11 +1945,18 @@ impl EventCache {
             .filter(|input| input.path.ends_with(".jsonl"))
             .map(|input| input.full_path(options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        if self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .discovery_is_current(&paths, complete)
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            return Ok(());
+        }
         let operation = self.capture_discover_operation(&paths, complete)?;
         let started = measurements.start();
         let result = self
-            .source_observations
-            .as_mut()
+            .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .discover(&operation, &paths, complete);
         let receipt = match result {
@@ -1957,8 +1990,7 @@ impl EventCache {
         let expected_generation = Some(generation);
         let operation = self.capture_finish_backfill_operation(expected_generation)?;
         let result = self
-            .source_observations
-            .as_mut()
+            .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .finish_backfill(&operation, expected_generation);
         let receipt = match result {
@@ -2029,8 +2061,7 @@ impl EventCache {
     }
 
     pub(crate) fn pending_catalog_sources(&self, limit: usize) -> io::Result<Vec<String>> {
-        self.source_observations
-            .as_ref()
+        self.observation_store()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .pending(limit)
             .map_err(|error| io::Error::other(error.to_string()))
@@ -2047,8 +2078,7 @@ impl EventCache {
         &self,
         paths: &[String],
     ) -> io::Result<Vec<(String, Option<i64>)>> {
-        self.source_observations
-            .as_ref()
+        self.observation_store()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .claims(paths)
             .map_err(|error| io::Error::other(error.to_string()))
@@ -2530,7 +2560,9 @@ impl EventCache {
                 let stamp = self.claude_json_stamp.take();
                 *self = Self::from_loaded(loaded);
                 self.store = Some(store);
+                self.observation_path = Some(Self::path(&v1_cache));
                 self.v1_cache = Some(v1_cache);
+                self.reconcile_pending_source_operation()?;
                 // Runs read from `~/.claude.json` meanwhile are kept.
                 if let Some(stamp) = stamp
                     && !runs.is_empty()
