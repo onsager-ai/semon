@@ -17,6 +17,7 @@ pub(crate) fn invalidate(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
+    crate::native_timing::discovery_count(|counts| counts.statements += 3);
     if namespace.is_none() && super::namespace::is_bound(db)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -38,10 +39,15 @@ pub(crate) fn discover(
     paths: &[String],
     complete: bool,
 ) -> rusqlite::Result<()> {
+    crate::native_timing::discovery_count(|counts| {
+        counts.statements += 1;
+        counts.rows += paths.len();
+    });
     if namespace.is_none() && super::namespace::is_bound(db)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for path in paths {
+        crate::native_timing::discovery_count(|counts| counts.statements += 1);
         let inserted = if let Some(namespace) = namespace {
             db.execute("INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(?1,?2)", params![namespace,path])?
         } else {
@@ -55,6 +61,7 @@ pub(crate) fn discover(
         }
     }
     let state = if complete { "draining" } else { "discovering" };
+    crate::native_timing::discovery_count(|counts| counts.statements += 1);
     if let Some(namespace) = namespace {
         db.execute(
             "UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1",
@@ -62,7 +69,7 @@ pub(crate) fn discover(
         )?;
     } else {
         db.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state',?1)",
+            "INSERT INTO meta(key,value) VALUES('catalog_backfill_state',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value<>excluded.value",
             [state],
         )?;
     }
@@ -98,19 +105,35 @@ pub(crate) fn claims(
         .collect()
 }
 
-pub(crate) struct SourceJournal(pub(crate) StoreConfig);
+pub(crate) struct SourceJournal {
+    config: StoreConfig,
+    owner: Option<crate::events::store::configured::NativeOwnership>,
+}
+#[allow(non_snake_case)]
+pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
+    SourceJournal {
+        config,
+        owner: None,
+    }
+}
 
 impl SourceJournal {
+    pub(crate) fn owned(owner: crate::events::store::configured::NativeOwnership) -> Self {
+        Self {
+            config: owner.config().clone(),
+            owner: Some(owner),
+        }
+    }
     pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         if self
-            .0
+            .config
             .expected_stream_epoch
             .as_ref()
             .is_none_or(|epoch| epoch.len() != 64 || !epoch.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err(StorageError::InvalidArguments);
         }
-        let StoreBackend::Sqlite { database } = &self.0.backend;
+        let StoreBackend::Sqlite { database } = &self.config.backend;
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
             return Err(StorageError::InvalidArguments);
         }
@@ -121,12 +144,27 @@ impl SourceJournal {
         .map_err(failed)?;
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
-        catalog_namespace::register(&db, &self.0.namespace)?;
+        catalog_namespace::register(&db, &self.config.namespace)?;
+        if self.owner.is_some() {
+            db.create_scalar_function(
+                "semon_event_writer",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .map_err(failed)?;
+        }
         Ok(db)
     }
 
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
-        if !NativeReaderBinding::Admitted(self.0.clone()).validate(db, &self.0.namespace)? {
+        if let Some(owner) = &self.owner {
+            return owner.validate(db);
+        }
+        if !NativeReaderBinding::Admitted(self.config.clone())
+            .validate(db, &self.config.namespace)?
+        {
             return Err(StorageError::NamespaceUpgradePending);
         }
         Ok(())
@@ -158,7 +196,7 @@ impl SourceJournal {
         if old < 0 {
             return Err(StorageError::Unavailable);
         }
-        let head: i64 = tx.query_row("SELECT coalesce(max(revision),0) FROM main.session_catalog_invalidations WHERE namespace=?1", [self.0.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
+        let head: i64 = tx.query_row("SELECT coalesce(max(revision),0) FROM main.session_catalog_invalidations WHERE namespace=?1", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
         if head < 0 {
             return Err(StorageError::Unavailable);
         }
@@ -182,7 +220,7 @@ impl SourceJournal {
         tx.execute(
             "INSERT OR IGNORE INTO storage_source_journal VALUES(?1,?2,?3,?4)",
             params![
-                self.0.namespace.as_str(),
+                self.config.namespace.as_str(),
                 old.max(head),
                 state,
                 SOURCE_JOURNAL_QUALIFICATION_VERSION
@@ -221,11 +259,12 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if claims(&tx, Some(self.0.namespace.as_str()), &paths).map_err(failed)? != expected {
+        if claims(&tx, Some(self.config.namespace.as_str()), &paths).map_err(failed)? != expected {
             return Ok(false);
         }
         for path in paths {
-            invalidate(&tx, Some(self.0.namespace.as_str()), &path, "changed").map_err(failed)?;
+            invalidate(&tx, Some(self.config.namespace.as_str()), &path, "changed")
+                .map_err(failed)?;
         }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(true)
@@ -237,7 +276,7 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        discover(&tx, Some(self.0.namespace.as_str()), paths, complete).map_err(failed)?;
+        discover(&tx, Some(self.config.namespace.as_str()), paths, complete).map_err(failed)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
     fn claims(
@@ -246,7 +285,7 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
     ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
         validate_paths(paths)?;
         let db = self.snapshot()?;
-        claims(&db, Some(self.0.namespace.as_str()), paths).map_err(failed)
+        claims(&db, Some(self.config.namespace.as_str()), paths).map_err(failed)
     }
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
         if limit == 0 || limit > MAX_PATHS {
@@ -255,7 +294,7 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
         let db = self.snapshot()?;
         let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
         let paths = statement
-            .query_map(params![self.0.namespace.as_str(), limit as i64], |r| {
+            .query_map(params![self.config.namespace.as_str(), limit as i64], |r| {
                 r.get(0)
             })
             .map_err(failed)?
@@ -267,7 +306,7 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
         let db = self.snapshot()?;
         db.query_row(
             "SELECT backfill_state FROM storage_source_journal WHERE namespace=?1",
-            [self.0.namespace.as_str()],
+            [self.config.namespace.as_str()],
             |r| r.get(0),
         )
         .map_err(failed)

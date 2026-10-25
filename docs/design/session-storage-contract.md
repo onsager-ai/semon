@@ -1183,3 +1183,35 @@ use CI. Check temperatures before/after CPU work and stop at 85 C or higher;
 do not start CPU work without current readings. Bound each read/search to one
 named file under 10 MB. Preserve unrelated work, disable Git automatic GC and
 maintenance, and do not merge, deploy, publish or move live data.
+
+Worker26 adds a candidate private fresh-store native ownership profile. It
+selects the existing authored composite core, meta, copied usage, native usage,
+Tree, support, stage and pricing queue families together. It never converts a
+singleton store or adopts native rows. Explicit crate-private admission captures
+one namespace's admission generation and physical epoch. The same capability
+supplies the existing configured Writer, Source journal and semantic Stage; the
+EventCache parser is unchanged. Public admission and Options remain closed.
+
+Native inventory, intent/completion and all writer effects have namespace guards.
+The meta guard allows only native/proof keys, checks both old and new keys on
+updates, and preserves physical globals. Private batch runtime witnesses also
+include namespace/admission, so a batch from A cannot match B's equal epoch and
+Catalog generation. Header frontier reads bind the actual composite meta owner.
+Unported Catalog/history/trace/description writers remain durably fenced.
+
+Four CI-only tests now exercise real A/B ingest in one database, primitive
+indexing/reduction/record, retained claims, rollback/reopen/completion replay,
+cross-namespace batch and stale admission refusal, and closed public factories.
+These are candidate assertions, not a CI pass or independent acceptance claim.
+The old six semantic cases and all budgets/guards remain. All public writer,
+multi-Source, Current, global, metadata and usage qualifications remain zero.
+
+The physical storage_writer_inventory registry remains a store-wide unqualified
+schema inventory; source writer ownership is in the composite storage_event_tables
+inventory. Unported singleton history/slots/search/trace families stay fenced.
+Lazy proof/repair reader qualification for multiple Sources still requires its
+own typed reader port. Full-domain reduction, typed publication/ACK/change hints,
+finish/select/replay, competing Catalog generation tests, immutable retained
+snapshots/leases/GC/Raw custody, all other owner ports, PostgreSQL, supported-store
+migration/cutover/rollback and Hub #313 remain required. The cold full-suite gate
+and #380 image acceptance remain open; #477 merge stays held.

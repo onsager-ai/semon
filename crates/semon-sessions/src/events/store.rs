@@ -839,11 +839,80 @@ const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, 
 /// [`super::EventCache`].
 struct SqliteStore {
     connection: Connection,
+    discovery: DiscoveryState,
     path: PathBuf,
     selected_runs: Option<std::collections::BTreeSet<String>>,
     semantic_rejection: Option<&'static str>,
     #[cfg(test)]
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiscoveryWitness {
+    data: i64,
+    main_schema: i64,
+    temp_schema: i64,
+    changes: u64,
+    rollback: u64,
+    contract: [u8; 32],
+}
+impl DiscoveryWitness {
+    fn read(c: &Connection, state: &DiscoveryState) -> rusqlite::Result<Self> {
+        crate::native_timing::discovery_count(|counts| {
+            counts.statements += 1;
+            counts.schema_probes += 1;
+        });
+        if crate::storage::sqlite::namespace::is_bound(c)? {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "namespace writer upgrade is pending".into(),
+            ));
+        }
+        crate::native_timing::discovery_count(|counts| {
+            counts.statements += 4;
+            counts.schema_probes += 2;
+        });
+        let mut digest = sha2::Sha256::new();
+        let mut statement=c.prepare_cached("SELECT key,CASE WHEN octet_length(value)<=2048 THEN value END FROM main.meta WHERE key IN('cache_version','catalog_version','search_version','catalog_semantic_recipe') ORDER BY key LIMIT 5")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let key: String = row.get(0)?;
+            let value: Option<String> = row.get(1)?;
+            digest.update((key.len() as u64).to_be_bytes());
+            digest.update(key.as_bytes());
+            digest.update([u8::from(value.is_some())]);
+            if let Some(value) = value {
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
+        Ok(Self {
+            data: c.pragma_query_value(None, "data_version", |r| r.get(0))?,
+            main_schema: c.pragma_query_value(Some("main"), "schema_version", |r| r.get(0))?,
+            temp_schema: c.pragma_query_value(Some("temp"), "schema_version", |r| r.get(0))?,
+            changes: c.total_changes(),
+            rollback: state.rollback.load(std::sync::atomic::Ordering::Relaxed),
+            contract: digest.finalize().into(),
+        })
+    }
+}
+struct DiscoveryState {
+    rollback: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    recovery: Option<DiscoveryWitness>,
+    publication: Option<(DiscoveryWitness, Vec<String>, bool)>,
+}
+impl DiscoveryState {
+    fn new(c: &Connection) -> rusqlite::Result<Self> {
+        let rollback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = rollback.clone();
+        c.rollback_hook(Some(move || {
+            clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }))?;
+        Ok(Self {
+            rollback,
+            recovery: None,
+            publication: None,
+        })
+    }
 }
 
 /// Opens (creating when missing) the store at `path` and reads all of it.
@@ -1259,26 +1328,39 @@ pub(crate) fn prioritize_projection_sources(
 
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
-pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
+fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
+    require_current_sql(tx).map_err(io::Error::other)?;
     let after: Option<String> = tx
         .query_row(
-            configured::metadata_sql(&tx, "SELECT value FROM meta WHERE key='catalog_recovery_after'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
+            configured::metadata_sql(tx, "SELECT value FROM meta WHERE key='catalog_recovery_after'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
             [],
             |row| row.get(0),
         )
         .optional()
         .map_err(io::Error::other)?;
+    crate::native_timing::discovery_count(|counts| counts.statements += 1);
     let Some(after) = after else {
         return Ok(true);
     };
-    let paths=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?.query_map([after],|row|row.get::<_,String>(0)).map_err(io::Error::other)?.collect::<Result<Vec<_>,_>>().map_err(io::Error::other)?;
+    let mut selected=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?;
+    let paths = selected
+        .query_map([after], |row| row.get::<_, String>(0))
+        .map_err(io::Error::other)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
+    if crate::native_timing::enabled() {
+        let scans = selected.get_status(rusqlite::StatementStatus::FullscanStep);
+        crate::native_timing::discovery_count(|counts| {
+            counts.source_fullscan_steps += scans.max(0) as usize
+        });
+    }
+    drop(selected);
+    crate::native_timing::discovery_count(|counts| {
+        counts.statements += 1;
+        counts.rows += paths.len();
+    });
     for path in &paths {
-        let _ = archived_index(&tx, path).map_err(io::Error::other)?;
+        let _ = archived_index(tx, path).map_err(io::Error::other)?;
     }
     for path in &paths {
         if tx
@@ -1289,22 +1371,20 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
             .map_err(io::Error::other)?
             > 0
         {
-            invalidate_catalog_source(&tx, path, "changed").map_err(io::Error::other)?;
+            invalidate_catalog_source(tx, path, "changed").map_err(io::Error::other)?;
         }
     }
     if let Some(last) = paths.last() {
         tx.execute(
-            configured::metadata_sql(&tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
+            configured::metadata_sql(tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
             [last],
         )
         .map_err(io::Error::other)?;
     } else {
-        tx.execute(configured::metadata_sql(&tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
+        tx.execute(configured::metadata_sql(tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
             .map_err(io::Error::other)?;
     }
-    let complete = paths.is_empty();
-    tx.commit().map_err(io::Error::other)?;
-    Ok(complete)
+    Ok(paths.is_empty())
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
@@ -2488,18 +2568,104 @@ impl IndexStore for SqliteStore {
             .optional()
             .map_err(failure)
     }
+    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
+        let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
+        let cached = self.discovery.recovery.take();
+        if !self.connection.is_autocommit() {
+            self.discovery.publication = None;
+            return Err(StoreError::Data(
+                "discovery requires committed owner connection".into(),
+            ));
+        }
+        crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        if cached == Some(witness) {
+            tx.commit().map_err(failure)?;
+            self.discovery.recovery = Some(witness);
+            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
+            return Ok(true);
+        }
+        let before = tx.total_changes();
+        let complete = recovery_page(&tx).map_err(|error| StoreError::Data(error.to_string()))?;
+        let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(failure)?;
+        }
+        tx.commit().map_err(failure)?;
+        if complete {
+            self.discovery.recovery = Some(committed);
+        }
+        crate::native_timing::discovery_count(|counts| {
+            counts.committed_changes += committed.changes - before
+        });
+        Ok(complete)
+    }
     fn discover_catalog_sources(
         &mut self,
         paths: &[String],
         complete: bool,
     ) -> Result<(), StoreError> {
+        let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
+        let cached = self.discovery.publication.take();
+        if !self.connection.is_autocommit() {
+            self.discovery.recovery = None;
+            return Err(StoreError::Data(
+                "discovery requires committed owner connection".into(),
+            ));
+        }
+        crate::native_timing::discovery_count(|counts| counts.statements += 2); // BEGIN / COMMIT
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        if cached.as_ref().is_some_and(|(old, inputs, done)| {
+            *old == witness && inputs == paths && *done == complete
+        }) {
+            tx.commit().map_err(failure)?;
+            self.discovery.publication = cached;
+            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
+            return Ok(());
+        }
+        if self.discovery.recovery != Some(witness) {
+            require_current_sql(&tx).map_err(failure)?;
+        }
+        let before = tx.total_changes();
         crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
             .map_err(failure)?;
-        tx.commit().map_err(failure)
+        let recovery_still_complete = if self.discovery.recovery == Some(witness) {
+            crate::native_timing::discovery_count(|counts| counts.statements += 1);
+            tx.query_row(configured::metadata_sql(&tx,"SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')","SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after')").map_err(failure)?,[],|r|r.get::<_,bool>(0)).map_err(failure)?
+        } else {
+            false
+        };
+        let committed = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(failure)?;
+        }
+        tx.commit().map_err(failure)?;
+        // Only advance after rechecking the durable marker under this same
+        // lock, including effects of authored or fault-injected triggers.
+        if recovery_still_complete {
+            self.discovery.recovery = Some(committed);
+        }
+        if paths.len() <= 256 && paths.iter().map(String::len).sum::<usize>() <= 1024 * 1024 {
+            self.discovery.publication = Some((committed, paths.to_vec(), complete));
+        }
+        crate::native_timing::discovery_count(|counts| {
+            counts.committed_changes += committed.changes - before
+        });
+        Ok(())
     }
     fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError> {
         let tx = self
@@ -4031,8 +4197,10 @@ impl SqliteStore {
         // transient DDL whose schema cookie can be reused after rollback.
         copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
+        let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
+            discovery,
             path: path.to_owned(),
             selected_runs: scoped.then(std::collections::BTreeSet::new),
             semantic_rejection: None,
@@ -4055,6 +4223,7 @@ impl SqliteStore {
     /// Unlike producer opens, this does not initialize storage or inspect
     /// unrelated archived markers.
     fn attempt_selected(path: &Path) -> Result<Self, Unopened> {
+        crate::native_timing::discovery_count(|counts| counts.factory_opens += 1);
         if !path.exists() {
             return Self::attempt_scoped(path, true).map(|(store, _)| store);
         }
@@ -4115,8 +4284,10 @@ impl SqliteStore {
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
         copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
+        let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
+            discovery,
             path: path.to_owned(),
             selected_runs: Some(std::collections::BTreeSet::new()),
             semantic_rejection: None,
@@ -5171,10 +5342,15 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 /// The store still has this binary's schema and parser: no other version
 /// replaced it since it was opened.
 pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
+    crate::native_timing::discovery_count(|counts| counts.statements += 1);
     Ok(current_contract(connection)? && !crate::storage::sqlite::namespace::is_bound(connection)?)
 }
 
 pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool> {
+    crate::native_timing::discovery_count(|counts| {
+        counts.statements += 2;
+        counts.schema_probes += 1;
+    });
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
@@ -7511,7 +7687,242 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba()
+    {
+        let root = scratch("cold-discovery-witness");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let _recording = crate::native_timing::catalog_commit_tests::recording(true);
+        crate::native_timing::take_discovery_records();
+        let inputs = vec!["/new-source.jsonl".to_owned()];
+        assert!(store.discover_recovery_sources().unwrap());
+        store.discover_catalog_sources(&inputs, false).unwrap();
+        crate::native_timing::take_discovery_records();
+        let changes = store.connection.total_changes();
+        assert!(store.discover_recovery_sources().unwrap());
+        store.discover_catalog_sources(&inputs, false).unwrap();
+        let records = crate::native_timing::take_discovery_records();
+        assert_eq!(records.len(), 2);
+        for (_, counts) in records {
+            assert_eq!(counts.skipped, 1);
+            assert_eq!(
+                counts.statements, 7,
+                "only the transaction and committed witness probes may execute"
+            );
+            assert_eq!(counts.rows, 0);
+            assert_eq!(counts.factory_opens, 0);
+            assert_eq!(counts.committed_changes, 0);
+        }
+        assert_eq!(store.connection.total_changes(), changes);
+
+        // A new durable recovery intent committed by a peer must invalidate the
+        // previous complete pass before the next discovery publication.
+        let peer = Connection::open(&path).unwrap();
+        peer.execute_batch("BEGIN IMMEDIATE; INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('recover','claude','recover','/recovered.jsonl'); INSERT INTO meta(key,value) VALUES('catalog_recovery_after',''); COMMIT;").unwrap();
+        assert!(!store.discover_recovery_sources().unwrap());
+        let records = crate::native_timing::take_discovery_records();
+        assert_eq!(records.last().unwrap().1.skipped, 0);
+        assert_eq!(records.last().unwrap().1.rows, 1);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/recovered.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM session_catalog_invalidations WHERE source_path='/recovered.jsonl' AND reason='changed'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert!(store.discover_recovery_sources().unwrap());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM meta WHERE key='catalog_recovery_after'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+
+        // A recovery marker introduced by discovery itself must not be hidden
+        // when a completed witness is advanced across known owner writes.
+        store.connection.execute_batch("CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
+        assert!(store.discover_recovery_sources().unwrap());
+        store
+            .discover_catalog_sources(&["/trigger-intent.jsonl".into()], false)
+            .unwrap();
+        crate::native_timing::take_discovery_records();
+        assert!(!store.discover_recovery_sources().unwrap());
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .skipped,
+            0
+        );
+        assert!(store.discover_recovery_sources().unwrap());
+        store
+            .connection
+            .execute_batch("DROP TRIGGER request_recovery_during_discovery;")
+            .unwrap();
+
+        // The schema cookie returns to A, but the rollback clock still changes.
+        let schema: i64 = store
+            .connection
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "BEGIN IMMEDIATE; CREATE TABLE transient_discovery(value TEXT); ROLLBACK;",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            schema
+        );
+        crate::native_timing::take_discovery_records();
+        assert!(store.discover_recovery_sources().unwrap());
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .skipped,
+            0
+        );
+
+        // A failed publication rolls back both membership and claims. It cannot
+        // arm a successful no-op witness or advance the recovery witness.
+        let next = vec!["/fault-source.jsonl".to_owned()];
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON session_catalog_invalidations WHEN NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;").unwrap();
+        assert!(store.discover_catalog_sources(&next, false).is_err());
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/fault-source.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_cold_discovery;")
+            .unwrap();
+        crate::native_timing::take_discovery_records();
+        store.discover_catalog_sources(&next, false).unwrap();
+        let records = crate::native_timing::take_discovery_records();
+        assert_eq!(records.last().unwrap().1.skipped, 0);
+        assert!(records.last().unwrap().1.committed_changes > 0);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM session_catalog_invalidations WHERE source_path='/fault-source.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+
+        // Local committed DML and peer commits also invalidate publication.
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('discovery-local-change','1')",
+                [],
+            )
+            .unwrap();
+        crate::native_timing::take_discovery_records();
+        store.discover_catalog_sources(&next, false).unwrap();
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .skipped,
+            0
+        );
+        peer.execute(
+            "INSERT INTO meta(key,value) VALUES('discovery-peer-change','1')",
+            [],
+        )
+        .unwrap();
+        store.discover_catalog_sources(&next, false).unwrap();
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .skipped,
+            0
+        );
+
+        // A trigger cannot smuggle changed contract metadata into a newly
+        // armed witness. The whole discovery transaction must roll back.
+        store.connection.execute_batch("CREATE TEMP TRIGGER corrupt_discovery_contract AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/corrupt-contract.jsonl' BEGIN UPDATE meta SET value='unsupported' WHERE key='cache_version'; END;").unwrap();
+        assert!(store.discover_recovery_sources().unwrap());
+        assert!(
+            store
+                .discover_catalog_sources(&["/corrupt-contract.jsonl".into()], false)
+                .is_err()
+        );
+        assert_eq!(
+            parser_version(&store.connection).unwrap(),
+            Some(CACHE_VERSION)
+        );
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/corrupt-contract.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM session_catalog_invalidations WHERE source_path='/corrupt-contract.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER corrupt_discovery_contract;")
+            .unwrap();
+
+        // Transient DDL never arms a witness, including a cookie ABA after its
+        // rollback; an unsupported committed incarnation cannot use the cache.
+        store
+            .connection
+            .execute_batch("BEGIN IMMEDIATE; ALTER TABLE meta ADD COLUMN transient TEXT;")
+            .unwrap();
+        assert!(store.discover_catalog_sources(&next, false).is_err());
+        store.connection.execute_batch("ROLLBACK;").unwrap();
+        crate::native_timing::take_discovery_records();
+        store.discover_catalog_sources(&next, false).unwrap();
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .skipped,
+            0
+        );
+        peer.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let changes = store.connection.total_changes();
+        assert!(store.discover_recovery_sources().is_err());
+        assert!(store.discover_catalog_sources(&next, false).is_err());
+        assert_eq!(store.connection.total_changes(), changes);
+        drop(peer);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     const CATALOG_FIXTURE_NOW: i64 = 1_790_294_400_000;
+
+    #[test]
+    fn cold_discovery_cached_witness_preserves_contract_and_namespace_refusals() {
+        for sql in [
+            "ALTER TABLE meta ADD COLUMN unexpected TEXT;",
+            "DROP TABLE meta;",
+            "CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
+            "UPDATE meta SET value='unsupported' WHERE key='cache_version';",
+        ] {
+            let root = scratch("cold-discovery-refusal");
+            let (mut store, _) = opened(&root.join("index.sqlite3"));
+            let inputs = vec!["/accepted.jsonl".into()];
+            assert!(store.discover_recovery_sources().unwrap());
+            store.discover_catalog_sources(&inputs, false).unwrap();
+            store.connection.execute_batch(sql).unwrap();
+            let before = store.connection.total_changes();
+            assert!(store.discover_recovery_sources().is_err(), "{sql}");
+            assert!(
+                store
+                    .discover_catalog_sources(&["/refused.jsonl".into()], false)
+                    .is_err(),
+                "{sql}"
+            );
+            assert_eq!(
+                store.connection.total_changes(),
+                before,
+                "refusal must precede writes: {sql}"
+            );
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     fn catalog_native_fixture(
         root: &Path,

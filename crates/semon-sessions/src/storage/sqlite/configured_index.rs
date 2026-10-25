@@ -36,12 +36,12 @@ pub(crate) fn open_private_semantic(
 pub(crate) fn open_semantic(
     capability: super::semantic::SemanticStaging,
 ) -> Result<Box<dyn IndexStore>, StorageError> {
-    let config = capability.config();
-    let journal = super::source_journal::SourceJournal(config.clone());
+    let journal = capability.journal();
     journal.prepare()?;
+    let native = capability.writer();
     Ok(Box::new(ConfiguredIndex {
         journal,
-        native: crate::events::store::configured::Writer::new(config),
+        native,
         semantic: Some(super::semantic::Stage::open(capability)?),
     }))
 }

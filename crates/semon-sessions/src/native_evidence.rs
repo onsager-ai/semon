@@ -378,7 +378,7 @@ impl NativeEvidence {
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
-                crate::events::store::discover_recovery_sources(&self.options)?
+                cache.discover_recovery_sources()?
             };
             let page = {
                 let _timing =
