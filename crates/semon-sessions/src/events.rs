@@ -1527,6 +1527,24 @@ enum Base {
 type PendingSourceOperation = crate::storage::source_observations::SourceIntent;
 
 impl EventCache {
+    /// Test-only binding of the real producer without a native IndexStore.
+    /// This is not a public PG backend factory or qualification.
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn source_observation_test_producer(
+        namespace: &str,
+        path: &Path,
+        store: Box<dyn crate::storage::source_observations::SourceObservationStore>,
+    ) -> io::Result<Self> {
+        let mut cache = Self {
+            observation_namespace: namespace.to_owned(),
+            observation_path: Some(path.to_owned()),
+            source_observations: Some(store),
+            ..Self::default()
+        };
+        cache.reconcile_pending_source_operation()?;
+        Ok(cache)
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_source_observations(
         &mut self,

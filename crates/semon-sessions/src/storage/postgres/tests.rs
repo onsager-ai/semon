@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-thread_local! { static LOSE_ACK: Cell<bool> = const { Cell::new(false) }; }
+thread_local! { pub(super) static LOSE_ACK: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static FAIL_CLEAN: Cell<bool> = const { Cell::new(false) }; }
 pub(super) fn lose_ack() -> bool {
     LOSE_ACK.with(|flag| flag.replace(false))

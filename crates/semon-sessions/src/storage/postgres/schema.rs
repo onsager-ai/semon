@@ -72,6 +72,56 @@ impl PgPool {
             ",
                     )
                     .map_err(sqlstate::error)?;
+                tx.driver.batch_execute("
+                CREATE TABLE semon_pg_source_state(
+                    namespace bytea NOT NULL CHECK(octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED PRIMARY KEY,
+                    revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
+                    backfill_state text CHECK(backfill_state IN ('discovering','draining','complete')),
+                    catalog_generation text CHECK(octet_length(catalog_generation)<=4096),
+                    semantic_pending boolean NOT NULL DEFAULT false,
+                    catalog_completeness text,
+                    search_backfill_complete boolean NOT NULL DEFAULT false,
+                    recovery_reason text
+                );
+                CREATE TABLE semon_pg_source_members(
+                    namespace bytea NOT NULL CHECK(octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
+                    source_path bytea NOT NULL CHECK(octet_length(source_path) BETWEEN 1 AND 4096),
+                    PRIMARY KEY(namespace_digest,source_path)
+                );
+                CREATE TABLE semon_pg_source_invalidations(
+                    namespace bytea NOT NULL CHECK(octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
+                    source_path bytea NOT NULL CHECK(octet_length(source_path) BETWEEN 1 AND 4096),
+                    revision bigint NOT NULL CHECK(revision>0),
+                    reason text NOT NULL,
+                    observed_at bigint NOT NULL,
+                    PRIMARY KEY(namespace_digest,source_path)
+                );
+                CREATE INDEX semon_pg_source_pending ON semon_pg_source_invalidations(namespace_digest,revision,source_path);
+                CREATE TABLE semon_pg_source_receipts(
+                    namespace bytea NOT NULL CHECK(octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
+                    operation_id text NOT NULL CHECK(octet_length(operation_id) BETWEEN 1 AND 256),
+                    payload_digest text NOT NULL CHECK(payload_digest ~ '^[0-9A-Fa-f]{64}$'),
+                    outcome text NOT NULL CHECK(outcome IN ('applied','conflict')),
+                    PRIMARY KEY(namespace_digest,operation_id)
+                );
+                CREATE TABLE semon_pg_source_intents(
+                    namespace bytea NOT NULL CHECK(octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
+                    operation_id text NOT NULL CHECK(octet_length(operation_id) BETWEEN 1 AND 256),
+                    payload_digest text NOT NULL CHECK(payload_digest ~ '^[0-9A-Fa-f]{64}$'),
+                    payload text NOT NULL CHECK(octet_length(payload)<=2097152),
+                    sequence bigint GENERATED ALWAYS AS IDENTITY,
+                    PRIMARY KEY(namespace_digest,operation_id)
+                );
+                CREATE INDEX semon_pg_source_intent_order ON semon_pg_source_intents(namespace_digest,sequence);
+                ").map_err(sqlstate::error)?;
+                for table in ["semon_pg_source_state", "semon_pg_source_members", "semon_pg_source_invalidations", "semon_pg_source_receipts", "semon_pg_source_intents"] {
+                    tx.driver.batch_execute(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; CREATE POLICY {table}_namespace ON {table} USING (semon_pg_namespace_matches(namespace,namespace_digest,decode(current_setting('semon.namespace',true),'hex'))) WITH CHECK (semon_pg_namespace_matches(namespace,namespace_digest,decode(current_setting('semon.namespace',true),'hex')));")).map_err(sqlstate::error)?;
+                }
                 Ok(())
             },
         )?;
