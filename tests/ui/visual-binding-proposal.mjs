@@ -189,9 +189,7 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
     audit.reports.some((item) => !expectedSources.has(item.source))
   )
     refusals.push('pathname audit report set does not match this suite');
-  const fingerprints = new Set(
-    specs.map((spec) => reports[spec.reportPath]?.candidateFingerprint),
-  );
+  const fingerprints = new Set(specs.map((spec) => reports[spec.reportPath]?.candidateFingerprint));
   if (fingerprints.size !== 1 || !isSha256([...fingerprints][0]))
     refusals.push('reports do not share one valid runtime fingerprint');
 
