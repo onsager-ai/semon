@@ -227,7 +227,11 @@ fn reset_page(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
         }
         // Member replay is a durable discovery cursor, including across the
         // epoch reset that invalidates the old model and its callers.
-        let filter = if table == "catalog_semantic_frontier" { " AND kind<>'members'" } else { "" };
+        let filter = if table == "catalog_semantic_frontier" {
+            " AND kind<>'members'"
+        } else {
+            ""
+        };
         budget-=c.execute(&format!("DELETE FROM main.{table} WHERE namespace=?1{filter} AND ({key}) IN (SELECT {key} FROM main.{table} WHERE namespace=?1{filter} ORDER BY {key} LIMIT ?2)"), params![ns,budget as i64])?;
     }
     if budget == 0 {
@@ -914,6 +918,53 @@ struct AdmittedLookup<'a> {
     replay: Vec<String>,
 }
 
+#[cfg(test)]
+pub(crate) fn name_members_vm_probe(c: &Connection, ns: &str, name: &str) -> Vec<(String, usize, usize)> {
+    use crate::model::relation_stage::SelectorLookup;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let tx = c.unchecked_transaction().unwrap();
+    let steps = Arc::new(AtomicUsize::new(0));
+    let observed = steps.clone();
+    c.progress_handler(1, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+    let started = std::time::Instant::now();
+    let layout = FrontierLayout::bind(&tx).unwrap();
+    c.progress_handler(0, None::<fn() -> bool>).unwrap();
+    let setup = steps.load(Ordering::Relaxed);
+    assert!(setup > 0 && setup <= 32768);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    eprintln!("name_members_setup vm_steps={setup}");
+    let mut result = vec![("setup".into(), setup, 0)];
+    let mut targets = Vec::new();
+    for kind in ["hints", "candidates", "members"] {
+        tx.execute_batch("SAVEPOINT name_members_probe").unwrap();
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        c.progress_handler(1, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+        let started = std::time::Instant::now();
+        let lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
+        let rows = match kind {
+            "hints" => { targets = lookup.name_hints(name).unwrap(); targets.len() }
+            "candidates" => lookup.name_candidates(name).unwrap().len(),
+            _ => {
+                for target in &targets {
+                    tx.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'members',?2,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key=''", params![ns,target]).unwrap();
+                }
+                frontier_page(&layout, ns).unwrap();
+                staged_paths(&tx, ns).unwrap().len()
+            }
+        };
+        c.progress_handler(0, None::<fn() -> bool>).unwrap();
+        let steps = steps.load(Ordering::Relaxed);
+        assert!(steps > 0 && steps <= 4096, "{kind}: {steps}");
+        assert!(rows <= 64);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        eprintln!("name_members_query kind={kind} vm_steps={steps} rows={rows}");
+        result.push((kind.into(), steps, rows));
+        tx.execute_batch("ROLLBACK TO name_members_probe; RELEASE name_members_probe").unwrap();
+    }
+    result
+}
+
 impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
     type Error = rusqlite::Error;
     fn invalid(&self, message: &'static str) -> Self::Error {
@@ -956,7 +1007,21 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
         self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM main.catalog_semantic_names n JOIN main.catalog_semantic_endpoints e ON e.namespace=n.namespace AND e.session_key=n.session_key WHERE n.namespace=?1 AND e.namespace=?1 AND n.name=?2 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM main.catalog_semantic_events sent JOIN main.catalog_semantic_events receipt ON receipt.namespace=sent.namespace AND receipt.msg_id=sent.msg_id JOIN main.catalog_semantic_endpoints e ON e.namespace=sent.namespace AND e.session_key=sent.owner JOIN main.catalog_semantic_endpoints root ON root.namespace=e.namespace AND root.session_key=e.root_key WHERE sent.namespace=?1 AND receipt.namespace=?1 AND e.namespace=?1 AND root.namespace=?1 AND sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?2 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM main.catalog_semantic_events first WHERE first.namespace=?1 AND first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
     }
     fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
-        self.db.prepare("SELECT DISTINCT member.session_key FROM main.catalog_native_dependencies hint INDEXED BY catalog_native_dependency JOIN main.session_catalog_sources member ON member.namespace=hint.namespace AND member.source_path=hint.source_path JOIN main.session_catalog owner ON owner.namespace=member.namespace AND owner.session_key=member.session_key WHERE hint.namespace=?1 AND hint.harness='name:claude' AND hint.native_id=?2 AND member.namespace=?1 AND member.lifecycle='current' AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=member.session_key) ORDER BY member.session_key LIMIT 65")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
+        let paths = self.db.prepare("SELECT CASE WHEN octet_length(source_path)<=1048576 THEN source_path END FROM main.catalog_native_dependencies INDEXED BY catalog_native_dependency WHERE namespace=?1 AND harness='name:claude' AND native_id=?2 ORDER BY source_path LIMIT 65")?.query_map(params![self.ns,name], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if paths.len() > 64 || paths.iter().map(String::len).sum::<usize>() > 1048576 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        let mut observations = 0usize;
+        for path in paths {
+            let members = self.db.prepare("SELECT member.session_key FROM main.session_catalog_sources member JOIN main.session_catalog owner ON owner.namespace=member.namespace AND owner.session_key=member.session_key WHERE member.namespace=?1 AND member.source_path=?2 AND member.lifecycle='current' AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND (NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=member.session_key) OR EXISTS(SELECT 1 FROM main.session_catalog_sources peer WHERE peer.namespace=?1 AND peer.session_key=member.session_key AND peer.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources staged WHERE staged.namespace=?1 AND staged.source_path=peer.source_path AND staged.index_done=1))) LIMIT 65")?.query_map(params![self.ns,path], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            observations += members.len();
+            if observations > 64 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            keys.extend(members);
+        }
+        Ok(keys.into_iter().collect())
     }
     fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
         self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND parent_native=?2 AND task=?3 LIMIT 2")?.query_map(params![self.ns, parent, task], |r| r.get(0))?.collect()
@@ -1674,7 +1739,10 @@ impl Stage {
         epoch: i64,
         selector: &crate::model::relation_stage::Selector,
     ) -> Result<crate::model::relation_stage::Selection, StoreError> {
-        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(error)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.namespace();
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND resetting=0)",params![ns,epoch],|r|r.get(0)).map_err(error)?;
@@ -1700,6 +1768,20 @@ impl Stage {
                 return Err(refuse("semantic_claude_event_projection_pending"));
             }
         }
+        if matches!(selector, crate::model::relation_stage::Selector::ClaudeName { .. }) {
+            let current: bool = tx.query_row("SELECT revision=(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            if !current {
+                return Err(refuse("stale semantic selector"));
+            }
+            for path in staged_paths(&tx, ns)? {
+                let Some((_, ledger)) = crate::events::store::ledger_row(&tx, &path).map_err(error)? else {
+                    return Err(refuse("stale semantic selector"));
+                };
+                if crate::events::Stat::of(std::path::Path::new(&path)).ok().as_ref() != Some(&ledger.stat) {
+                    return Err(refuse("stale semantic selector"));
+                }
+            }
+        }
         let mut lookup = AdmittedLookup {
             db: &tx,
             ns,
@@ -1719,10 +1801,28 @@ impl Stage {
             let layout = FrontierLayout::bind(&tx).map_err(error)?;
             frontier_page(&layout, ns)?;
             staged_paths(&tx, ns)?;
-            let runtime: String = tx.query_row("SELECT runtime FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            let runtime: String = tx
+                .query_row(
+                    "SELECT runtime FROM main.catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
             reset(&tx, ns, &runtime).map_err(error)?;
-            tx.execute("DELETE FROM storage_semantic_model_batches WHERE namespace=?1", [ns]).map_err(error)?;
-            let next_epoch = tx.query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            tx.execute(
+                "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
+                [ns],
+            )
+            .map_err(error)?;
+            let next_epoch = tx
+                .query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            #[cfg(test)]
+            crate::events::store::configured::effect("semantic_name_members_reset").map_err(error)?;
             tx.commit().map_err(error)?;
             self.epoch = Some(next_epoch);
             return Err(refuse("semantic_claude_name_members_pending"));
