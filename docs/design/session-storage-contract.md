@@ -1292,3 +1292,45 @@ The full legacy publication algorithm has therefore not yet been extracted.
 S1B is unfinished. S2-S4, PG integration without SQLite, migration/cutover/
 rollback, Hub #313 and fresh independent acceptance remain required. #380 still
 blocks #477 main merge. Thermal readings are absent: no local checks ran.
+
+### Worker34: authored publication families and shared effects (unqualified)
+
+The five Worker32 configured publication failures have a concrete common
+physical mismatch: `authored_storage_ddl` selected singleton History and slot
+schemas even for the fully composite private semantic profile, while the new
+admitted effects explicitly queried `main.*` with `namespace`. Fresh semantic
+profiles now select independently authored namespace-keyed History, slot and
+search DDL. Other profiles retain their original DDL. Publication checks these
+family keys before payload effects; existing private profiles are not upgraded.
+Test-only diagnostics print a publication phase and optional SQLite extended
+code, never the SQLite message, SQL, paths or content. Production error mapping
+is unchanged.
+
+`CurrentPublicationStore` owns authored Current/source/dependency statements;
+one `publish_current_sources` loop retains the original retirement, dependency
+clearing, PID/parent derivation and source insertion order. The legacy batch
+Current statement has moved into the adapter. `SearchPublicationStore` supplies
+cohort/member/removal/document/posting/count effects to the existing search
+algorithm, preserving its normalization, field limits, tokenization, posting
+order and per-cohort counts. `CompositeHistoryStore` supplies physical effects
+to the original missing-source recipe composition. Both publishers use these
+algorithms. Only test code retains frozen original publication paths for the
+independent durable-row/digest comparison. The comparison requires nonempty
+Current/source, native-dependency, search and original-recipe families.
+
+Scoped Current, History, slots, search, proof, ACK and change hints stay in the
+same fenced IMMEDIATE transaction. The new after-search fault is covered by
+whole-database rollback and the existing stale/replacement tests. Additional
+private two-Source coverage checks search documents/counts, replay and foreign
+namespace equality. CI results remain pending; these fixtures are not the
+required full configured model/Query integration test.
+
+S1B remains unfinished: the real model preparation path still needs a coherent
+typed runtime/producer seam; record still refuses nonprimitive projection
+payloads, and exact staged primitive rows remain required at publication.
+Full affected-owner lifecycle retirement, complete selectors/incident replay,
+nonprimitive owner closure and the multi-Source proof/repair reader remain.
+Public qualification is 0 and the public factory retains `semantic=None`.
+Immutable generations/leases/GC/Raw custody, remaining owners, public backend
+qualification, full PG parity/no hidden SQLite, migration/cutover/rollback and
+Hub #313 remain required. #380 must complete before #477 merges.

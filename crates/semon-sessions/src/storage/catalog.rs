@@ -8,6 +8,74 @@ use std::io;
 
 pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 
+/// Current membership and native dependency effects within publication's CAS.
+/// Source paths are typed row values, never statements supplied by a caller.
+pub(crate) trait CurrentPublicationStore {
+    type Error;
+    fn current(&self, row: &CatalogRow, metadata: &str) -> Result<bool, Self::Error>;
+    fn retire_sources(&self, key: &str) -> Result<(), Self::Error>;
+    fn clear_dependencies(&self, source: &CatalogSource) -> Result<(), Self::Error>;
+    fn dependency(&self, source: &CatalogSource, harness: &str, native: &str) -> Result<(), Self::Error>;
+    fn source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), Self::Error>;
+}
+
+/// Physical effects for the existing bounded metadata-search cohort algorithm.
+pub(crate) trait SearchPublicationStore {
+    fn begin(&self, rows: &[&CatalogRow]) -> Result<(), Self::Error>;
+    type Error;
+    fn validate(&self, key: &str) -> Result<(), Self::Error>;
+    fn remove(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
+    fn document(&self, scope: crate::CatalogReadScope, row: &CatalogRow, fields: &str, complete: bool) -> Result<(), Self::Error>;
+    fn postings(&self, rows: &[(&String, &CatalogRow)]) -> Result<(), Self::Error>;
+    fn counts(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
+}
+
+pub(crate) type HistoryRecipeHeader = (u32, Option<String>, bool);
+pub(crate) trait CompositeHistoryStore {
+    type Error;
+    fn data(error: serde_json::Error) -> Self::Error;
+    fn original(&self, key: &str) -> Result<bool, Self::Error>;
+    fn previous(&self, key: &str) -> Result<Option<String>, Self::Error>;
+    fn history_exists(&self, key: &str) -> Result<bool, Self::Error>;
+    fn retain_source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), Self::Error>;
+    fn relocated(&self, old: &CatalogSource, current: &[CatalogSource]) -> Result<bool, Self::Error>;
+    fn clear(&self, key: &str) -> Result<(), Self::Error>;
+    fn previous_recipe(&self, key: &str) -> Result<(bool, Option<HistoryRecipeHeader>), Self::Error>;
+    fn recipe_slots(&self, key: &str, history: bool) -> Result<Vec<String>, Self::Error>;
+    fn composed(&self, key: &str, generation: &str, sources: &str, metadata: &str, texts: &[String], incomplete: bool) -> Result<(), Self::Error>;
+}
+
+/// The original dependency derivation and statement ordering, shared by both
+/// physical layouts. Lineage and bridge dependencies retain their own owners.
+pub(crate) fn publish_current_sources<P: CurrentPublicationStore>(
+    store: &P,
+    row: &CatalogRow,
+) -> Result<(), P::Error> {
+    store.retire_sources(&row.key)?;
+    for source in &row.sources {
+        store.clear_dependencies(source)?;
+        let parent = source.native_role.as_ref().and_then(|role| {
+            role.pointer("/Agent/parent").and_then(Value::as_str).or_else(|| {
+                (role.pointer("/Codex/guardian_review").and_then(Value::as_bool) != Some(true))
+                    .then(|| role.pointer("/Codex/parent_thread").and_then(Value::as_str))
+                    .flatten()
+            })
+        });
+        if let Some(observations) = row.query.as_ref().and_then(|query| query["rows"].as_object()) {
+            for observation in observations.values() {
+                if let Some(pid) = observation["summary"]["pid"].as_u64() {
+                    store.dependency(source, "runtime:pid", &pid.to_string())?;
+                }
+            }
+        }
+        if let Some(parent) = parent {
+            store.dependency(source, &row.harness, parent)?;
+        }
+        store.source(row, source)?;
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HistoryTransfer {
     witness: String,
@@ -288,4 +356,169 @@ pub(crate) trait CatalogSnapshot {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>>;
+}
+
+/// The original missing-source History composition, shared without SQL or a
+/// second recipe derivation. Physical reads/effects remain adapter-owned.
+pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
+    store: &P,
+    rows: &[CatalogRow],
+    projections: Option<&[crate::slot_projection::Projection]>,
+) -> Result<(), P::Error> {
+    use crate::slot_projection::{SavedSlot, VERSION};
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet};
+    let Some(projections) = projections else {
+        return Ok(());
+    };
+    let rows: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    for projection in projections {
+        let Some(current) = rows.get(projection.key.as_str()).copied() else {
+            continue;
+        };
+        // A completed cross-harness original is immutable custody even if a
+        // later Current publication reuses its original harness again.
+        let original = store.original(&current.key)?;
+        if original {
+            continue;
+        }
+        let old_text = store.previous(&current.key)?;
+        let old = old_text
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        let separate_harness = old
+            .as_ref()
+            .is_some_and(|old| old.harness != current.harness);
+        if separate_harness {
+            let old = old.as_ref().unwrap();
+            for source in &old.sources {
+                store.retain_source(old, source)?;
+            }
+            // The owning publication transaction completed custody preflight.
+            debug_assert!(store.history_exists(&old.key)?);
+            continue;
+        }
+        // A reused viewer key does not join two native harness identities.
+        // Retain the original owner and recipes independently of Current.
+        let mut history = current.clone();
+        let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
+        let mut missing = BTreeMap::new();
+        for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
+            if !paths.contains(&source.path)
+                && !store.relocated(source, &current.sources)?
+            {
+                missing.insert(source.path.clone(), source.clone());
+            }
+        }
+        if missing.is_empty() {
+            store.clear(&current.key)?;
+            continue;
+        }
+        // A composite recipe is custody, not an exact aggregate of its native
+        // records. The existing selected producer must qualify full Query facts.
+        history.query = None;
+        history.sources.extend(missing.values().cloned());
+        history.native_ids = history
+            .sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for source in missing.values() {
+            store.retain_source(old.as_ref().unwrap(), source)?;
+        }
+
+        let mut slots = projection.slots.clone();
+        let mut incomplete = false;
+        if !missing.is_empty() {
+            let (history_recipe, header) = store.previous_recipe(&current.key)?;
+            let qualified =
+                old.as_ref()
+                    .zip(header.as_ref())
+                    .is_some_and(|(old, (version, hash, _))| {
+                        *version == VERSION
+                            && hash.is_some()
+                            && crate::retention::source_generation(&old.sources)
+                                .ok()
+                                .as_ref()
+                                == hash.as_ref()
+                    });
+            if qualified {
+                incomplete = header.is_some_and(|(_, _, incomplete)| incomplete);
+                let old_sources: BTreeMap<_, _> = old
+                    .as_ref()
+                    .unwrap()
+                    .sources
+                    .iter()
+                    .map(|source| (&source.path, source))
+                    .collect();
+                let current_sources: BTreeMap<_, _> = current
+                    .sources
+                    .iter()
+                    .map(|source| (&source.path, source))
+                    .collect();
+                for text in store.recipe_slots(&current.key, history_recipe)? {
+                    let slot: SavedSlot = match serde_json::from_str(&text) {
+                        Ok(slot) => slot,
+                        Err(_) => {
+                            incomplete = true;
+                            continue;
+                        }
+                    };
+                    let Some(file) = &slot.file else {
+                        continue;
+                    };
+                    if !missing.contains_key(&file.path) {
+                        if slot
+                            .source_paths()
+                            .iter()
+                            .any(|path| missing.contains_key(*path))
+                        {
+                            incomplete = true;
+                        }
+                        continue;
+                    }
+                    // Every foreign-file dependency must retain the same original
+                    // consumed generation. Changed foreign paths need a future
+                    // multi-generation recipe, never an implicit current rebind.
+                    if slot.source_paths().iter().all(|path| {
+                        missing.contains_key(*path)
+                            || old_sources.get(*path) == current_sources.get(*path)
+                    }) {
+                        let at = slot
+                            .t
+                            .and_then(|time| {
+                                slots
+                                    .iter()
+                                    .position(|current| current.t.is_some_and(|t| t > time))
+                            })
+                            .unwrap_or(slots.len());
+                        slots.insert(at, slot);
+                    } else {
+                        incomplete = true;
+                    }
+                }
+            } else {
+                incomplete = true;
+            }
+        }
+        // Native source/event/block/kind identity, not text equality. Existing
+        // current slots win. Stable timestamp ordering preserves old records
+        // while allowing current continuation to advance after a disappearance.
+        let mut seen = BTreeSet::new();
+        slots.retain(|slot| seen.insert(slot.identity()));
+        let texts: Vec<String> = slots.iter().map(serde_json::to_string).collect::<Result<_, _>>().map_err(P::data)?;
+        let sources = crate::retention::source_generation(&history.sources).map_err(P::data)?;
+        let metadata = serde_json::to_string(&history).map_err(P::data)?;
+        let generation = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_string(&(VERSION, &sources, &texts, incomplete)).map_err(P::data)?.as_bytes())
+        );
+        store.composed(&current.key, &generation, &sources, &metadata, &texts, incomplete)?;
+    }
+    Ok(())
 }

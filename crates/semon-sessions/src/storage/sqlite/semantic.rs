@@ -10,6 +10,34 @@ use crate::model::{
 use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_PHASE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+struct PublicationDiagnostic(Option<&'static str>);
+#[cfg(test)]
+impl Drop for PublicationDiagnostic {
+    fn drop(&mut self) {
+        PUBLICATION_PHASE.with(|phase| phase.set(self.0));
+    }
+}
+fn publication_phase(label: &'static str) {
+    #[cfg(test)]
+    PUBLICATION_PHASE.with(|phase| phase.set(Some(label)));
+    #[cfg(not(test))]
+    let _ = label;
+}
+#[cfg(test)]
+pub(super) fn diagnose(error: &rusqlite::Error) {
+    PUBLICATION_PHASE.with(|phase| {
+        if let Some(phase) = phase.get() {
+            // Never print SQLite messages: they can contain SQL or native data.
+            eprintln!("semantic_publication_failure phase={phase} sqlite_extended_code={:?}", error.sqlite_error().map(|e| e.extended_code));
+        }
+    });
+}
+
 /// This capability binds the real admission and physical incarnation. Its fields
 /// cannot be supplied by a caller or inferred from an Options path.
 pub(crate) struct AdmittedSource {
@@ -26,6 +54,12 @@ impl AdmittedSource {
     pub(super) fn validate_publication(&self, db: &Connection) -> Result<(), StorageError> {
         if self.owner.is_none() {
             return Err(StorageError::NamespaceUpgradePending);
+        }
+        // Private profiles are authored as one physical family. Never upgrade
+        // a profile that predates the scoped custody/recipe/search effects.
+        for table in ["session_slot_projections", "session_slots", "session_history_catalog", "session_history_projections", "session_history_slots", "session_history_slot_parts", "session_search_coverage", "session_search_documents", "session_search_memberships", "session_search_counts"] {
+            let scoped: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |r|r.get(0)).map_err(failed)?;
+            if !scoped { return Err(StorageError::NamespaceUpgradePending); }
         }
         self.validate(db)
     }
@@ -373,6 +407,8 @@ impl Stage {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         use crate::storage::catalog::CatalogPublicationHead;
         use sha2::{Digest, Sha256};
+        #[cfg(test)]
+        let _diagnostic = PublicationDiagnostic(PUBLICATION_PHASE.with(|phase| phase.replace(Some("prepare"))));
         if batch.phase != Phase::Publication || batch.base_generation != prepared.base_generation {
             return Ok((Outcome::Conflict, None));
         }
@@ -451,6 +487,7 @@ impl Stage {
                 .map_err(|e| StoreError::Data(e.to_string()))?
             )
         );
+        publication_phase("admission_and_witnesses");
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -642,6 +679,7 @@ impl Stage {
                 &generation_metadata,
             )
         };
+        publication_phase("original_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
         if !crate::storage::catalog::preserve_replacement_rows(&history, &prepared.rows)
@@ -652,8 +690,11 @@ impl Stage {
             tx.commit().map_err(error)?;
             return Ok((Outcome::Deferred, None));
         }
+        publication_phase("composite_history");
+        crate::storage::catalog::publish_history_rows(&history, &prepared.rows, Some(&prepared.transcripts)).map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
+        publication_phase("slot_effects");
         if !prepared.transcripts.is_empty() {
             crate::storage::catalog::publish_slot_rows(
                 &super::publication::SlotWriter::admitted(&tx, &self.source)
@@ -667,14 +708,26 @@ impl Stage {
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_slots").map_err(error)?;
+        publication_phase("current_effects");
+        let current_effects = super::publication::CurrentWriter::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
         for (row, encoded) in prepared.rows.iter().zip(&metadata) {
-            tx.execute("INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.metadata IS NOT excluded.metadata",params![ns,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,encoded]).map_err(error)?;
-            for source in &row.sources {
-                tx.execute("INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'current',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id",params![ns,row.key,row.harness,source.native_id,source.path.to_string_lossy()]).map_err(error)?;
+            use crate::storage::catalog::CurrentPublicationStore;
+            if current_effects.current(row, encoded).map_err(error)? {
+                crate::storage::catalog::publish_current_sources(&current_effects, row).map_err(error)?;
             }
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_rows").map_err(error)?;
+        publication_phase("search_effects");
+        crate::catalog_search::publish_current_rows_with_store(
+            &tx,
+            &prepared.rows.iter().collect::<Vec<_>>(),
+            &super::search::SearchWriter::admitted(&tx, &self.source).map_err(StoreError::Configured)?,
+        ).map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_search").map_err(error)?;
+        publication_phase("publication_proof");
         tx.execute(
             "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
@@ -693,6 +746,7 @@ impl Stage {
         .map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
+        publication_phase("claim_ack");
         for (path, claim) in &prepared.claims {
             if let Some(claim) = claim
                 && tx.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND revision=?3",params![ns,path,claim]).map_err(error)? != 1
@@ -702,6 +756,7 @@ impl Stage {
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_ack").map_err(error)?;
+        publication_phase("head_and_hints");
         publication_head
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
@@ -719,6 +774,7 @@ impl Stage {
         .map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_head").map_err(error)?;
+        publication_phase("commit");
         tx.commit().map_err(error)?;
         self.source.generation = Some(generation.clone());
         Ok((Outcome::Written, Some(generation)))
