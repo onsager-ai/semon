@@ -804,7 +804,7 @@ pub(super) fn replayed_presentation(
     Ok(saved == base
         && manifest.len() <= 1048576
         && joined == expected
-        && proof_codec::verify_presentation_digest(&saved, &manifest, &joined).is_ok())
+        && joined_digest(&saved, &manifest)? == joined)
 }
 fn validate_presentation(
     db: &Connection,
