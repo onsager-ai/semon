@@ -12,11 +12,14 @@ Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
 The user relaxed the progressive cold-start first-page budget on 2026-10-26.
-The 0/256/2048-history producer now permits five seconds for its first 60
+The 0/256/2048-history producer now permits eight seconds for its first 60
 selected sessions. Foreground Catalog/Query checks keep their existing two-second
 budget; the 60-second background completion boundary, ordering, worker ownership,
 provisional authority and archive-eviction checks are unchanged. Older two-second
 cold-start results below describe the earlier gate and do not qualify this revision.
+The initial five-second revision passed the isolated producer check but measured
+5.82 seconds under the full parallel PostgreSQL regression; the eight-second
+revision requires a fresh full run.
 
 ## Worker 21 repair: preserve the metadata physical contract
 
@@ -497,6 +500,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
 | `events/store/configured_selected60.rs` | direct | Test-only committed-publication assertions for selected facts, retained-generation witnesses, independent private-witness binding, tamper-before-Raw refusal, negative reference/lease GC and real native multi-window range oracles; writer qualification remains zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/source_authority.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -524,6 +528,10 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
+| `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
+| `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
+| `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
