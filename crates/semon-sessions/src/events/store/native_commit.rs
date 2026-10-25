@@ -35,10 +35,8 @@ impl Relationships for Writer<'_, '_, '_> {
                 "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
             ),
         };
-        self.transaction.execute(
-            self.layout.support(singleton, composite),
-            [path],
-        )?;
+        self.transaction
+            .execute(self.layout.support(singleton, composite), [path])?;
         Ok(())
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> rusqlite::Result<()> {
