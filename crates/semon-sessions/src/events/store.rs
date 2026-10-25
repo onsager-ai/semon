@@ -7326,7 +7326,11 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     )?;
     for id in &changes.usage {
         let started = measurements.start();
-        let selected = copied_usage_sql(transaction, "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2", "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?;
+        let selected = copied_usage_sql(
+            transaction,
+            "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
+            "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
+        )?;
         measurements.record("usage_identity_delete_qualification", started, 1);
         if deletes
             .identity
@@ -7356,7 +7360,11 @@ fn write_copied_usage_rows_with_deletes<'tx>(
             }
         } else {
             let started = measurements.start();
-            let selected = copied_usage_sql(transaction, "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2", "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?;
+            let selected = copied_usage_sql(
+                transaction,
+                "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
+                "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
+            )?;
             measurements.record("usage_delete_qualification", started, 1);
             if deletes
                 .usage
@@ -11319,9 +11327,8 @@ mod tests {
             );
             assert_eq!(tx.total_changes(), changed_before);
             assert_eq!(usage_delete_snapshot(&tx), before);
-            let work =
-                write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default())
-                    .unwrap();
+            let work = write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default())
+                .unwrap();
             assert_eq!(
                 work,
                 UsageDeleteWork {
