@@ -546,9 +546,17 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
     fn invalid(&self, message: &'static str) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
     }
-    fn native_key(&self, native: &str, harness: &str) -> rusqlite::Result<crate::model::relation_stage::Selection> {
+    fn native_key(
+        &self,
+        native: &str,
+        harness: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::Selection> {
         let key: Option<String> = self.db.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3", params![self.ns,harness,native], |r| r.get(0)).optional()?;
-        Ok(crate::model::relation_stage::Selection { count: usize::from(key.is_some()), key, ..Default::default() })
+        Ok(crate::model::relation_stage::Selection {
+            count: usize::from(key.is_some()),
+            key,
+            ..Default::default()
+        })
     }
     fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
         self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![self.ns, id], |r| r.get(0)).optional()
@@ -562,7 +570,10 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
     fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
         self.db.query_row("SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2", params![self.ns, path], |r| r.get(0))
     }
-    fn endpoint_row(&self, key: &str) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
+    fn endpoint_row(
+        &self,
+        key: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
         self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
     }
     fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
@@ -1244,13 +1255,18 @@ impl Stage {
         // The real admitted event producer still refuses Claude incident
         // candidates. Until it exists, an empty staging event table cannot
         // certify a negative Receipt/Call result, even during indexing.
-        if matches!(selector,
+        if matches!(
+            selector,
             crate::model::relation_stage::Selector::ClaudeReceipt { .. }
                 | crate::model::relation_stage::Selector::ClaudeCall { .. }
         ) {
             return Err(refuse("semantic_claude_event_projection_pending"));
         }
-        let mut lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
+        let mut lookup = AdmittedLookup {
+            db: &tx,
+            ns,
+            replay: Vec::new(),
+        };
         let result = crate::model::relation_stage::select_with(&mut lookup, selector);
         // Hints cannot become authoritative negative matches. The admitted
         // durable members replay is deliberately still closed in this slice.

@@ -494,7 +494,13 @@ fn root_alive(c: &Connection, key: &str) -> rusqlite::Result<bool> {
 }
 fn normalized_endpoint(c: &Connection, key: &str, used: &mut usize) -> rusqlite::Result<Endpoint> {
     crate::model::relation_stage::selector_endpoint(
-        &OrdinaryLookup { db: c, replay: Vec::new() }, key, used, false,
+        &OrdinaryLookup {
+            db: c,
+            replay: Vec::new(),
+        },
+        key,
+        used,
+        false,
     )
 }
 fn native_key(c: &Connection, native: &str, harness: &str) -> rusqlite::Result<String> {
@@ -1005,7 +1011,12 @@ fn decode_event(
     used: &mut usize,
 ) -> rusqlite::Result<crate::model::relation_stage::NativeEvent> {
     crate::model::relation_stage::selector_event(
-        &OrdinaryLookup { db: c, replay: Vec::new() }, text, used,
+        &OrdinaryLookup {
+            db: c,
+            replay: Vec::new(),
+        },
+        text,
+        used,
     )
 }
 /// Read candidates one row at a time. Both the persistent cursor and accepted
@@ -2802,27 +2813,41 @@ impl SqliteStore {
         epoch: i64,
         selector: &Selector,
     ) -> Result<Selection, StoreError> {
-        let actual: Option<i64> = self.connection.query_row(
-            "SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0),
-        ).optional().map_err(failure)?;
+        let actual: Option<i64> = self
+            .connection
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+            .optional()
+            .map_err(failure)?;
         if actual != Some(epoch) {
             return Err(StoreError::Data("stale semantic selector".into()));
         }
-        let mut lookup = OrdinaryLookup { db: &self.connection, replay: Vec::new() };
+        let mut lookup = OrdinaryLookup {
+            db: &self.connection,
+            replay: Vec::new(),
+        };
         let result = crate::model::relation_stage::select_with(&mut lookup, selector);
         let replay = lookup.replay;
         if !replay.is_empty() {
-            let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
-            let runtime: String = tx.query_row(
-                "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1", [epoch], |r| r.get(0),
-            ).map_err(failure)?;
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            let runtime: String = tx
+                .query_row(
+                    "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1",
+                    [epoch],
+                    |r| r.get(0),
+                )
+                .map_err(failure)?;
             for key in replay {
                 queue(&tx, "members", &key, "").map_err(failure)?;
             }
             frontier_page(&tx).map_err(failure)?;
             reset(&tx, &runtime).map_err(failure)?;
             tx.commit().map_err(failure)?;
-            return Err(StoreError::Data("native name companion requires semantic replay".into()));
+            return Err(StoreError::Data(
+                "native name companion requires semantic replay".into(),
+            ));
         }
         result.map_err(failure)
     }
@@ -2837,8 +2862,16 @@ impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
     fn invalid(&self, message: &'static str) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
     }
-    fn native_key(&self, native: &str, harness: &str) -> rusqlite::Result<crate::model::relation_stage::Selection> {
-        Ok(Selection { count: 1, key: Some(native_key(self.db, native, harness)?), ..Default::default() })
+    fn native_key(
+        &self,
+        native: &str,
+        harness: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::Selection> {
+        Ok(Selection {
+            count: 1,
+            key: Some(native_key(self.db, native, harness)?),
+            ..Default::default()
+        })
     }
     fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
         self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![id], |r| r.get(0)).optional()
@@ -2850,9 +2883,16 @@ impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
         self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE source_path=?1 AND event_key=?2", params![path, key], |r| r.get(0))
     }
     fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
-        self.db.query_row("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1", params![path], |r| r.get(0))
+        self.db.query_row(
+            "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
+            params![path],
+            |r| r.get(0),
+        )
     }
-    fn endpoint_row(&self, key: &str) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
+    fn endpoint_row(
+        &self,
+        key: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
         self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1", params![key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
     }
     fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
