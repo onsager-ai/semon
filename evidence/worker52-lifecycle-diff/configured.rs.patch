@@ -1,72 +1,8 @@
 diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
-index 0fd71a9c..58539b6f 100644
+index 0fd71a9c..218030e1 100644
 --- a/crates/semon-sessions/src/events/store/configured.rs
 +++ b/crates/semon-sessions/src/events/store/configured.rs
-@@ -1337,6 +1337,63 @@ impl Writer {
-             observed_revision: intent.revision,
-             replayed: false,
-         })
-+        #[test]
-+        fn configured_semantic_domain52_foreign_epoch_and_changed_authority_zero_effects() {
-+            let (f, _, options, inputs) = model_sources();
-+            let options = &options[0];
-+            let input = &inputs[0];
-+            let mut original = open(&f.config);
-+            original.ingest(&"4".repeat(64),&input.full_path(options),"codex").unwrap();
-+            let (batch,model) = ready(&mut original,&f,options,std::slice::from_ref(input));
-+            publish(&mut original,&f,&batch,&model);
-+            original.finish_semantic_stage(batch.epoch).unwrap();
-+            write(options,input,"replacement",None);
-+            original.ingest(&"5".repeat(64),&input.full_path(options),"codex").unwrap();
-+            let (old_batch,old_model) = ready(&mut original,&f,options,std::slice::from_ref(input));
-+            let mut successor = open(&f.config);
-+            let (batch,model) = ready(&mut successor,&f,options,std::slice::from_ref(input));
-+            let before = shared_state(&f);
-+            assert_eq!(original.publish_semantic_catalog(&old_batch,old_model.prepared()).unwrap().0,Outcome::Conflict);
-+            assert_eq!(shared_state(&f),before,"old holder cannot publish lifecycle changes");
-+            crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts {version:2,hostname:"machine-0".into(),..Default::default()}).unwrap();
-+            assert_eq!(successor.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
-+            assert_eq!(shared_state(&f),before,"same content with replaced Facts identity is stale");
-+        }
-+
-+        #[test]
-+        fn configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication() {
-+            let (f, _, options, _) = model_sources();
-+            let options = &options[0];
-+            let mut cache = open(&f.config);
-+            let inputs = (0..65).map(|i| crate::Input {root:crate::InputRoot::Codex,path:format!("sessions/budget-{i:02}.jsonl")}).collect::<Vec<_>>();
-+            for (i,input) in inputs.iter().enumerate() {
-+                let id = format!("budget-{i:02}");
-+                write(options,input,&id,if i==0 {None} else {Some("budget-00")});
-+                cache.ingest(&format!("{:064x}",5400+i),&input.full_path(options),"codex").unwrap();
-+            }
-+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-+            cache.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()],&runtime,true).unwrap();
-+            for _ in 0..128 {
-+                let before = shared_state(&f);
-+                let batch = match cache.semantic_batch(64) {
-+                    Ok(Some(batch)) => batch,
-+                    Err(error) => {
-+                        assert!(error.to_string().contains("budget"),"explicit bounded refusal: {error}");
-+                        assert_eq!(shared_state(&f),before,"refused closure transaction has zero effects");
-+                        assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-+                        return;
-+                    }
-+                    Ok(None) => panic!("component disappeared"),
-+                };
-+                if batch.paths.is_empty() {continue;}
-+                let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
-+                assert_eq!(selected.len(),batch.paths.len());
-+                cache.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
-+                assert_ne!(batch.phase,Phase::Publication,"65-owner component cannot partially publish");
-+            }
-+            panic!("high degree component never explicitly refused")
-+        }
-+
-     }
- }
- 
-@@ -6377,4 +6434,176 @@ mod tests {
+@@ -6377,4 +6377,233 @@ mod tests {
                  .is_ok()
          );
      }
@@ -240,6 +176,63 @@ index 0fd71a9c..58539b6f 100644
 +            match reopened.read_record(options,None,&old.full_path(options),0) { Ok(bytes) => assert_eq!(bytes,prefix), Err(error) => assert!(!error.to_string().is_empty(),"precise pre-byte refusal") }
 +            lease.release().unwrap();
 +        }
++        #[test]
++        fn configured_semantic_domain52_foreign_epoch_and_changed_authority_zero_effects() {
++            let (f, _, options, inputs) = model_sources();
++            let options = &options[0];
++            let input = &inputs[0];
++            let mut original = open(&f.config);
++            original.ingest(&"4".repeat(64),&input.full_path(options),"codex").unwrap();
++            let (batch,model) = ready(&mut original,&f,options,std::slice::from_ref(input));
++            publish(&mut original,&f,&batch,&model);
++            original.finish_semantic_stage(batch.epoch).unwrap();
++            write(options,input,"replacement",None);
++            original.ingest(&"5".repeat(64),&input.full_path(options),"codex").unwrap();
++            let (old_batch,old_model) = ready(&mut original,&f,options,std::slice::from_ref(input));
++            let mut successor = open(&f.config);
++            let (batch,model) = ready(&mut successor,&f,options,std::slice::from_ref(input));
++            let before = shared_state(&f);
++            assert_eq!(original.publish_semantic_catalog(&old_batch,old_model.prepared()).unwrap().0,Outcome::Conflict);
++            assert_eq!(shared_state(&f),before,"old holder cannot publish lifecycle changes");
++            crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts {version:2,hostname:"machine-0".into(),..Default::default()}).unwrap();
++            assert_eq!(successor.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
++            assert_eq!(shared_state(&f),before,"same content with replaced Facts identity is stale");
++        }
++
++        #[test]
++        fn configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication() {
++            let (f, _, options, _) = model_sources();
++            let options = &options[0];
++            let mut cache = open(&f.config);
++            let inputs = (0..65).map(|i| crate::Input {root:crate::InputRoot::Codex,path:format!("sessions/budget-{i:02}.jsonl")}).collect::<Vec<_>>();
++            for (i,input) in inputs.iter().enumerate() {
++                let id = format!("budget-{i:02}");
++                write(options,input,&id,if i==0 {None} else {Some("budget-00")});
++                cache.ingest(&format!("{:064x}",5400+i),&input.full_path(options),"codex").unwrap();
++            }
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            cache.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()],&runtime,true).unwrap();
++            for _ in 0..128 {
++                let before = shared_state(&f);
++                let batch = match cache.semantic_batch(64) {
++                    Ok(Some(batch)) => batch,
++                    Err(error) => {
++                        assert!(error.to_string().contains("budget"),"explicit bounded refusal: {error}");
++                        assert_eq!(shared_state(&f),before,"refused closure transaction has zero effects");
++                        assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
++                        return;
++                    }
++                    Ok(None) => panic!("component disappeared"),
++                };
++                if batch.paths.is_empty() {continue;}
++                let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
++                assert_eq!(selected.len(),batch.paths.len());
++                cache.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
++                assert_ne!(batch.phase,Phase::Publication,"65-owner component cannot partially publish");
++            }
++            panic!("high degree component never explicitly refused")
++        }
++
 +    }
 +
  }

@@ -377,11 +377,11 @@ fn retirement_plan(
     Ok(plan)
 }
 
-fn lifecycle_current(_source: &AdmittedSource, _batch: &Batch, prepared: &PreparedSources) -> Result<bool, StoreError> {
+fn lifecycle_current(prepared: &PreparedSources) -> bool {
     let Some(authority) = &prepared.relationships.lifecycle_authority else {
-        return Ok(prepared.relationships.retired_owners.is_empty());
+        return prepared.relationships.retired_owners.is_empty();
     };
-    Ok(authority.current().unwrap_or(false))
+    authority.current().unwrap_or(false)
 }
 
 fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
@@ -673,7 +673,7 @@ impl Stage {
         if !valid || self.epoch != Some(batch.epoch) {
             return Ok((Outcome::Conflict, None));
         }
-        if !lifecycle_current(&self.source, batch, prepared)? {
+        if !lifecycle_current(prepared) {
             return Ok((Outcome::Conflict, None));
         }
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",[ns],|r|r.get(0)).map_err(error)?;
@@ -1627,7 +1627,7 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
-            if !lifecycle_current(&self.source, batch, prepared)? {
+            if !lifecycle_current(prepared) {
                 return Ok(Outcome::Conflict);
             }
             if !reduction_witnesses(&tx, ns).map_err(error)? {
