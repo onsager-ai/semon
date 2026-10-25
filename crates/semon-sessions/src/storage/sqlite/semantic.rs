@@ -1241,6 +1241,15 @@ impl Stage {
         if !valid {
             return Err(refuse("stale semantic selector"));
         }
+        // The real admitted event producer still refuses Claude incident
+        // candidates. Until it exists, an empty staging event table cannot
+        // certify a negative Receipt/Call result, even during indexing.
+        if matches!(selector,
+            crate::model::relation_stage::Selector::ClaudeReceipt { .. }
+                | crate::model::relation_stage::Selector::ClaudeCall { .. }
+        ) {
+            return Err(refuse("semantic_claude_event_projection_pending"));
+        }
         let mut lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
         let result = crate::model::relation_stage::select_with(&mut lookup, selector);
         // Hints cannot become authoritative negative matches. The admitted
