@@ -12975,7 +12975,7 @@ mod tests {
     }
 
     #[test]
-    fn file_row_codec_matches_persisted_dimensions_through_append_and_truncation() {
+    fn recovery_file_row_codec_matches_persisted_dimensions_through_append_and_truncation() {
         use crate::events::file_rows::FileRow;
 
         let root = scratch("file-row-codec");
@@ -13058,6 +13058,11 @@ mod tests {
         assert_eq!(read_ledger, third);
         assert_eq!(format!("{read:?}"), format!("{truncated:?}"));
 
+        drop(store);
+        let (store, _) = opened(&db);
+        let (read_ledger, read) = store.read_one("file.jsonl").unwrap().unwrap();
+        assert_eq!(read_ledger, third);
+        assert_eq!(format!("{read:?}"), format!("{truncated:?}"));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
