@@ -96,6 +96,12 @@ pub(super) fn fixture(mut configure: impl FnMut(&mut PoolLimits)) -> (PgPool, Ar
 
 /// A separate LOGIN principal, provisioned only in the ephemeral CI service.
 /// Credentials remain inside this test factory and never enter library APIs.
+pub(super) fn admin_factory(host: &Factory) -> Arc<Factory> {
+    let dsn = std::env::var("SEMON_PG_ADMIN_TEST_DSN")
+        .expect("ephemeral CI corruption observer required");
+    Arc::new(Factory { dsn, schema: host.schema.clone() })
+}
+
 pub(super) fn source_factory(host: &Factory) -> Arc<Factory> {
     let dsn = std::env::var("SEMON_PG_SOURCE_TEST_DSN")
         .expect("distinct Source principal required in CI");

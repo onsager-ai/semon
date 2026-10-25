@@ -105,7 +105,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         };
         expected.sort_unstable();
         let shape: bool = tx.driver.query_one(
-            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND (NOT convalidated OR contype NOT IN ('p','c')))", &[&name]
+            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=$1::regclass AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=$1::regclass)", &[&name]
         ).map_err(sqlstate::error)?.get(0);
         if checks != expected || !shape { return Err(StorageError::ScopeChanged); }
         let owners = tx
@@ -232,7 +232,7 @@ impl PgStoreMetadata {
             if revision!=expected_revision { return Err(StorageError::Conflict); }
             let next=revision.checked_add(1).ok_or(StorageError::Conflict)?;
             mutation_boundary(1)?;
-            if tx.driver.execute("UPDATE semon_pg_store_state SET revision=$1,pricing_target=$2 WHERE singleton AND revision=$3", &[&next,&target.map(str::as_bytes),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            if tx.driver.execute("UPDATE semon_pg_store_state SET revision=$1,pricing_target=$2 WHERE singleton AND revision=$3 AND owner=CURRENT_USER", &[&next,&target.map(str::as_bytes),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
             mutation_boundary(2)?;
             if tx.driver.execute("INSERT INTO semon_pg_store_operations(operation_id,owner,request_digest,revision) VALUES($1,CURRENT_USER,$2,$3)", &[&&operation[..],&digest,&next]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
             mutation_boundary(3)?;

@@ -13,6 +13,7 @@ permissions:
 env:
   SEMON_PRICING_REFRESH: "off"
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+  SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
   SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
   SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
 
