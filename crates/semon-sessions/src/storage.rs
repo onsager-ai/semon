@@ -5,6 +5,7 @@ pub(crate) mod catalog;
 #[cfg(test)]
 mod conformance;
 pub mod native_events;
+#[cfg(feature = "postgres")] pub mod postgres;
 pub(crate) mod navigation;
 pub(crate) mod query;
 pub mod source_observations;
