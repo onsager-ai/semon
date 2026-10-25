@@ -823,10 +823,12 @@ impl Stage {
                     relation.stubs.iter().any(|stub| stub.key == projection.key)
                         && (relation.from == projection.key
                             || relation.to.as_ref() == Some(&projection.key))
-                        && std::iter::once(&relation.from).chain(relation.to.iter()).any(|key| {
-                            projection_rows.contains_key(key.as_str())
-                                && prepared.relationships.endpoints.contains_key(key)
-                        })
+                        && std::iter::once(&relation.from)
+                            .chain(relation.to.iter())
+                            .any(|key| {
+                                projection_rows.contains_key(key.as_str())
+                                    && prepared.relationships.endpoints.contains_key(key)
+                            })
                 });
                 if !anchored_stub {
                     return Err(refuse("semantic_publication_projection_owner"));
