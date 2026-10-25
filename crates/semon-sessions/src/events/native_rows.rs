@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{BillingUsage, CodexUsageEvent, DirtyRows, Event, FileIndex, MessageUsage, ModelTokens, Peer, Reply, Signal, Yield};
+use super::{
+    BillingUsage, CodexUsageEvent, DirtyRows, Event, FileIndex, MessageUsage, ModelTokens, Peer,
+    Reply, Signal, Yield,
+};
 use crate::Tokens;
 
 pub(crate) struct NativeRowPlan<'a> {
@@ -16,7 +19,6 @@ pub(crate) struct NativeRowPlan<'a> {
     pub(crate) extras: RowChanges<'a, Event>,
     pub(crate) signals: RowChanges<'a, Signal>,
     pub(crate) codex_usage: RowChanges<'a, CodexUsageEvent>,
-    pub(crate) usage: UsageChanges<'a>,
 }
 
 impl<'a> NativeRowPlan<'a> {
@@ -30,7 +32,6 @@ impl<'a> NativeRowPlan<'a> {
                 &changes.codex_usage,
                 &index.codex_usage_events,
             ),
-            usage: UsageChanges::new(changes, &index.usage_by_id),
         }
     }
 }
@@ -199,7 +200,12 @@ impl<'a> EventRow<'a> {
             None => (false, None, None, None, None, None, None),
         };
         let (has_peer, peer_sock, peer_pid, peer_start) = match peer {
-            Some(Peer { sock, pid, start }) => (true, sock.as_deref(), pid.map(|value| value as i64), start.as_deref()),
+            Some(Peer { sock, pid, start }) => (
+                true,
+                sock.as_deref(),
+                pid.map(|value| value as i64),
+                start.as_deref(),
+            ),
             None => (false, None, None, None),
         };
         Ok(Self {
