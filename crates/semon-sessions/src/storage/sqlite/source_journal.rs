@@ -2069,6 +2069,31 @@ mod tests {
     }
 
     #[test]
+    fn configured_recovery_refuses_without_changing_the_database() {
+        let f = Fixture::new();
+        f.assign();
+        let mut store = f.config.source_observations().unwrap();
+        let db = f.db();
+        let before: i64 = db.pragma_query_value(None, "data_version", |row| row.get(0)).unwrap();
+        let operation = SourceOperation::capture(
+            f.config.namespace.as_str(),
+            "recover",
+            &serde_json::to_vec(&Some("")).unwrap(),
+        );
+        let intent = SourceIntent::Recover {
+            operation: operation.clone(),
+            cursor: Some(String::new()),
+        };
+        assert_eq!(store.recovery_is_current(), Err(StorageError::Unavailable));
+        assert_eq!(store.recovery_cursor(), Err(StorageError::Unavailable));
+        assert_eq!(store.persist_intent(&intent), Err(StorageError::Unavailable));
+        assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Unavailable));
+        assert_eq!(intent.apply(store.as_mut()), Err(StorageError::Unavailable));
+        let after: i64 = db.pragma_query_value(None, "data_version", |row| row.get(0)).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn configured_discovery_claim_cas_restart_and_originals() {
         let f = Fixture::new();
         assert!(matches!(
