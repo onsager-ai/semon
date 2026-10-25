@@ -4,10 +4,10 @@
 use super::failed;
 use crate::events::store::configured::NativeOwnership;
 use crate::model::summary::CatalogRow;
+use crate::storage::proof_codec::{self, LEASE_CAP, TTL_MAX};
 use crate::storage::proof_lifetime::{
     ProofGenerationId, ProofReaderLease, ReaderPage, ReaderSnapshot,
 };
-use crate::storage::proof_codec::{self, LEASE_CAP, TTL_MAX};
 use crate::storage::{NativeReaderBinding, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -100,9 +100,16 @@ pub(super) fn publish(
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         let record = proof_codec::GenerationRecord {
-            namespace: namespace.to_owned(), id: id.clone(), session_key: row.key.clone(),
-            publication: publication.to_owned(), proof: proof.to_owned(), admission,
-            stream: stream.to_owned(), metadata, slots, prefix,
+            namespace: namespace.to_owned(),
+            id: id.clone(),
+            session_key: row.key.clone(),
+            publication: publication.to_owned(),
+            proof: proof.to_owned(),
+            admission,
+            stream: stream.to_owned(),
+            metadata,
+            slots,
+            prefix,
         };
         // Validate precisely the same typed values that are persisted; the
         // SQLite transaction still owns the write and its constraints.
@@ -748,7 +755,10 @@ pub(super) fn bind_presentations(
             .find(|projection| &projection.key == key);
         let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
             .map_err(|_| StorageError::Unavailable)?;
-        entries.push((key.clone(), proof_codec::presentation_entry(&metadata, &slots, text)?));
+        entries.push((
+            key.clone(),
+            proof_codec::presentation_entry(&metadata, &slots, text)?,
+        ));
     }
     let manifest = serde_json::to_string(&PresentationManifest {
         entries,
@@ -795,11 +805,9 @@ fn validate_presentation(
     let manifest: PresentationManifest =
         serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+    let entry = proof_codec::presentation_entry(&metadata, &slots, &text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest
-            .entries
-            .iter()
-            .any(|(k, d)| k == key && *d == proof_codec::presentation_entry(&metadata, &slots, &text)?)
+        || !manifest.entries.iter().any(|(k, d)| k == key && *d == entry)
     {
         return Err(StorageError::ScopeChanged);
     }
