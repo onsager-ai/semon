@@ -196,7 +196,7 @@ CREATE TABLE catalog_native_dependencies(namespace TEXT NOT NULL,source_path TEX
 CREATE INDEX catalog_native_dependency ON catalog_native_dependencies(namespace,harness,native_id,source_path);
 CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
 CREATE TABLE session_descriptions(session_key TEXT PRIMARY KEY,version INTEGER NOT NULL,inputs TEXT NOT NULL,description TEXT NOT NULL) STRICT;
-CREATE TABLE reported_runs(session_id TEXT NOT NULL,start INTEGER NOT NULL,cost REAL,duration INTEGER,api_duration INTEGER,tool_duration INTEGER,lines_added INTEGER,lines_removed INTEGER,model_usage TEXT NOT NULL,capture_at INTEGER NOT NULL,PRIMARY KEY(session_id,start)) STRICT, WITHOUT ROWID;
+CREATE TABLE reported_runs(namespace TEXT NOT NULL,session_id TEXT NOT NULL,start INTEGER NOT NULL,cost REAL,duration INTEGER,api_duration INTEGER,tool_duration INTEGER,lines_added INTEGER,lines_removed INTEGER,model_usage TEXT NOT NULL,capture_at INTEGER NOT NULL,PRIMARY KEY(namespace,session_id,start)) STRICT, WITHOUT ROWID;
 " };
 }
 const COMPOSITE_SUPPORT_SCHEMA: &str = concat!("
@@ -352,6 +352,7 @@ pub(crate) fn support_sql<'a>(
             "source_path,harness,native_id",
         ),
         ("session_source_mutations", "source_path"),
+        ("reported_runs", "session_id,start"),
     ] {
         let pk: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1,'main') WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
         let ns = pk == format!("namespace,{key}");
@@ -377,6 +378,7 @@ pub(crate) fn support_sql<'a>(
         "catalog_relocation_candidates",
         "catalog_native_dependencies",
         "session_source_mutations",
+        "reported_runs",
     ] {
         if columns(c, table)? != columns(&reference, table)? {
             return Err(rusqlite::Error::InvalidQuery);

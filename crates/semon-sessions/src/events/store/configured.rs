@@ -405,6 +405,7 @@ fn create_with_layout(config: &StoreConfig, layout: PhysicalLayout) -> Result<()
 // have composite row keys; the other 22 families remain singleton and fenced.
 // A public second namespace must still be refused before any operation.
 const TABLES: &[&str] = &[
+    "reported_runs",
     "files",
     "events",
     "signals",
@@ -808,7 +809,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key='claude_json_stamp' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -1058,6 +1059,38 @@ impl Writer {
         ledger_row(&db, path)
             .map(|row| row.map(|(_, ledger)| ledger))
             .map_err(failed)
+    }
+
+    pub(crate) fn reported_stamp(&self) -> Result<Option<ReportedFileStamp>, StorageError> {
+        if self.owner.is_none() { return Err(StorageError::NamespaceUpgradePending); }
+        let db = self.snapshot()?;
+        let text: Option<String> = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'", [], |r| r.get(0)).optional().map_err(failed)?;
+        text.map(|text| super::super::reported_rows::decode_stamp(text.as_bytes()).map_err(|_| StorageError::Unavailable)).transpose()
+    }
+
+    pub(crate) fn reported_runs(&self, ids: &BTreeSet<String>) -> Result<Vec<ReportedRunSnapshot>, StorageError> {
+        if self.owner.is_none() { return Err(StorageError::NamespaceUpgradePending); }
+        let db = self.snapshot()?;
+        read_runs_selected(&db, ids).map_err(failed)
+    }
+
+    pub(crate) fn save_reported_runs(&self, runs: &[ReportedRunSnapshot], stamp: &ReportedFileStamp, selected: Option<&BTreeSet<String>>) -> Result<Vec<ReportedRunSnapshot>, StorageError> {
+        if self.owner.is_none() { return Err(StorageError::NamespaceUpgradePending); }
+        let rows = super::super::reported_rows::plan(runs).map_err(|_| StorageError::InvalidArguments)?;
+        let stamp = super::super::reported_rows::encode_stamp(stamp).map_err(|_| StorageError::InvalidArguments)?;
+        let stamp = String::from_utf8(stamp).map_err(|_| StorageError::InvalidArguments)?;
+        let mut db = connection(&self.config)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        self.validate(&tx)?;
+        {
+            let mut put = tx.prepare(PUT_RUN_SCOPED).map_err(failed)?;
+            for row in rows { put_run(&mut put, &row.run).map_err(failed)?; effect("reported_run").map_err(failed)?; }
+        }
+        tx.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),'claude_json_stamp',?1) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", [stamp]).map_err(failed)?;
+        effect("reported_stamp").map_err(failed)?;
+        let all = match selected { Some(ids) => read_runs_selected(&tx, ids), None => read_runs(&tx) }.map_err(failed)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Ok(all)
     }
 
     pub(crate) fn load(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StorageError> {
