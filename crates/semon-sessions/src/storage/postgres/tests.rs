@@ -236,8 +236,16 @@ fn pg_pool_saturation_and_deadline_keep_capacity() {
 }
 
 struct ConnectEnded(Arc<AtomicUsize>);
-impl Drop for ConnectEnded { fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); } }
-struct BlockingFactory { started: mpsc::SyncSender<()>, calls: AtomicUsize, ended: Arc<AtomicUsize> }
+impl Drop for ConnectEnded {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+struct BlockingFactory {
+    started: mpsc::SyncSender<()>,
+    calls: AtomicUsize,
+    ended: Arc<AtomicUsize>,
+}
 impl PgConnectionFactory for BlockingFactory {
     fn connect(&self) -> ConnectFuture<'_> {
         Box::pin(async move {
@@ -251,15 +259,37 @@ impl PgConnectionFactory for BlockingFactory {
 #[test]
 fn pg_pending_factory_is_dropped_before_reserved_slot_release() {
     let (send, receive) = mpsc::sync_channel(2);
-    let factory = Arc::new(BlockingFactory { started: send, calls: AtomicUsize::new(0), ended: Arc::new(AtomicUsize::new(0)) });
-    let pool = PgPool::new(factory.clone(), PoolLimits { max_connections: 1, ..limits() }).unwrap();
+    let factory = Arc::new(BlockingFactory {
+        started: send,
+        calls: AtomicUsize::new(0),
+        ended: Arc::new(AtomicUsize::new(0)),
+    });
+    let pool = PgPool::new(
+        factory.clone(),
+        PoolLimits {
+            max_connections: 1,
+            ..limits()
+        },
+    )
+    .unwrap();
     let start = Instant::now();
-    assert!(matches!(pool.acquire(&PgCancellation::default()), Err(StorageError::Busy)));
+    assert!(matches!(
+        pool.acquire(&PgCancellation::default()),
+        Err(StorageError::Busy)
+    ));
     receive.recv_timeout(Duration::from_secs(1)).unwrap();
     assert!(start.elapsed() < Duration::from_secs(2));
-    assert_eq!(pool.accounted(), 0, "connect future ended before capacity release");
+    assert_eq!(
+        pool.accounted(),
+        0,
+        "connect future ended before capacity release"
+    );
     assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.ended.load(Ordering::SeqCst), 1, "actual future drop preceded slot release");
+    assert_eq!(
+        factory.ended.load(Ordering::SeqCst),
+        1,
+        "actual future drop preceded slot release"
+    );
 }
 
 #[test]
@@ -304,7 +334,11 @@ fn pg_cancellation_before_commit_rolls_back_and_holds_lease() {
     assert_eq!(pool.accounted(), 0);
 }
 
-struct SlowCancelFactory { real: Arc<Factory>, started: mpsc::SyncSender<()>, release: Arc<tokio::sync::Notify> }
+struct SlowCancelFactory {
+    real: Arc<Factory>,
+    started: mpsc::SyncSender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
 impl PgConnectionFactory for SlowCancelFactory {
     fn connect(&self) -> ConnectFuture<'_> {
         Box::pin(async move {
@@ -313,8 +347,14 @@ impl PgConnectionFactory for SlowCancelFactory {
             let started = self.started.clone();
             let release = self.release.clone();
             connection.client.cancel = Arc::new(move || {
-                let request = request.clone(); let started = started.clone(); let release = release.clone();
-                Box::pin(async move { started.send(()).unwrap(); release.notified().await; request().await })
+                let request = request.clone();
+                let started = started.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    started.send(()).unwrap();
+                    release.notified().await;
+                    request().await
+                })
             });
             Ok(connection)
         })
@@ -325,18 +365,38 @@ fn pg_cancel_helper_remains_accounted_after_query_returns() {
     let (_, real) = fixture(|_| {});
     let (cancel_send, cancel_receive) = mpsc::sync_channel(1);
     let release = Arc::new(tokio::sync::Notify::new());
-    let factory = Arc::new(SlowCancelFactory { real: real.clone(), started: cancel_send, release: release.clone() });
-    let pool = PgPool::open(factory, PoolLimits { max_connections: 1, cancel_timeout: Duration::from_secs(2), ..limits() }).unwrap();
+    let factory = Arc::new(SlowCancelFactory {
+        real: real.clone(),
+        started: cancel_send,
+        release: release.clone(),
+    });
+    let pool = PgPool::open(
+        factory,
+        PoolLimits {
+            max_connections: 1,
+            cancel_timeout: Duration::from_secs(2),
+            ..limits()
+        },
+    )
+    .unwrap();
     let control = PgCancellation::default();
     let (send, receive) = mpsc::sync_channel(1);
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| pool.apply_operation(&ns("a"), &identity(), &control, |tx| {
-            effect(tx)?;
-            let pid: i32 = tx.driver.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-            send.send(pid).unwrap();
-            tx.driver.batch_execute("SELECT pg_sleep(0.2)").map_err(super::sqlstate::error)?;
-            Ok(json!(1))
-        }));
+        let worker = scope.spawn(|| {
+            pool.apply_operation(&ns("a"), &identity(), &control, |tx| {
+                effect(tx)?;
+                let pid: i32 = tx
+                    .driver
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .unwrap()
+                    .get(0);
+                send.send(pid).unwrap();
+                tx.driver
+                    .batch_execute("SELECT pg_sleep(0.2)")
+                    .map_err(super::sqlstate::error)?;
+                Ok(json!(1))
+            })
+        });
         let pid = receive.recv_timeout(Duration::from_secs(2)).unwrap();
         control.cancel();
         cancel_receive.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -344,12 +404,19 @@ fn pg_cancel_helper_remains_accounted_after_query_returns() {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if direct.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='idle in transaction' AND query='SELECT pg_sleep(0.2)')", &[&pid]).unwrap().get::<_, bool>(0) { break; }
-            assert!(Instant::now() < deadline, "query did not finish before cancel helper"); std::thread::yield_now();
+            assert!(
+                Instant::now() < deadline,
+                "query did not finish before cancel helper"
+            );
+            std::thread::yield_now();
         }
         // The query has finished while cancellation is still pending. The inline
         // cancel future continues owning the lease until completed/dropped.
         assert_eq!(pool.accounted(), 1);
-        assert!(matches!(pool.acquire(&PgCancellation::default()), Err(StorageError::Busy)));
+        assert!(matches!(
+            pool.acquire(&PgCancellation::default()),
+            Err(StorageError::Busy)
+        ));
         assert_eq!(pool.accounted(), 1);
         release.notify_one();
         assert_eq!(worker.join().unwrap(), Err(StorageError::Busy));
@@ -825,21 +892,33 @@ fn pg_connection_max_lifetime_retires_healthy_idle_client() {
 }
 
 #[cfg(feature = "postgres-test-tls")]
-struct TlsFactory { dsn: String, schema: String, tls: postgres_native_tls::MakeTlsConnector }
+struct TlsFactory {
+    dsn: String,
+    schema: String,
+    tls: postgres_native_tls::MakeTlsConnector,
+}
 #[cfg(feature = "postgres-test-tls")]
 impl PgConnectionFactory for TlsFactory {
-    fn connect(&self) -> ConnectFuture<'_> { Box::pin(async move {
-        let mut config: tokio_postgres::Config = self.dsn.parse().unwrap();
-        config.options(&format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.schema));
-        config.ssl_mode(tokio_postgres::config::SslMode::Require);
-        if config.get_hostaddrs().is_empty() { config.hostaddr("127.0.0.1".parse().unwrap()); }
-        PgConnection::connect(config, self.tls.clone()).await
-    }) }
+    fn connect(&self) -> ConnectFuture<'_> {
+        Box::pin(async move {
+            let mut config: tokio_postgres::Config = self.dsn.parse().unwrap();
+            config.options(&format!("-c search_path={} -c idle_in_transaction_session_timeout=10000 -c idle_session_timeout=10000 -c statement_timeout=10000", self.schema));
+            config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            if config.get_hostaddrs().is_empty() {
+                config.hostaddr("127.0.0.1".parse().unwrap());
+            }
+            PgConnection::connect(config, self.tls.clone()).await
+        })
+    }
 }
 #[cfg(feature = "postgres-test-tls")]
 fn test_tls(ca: &str) -> postgres_native_tls::MakeTlsConnector {
     let cert = native_tls::Certificate::from_pem(&std::fs::read(ca).unwrap()).unwrap();
-    let tls = native_tls::TlsConnector::builder().disable_built_in_roots(true).add_root_certificate(cert).build().unwrap();
+    let tls = native_tls::TlsConnector::builder()
+        .disable_built_in_roots(true)
+        .add_root_certificate(cert)
+        .build()
+        .unwrap();
     postgres_native_tls::MakeTlsConnector::new(tls)
 }
 #[cfg(feature = "postgres-test-tls")]
@@ -848,16 +927,35 @@ fn pg_tls_verified_connect_and_cancel_and_certificate_refusals() {
     let dsn = std::env::var("SEMON_PG_TLS_DSN").expect("TLS service mandatory");
     let ca = std::env::var("SEMON_PG_TLS_CA").expect("ephemeral CA mandatory");
     let wrong_ca = std::env::var("SEMON_PG_TLS_WRONG_CA").expect("wrong CA mandatory");
-    let schema = format!("tls_{}_{}", std::process::id(), NEXT_SCHEMA.fetch_add(1, Ordering::SeqCst));
+    let schema = format!(
+        "tls_{}_{}",
+        std::process::id(),
+        NEXT_SCHEMA.fetch_add(1, Ordering::SeqCst)
+    );
     let tls = test_tls(&ca);
     let mut config: ::postgres::Config = dsn.parse().unwrap();
     config.ssl_mode(::postgres::config::SslMode::Require);
     let mut admin = config.connect(tls.clone()).unwrap();
-    assert!(admin.query_one("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()", &[]).unwrap().get::<_, bool>(0));
-    admin.batch_execute(&format!("CREATE SCHEMA {schema}")).unwrap();
-    let factory = Arc::new(TlsFactory { dsn: dsn.clone(), schema: schema.clone(), tls });
+    assert!(
+        admin
+            .query_one(
+                "SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()",
+                &[]
+            )
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    admin
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .unwrap();
+    let factory = Arc::new(TlsFactory {
+        dsn: dsn.clone(),
+        schema: schema.clone(),
+        tls,
+    });
     let pool = PgPool::create_schema(factory, limits()).unwrap();
-    let control = PgCancellation::default(); let (send, receive) = mpsc::sync_channel(1);
+    let control = PgCancellation::default();
+    let (send, receive) = mpsc::sync_channel(1);
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| pool.transaction::<()>(&ns("tls"), TxnKind::Write, &control, |tx| {
             let row = tx.driver.query_one("SELECT pg_backend_pid(), ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()", &[]).unwrap();
@@ -871,7 +969,8 @@ fn pg_tls_verified_connect_and_cancel_and_certificate_refusals() {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if admin.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event='PgSleep')", &[&pid]).unwrap().get::<_, bool>(0) { break; }
-            assert!(Instant::now() < deadline); std::thread::yield_now();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
         }
         control.cancel();
         // Busy is the real 57014 server response via the TLS cancel connection.
@@ -879,10 +978,23 @@ fn pg_tls_verified_connect_and_cancel_and_certificate_refusals() {
     });
     assert_eq!(pool.accounted(), 0);
     super::proxy_test::tls_cancel_handshake_freeze(&dsn, &schema, test_tls(&ca));
-    for (bad_dsn, bad_tls) in [(dsn.clone(), test_tls(&wrong_ca)), (dsn.replace("host=localhost", "host=wrong.invalid hostaddr=127.0.0.1"), test_tls(&ca))] {
-        let factory = Arc::new(TlsFactory { dsn: bad_dsn, schema: schema.clone(), tls: bad_tls });
+    for (bad_dsn, bad_tls) in [
+        (dsn.clone(), test_tls(&wrong_ca)),
+        (
+            dsn.replace("host=localhost", "host=wrong.invalid hostaddr=127.0.0.1"),
+            test_tls(&ca),
+        ),
+    ] {
+        let factory = Arc::new(TlsFactory {
+            dsn: bad_dsn,
+            schema: schema.clone(),
+            tls: bad_tls,
+        });
         let pool = PgPool::new(factory, limits()).unwrap();
-        assert!(matches!(pool.acquire(&PgCancellation::default()), Err(StorageError::Unavailable)));
+        assert!(matches!(
+            pool.acquire(&PgCancellation::default()),
+            Err(StorageError::Unavailable)
+        ));
         assert_eq!(pool.accounted(), 0);
     }
 }
@@ -891,12 +1003,19 @@ fn pg_tls_verified_connect_and_cancel_and_certificate_refusals() {
 fn pg_unresolved_hostname_is_refused_without_unaccounted_dns() {
     struct Unresolved;
     impl PgConnectionFactory for Unresolved {
-        fn connect(&self) -> ConnectFuture<'_> { Box::pin(async {
-            let config = "host=unresolved.invalid user=test dbname=test".parse().unwrap();
-            PgConnection::connect(config, tokio_postgres::NoTls).await
-        }) }
+        fn connect(&self) -> ConnectFuture<'_> {
+            Box::pin(async {
+                let config = "host=unresolved.invalid user=test dbname=test"
+                    .parse()
+                    .unwrap();
+                PgConnection::connect(config, tokio_postgres::NoTls).await
+            })
+        }
     }
     let pool = PgPool::new(Arc::new(Unresolved), limits()).unwrap();
-    assert!(matches!(pool.acquire(&PgCancellation::default()), Err(StorageError::InvalidArguments)));
+    assert!(matches!(
+        pool.acquire(&PgCancellation::default()),
+        Err(StorageError::InvalidArguments)
+    ));
     assert_eq!(pool.accounted(), 0);
 }
