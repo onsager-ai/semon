@@ -24,6 +24,8 @@ pub(super) struct Loaded {
 
 #[cfg(test)]
 thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+thread_local! { static READ_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 fn boundary(tx: &PgTxn<'_>) -> Result<(), StorageError> {
     #[cfg(test)]
@@ -63,6 +65,7 @@ fn revision(tx: &mut PgTxn<'_>, lock: bool) -> Result<i64, StorageError> {
 
 /// Caller retains the exact ID and request through uncertain commit/restart.
 /// Receipt replay cannot execute another writer's effect or change the request.
+#[allow(clippy::too_many_arguments)] // Exact durable request, separately authorized pool/namespace/control.
 pub(super) fn save(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
@@ -343,6 +346,41 @@ mod tests {
         ));
         assert_eq!(load(&pool, &source, None, &control).unwrap().runs.len(), 4);
     }
+
+    #[test]
+    fn pg_reported_facts_selected_work_unrelated_history_and_cancel_refusal() {
+        let (pool,_) = fixture(|_|{});
+        let source = ns("bounded"); seed(&pool,&source);
+        let control = PgCancellation::default();
+        let selected = ReportedRunSnapshot { last_session_id:"selected".into(),last_duration:Some(u64::MAX),..Default::default() };
+        let ids = BTreeSet::from(["selected".into()]);
+        save(&pool,&source,0,&"a".repeat(64),std::slice::from_ref(&selected),&stamp(),&control).unwrap();
+        for (index,total) in [0,256,2048].into_iter().enumerate() {
+            if total>0 {
+                let history = (0..total).map(|n|ReportedRunSnapshot {last_session_id:format!("unrelated-{n}"),..Default::default()}).collect::<Vec<_>>();
+                save(&pool,&source,0,&format!("{:064x}",index+16),&history,&stamp(),&control).unwrap();
+            }
+            READ_WORK.with(|work|work.set(0));
+            assert_eq!(load(&pool,&source,Some(&ids),&control).unwrap().runs,[selected.clone()]);
+            READ_WORK.with(|work|assert_eq!(work.get(),1));
+        }
+        let cancelled = PgCancellation::default(); cancelled.cancel();
+        assert!(matches!(load(&pool,&source,Some(&ids),&cancelled),Err(StorageError::Busy)));
+        assert!(matches!(save(&pool,&source,0,&"f".repeat(64),&[],&stamp(),&cancelled),Err(StorageError::Busy)));
+        assert_eq!(load(&pool,&source,Some(&ids),&control).unwrap().runs,[selected]);
+    }
+
+    #[test]
+    fn pg_reported_facts_warm_schema_drift_and_missing_namespace_refuse() {
+        let (pool,factory) = fixture(|_|{});
+        let source = ns("drift"); seed(&pool,&source);
+        let control = PgCancellation::default();
+        save(&pool,&source,0,&"a".repeat(64),&[],&stamp(),&control).unwrap();
+        assert!(matches!(load(&pool,&ns("unadmitted"),None,&control),Err(StorageError::ScopeChanged)));
+        factory.client().batch_execute("ALTER TABLE semon_pg_native_reported_runs DROP COLUMN record").unwrap();
+        assert!(matches!(save(&pool,&source,0,&"b".repeat(64),&[],&stamp(),&control),Err(StorageError::ScopeChanged)));
+        assert!(matches!(load(&pool,&source,None,&control),Err(StorageError::ScopeChanged)));
+    }
 }
 
 struct Budget {
@@ -388,6 +426,8 @@ fn read_rows(
             break;
         };
         budget.charge(row.get(2))?;
+        #[cfg(test)]
+        READ_WORK.with(|work|work.set(work.get()+1));
         tx.check()?;
         let digest: Vec<u8> = row.get(0);
         let next_start: i64 = row.get(1);

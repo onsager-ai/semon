@@ -1109,10 +1109,12 @@ impl Writer {
             let mut put = tx.prepare(PUT_RUN_SCOPED).map_err(failed)?;
             for row in rows {
                 put_run(&mut put, &row.run).map_err(failed)?;
+                #[cfg(test)]
                 effect("reported_run").map_err(failed)?;
             }
         }
         tx.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),'claude_json_stamp',?1) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", [stamp]).map_err(failed)?;
+        #[cfg(test)]
         effect("reported_stamp").map_err(failed)?;
         let all = match selected {
             Some(ids) => read_runs_selected(&tx, ids),
@@ -2742,44 +2744,77 @@ mod tests {
         let input = a.root.join(".claude.json");
         let selected = BTreeSet::from(["同\0native".to_owned()]);
         let mut expected = Vec::new();
-        for (config, starts) in [(&a.config, vec![100,200]), (&b, vec![300])] {
+        for (config, starts) in [(&a.config, vec![100, 200]), (&b, vec![300])] {
             for start in starts {
                 fs::write(&input, serde_json::json!({"projects":{"/sanitized":{"lastSessionId":"同\0native","lastStartTime":start,"lastDuration":u64::MAX,"lastModelUsage":{"模型\0":{"inputTokens":u64::MAX}}}}}).to_string()).unwrap();
-                let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+                let capability =
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
                 let mut cache = EventCache::open_semantic(capability).unwrap();
                 cache.select_reported_runs(&selected).unwrap();
-                cache.refresh_reported_runs(&input,start+1,&mut false).unwrap();
+                cache
+                    .refresh_reported_runs(&input, start + 1, &mut false)
+                    .unwrap();
                 let actual = cache.reported_runs().cloned().collect::<Vec<_>>();
-                assert!(actual.iter().all(|run| run.last_duration==Some(u64::MAX) && run.last_model_usage["模型\0"].input_tokens==u64::MAX));
-                if config.namespace==a.config.namespace { expected=actual; }
+                assert!(actual.iter().all(|run| run.last_duration == Some(u64::MAX)
+                    && run.last_model_usage["模型\0"].input_tokens == u64::MAX));
+                if config.namespace == a.config.namespace {
+                    expected = actual;
+                }
             }
         }
-        assert_eq!(expected.len(),2);
+        assert_eq!(expected.len(), 2);
         fs::remove_file(&input).unwrap();
         let owner = NativeOwnership::admit(&a.config).unwrap();
         let writer = Writer::owned(owner);
-        assert_eq!(writer.reported_runs(&selected).unwrap(),expected);
+        assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
         let before = writer.reported_stamp().unwrap().unwrap();
-        let changed = ReportedFileStamp {size:123,..before.clone()};
-        let run = ReportedRunSnapshot {last_session_id:"new".into(),..Default::default()};
-        for point in ["reported_run","reported_stamp"] {
-            FAIL_EFFECT.with(|flag|flag.set(Some(point)));
-            assert!(writer.save_reported_runs(std::slice::from_ref(&run),&changed,None).is_err());
-            assert_eq!(writer.reported_runs(&selected).unwrap(),expected);
-            assert_eq!(writer.reported_stamp().unwrap(),Some(before.clone()));
-            assert!(writer.reported_runs(&BTreeSet::from(["new".into()])).unwrap().is_empty());
+        let changed = ReportedFileStamp {
+            size: 123,
+            ..before.clone()
+        };
+        let run = ReportedRunSnapshot {
+            last_session_id: "new".into(),
+            ..Default::default()
+        };
+        for point in ["reported_run", "reported_stamp"] {
+            FAIL_EFFECT.with(|flag| flag.set(Some(point)));
+            assert!(
+                writer
+                    .save_reported_runs(std::slice::from_ref(&run), &changed, None)
+                    .is_err()
+            );
+            assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
+            assert_eq!(writer.reported_stamp().unwrap(), Some(before.clone()));
+            assert!(
+                writer
+                    .reported_runs(&BTreeSet::from(["new".into()]))
+                    .unwrap()
+                    .is_empty()
+            );
         }
-        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
         let mut cache = EventCache::open_semantic(capability).unwrap();
         cache.select_reported_runs(&selected).unwrap();
-        cache.refresh_reported_runs(&input,999,&mut false).unwrap();
-        assert_eq!(cache.reported_runs().cloned().collect::<Vec<_>>(),expected);
-        let other = Writer::owned(NativeOwnership::admit(&b).unwrap()).reported_runs(&selected).unwrap();
-        assert_eq!(other.len(),1); assert_eq!(other[0].last_start_time,300);
+        cache
+            .refresh_reported_runs(&input, 999, &mut false)
+            .unwrap();
+        assert_eq!(cache.reported_runs().cloned().collect::<Vec<_>>(), expected);
+        let other = Writer::owned(NativeOwnership::admit(&b).unwrap())
+            .reported_runs(&selected)
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].last_start_time, 300);
         // Both OLD and NEW Source ownership are guarded, even for a warm handle.
         let db = connection(&a.config).unwrap();
-        assert!(db.execute("UPDATE reported_runs SET namespace=?1 WHERE namespace=semon_namespace()",[b.namespace.as_str()]).is_err());
-        assert_eq!(writer.reported_runs(&selected).unwrap(),expected);
+        assert!(
+            db.execute(
+                "UPDATE reported_runs SET namespace=?1 WHERE namespace=semon_namespace()",
+                [b.namespace.as_str()]
+            )
+            .is_err()
+        );
+        assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
     }
 
     fn same_db_sources() -> (Fixture, StoreConfig, PathBuf) {
