@@ -1140,7 +1140,7 @@ fn finish_catalog_backfill_sql(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';",
             "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';",
         ).map_err(failed)?;
-        tx.execute_batch(&sql).map_err(failed)?;
+        tx.execute_batch(sql).map_err(failed)?;
         let updated = tx
             .execute(
                 "UPDATE storage_source_journal SET backfill_state='complete' WHERE namespace=?1",
