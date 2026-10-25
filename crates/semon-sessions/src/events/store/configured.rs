@@ -7906,7 +7906,7 @@ mod tests {
             events: usize,
         ) -> Vec<crate::Input> {
             (0..copies).map(|i| {
-                let input = crate::Input { root: crate::InputRoot::Claude, path: format!("projects/sanitized/claude72-{i}.jsonl").into() };
+                let input = crate::Input { root: crate::InputRoot::Claude, path: format!("projects/sanitized/claude72-{i}.jsonl") };
                 let mut raw = format!("{}\n",serde_json::json!({"type":"user","sessionId":format!("claude72-{i}"),"uuid":format!("first-{i}"),"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":"native work"}}));
                 for n in 0..events {
                     raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":format!("claude72-{i}"),"uuid":format!("call-row-{n}"),"timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":format!("claude-call-{n}"),"name":"Agent","input":{"prompt":"sanitized work"}}]}})));
