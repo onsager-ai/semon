@@ -7,7 +7,11 @@ struct Fixture {
     path: String,
     ledger: Ledger,
     oracle: Summary,
+    sources: Vec<(String, Ledger, crate::events::FileIndex)>,
     rows: Vec<(&'static str, Vec<Vec<(String, Value)>>)>,
+}
+fn read_ledger(sqlite: &rusqlite::Connection, path: &str) -> Ledger {
+    sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
 }
 fn parser_fixture(harness: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("pg100-{}-{}-{harness}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -34,7 +38,7 @@ fn parser_fixture(harness: &str) -> Fixture {
     let mut oracle = index.tree_summary.clone().unwrap();
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
-    let ledger = sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
+    let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     let mut rows = Vec::new();
     for family in ["files", "usage", "usage_identity", "usage_sources", "usage_current", "tree_generations", "tree_headers", "tree_models", "tree_labels", "tree_tools", "tree_usage_models"] {
         let table = if family.starts_with("usage_") && family != "usage_identity" || family.starts_with("tree_") { format!("native_{family}") } else { family.into() };
@@ -43,13 +47,36 @@ fn parser_fixture(harness: &str) -> Fixture {
         let data = stmt.query_map([], |r| names.iter().enumerate().map(|(i,n)| Ok((n.clone(), r.get(i)?))).collect::<rusqlite::Result<Vec<_>>>()).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         rows.push((family, data));
     }
+    let source_paths = sqlite.prepare("SELECT source_path FROM native_usage_sources ORDER BY source_id").unwrap().query_map([], |row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let sources = source_paths.into_iter().map(|path| {
+        let ledger = read_ledger(&sqlite, &path);
+        let index = crate::events::store::native_usage::parser_fixture(std::path::Path::new(&path),harness);
+        (format!("{path}\0🦀"),ledger,index)
+    }).collect();
     drop(sqlite); drop(cache);
-    Fixture {root, path:path.to_str().unwrap().into(), ledger, oracle, rows}
+    // PG's logical path is lossless bytea; the real fixture's ledger and
+    // parser rows stay identical while its logical carrier includes NUL.
+    for (_, family_rows) in &mut rows {
+        for row in family_rows {
+            for (name, value) in row {
+                if (name == "path" || name == "source_path") && let Value::Text(path) = value { path.push_str("\0🦀"); }
+            }
+        }
+    }
+    Fixture {root, path:format!("{}\0🦀",path.to_str().unwrap()), ledger, oracle, sources, rows}
 }
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+    {
+        let mut effects = super::super::native_usage::Usage::new(tx)?;
+        for (path,ledger,index) in &fixture.sources {
+            crate::events::store::native_usage::algorithm::begin(&mut effects,path,None,ledger,false)?;
+            crate::events::store::native_usage::algorithm::write(&mut effects,path,ledger,index)?;
+        }
+    }
     for (family, rows) in &fixture.rows {
+        if matches!(*family,"usage_sources"|"usage_current") { continue; }
         let table = format!("semon_pg_native_{family}");
         let columns = tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
         for row in rows {
@@ -102,8 +129,10 @@ fn pg_tree_checkpoint_stale_authority_rebind_and_selected_limits() {
     let data=parser_fixture("claude");let (pool,_)=fixture(|b|b.max_connections=1);
     pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install(tx,&data)).unwrap();
     let summary=restore(&pool,&data);let checkpoint=summary.stored.unwrap();
-    let control=crate::selected_read::SelectedReadControl::default().with_limits(1,1);
+    DECODED.with(|value|value.set(0));
+    let control=crate::selected_read::SelectedReadControl::default().with_limits(10,65);
     {let _scope=crate::selected_read::Scope::enter(&control);assert!(checkpoint.shared_usage().is_err());}
+    assert_eq!(DECODED.with(|value|value.get()),0);
     let mut rebound=checkpoint.clone();rebound.bind_configured(crate::storage::StoreConfig{backend:crate::storage::StoreBackend::Sqlite{database:data.root.join("must-not-open.sqlite")},namespace:ns("tree\0🦀"),expected_stream_epoch:None});
     assert!(rebound.tool_name("missing").is_err());assert!(!data.root.join("must-not-open.sqlite").exists());
     for mutation in ["UPDATE semon_pg_native_files SET resume_at=resume_at+1", "UPDATE semon_pg_native_tree_headers SET projection_id=projection_id+100", "UPDATE semon_pg_native_tree_generations SET complete=false", "UPDATE semon_pg_native_usage_sources SET parser_version=parser_version+1", "UPDATE semon_pg_native_usage_sources SET receipt='bad'::bytea", "DELETE FROM semon_pg_native_usage_current"] {
@@ -119,5 +148,40 @@ fn pg_tree_checkpoint_stale_authority_rebind_and_selected_limits() {
     checkpoint.shared_usage().unwrap();
     pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|{tx.driver.batch_execute("UPDATE semon_pg_native_files SET size=size+1").map_err(sqlstate::error)}).unwrap();
     assert!(checkpoint.tool_name("missing").is_err());assert!(checkpoint.shared_usage().is_err());
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_tree_checkpoint_cancel_deadline_closed_nullable_and_unsigned_tokens() {
+    let data=parser_fixture("claude");let (pool,factory)=fixture(|b|b.max_connections=1);
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|install(tx,&data)).unwrap();
+    let mut summary=restore(&pool,&data);
+    let checkpoint=summary.stored.clone().unwrap();
+    // Remove the oracle's carrier before PG callbacks; deferred PG consumers
+    // cannot depend on the known SQLite store or create it as a fallback.
+    let sqlite_path=EventCache::path(&data.root.join("index.json"));
+    std::fs::rename(&sqlite_path,data.root.join("oracle-held")).unwrap();
+    assert!(!sqlite_path.exists());
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|{
+        tx.driver.execute("UPDATE semon_pg_native_tree_tools SET closed=true WHERE tool_id=$1", &[&"tool\0🦀".as_bytes()]).map_err(sqlstate::error)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) SELECT namespace,projection_id,$1,NULL,true FROM semon_pg_native_tree_headers WHERE source_path=$2", &[&"null\0🦀".as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?;
+        tx.driver.batch_execute("UPDATE semon_pg_native_usage SET input=18446744073709551615,total=18446744073709551615").map_err(sqlstate::error)?;Ok(())
+    }).unwrap();
+    assert_eq!(checkpoint.tool_name("tool\0🦀").unwrap(),Some("Bash'\0🦀".into()));
+    assert_eq!(checkpoint.tool_name("null\0🦀").unwrap(),None);
+    summary.load_shared_usage().unwrap();
+    assert!(summary.usage_by_id.values().any(|v|v.input==u64::MAX && v.total==u64::MAX));
+    let restored=restore(&pool,&data); assert!(!restored.tools.contains_key("tool\0🦀"));
+    assert!(!sqlite_path.exists());
+    let control=PgCancellation::default();control.cancel();
+    assert!(Snapshot::restore(pool.clone(),ns("tree\0🦀"),&data.path,&data.ledger,control).is_err());
+    let cancelled=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let control=crate::selected_read::SelectedReadControl::new(std::time::Instant::now()+std::time::Duration::from_secs(1),cancelled);
+    {let _scope=crate::selected_read::Scope::enter(&control);assert_eq!(checkpoint.shared_usage().unwrap_err().kind(),std::io::ErrorKind::Interrupted);}
+    let control=crate::selected_read::SelectedReadControl::new(std::time::Instant::now(),std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    {let _scope=crate::selected_read::Scope::enter(&control);assert_eq!(checkpoint.shared_usage().unwrap_err().kind(),std::io::ErrorKind::TimedOut);}
+    // Read admission still uses the existing manifest verifier on a warm pool.
+    factory.client().batch_execute("ALTER TABLE semon_pg_native_tree_tools NO FORCE ROW LEVEL SECURITY").unwrap();
+    assert!(checkpoint.tool_name("tool\0🦀").is_err());
     std::fs::remove_dir_all(data.root).unwrap();
 }
