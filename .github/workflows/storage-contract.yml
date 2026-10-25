@@ -59,6 +59,9 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_runtime_capability_is_crate_private_and_public_factory_stays_closed -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_batch_reduces_events_native_keys_frontier_scoped -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_reset_and_reduction_rollback_zero_partial_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_ingest_begin_batch_record_uses_real_claim_and_generation -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_namespace_factories_keep_rollback_and_restart_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stale_record_and_admission_refuse_without_writes -- --exact --nocapture
