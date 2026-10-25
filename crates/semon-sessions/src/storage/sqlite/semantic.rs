@@ -1532,20 +1532,23 @@ impl Stage {
             }
             let added = paths.iter().any(|path| !seeds.contains(path));
             if phase != "indexing"
-                && paths.iter().filter(|path| !seeds.contains(path)).any(|path| {
-                    !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-                })
+                && paths
+                    .iter()
+                    .filter(|path| !seeds.contains(path))
+                    .any(|path| !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
             {
                 return Err(refuse("semantic_affected_owner_late_incident_pending"));
             }
             // A new native child has no Current owner yet. Revisit the real
             // indexed header/dependency frontiers after a journal advance;
             // the prior-owner closure alone cannot discover that child.
-            let revision: i64 = tx.query_row(
-                "SELECT revision FROM storage_source_journal WHERE namespace=?1",
-                [ns],
-                |r| r.get(0),
-            ).map_err(error)?;
+            let revision: i64 = tx
+                .query_row(
+                    "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
             let changed: bool = tx.query_row(
                 "SELECT revision<>?2 OR EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0) FROM main.catalog_semantic_stage WHERE namespace=?1",
                 params![ns,revision],
@@ -1565,14 +1568,18 @@ impl Stage {
                 tx.execute(
                     "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
                     [ns],
-                ).map_err(error)?;
-                let next_epoch = tx.query_row(
-                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
-                    [ns],
-                    |r| r.get(0),
-                ).map_err(error)?;
+                )
+                .map_err(error)?;
+                let next_epoch = tx
+                    .query_row(
+                        "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                        [ns],
+                        |r| r.get(0),
+                    )
+                    .map_err(error)?;
                 #[cfg(test)]
-                crate::events::store::configured::effect("semantic_late_incident_reset").map_err(error)?;
+                crate::events::store::configured::effect("semantic_late_incident_reset")
+                    .map_err(error)?;
                 tx.commit().map_err(error)?;
                 self.epoch = Some(next_epoch);
                 return Ok(Some(Batch {
