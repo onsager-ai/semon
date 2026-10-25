@@ -7412,25 +7412,68 @@ mod tests {
             inputs: &[crate::Input],
         ) -> (Batch, crate::model::SemanticModelBatch) {
             for (i, input) in inputs.iter().enumerate() {
-                cache.ingest(&format!("{:064x}", 6800 + i), &input.full_path(options), "codex").unwrap();
+                if cache.explicit_store {
+                    cache
+                        .ingest(
+                            &format!("{:064x}", 6800 + i),
+                            &input.full_path(options),
+                            "codex",
+                        )
+                        .unwrap();
+                } else {
+                    crate::events::scan_file(
+                        &input.full_path(options),
+                        "codex",
+                        cache,
+                        &mut false,
+                    )
+                    .unwrap();
+                }
             }
-            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
             for _ in 0..128 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
-                if batch.paths.is_empty() { continue; }
-                let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|i| {
+                        batch
+                            .paths
+                            .contains(&i.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 assert_eq!(selected.len(), batch.paths.len());
-                let model = cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
-                if batch.phase == Phase::Publication { return (batch, model); }
+                let model = cache
+                    .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
+                    .unwrap();
+                if batch.phase == Phase::Publication {
+                    return (batch, model);
+                }
             }
             panic!("selector producer failed to reach publication")
         }
 
         fn selector_value(selection: crate::model::relation_stage::Selection) -> serde_json::Value {
             let mut endpoint = selection.endpoint.map(|e| serde_json::to_value(e).unwrap());
-            if let Some(query) = endpoint.as_mut().and_then(|e| e.get_mut("row")).and_then(|r| r.get_mut("query")).and_then(serde_json::Value::as_object_mut) {
+            if let Some(query) = endpoint
+                .as_mut()
+                .and_then(|e| e.get_mut("row"))
+                .and_then(|r| r.get_mut("query"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 // Source-bound and ordinary runtime addresses differ; native
                 // identity, provenance, locations and every other field agree.
                 query.remove("runtime");
@@ -7450,20 +7493,51 @@ mod tests {
                 let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
                 let (reference, _) = selector_ready(&mut ordinary, options, &inputs);
                 let task = if duplicate { "shared" } else { "child-1" };
-                let target = if duplicate { "root/shared" } else { "root/child-1" };
+                let target = if duplicate {
+                    "root/shared"
+                } else {
+                    "root/child-1"
+                };
                 let selectors = [
-                    Selector::CodexSibling { parent: "selector-0".into(), task: task.into() },
-                    Selector::CodexRelay { root: "selector-0".into(), target: task.into() },
-                    Selector::CodexRelay { root: "selector-0".into(), target: target.into() },
-                    Selector::CodexWait { root: "selector-0".into(), target: target.into(), exclude: "selector-0".into() },
-                    Selector::CodexWait { root: "selector-0".into(), target: target.into(), exclude: "selector-1".into() },
+                    Selector::CodexSibling {
+                        parent: "selector-0".into(),
+                        task: task.into(),
+                    },
+                    Selector::CodexRelay {
+                        root: "selector-0".into(),
+                        target: task.into(),
+                    },
+                    Selector::CodexRelay {
+                        root: "selector-0".into(),
+                        target: target.into(),
+                    },
+                    Selector::CodexWait {
+                        root: "selector-0".into(),
+                        target: target.into(),
+                        exclude: "selector-0".into(),
+                    },
+                    Selector::CodexWait {
+                        root: "selector-0".into(),
+                        target: target.into(),
+                        exclude: "selector-1".into(),
+                    },
                 ];
                 for (i, selector) in selectors.iter().enumerate() {
                     let actual = admitted.semantic_select(batch.epoch, selector).unwrap();
                     let expected = ordinary.semantic_select(reference.epoch, selector).unwrap();
-                    let count = if i == 4 { usize::from(duplicate) } else if duplicate { 2 } else { 1 };
+                    let count = if i == 4 {
+                        usize::from(duplicate)
+                    } else if duplicate {
+                        2
+                    } else {
+                        1
+                    };
                     assert_eq!(actual.count, count, "{selector:?}");
-                    assert_eq!(selector_value(actual), selector_value(expected), "{selector:?}");
+                    assert_eq!(
+                        selector_value(actual),
+                        selector_value(expected),
+                        "{selector:?}"
+                    );
                 }
                 oracle(&admitted, options, &inputs, model.prepared());
                 publish(&mut admitted, &f, &batch, &model);
@@ -7480,18 +7554,42 @@ mod tests {
             let mut b_cache = open(&b);
             let (a_batch, a_model) = selector_ready(&mut a_cache, options, &inputs);
             let (b_batch, b_model) = selector_ready(&mut b_cache, options, &inputs);
-            b_cache.publish_semantic_catalog(&b_batch, b_model.prepared()).unwrap();
+            b_cache
+                .publish_semantic_catalog(&b_batch, b_model.prepared())
+                .unwrap();
             let foreign = namespace_state(&f, "source-b");
             let before = shared_state(&f);
             for selector in [
-                Selector::CodexSibling { parent: "selector-0".into(), task: "child-1".into() },
-                Selector::CodexRelay { root: "selector-0".into(), target: "root/child-1".into() },
-                Selector::CodexWait { root: "selector-0".into(), target: "root/child-1".into(), exclude: "selector-0".into() },
+                Selector::CodexSibling {
+                    parent: "selector-0".into(),
+                    task: "child-1".into(),
+                },
+                Selector::CodexRelay {
+                    root: "selector-0".into(),
+                    target: "root/child-1".into(),
+                },
+                Selector::CodexWait {
+                    root: "selector-0".into(),
+                    target: "root/child-1".into(),
+                    exclude: "selector-0".into(),
+                },
             ] {
-                assert_eq!(a_cache.semantic_select(a_batch.epoch, &selector).unwrap().count, 1);
+                assert_eq!(
+                    a_cache
+                        .semantic_select(a_batch.epoch, &selector)
+                        .unwrap()
+                        .count,
+                    1
+                );
             }
-            assert_eq!(shared_state(&f), before, "selector reads have zero whole-DB effects");
-            a_cache.publish_semantic_catalog(&a_batch, a_model.prepared()).unwrap();
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "selector reads have zero whole-DB effects"
+            );
+            a_cache
+                .publish_semantic_catalog(&a_batch, a_model.prepared())
+                .unwrap();
             assert_eq!(namespace_state(&f, "source-b"), foreign);
         }
 
@@ -7503,17 +7601,45 @@ mod tests {
             let inputs = selector_inputs(options, false);
             let mut old = open(&f.config);
             let (batch, model) = selector_ready(&mut old, options, &inputs);
-            crate::facts::write_facts(options.facts.as_ref().unwrap(), &crate::Facts {
-                version: 2, hostname: "selector-new-authority".into(), ..Default::default()
-            }).unwrap();
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "selector-new-authority".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let mut replacement = open(&f.config);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
-            assert_eq!(replacement.begin_semantic_stage_with_journal(&paths, &runtime, false).unwrap(), Outcome::Written);
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                replacement
+                    .begin_semantic_stage_with_journal(&paths, &runtime, false)
+                    .unwrap(),
+                Outcome::Written
+            );
             let before = shared_state(&f);
-            assert!(old.semantic_select(batch.epoch, &Selector::CodexRelay { root: "selector-0".into(), target: "child-1".into() }).is_err());
+            assert!(
+                old.semantic_select(
+                    batch.epoch,
+                    &Selector::CodexRelay {
+                        root: "selector-0".into(),
+                        target: "child-1".into()
+                    }
+                )
+                .is_err()
+            );
             assert_eq!(shared_state(&f), before);
-            assert_eq!(old.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(
+                old.publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
             assert_eq!(shared_state(&f), before);
         }
 
@@ -7526,38 +7652,91 @@ mod tests {
             raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":"model-1","uuid":"native-call","timestamp":"2026-10-01T00:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"selector-call","name":"Agent","input":{"prompt":"sanitized work"}}]}})));
             fs::write(input.full_path(options), raw).unwrap();
             let mut cache = open(&f.config);
-            cache.ingest(&format!("{:064x}", 6899), &input.full_path(options), "claude").unwrap();
+            cache
+                .ingest(
+                    &format!("{:064x}", 6899),
+                    &input.full_path(options),
+                    "claude",
+                )
+                .unwrap();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            cache.begin_semantic_stage_with_journal(&[input.full_path(options).to_string_lossy().into_owned()], &runtime, true).unwrap();
+            cache
+                .begin_semantic_stage_with_journal(
+                    &[input.full_path(options).to_string_lossy().into_owned()],
+                    &runtime,
+                    true,
+                )
+                .unwrap();
             let mut reached = false;
             for _ in 0..128 {
                 let before = shared_state(&f);
                 match cache.semantic_batch(64) {
                     Err(error) => {
-                        assert!(error.to_string().contains("semantic_nonprimitive_event_harness"), "{error}");
-                        assert_eq!(shared_state(&f), before, "producer refusal rolls back whole transaction");
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("semantic_nonprimitive_event_harness"),
+                            "{error}"
+                        );
+                        assert_eq!(
+                            shared_state(&f),
+                            before,
+                            "producer refusal rolls back whole transaction"
+                        );
                         reached = true;
                         break;
                     }
                     Ok(Some(batch)) if !batch.paths.is_empty() => {
-                        assert_ne!(batch.phase, Phase::Publication, "incident inputs must not publish without their event producer");
+                        assert_ne!(
+                            batch.phase,
+                            Phase::Publication,
+                            "incident inputs must not publish without their event producer"
+                        );
                         for selector in [
-                            crate::model::relation_stage::Selector::ClaudeCall { id: "selector-call".into() },
-                            crate::model::relation_stage::Selector::ClaudeReceipt { id: "selector-message".into() },
+                            crate::model::relation_stage::Selector::ClaudeCall {
+                                id: "selector-call".into(),
+                            },
+                            crate::model::relation_stage::Selector::ClaudeReceipt {
+                                id: "selector-message".into(),
+                            },
                         ] {
                             let before_select = shared_state(&f);
                             let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
-                            assert!(error.to_string().contains("semantic_claude_event_projection_pending"), "{error}");
+                            assert!(
+                                error
+                                    .to_string()
+                                    .contains("semantic_claude_event_projection_pending"),
+                                "{error}"
+                            );
                             assert_eq!(shared_state(&f), before_select);
                         }
-                        cache.prepare_semantic_model_batch(options, std::slice::from_ref(input), &batch, 1_790_000_000_000).unwrap();
+                        cache
+                            .prepare_semantic_model_batch(
+                                options,
+                                std::slice::from_ref(input),
+                                &batch,
+                                1_790_000_000_000,
+                            )
+                            .unwrap();
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => panic!("stage disappeared before producer refusal"),
                 }
             }
-            assert!(reached, "real Agent input must reach the actual producer refusal");
-            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert!(
+                reached,
+                "real Agent input must reach the actual producer refusal"
+            );
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT count(*) FROM session_catalog WHERE namespace='source-a'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
         }
     }
 }
