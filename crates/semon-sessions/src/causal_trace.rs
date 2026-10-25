@@ -440,272 +440,42 @@ pub(crate) fn selected_details(
     sources: &[crate::model::summary::CatalogSource],
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Option<Value>> {
-    if !tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_trace_headers')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )? {
-        return Ok(None);
-    }
-    let expected = crate::retention::source_generation(sources)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let encoded: Option<(Option<String>, bool)> = tx.query_row(
-        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_set(json_extract(metadata,'$.details'),'$.busy',json_extract(metadata,'$.busy'),'$.content_generation',json_extract(metadata,'$.content_generation')) ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",
-        params![key, expected], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional()?;
-    encoded
-        .and_then(|(text, current)| text.map(|text| (text, current)))
-        .map(|(text, current)| {
-            let mut value: Value = serde_json::from_str(&text)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            value["live_observation"] = json!(current);
-            value["family"] = selected_family(tx, key, relative_status)?;
-            Ok(value)
-        })
-        .transpose()
+    crate::storage::selected::selected_details(
+        &crate::storage::sqlite::selected::Context::local(tx),
+        key,
+        sources,
+        relative_status,
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
-/// Indexed, body-free relatives of the selected owner. This never walks an
-/// unrelated workspace. A truncated family retains an explicit unknown total.
+#[cfg(test)]
 fn selected_family(
     tx: &Transaction<'_>,
     key: &str,
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Value> {
-    let mut bytes = 0;
-    let incomplete = std::cell::Cell::new(false);
-    let mut compact = tx.prepare("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost'),'_status_catalog',json_set(COALESCE(h.metadata,c.metadata),'$.lifecycle',c.lifecycle)) ELSE NULL END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1")?;
-    let mut read = |sid: &str| -> rusqlite::Result<Option<Value>> {
-        let text: Option<String> = compact
-            .query_row([sid], |row| row.get(0))
-            .optional()?
-            .flatten();
-        let Some(text) = text else {
-            incomplete.set(true);
-            return Ok(None);
-        };
-        bytes += text.len();
-        if text.len() > 65536 || bytes > 1048576 {
-            incomplete.set(true);
-            return Ok(None);
-        }
-        let mut row: Value = serde_json::from_str(&text)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        // Qualification uses the same bounded published scope as the relative.
-        // Private native paths and Query recipes never enter the UI response.
-        let scope = row
-            .as_object_mut()
-            .and_then(|row| row.remove("_status_catalog"))
-            .and_then(|value| {
-                serde_json::from_value::<crate::model::summary::CatalogRow>(value).ok()
-            });
-        row["status"] = scope
-            .filter(|scope| scope.key == sid && row["harness"] == scope.harness)
-            .map(|scope| relative_status(&scope))
-            .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
-        Ok(Some(row))
-    };
-    let mut ancestors = Vec::new();
-    let mut seen = BTreeSet::from([key.to_owned()]);
-    let mut parent = read(key)?.and_then(|row| row["parent"].as_str().map(str::to_owned));
-    while let Some(sid) = parent.take() {
-        if ancestors.len() >= 32 || !seen.insert(sid.clone()) {
-            incomplete.set(true);
-            break;
-        }
-        let Some(row) = read(&sid)? else {
-            break;
-        };
-        parent = row["parent"].as_str().map(str::to_owned);
-        ancestors.push(row);
-    }
-    ancestors.reverse();
-    let mut statement = tx.prepare("WITH RECURSIVE family(session_key) AS (VALUES(?1) UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.session_key LIMIT 101) SELECT session_key FROM family WHERE session_key!=?1")?;
-    let mut runs = Vec::new();
-    for sid in statement.query_map([key], |row| row.get::<_, String>(0))? {
-        let sid = sid?;
-        if seen.contains(&sid) {
-            incomplete.set(true);
-            continue;
-        }
-        if runs.len() >= 99 {
-            incomplete.set(true);
-            break;
-        }
-        if let Some(row) = read(&sid)? {
-            runs.push(row);
-        }
-    }
-    Ok(
-        json!({"state":if incomplete.get() {"incomplete"} else {"complete"},"ancestors":ancestors,"runs":runs}),
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::local(tx),
+        key,
+        relative_status,
     )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
-/// Relationships for the issued native range only. This shares the producer's
-/// causal projection; it never constructs a graph or reads native bodies.
 pub(crate) fn range_context(
     tx: &Transaction<'_>,
     key: &str,
     slots: &[crate::slot_projection::SavedSlot],
     sources: &[crate::model::summary::CatalogSource],
 ) -> rusqlite::Result<Value> {
-    let mut ids = BTreeSet::new();
-    let turn_ids: BTreeSet<_> = slots
-        .iter()
-        .filter_map(|slot| slot.turn.as_deref())
-        .collect();
-    for slot in slots {
-        if let crate::slot_projection::Recipe::H { id } = &slot.recipe {
-            ids.insert(id.clone());
-        }
-    }
-    if !ids.is_empty() || !turn_ids.is_empty() {
-        let expected = crate::retention::source_generation(sources)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let published: Option<String> = tx
-            .query_row(
-                "SELECT source_generation FROM session_trace_headers WHERE session_key=?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if published.as_deref() != Some(&expected) {
-            return Ok(
-                json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
-            );
-        }
-    }
-    let mut missing = tx.query_row("SELECT COALESCE(json_extract(metadata,'$.relationships_incomplete'),0) FROM session_trace_headers WHERE session_key=?1", [key], |row|row.get::<_,bool>(0)).optional()?.unwrap_or(false);
-    let mut turns = Vec::new();
-    let mut bytes = 0;
-    for id in turn_ids {
-        let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",params![key,id],|row|row.get(0)).optional()?;
-        let Some(encoded) = encoded else {
-            missing = true;
-            continue;
-        };
-        bytes += encoded.len();
-        if bytes > 4 * 1024 * 1024 {
-            missing = true;
-            break;
-        }
-        let turn: Value = serde_json::from_str(&encoded)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if turn["sent"].as_array().is_none_or(|sent| sent.len() > 1000) {
-            missing = true;
-            continue;
-        }
-        if let Some(start) = turn["start"].as_str() {
-            ids.insert(start.to_owned());
-        }
-        turns.push(turn);
-    }
-    let mut edges = Vec::new();
-    let mut owners = BTreeSet::new();
-    let mut participants = BTreeSet::new();
-    for id in ids {
-        let encoded: Option<String> = tx.query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
-            params![key,id], |row|row.get(0)).optional()?;
-        let Some(encoded) = encoded else {
-            missing = true;
-            continue;
-        };
-        bytes += encoded.len();
-        if bytes > 4 * 1024 * 1024 {
-            missing = true;
-            break;
-        }
-        let mut edge: Value = serde_json::from_str(&encoded)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        for field in ["brief_session", "result_session"] {
-            if let Some(owner) = edge[field].as_str() {
-                owners.insert(owner.to_owned());
-            }
-        }
-        for field in ["from", "to"] {
-            if let Some(sid) = edge[field].as_str().filter(|sid| *sid != "you") {
-                participants.insert(sid.to_owned());
-            }
-        }
-        if let Some(target) = edge["to"].as_str() {
-            let found: Vec<String> = tx.prepare("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2")?
-                .query_map(params![target,id],|row|row.get(0))?.collect::<Result<_,_>>()?;
-            if found.len() == 1 {
-                edge["target_turn"] = json!(found[0]);
-            }
-        }
-        edges.push(edge);
-    }
-    let mut sessions = BTreeMap::new();
-    if participants.len() > 201 {
-        missing = true;
-    }
-    for sid in participants.into_iter().take(201) {
-        let metadata:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'activity',json_extract(metadata,'$.details.activity'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1",[&sid],|row|row.get(0)).optional()?.flatten();
-        if let Some(metadata) = metadata {
-            bytes += metadata.len();
-            if metadata.len() > 65536 || bytes > 4 * 1024 * 1024 {
-                missing = true;
-                continue;
-            }
-            sessions.insert(
-                sid,
-                serde_json::from_str::<Value>(&metadata)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
-            );
-        } else {
-            missing = true;
-        }
-    }
-    for edge in &edges {
-        if edge["kind"] == "spawn"
-            && let Some(target) = edge["to"].as_str()
-            && let Some(session) = sessions.get(target)
-            && session["state"] == "work"
-            && session["live_observation"] == 1
-            && !session["activity"].is_null()
-        {
-            owners.insert(target.to_owned());
-        }
-    }
-    let mut previews = BTreeMap::new();
-    if owners.len() > 128 {
-        missing = true;
-    }
-    for sid in owners.into_iter().take(128) {
-        let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        let Some((generation, Some(content))) = header else {
-            missing = true;
-            continue;
-        };
-        let metadata = crate::history_projection::catalog(tx, &sid)?.or(tx
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                [&sid],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?);
-        let Some(metadata) = metadata else {
-            missing = true;
-            continue;
-        };
-        let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if row.key != sid
-            || crate::retention::source_generation(&row.sources)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
-                != generation
-            || content.len() != 64
-        {
-            missing = true;
-            continue;
-        }
-        previews.insert(sid, content);
-    }
-    Ok(
-        json!({"state":if missing {"incomplete"} else {"complete"},"turns":turns,"handoffs":edges,"sessions":sessions,"previews":previews}),
+    crate::storage::selected::range_context(
+        &crate::storage::sqlite::selected::Context::local(tx),
+        key,
+        slots,
+        sources,
     )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 #[derive(Serialize)]
