@@ -5392,21 +5392,21 @@ fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
         configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe'")?, [], |row| row.get(0),
     ).optional()?;
     if let Some(recipe) = recipe {
-        let Some(version) = recipe
-            .as_deref()
-            .and_then(|text| text.strip_prefix("recorded-origin-turn-complete-receipts-v"))
-            .and_then(contract_number)
+        let Some((family, current)) = semantic_stage::RECIPE
+            .rsplit_once("-v")
+            .and_then(|(family, version)| contract_number(version).map(|version| (family, version)))
         else {
             return Ok(found);
         };
-        let current = semantic_stage::RECIPE
-            .strip_prefix("recorded-origin-turn-complete-receipts-v")
-            .and_then(contract_number)
-            .expect("current semantic recipe");
-        if version > current {
+        let stored = recipe.as_deref().and_then(|text| {
+            let (stored_family, version) = text.rsplit_once("-v")?;
+            Some((stored_family, contract_number(version)?))
+        });
+        // A different recipe is unsupported, not authority to rebuild or
+        // upgrade historical semantic state under the current producer.
+        if stored != Some((family, current)) {
             return Ok(found);
         }
-        obsolete |= version < current;
     }
     // Inspect only format numbers, never old archive payloads or source bytes.
     let (invalid, older): (bool, bool) = connection.query_row(
