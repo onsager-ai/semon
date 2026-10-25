@@ -1444,7 +1444,6 @@ mod tests {
             SLOT_SCHEMA,
             crate::events::store::catalog_schema(false),
             CATALOG_SUPPORT_SCHEMA,
-            crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA,
             metadata_schema(false),
             LEGACY_EVENT_SCHEMA,
             copied_usage_schema(false),
@@ -1460,6 +1459,24 @@ mod tests {
             crate::history_projection::SCHEMA,
             crate::catalog_search::SCHEMA,
             crate::storage::sqlite::changes::SCHEMA,
+            "
+CREATE TABLE IF NOT EXISTS source_observation_receipts (
+    namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),
+    PRIMARY KEY(namespace,operation_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS source_observation_intents (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(namespace,operation_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observation_intents(namespace,sequence);
+",
             queue_schema(false),
             catalog_schema(false, false, false),
             file_schema(false, false),
@@ -1468,7 +1485,7 @@ mod tests {
         let mut configured_original = original;
         configured_original[4] = configured::CORE_SCHEMA;
         configured_original[10] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
-        configured_original[20] = configured::pricing_file_schema(false);
+        configured_original[21] = configured::pricing_file_schema(false);
         assert_eq!(
             authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
             configured_original

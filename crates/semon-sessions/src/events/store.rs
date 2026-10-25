@@ -387,8 +387,18 @@ CREATE TABLE IF NOT EXISTS source_observation_receipts (
     namespace TEXT NOT NULL,
     operation_id TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),
     PRIMARY KEY(namespace,operation_id)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS source_observation_intents (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(namespace,operation_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observation_intents(namespace,sequence);
 "
     };
 }
