@@ -61,6 +61,10 @@ impl AdmittedSource {
         // Private profiles are authored as one physical family. Never upgrade
         // a profile that predates the scoped custody/recipe/search effects.
         for table in [
+            "session_trace_headers",
+            "session_trace_turns",
+            "session_trace_edges",
+            "session_trace_bookmarks",
             "session_slot_projections",
             "session_slots",
             "session_history_catalog",
@@ -449,6 +453,9 @@ impl Stage {
         {
             return Err(refuse("semantic_publication_nonprimitive_owners_pending"));
         }
+        if prepared.rows.iter().any(|row| row.query.is_some() && row.trace.is_none()) {
+            return Err(refuse("semantic_publication_trace_missing"));
+        }
         let projection_rows: std::collections::BTreeMap<_, _> =
             prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
         let mut projection_keys = std::collections::BTreeSet::new();
@@ -486,6 +493,11 @@ impl Stage {
             .iter()
             .map(|p| (&p.key, &p.slots, p.repair))
             .collect::<Vec<_>>();
+        let producer_witness = prepared.staged_projection_witness()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        if producer_witness.len() > 2 * 1048576 {
+            return Err(refuse("semantic_context_budget"));
+        }
         let metadata = prepared
             .rows
             .iter()
@@ -508,7 +520,8 @@ impl Stage {
                     &batch.base_generation,
                     &claims_text,
                     &metadata_text,
-                    &projection_witness
+                    &projection_witness,
+                    &producer_witness
                 ))
                 .map_err(|e| StoreError::Data(e.to_string()))?
             )
@@ -663,7 +676,7 @@ impl Stage {
         {
             return Err(refuse("semantic_affected_owner_retirement_pending"));
         }
-        if prepared.rows.iter().any(|row| row.query.is_some()) || !prepared.transcripts.is_empty() {
+        if prepared.rows.iter().any(|row| row.query.is_some() || row.trace.is_some()) || !prepared.transcripts.is_empty() {
             let witness = prepared
                 .staged_projection_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
@@ -675,6 +688,14 @@ impl Stage {
         // All stale/scope/Raw/claim checks precede the first durable write.
         let old_epoch:Option<String>=tx.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_publication_epoch'",[ns],|r|r.get(0)).optional().map_err(error)?;
         let mut projections_unchanged = true;
+        let trace_effects = super::trace::TraceWriter::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        for row in &prepared.rows {
+            if let Some(trace) = &row.trace {
+                projections_unchanged &= crate::causal_trace::is_published(&trace_effects, row, trace)
+                    .map_err(error)?;
+            }
+        }
         for projection in &prepared.transcripts {
             let row = projection_rows[projection.key.as_str()];
             let slots = projection
@@ -717,6 +738,9 @@ impl Stage {
                     serde_json::to_string(&projection_witness)
                         .map_err(|e| StoreError::Data(e.to_string()))?,
                 );
+            }
+            if prepared.rows.iter().any(|row| row.trace.is_some()) {
+                generation_metadata.push(producer_witness.clone());
             }
             crate::storage::catalog::component_generation(
                 &version,
@@ -771,6 +795,17 @@ impl Stage {
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_rows").map_err(error)?;
+        publication_phase("trace_effects");
+        let trace = super::trace::TraceWriter::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        for row in &prepared.rows {
+            if let Some(projection) = &row.trace {
+                crate::causal_trace::publish_with_store(&trace, row, projection)
+                    .map_err(error)?;
+            }
+        }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_trace").map_err(error)?;
         publication_phase("search_effects");
         crate::catalog_search::publish_current_rows_with_store(
             &tx,
@@ -1056,6 +1091,16 @@ impl Stage {
             .validate(&self.db)
             .map_err(StoreError::Configured)?;
         head(&self.db).map_err(error)
+    }
+
+    pub(crate) fn runtime_binding(&self) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {
+        self.source.validate(&self.db).map_err(StoreError::Configured)?;
+        Ok(crate::storage::QueryRuntimeBinding {
+            namespace: self.source.config.namespace.clone(),
+            admission: self.source.admission,
+            stream_epoch: self.source.config.expected_stream_epoch.clone()
+                .ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
+        })
     }
 
     pub(crate) fn begin(&mut self, paths: &[String], runtime: &str) -> Result<Outcome, StoreError> {

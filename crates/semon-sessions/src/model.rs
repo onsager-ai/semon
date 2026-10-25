@@ -7288,13 +7288,14 @@ pub(crate) struct PreparedSources {
 impl PreparedSources {
     /// Exact content-free publication witness shared by staging and publish.
     pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
-        serde_json::to_string(
-            &self
+        serde_json::to_string(&(
+            self
                 .transcripts
                 .iter()
                 .map(|p| (&p.key, &p.slots, p.repair))
                 .collect::<Vec<_>>(),
-        )
+            self.rows.iter().map(|row| (&row.key, row.trace.as_ref().map(|trace| trace.publication_witness(row)))).collect::<Vec<_>>(),
+        ))
         .map_err(io::Error::other)
     }
     /// Header/path parent references exist before a selected cohort can resolve
@@ -7932,7 +7933,10 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+        if let Some(binding) = cache.query_runtime_binding()? {
+            crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
+                .into_scoped()
+        } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
             crate::native_evidence::RuntimeObservations::for_publication_measured(
                 options,
                 &query_runtime,

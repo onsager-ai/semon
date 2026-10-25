@@ -1152,6 +1152,9 @@ pub(crate) trait IndexStore: Send {
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError>;
 
+    fn query_runtime_binding(&self) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
+        Ok(None)
+    }
     fn begin_semantic_stage(
         &mut self,
         paths: &[String],
@@ -1563,6 +1566,10 @@ enum Base {
 }
 
 impl EventCache {
+    pub(crate) fn query_runtime_binding(&self) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
+        self.store.as_ref().map(|store| store.query_runtime_binding())
+            .transpose().map(Option::flatten).map_err(io::Error::other)
+    }
     #[allow(dead_code)]
     pub(crate) fn open_semantic(
         capability: crate::storage::sqlite::semantic::SemanticStaging,

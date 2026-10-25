@@ -47,6 +47,10 @@ pub(crate) fn open_semantic(
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn query_runtime_binding(&self) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
+        self.semantic.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?
+            .runtime_binding().map(Some)
+    }
     fn prepare_file(
         &mut self,
         path: &str,

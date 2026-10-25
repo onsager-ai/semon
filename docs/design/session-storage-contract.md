@@ -1414,3 +1414,42 @@ These are test additions, not execution evidence: exact-head CI, formatting and
 independent review are still required. Full selected readers, incident/owner
 retirement, PID/lineage/relations/withdrawals, S2-S4, PG, Hub313 and #380 remain
 unqualified or pending; #477 merge is held on #380 completion.
+
+### Worker40: private Query trace family and runtime fence (unverified WIP)
+
+The private listing cohort requires trace headers, turns and edges as well as
+Current/History metadata. Its fresh semantic profile now authors the complete
+namespace-keyed trace family, including bookmarks and namespace-leading indexes.
+Admission validates exact ordered column/PK shapes, strict rowid policy and
+index shapes before any enrollment write. Unsupported physical profiles refuse;
+there is no adoption, empty-table shortcut, in-place reset or upgrade chain.
+
+`TracePublicationStore` exposes typed header, turn, edge and bookmark effects.
+The existing trace derivation/digest/publication algorithm serves both physical
+profiles through the SQLite adapter. The private semantic publisher writes these
+effects under its existing Raw/ledger/claim/admission/epoch/generation fence,
+before listing readiness. Full trace metadata and its content-generation header
+join the durable model witness, publication proof and generation calculation;
+repeat detection also checks the persisted trace header. Selected Query recipe
+metadata remains unqualified and is not written through an unscoped fallback.
+
+Private runtime observations use `source-runtime-v1:SHA256(JSON(tuple))`, with
+the tuple `(semon-source-runtime-v1, namespace, admission, stream_epoch, runtime)`.
+The runtime input is the existing captured/rechecked aggregate native runtime
+fingerprint. This conservatively invalidates a private Source's summaries on an
+aggregate runtime change. Database coordinates and Options-derived SQLite files
+are absent. The configured IndexStore supplies a validated typed binding; the
+listing reader derives the same binding from its validated ownership capability.
+An ordinary reopen retains the witness; a different admission or stream fences
+it. The unbound producer retains its existing row-runtime observation contract.
+
+The parity oracle asserts the exact private runtime tuple independently, then
+compares every other semantic field and all recipe/trace witness bytes with the
+unbound producer. Added tests cover persisted trace facts, equal native IDs and
+relative paths across Sources, stable reopen and changed admission/runtime,
+nonempty unsupported physical-profile refusal, and trace-effect rollback.
+These tests have not run. CI and fresh Manager review are required. All public
+qualifications remain 0/None; generic catalog completeness remains partial.
+Affected-owner retirement, complete History/slot/search lifetimes, native
+PID/lineage/relations/withdrawals/incidents, S2-S4, complete PG selection,
+migration/cutover/rollback, Hub #313 and the #380 merge hold remain outstanding.

@@ -521,6 +521,7 @@ impl NativeOwnership {
 
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
+        crate::storage::sqlite::trace::validate(db)?;
         if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
             || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
                 != "composite"
@@ -696,8 +697,8 @@ impl NativeOwnership {
                 {
                     continue;
                 }
-                // Unported Catalog, history, descriptions, trace and pricing
-                // consumers are fenced even on this private fresh profile.
+                // Unported consumers remain fenced. The complete scoped trace
+                // family is writable only by the fenced semantic publisher.
                 for operation in ["INSERT", "UPDATE", "DELETE"] {
                     let condition = if [
                         "session_catalog",
@@ -713,6 +714,10 @@ impl NativeOwnership {
                         "session_search_documents",
                         "session_search_memberships",
                         "session_search_counts",
+                        "session_trace_headers",
+                        "session_trace_turns",
+                        "session_trace_edges",
+                        "session_trace_bookmarks",
                     ]
                     .contains(&table.as_str())
                     {
@@ -758,7 +763,7 @@ pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageE
             core: true,
             metadata: true,
             catalog: true,
-            trace: false,
+            trace: true,
             copied_usage: true,
             native_usage: true,
             tree: true,
@@ -2928,6 +2933,24 @@ mod tests {
             part.rows[&query_row.key], expected,
             "ordinary Query port reads exact persisted facts"
         );
+        for row in &prepared.rows {
+            let trace = row.trace.as_ref().expect("real model trace");
+            let witness: serde_json::Value = serde_json::from_str(&trace.publication_witness(row)).unwrap();
+            for (table, id, expected) in [
+                ("session_trace_turns", "turn_id", &witness[1]),
+                ("session_trace_edges", "edge_id", &witness[2]),
+            ] {
+                let actual: Vec<String> = db.prepare(&format!("SELECT metadata FROM {table} WHERE namespace=?1 AND session_key=?2 ORDER BY {id}")).unwrap().query_map(params![config.namespace.as_str(),row.key],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+                let mut expected: Vec<_> = expected.as_array().unwrap().iter().collect();
+                expected.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+                assert_eq!(actual, expected.iter().map(|value|value.to_string()).collect::<Vec<_>>());
+            }
+            let (generation, source, metadata): (String, String, String) = db.query_row("SELECT generation,source_generation,metadata FROM session_trace_headers WHERE namespace=?1 AND session_key=?2",params![config.namespace.as_str(),row.key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(generation, format!("{:x}", Sha256::digest(trace.publication_witness(row).as_bytes())));
+            assert_eq!(source, crate::retention::source_generation(&row.sources).unwrap());
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&metadata).unwrap(), witness[0]);
+        }
         assert_eq!(part.rows.len(), 1, "foreign Source excluded");
         port.validate(&config.namespace, &part).unwrap();
         let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
@@ -3001,13 +3024,28 @@ mod tests {
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
             let mut original = EventCache::open_scoped(&options[i].cache).unwrap();
-            let original = crate::model::prepare_sources(
+            let mut original = crate::model::prepare_sources(
                 &options[i],
                 &mut original,
                 std::slice::from_ref(&inputs[i]),
                 1_790_000_000_000,
             )
             .unwrap();
+            let config = if i == 0 { &a.config } else { &b };
+            let runtime = crate::native_evidence::query_runtime_generation(&options[i]).unwrap();
+            let admission: u64 = a.db().query_row("SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",[config.namespace.as_str()],|r|r.get(0)).unwrap();
+            use sha2::{Digest, Sha256};
+            let expected = format!("source-runtime-v1:{:x}", Sha256::digest(serde_json::to_vec(&(
+                "semon-source-runtime-v1", config.namespace.as_str(), admission,
+                config.expected_stream_epoch.as_deref().unwrap(), &runtime,
+            )).unwrap()));
+            assert_eq!(model.prepared().rows[0].query.as_ref().unwrap()["runtime"], expected);
+            // The only intentional difference from the unbound oracle is its
+            // runtime observation contract. All semantic rows and recipes below
+            // still compare byte-for-byte, including source-generation fences.
+            for row in &mut original.rows {
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(expected);
+            }
             assert_eq!(
                 serde_json::to_value(&model.prepared().rows).unwrap(),
                 serde_json::to_value(&original.rows).unwrap()
@@ -3068,6 +3106,58 @@ mod tests {
                 Outcome::Written
             );
         }
+    }
+
+    #[test]
+    fn configured_semantic_trace_and_runtime_equal_native_ids_are_source_owned() {
+        use crate::storage::{native_events::NativeEventStore, query::QueryCatalogStore};
+        let (a, b, options, mut inputs) = model_sources();
+        inputs[1] = inputs[0].clone();
+        fs::copy(inputs[0].full_path(&options[0]), inputs[1].full_path(&options[1])).unwrap();
+        fs::copy(options[0].facts.as_ref().unwrap(), options[1].facts.as_ref().unwrap()).unwrap();
+        let runtime = crate::native_evidence::query_runtime_generation(&options[0]).unwrap();
+        assert_eq!(runtime, crate::native_evidence::query_runtime_generation(&options[1]).unwrap());
+        let mut witnesses = Vec::new();
+        for (i, config) in [&a.config, &b].into_iter().enumerate() {
+            let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+            cache.ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), "codex").unwrap();
+            let foreign = if i == 0 { "source-b" } else { "source-a" };
+            let before = namespace_state(&a, foreign);
+            let (batch, model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "same-native-id");
+            let row = &model.prepared().rows[0];
+            assert_eq!(row.key, "model-0");
+            witnesses.push(row.query.as_ref().unwrap()["runtime"].clone());
+            cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+            assert_stored_model(&a, config, &options[i], model.prepared(), row);
+            assert_eq!(namespace_state(&a, foreign), before);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            drop(cache);
+            let reopened = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap()).unwrap();
+            let binding = reopened.query_runtime_binding().unwrap().unwrap();
+            assert_eq!(binding.witness(&runtime).unwrap(), witnesses[i]);
+            let next = crate::storage::QueryRuntimeBinding { admission: binding.admission + 1, ..binding.clone() };
+            assert_ne!(next.witness(&runtime).unwrap(), witnesses[i]);
+            assert_ne!(binding.witness("changed-runtime").unwrap(), witnesses[i]);
+        }
+        assert_ne!(witnesses[0], witnesses[1], "same runtime/native IDs/relative paths cannot share a Source witness");
+        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap().reader_binding().unwrap();
+        let port = crate::storage::sqlite::query::SqliteQueryCatalog { options: options[0].clone(), binding };
+        let mut left = 8 * 1024 * 1024;
+        let part = port.read_cohort(&a.config.namespace, 1_790_000_000_000, &mut left).unwrap();
+        a.db().execute("UPDATE storage_namespaces SET admission_generation=admission_generation+2 WHERE namespace='source-a'", []).unwrap();
+        assert!(port.validate(&a.config.namespace, &part).is_err(), "prior admission is fenced after restart/re-admission");
+    }
+
+    #[test]
+    fn configured_semantic_unsupported_trace_profile_refuses_without_adoption() {
+        let (a, _, _, _) = model_sources();
+        // This is a current-format but unsupported physical profile containing
+        // nonempty unattributable data, not an old Semon upgrade fixture.
+        let db = a.db();
+        db.execute_batch("ALTER TABLE session_trace_edges RENAME TO preserved_trace_edges; CREATE TABLE session_trace_edges(session_key TEXT NOT NULL,edge_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(session_key,edge_id)) STRICT, WITHOUT ROWID; INSERT INTO session_trace_edges VALUES('retained-owner','retained-edge','{}');").unwrap();
+        let before = shared_state(&a);
+        assert!(matches!(crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config), Err(StorageError::NamespaceUpgradePending)));
+        assert_eq!(shared_state(&a), before, "unsupported facts and all existing source data remain untouched");
     }
 
     #[test]
@@ -3149,6 +3239,7 @@ mod tests {
             "semantic_publish_history",
             "semantic_publish_slots",
             "semantic_publish_rows",
+            "semantic_publish_trace",
             "semantic_publish_search",
             "semantic_publish_proof",
             "semantic_publish_ack",
@@ -3267,7 +3358,7 @@ mod tests {
             options[0].clone(),
         )]));
         let mut query = crate::Query::from_sources(sources);
-        for tool in ["stalls", "find", "get_session", "read_transcript"] {
+        for tool in ["stalls", "find", "get_session", "read_transcript", "unknown_selector"] {
             assert!(
                 query
                     .call_bound_catalog_at(tool, &serde_json::json!({}), 1_790_000_000_000, &port)
