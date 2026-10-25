@@ -316,9 +316,10 @@ impl CapturedContext {
     pub(crate) fn capture(
         lookup: &dyn ContextLookup, row: &crate::model::summary::CatalogRow,
         slots: &[crate::slot_projection::SavedSlot],
+        status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
     ) -> io::Result<Self> {
         let capture = Capture { source: lookup, data: Default::default(), bytes: std::cell::Cell::new(0) };
-        selected_details(&capture, &row.key, &row.sources, &mut |_| Value::Null)?;
+        selected_details(&capture, &row.key, &row.sources, status)?;
         // Capture dependencies of every possible bounded window, including the
         // empty window. Lookup caching avoids repeating SQL for shared turns.
         range_context(&capture, &row.key, &[], &row.sources)?;
@@ -349,6 +350,8 @@ pub(crate) struct PresentationObservations {
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
     current_codex: Option<BTreeSet<std::path::PathBuf>>,
+    roots: BTreeMap<String, std::path::PathBuf>,
+    relative_statuses: BTreeMap<String, Value>,
 }
 impl PresentationObservations {
     pub(crate) fn capture(options: &crate::Options, binding: &crate::storage::QueryRuntimeBinding) -> io::Result<Self> {
@@ -369,20 +372,34 @@ impl PresentationObservations {
         if crate::native_evidence::query_runtime_generation(options)? != runtime {
             return Err(io::Error::other("selected presentation observations changed"));
         }
-        Ok(Self { runtime: binding.witness(&runtime)?, facts_known, selection_known, machine_label, current_codex })
+        let roots = [
+            ("codex".into(), options.codex_home.clone()),
+            ("claude".into(), options.claude_home.clone()),
+            ("copilot".into(), options.copilot_home.clone()),
+        ].into_iter().collect();
+        Ok(Self { runtime: binding.witness(&runtime)?, facts_known, selection_known, machine_label, current_codex, roots, relative_statuses: BTreeMap::new() })
     }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
         self.current_codex.as_ref().is_some_and(|paths| !paths.contains(&source.path))
     }
-    fn relative_status(&self, row: &crate::model::summary::CatalogRow) -> Value {
+    pub(crate) fn capture_relative_status(&mut self, row: &crate::model::summary::CatalogRow) -> Value {
+        let status = self.observed_relative_status(row);
+        self.relative_statuses.insert(row.key.clone(), status.clone());
+        status
+    }
+    fn observed_relative_status(&self, row: &crate::model::summary::CatalogRow) -> Value {
         if row.sources.is_empty() || row.sources.len() > 64 ||
             (row.lifecycle == crate::model::summary::CatalogLifecycle::Current &&
-                (!self.facts_known || (row.harness == "codex" && !self.selection_known))) {
+                (!self.facts_known || (row.harness == "codex" && !self.selection_known))) ||
+            row.sources.iter().any(|source| self.roots.get(&row.harness).and_then(|home| crate::catalog::source_relative_from_home(home, &row.harness, source)).is_none()) {
             return json!({"state":null,"observation":"unavailable"});
         }
-        crate::catalog::recorded_status(row, Some(&self.runtime), true, self.facts_known,
+        crate::catalog::recorded_status(row, Some(&self.runtime), row.sources.iter().all(|source| crate::catalog::source_state(source) == "cached"), self.facts_known,
             row.harness == "codex" && row.sources.iter().any(|source| self.retired(source)))
             .unwrap_or_else(|_| json!({"state":null,"observation":"unavailable"}))
+    }
+    fn relative_status(&self, row: &crate::model::summary::CatalogRow) -> Value {
+        self.relative_statuses.get(&row.key).cloned().unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}))
     }
 }
 

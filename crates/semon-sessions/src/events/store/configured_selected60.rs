@@ -53,12 +53,25 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     assert_eq!(original_value["identity"]["machine_label"], facts.hostname);
     cache.finish_semantic_stage(batch.epoch).unwrap();
 
+    // An independent ordinary producer/public read is the live-facts oracle.
+    // Its explicitly separate store cannot become an owned-reader fallback.
+    let mut oracle_options = options.clone();
+    oracle_options.cache = f.root.join("selected60-ordinary-oracle");
+    let mut ordinary = EventCache::open_scoped(&oracle_options.cache).unwrap();
+    let prepared = crate::model::prepare_sources(&oracle_options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
+    ordinary.publish_catalog_projection(&crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) }, prepared.base_generation.as_deref()).unwrap();
+    let before = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
+    assert_eq!(before["identity"]["machine_label"], facts.hostname);
+
     // No Raw mutation: change independent reported runtime facts and the facts
     // availability observation. The old witness must never be reconstructed.
     facts.hostname = "independent-facts-change".into();
     facts.offline_since = Some(1_790_000_100_000);
     crate::facts::write_facts(facts_path, &facts).unwrap();
     assert_eq!(bytes(&lease, options, &host, &query), original);
+    let current = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
+    assert_eq!(current["identity"]["machine_label"], "independent-facts-change");
+    assert_ne!(before["identity"]["facts_observation"], current["identity"]["facts_observation"]);
 
     let (next, next_model) = model_ready(&f, &mut cache, options, input, "selected60-next-runtime");
     assert_eq!(cache.publish_semantic_catalog(&next, next_model.prepared()).unwrap().0, Outcome::Written);

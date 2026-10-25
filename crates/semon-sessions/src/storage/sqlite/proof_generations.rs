@@ -654,8 +654,9 @@ pub(super) fn capture_presentations(
                 ("catalog_observed_at".into(),observed_at.to_string()),
             ].into_iter().collect();
             let observations = row.query.as_ref().and_then(|query| query.get("selected_presentation_observations")).ok_or(StorageError::Unavailable)?;
-            let observations = serde_json::from_value(observations.clone()).map_err(|_| StorageError::Unavailable)?;
-            Some(PresentationWitness { header_generation,version:header.1,total:texts.len(),has_history,catalog,context:CapturedContext::capture(&lookup,row,&projection.slots).map_err(|_| StorageError::Unavailable)?,observations })
+            let mut observations: crate::storage::selected::PresentationObservations = serde_json::from_value(observations.clone()).map_err(|_| StorageError::Unavailable)?;
+            let context = CapturedContext::capture(&lookup,row,&projection.slots,&mut |relative| observations.capture_relative_status(relative)).map_err(|_| StorageError::Unavailable)?;
+            Some(PresentationWitness { header_generation,version:header.1,total:texts.len(),has_history,catalog,context,observations })
         } else { None };
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         bytes = bytes.saturating_add(text.len());

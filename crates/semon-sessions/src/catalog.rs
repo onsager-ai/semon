@@ -615,6 +615,14 @@ pub(crate) fn source_relative(
         "copilot" => &options.copilot_home,
         _ => return None,
     };
+    source_relative_from_home(home, harness, source)
+}
+
+pub(crate) fn source_relative_from_home(
+    home: &std::path::Path,
+    harness: &str,
+    source: &CatalogSource,
+) -> Option<String> {
     let relative = source.path.strip_prefix(home).ok()?.to_str()?;
     (source
         .path
@@ -779,24 +787,35 @@ pub(crate) fn read_page_snapshot(
         ));
     }
     let pinned = transaction.presentation_observations();
-    let runtime = if pinned.is_some() { None } else { crate::native_evidence::query_runtime_generation(options).ok() };
+    let runtime = if pinned.is_some() {
+        None
+    } else {
+        crate::native_evidence::query_runtime_generation(options).ok()
+    };
     let runtime_binding = transaction.runtime_binding();
     let runtime_observations = match (pinned, runtime_binding.as_ref()) {
         (Some(_), _) => None,
-        (None, Some(binding)) => Some(crate::native_evidence::RuntimeObservations::bound(binding, runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?)?),
+        (None, Some(binding)) => Some(crate::native_evidence::RuntimeObservations::bound(
+            binding,
+            runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?,
+        )?),
         (None, None) => Some(crate::native_evidence::RuntimeObservations::new(options)),
     };
     // Share the same custody capture with selected family status qualification.
     // Its existing final validation still fences the whole response.
-    let recorded = pinned.is_none().then_some(options)
+    let recorded = pinned
+        .is_none()
+        .then_some(options)
         .and_then(|options| options.facts.as_ref())
         .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-    let facts_known = pinned.map_or_else(||
-        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known()), |saved| saved.facts_known);
-    let codex_selection_known = pinned.map_or_else(|| options.facts.is_none()
-        || recorded
-            .as_ref()
-            .is_some_and(|source| source.selection_known()), |saved| saved.selection_known);
+    let facts_known = pinned.map_or_else(
+        || options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known()),
+        |saved| saved.facts_known,
+    );
+    let codex_selection_known = pinned.map_or_else(
+        || options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.selection_known()),
+        |saved| saved.selection_known,
+    );
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
@@ -972,7 +991,10 @@ pub(crate) fn read_page_snapshot(
             .map(|row| {
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
                     // ImmutableCatalog supplies its pinned relative inputs.
-                    runtime_observations.as_ref().map(|runtime| relative_status(options, runtime, recorded.as_ref(), relative)).unwrap_or(Value::Null)
+                    runtime_observations
+                        .as_ref()
+                        .map(|runtime| relative_status(options, runtime, recorded.as_ref(), relative))
+                        .unwrap_or(Value::Null)
                 })
             })
             .transpose()?
@@ -1102,7 +1124,9 @@ pub(crate) fn read_page_snapshot(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
-        let runtime = pinned.map(|saved| saved.runtime.clone()).or_else(|| runtime_observations.as_ref().and_then(|runtime| runtime.expected(&row)));
+        let runtime = pinned.map(|saved| saved.runtime.clone()).or_else(|| {
+            runtime_observations.as_ref().and_then(|runtime| runtime.expected(&row))
+        });
         let runtime_pending = current
             && facts_known
             && !retired_native
