@@ -13,7 +13,7 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table { name: "files", columns: "file_id bigint,path bytea,dev numeric,ino numeric,size numeric,mtime_ns bytea,ctime_ns bytea?,resume_at numeric,head_sha256 bytea,tail_sha256 bytea,entrypoint bytea?,title bytea?,agent_name bytea?,last_model bytea?,failed boolean,first_ms bigint?,last_ms bigint?,cwd bytea?,branch bytea?,pending bytea,tool_ids bytea,yields bytea,busy bytea,links bytea,codex_tokens bytea,codex_tokens_by_model bytea,rate_limits bytea?,codex_native_usage bytea?,codex_pricing_fingerprint bytea?,copilot bytea?", key: "file_id" },
-    Table { name: "events", columns: "file_id bigint,extra boolean,seq bigint,k bytea,o numeric,b numeric,t bigint?,id bytea?,n bytea?,code_mode boolean,code_mode_open boolean,parent bigint?,script boolean,y bytea?,poll bigint?,reply boolean,reply_o numeric?,reply_b numeric?,reply_t bigint?,reply_e bigint?,reply_f bigint?,reply_m bytea?,item bigint?,peer boolean,peer_sock bytea?,peer_pid bigint?,peer_start bytea?,u bytea?", key: "file_id,extra,seq" },
+    Table { name: "events", columns: "file_id bigint,extra boolean,seq bigint,k bytea,o numeric,b numeric,t bigint?,id bytea?,n bytea?,code_mode boolean,code_mode_open boolean,parent bigint?,script smallint,y bytea?,poll bigint?,reply boolean,reply_o numeric?,reply_b numeric?,reply_t bigint?,reply_e boolean?,reply_f smallint?,reply_m bytea?,item bigint?,peer boolean,peer_sock bytea?,peer_pid bigint?,peer_start bytea?,u bytea?", key: "file_id,extra,seq" },
     Table { name: "signals", columns: "file_id bigint,seq bigint,k bytea,o numeric,t bigint?,at numeric,n bytea?,v bigint?", key: "file_id,seq" },
     Table { name: "usage_identity", columns: "file_id bigint,message_id bytea,record_uuid bytea", key: "file_id,message_id,record_uuid" },
     Table { name: "usage", columns: "file_id bigint,message_id bytea,model bytea?,input numeric,cached_input numeric,output numeric,reasoning_output numeric,total numeric,model_input numeric,model_output numeric,model_cache_write numeric,model_cache_read numeric,billing_input numeric,billing_output numeric,billing_cache_read numeric,billing_cache_write_5m numeric,billing_cache_write_1h numeric,billing_web_search_requests numeric,billing_speed bytea?,billing_service_tier bytea?,billing_prompt_size numeric,billing_timestamp bigint?,billing_split_unknown boolean,record_ids bytea", key: "file_id,message_id" },
@@ -98,15 +98,13 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     }
     // One catalog round trip for all native tables. No unsafe connection cache:
     // a warm reused connection is requalified before the effect callback.
-    let rows = tx.driver.query("SELECT c.relname, c.relrowsecurity AND c.relforcerowsecurity AND c.relkind='r',
+    let rows = tx.driver.query("SELECT c.relname, c.relrowsecurity AND c.relforcerowsecurity AND c.relkind='r' AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'UPDATE') AND has_table_privilege(c.oid,'DELETE'),
         ARRAY(SELECT a.attname::text || ' ' || format_type(a.atttypid,a.atttypmod) || CASE WHEN a.attnotnull THEN '' ELSE '?' END FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum),
         ARRAY(SELECT a.attname::text FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.num WHERE k.conrelid=c.oid AND k.contype='p' ORDER BY x.ord),
         ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || pg_get_expr(p.polwithcheck,p.polrelid) FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
         (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attname='namespace_digest' AND a.attgenerated='s'),
         ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname)
-        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_native_%' ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
-    // The prefix also matches indexes; only table rows are relevant.
-    let rows = rows.iter().filter(|r| r.get::<_, String>(0).strip_suffix("_pkey").is_none() && TABLES.iter().any(|t| r.get::<_, String>(0) == format!("semon_pg_native_{}",t.name))).collect::<Vec<_>>();
+        FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_native_%' AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
     if rows.len() != TABLES.len() { return Err(StorageError::ScopeChanged); }
     for table in TABLES {
         let name = format!("semon_pg_native_{}",table.name);
@@ -130,7 +128,31 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::postgres::tests::{count, effect, fixture, identity, limits, ns};
+    use crate::storage::postgres::tests::{count, fixture, identity, limits, ns};
+
+    #[test]
+    fn pg_native_shared_parser_tree_values_roundtrip_without_sqlite() {
+        use crate::events::{EventCache, scan_file, tree_rows::TreeRows};
+        let (pool, _) = fixture(|_| {});
+        let path = std::env::temp_dir().join(format!("pg88-parser-{}-{}.jsonl", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let id = "tool\0中é";
+        let line = serde_json::json!({"type":"assistant","uuid":"u-1","timestamp":"2026-09-29T00:00:01Z","message":{"id":"m-1","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"fixture body stays in Raw"}}]}});
+        std::fs::write(&path,format!("{line}\n")).unwrap();
+        let mut cache=EventCache::default();
+        let index=scan_file(&path,"claude",&mut cache,&mut false).unwrap();
+        let tree=TreeRows::new(index.tree_summary.as_ref().unwrap()).unwrap();
+        assert_eq!(tree.tools.get(id).map(String::as_str),Some("Bash"));
+        pool.transaction(&ns("parser\0中"),TxnKind::Write,&PgCancellation::default(),|tx| {
+            for (id,name) in tree.tools {
+                tx.driver.execute("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,1,$2,$3,false)",&[&tx.namespace.as_str().as_bytes(),&id.as_bytes(),&name.as_bytes()]).map_err(sqlstate::error)?;
+            }
+            let row=tx.driver.query_one("SELECT tool_id,name FROM semon_pg_native_tree_tools",&[]).map_err(sqlstate::error)?;
+            assert_eq!(row.get::<_,Vec<u8>>(0),id.as_bytes());
+            assert_eq!(row.get::<_,Vec<u8>>(1),b"Bash");
+            Ok(())
+        }).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pg_native_current_manifest_all_tables_forced_rls_and_warm_namespace_bytes() {
@@ -196,14 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn pg_native_revoked_privilege_refuses_and_rolls_back_other_effects() {
+    fn pg_native_revoked_privilege_refuses_before_other_effects() {
         let (pool,factory)=fixture(|_|{});
         factory.client().batch_execute("REVOKE ALL ON semon_pg_native_meta FROM PUBLIC; REVOKE ALL ON semon_pg_native_meta FROM CURRENT_USER").unwrap();
-        assert!(pool.apply_operation(&ns("revoke"),&identity(),&PgCancellation::default(),|tx| {
-            effect(tx)?;
-            tx.driver.query("SELECT * FROM semon_pg_native_meta",&[]).map_err(sqlstate::error)?;
-            Ok(serde_json::json!(null))
-        }).is_err());
+        assert_eq!(pool.apply_operation(&ns("revoke"),&identity(),&PgCancellation::default(),|_| panic!("revocation admitted effects")),Err(StorageError::ScopeChanged));
         assert_eq!(count(&factory),0);
     }
 }
