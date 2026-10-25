@@ -127,9 +127,6 @@ pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
     }
 }
 
-/// Select an authored statement for the physical family shape, never rewrite
-/// SQL or retry errors against another schema. Singleton stores still support
-/// read-only admission/assignment; configured writes require validate_core.
 thread_local! {
     static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<crate::native_timing::Measurements>> = const { std::cell::RefCell::new(None) };
 }
@@ -173,6 +170,9 @@ impl Drop for WriterShapeProbe {
     }
 }
 
+/// Select an authored statement for the physical family shape, never rewrite
+/// SQL or retry errors against another schema. Singleton stores still support
+/// read-only admission/assignment; configured writes require validate_core.
 pub(super) fn sql<'a>(
     db: &Connection,
     legacy: &'a str,
