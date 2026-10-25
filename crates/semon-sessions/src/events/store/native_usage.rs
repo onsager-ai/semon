@@ -4,7 +4,7 @@ use super::*;
 use crate::{events::CodexNativeUsage, native_record::Record, pricing::CostBuild};
 pub(crate) mod algorithm;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex {
     let mut index = FileIndex::default();
     if harness == "codex" {
@@ -14,7 +14,7 @@ pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex
     index
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 pub(crate) fn parser_append_fixture(
     path: &std::path::Path,
     harness: &str,
@@ -34,7 +34,7 @@ pub(crate) fn parser_append_fixture(
     .unwrap();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 pub(crate) fn sqlite_fixture(
     db: &mut Connection,
     path: &str,

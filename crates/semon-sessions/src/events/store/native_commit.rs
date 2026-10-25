@@ -205,7 +205,7 @@ impl Effects for Writer<'_, '_, '_> {
 
 /// Independent oracle executes the production parser, EventCache and IndexStore
 /// before the PG phase. No SQLite connection is returned to that phase.
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 pub(crate) fn parser_oracle(
     cache_path: &Path,
     source: &Path,
