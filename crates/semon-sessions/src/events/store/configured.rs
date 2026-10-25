@@ -6472,16 +6472,20 @@ mod tests {
             ] {
                 let before = shared_state(f);
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
-                assert!(
-                    cache
-                        .publish_semantic_catalog(batch, model.prepared())
-                        .is_err(),
-                    "{point}"
-                );
+                let result = cache.publish_semantic_catalog(batch, model.prepared());
+                assert!(result.is_err(), "{point}");
+                let refusal = match &result {
+                    Err(StoreError::Data(reason))
+                        if reason.starts_with("semantic_")
+                            && reason.len() < 128
+                            && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') => reason.as_str(),
+                    _ => "injected_or_other",
+                };
                 assert_eq!(
                     FAIL_EFFECT.with(|p| p.get()),
                     None,
-                    "unconsumed fault {point}"
+                    "unconsumed fault {point}; refusal={refusal}; max_slots={}",
+                    model.prepared().transcripts.iter().map(|p| p.slots.len()).max().unwrap_or(0)
                 );
                 assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
             }
@@ -7927,30 +7931,69 @@ mod tests {
         ) -> Batch {
             assert!(!cache.explicit_store);
             claude_ingest(cache, options, inputs);
-            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
             for _ in 0..256 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
                 if batch.paths.is_empty() {
                     continue;
                 }
-                let mut selected = batch.paths.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+                let mut selected = batch
+                    .paths
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
                 if batch.phase == Phase::Relations {
                     selected.extend(batch.context.parent_paths(&batch.paths));
                     selected.extend(batch.context.companions.iter().cloned());
                 }
                 assert!(selected.len() <= 64);
-                let selected = selected.iter().map(|path| crate::native_evidence::catalog_input(Path::new(path), options).unwrap()).collect::<Vec<_>>();
+                let selected = selected
+                    .iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(path), options).unwrap()
+                    })
+                    .collect::<Vec<_>>();
                 let prepared = match batch.phase {
-                    Phase::Indexing => crate::model::prepare_semantic_index_sources(options, cache, &selected, 1_790_000_000_000),
-                    Phase::Identity => crate::model::prepare_semantic_identity_sources(options, cache, &selected, &batch.context, 1_790_000_000_000),
-                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(options, cache, &selected, &batch.context, batch.phase == Phase::Relations, 1_790_000_000_000),
-                }.unwrap();
+                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
+                        options,
+                        cache,
+                        &selected,
+                        1_790_000_000_000,
+                    ),
+                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
+                        options,
+                        cache,
+                        &selected,
+                        &batch.context,
+                        1_790_000_000_000,
+                    ),
+                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
+                        options,
+                        cache,
+                        &selected,
+                        &batch.context,
+                        batch.phase == Phase::Relations,
+                        1_790_000_000_000,
+                    ),
+                }
+                .unwrap();
                 if batch.phase == Phase::Publication {
                     return batch;
                 }
-                assert_eq!(cache.record_semantic_batch(&batch, &prepared).unwrap(), Outcome::Written);
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                    Outcome::Written
+                );
             }
             panic!("ordinary Claude producer did not finish");
         }
@@ -8120,7 +8163,75 @@ mod tests {
             let before = namespace_state(&f, "source-b");
             let mut own = open(&f.config);
             let (batch, model) = claude_ready(&mut own, options, &inputs);
+            let mut altered = crate::model::prepare_staged_sources(
+                options,
+                &mut own,
+                &inputs,
+                &batch.context,
+                false,
+                1_790_000_000_000,
+            )
+            .unwrap();
+            let stub = altered
+                .transcripts
+                .iter()
+                .position(|projection| !altered.rows.iter().any(|row| row.key == projection.key))
+                .expect("real unmatched native call produces a virtual transcript");
+            let real_key = altered.transcripts[stub].key.clone();
+            let unchanged = shared_state(&f);
+            altered.transcripts[stub].key = "unrecorded-virtual-owner".into();
+            assert_eq!(
+                own.publish_semantic_catalog(&batch, &altered)
+                    .unwrap_err()
+                    .to_string(),
+                "semantic_publication_projection_owner"
+            );
+            assert_eq!(
+                shared_state(&f),
+                unchanged,
+                "arbitrary virtual projection has zero effects"
+            );
+            altered.transcripts[stub].key = real_key.clone();
+            let relation = altered
+                .relationships
+                .relations
+                .values_mut()
+                .find(|relation| relation.stubs.iter().any(|stub| stub.key == real_key))
+                .unwrap();
+            relation
+                .stubs
+                .iter_mut()
+                .find(|stub| stub.key == real_key)
+                .unwrap()
+                .name
+                .push_str("-unrecorded");
+            assert_eq!(
+                own.publish_semantic_catalog(&batch, &altered).unwrap().0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                unchanged,
+                "typed anchored stub must match the recorded producer witness"
+            );
             publish(&mut own, &f, &batch, &model);
+            for table in [
+                "session_catalog",
+                "session_catalog_sources",
+                "session_slot_projections",
+                "session_slots",
+                "catalog_semantic_owner_sources",
+            ] {
+                assert_eq!(
+                    f.db().query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE namespace='source-a' AND session_key=?1"),
+                        [&real_key],
+                        |row| row.get::<_, i64>(0),
+                    ).unwrap(),
+                    0,
+                    "virtual stubs have no persisted owner or Raw membership in {table}"
+                );
+            }
             assert_eq!(
                 namespace_state(&f, "source-b"),
                 before,
