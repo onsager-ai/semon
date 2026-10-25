@@ -443,7 +443,8 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
     fn candidates(&self, file: i64, after: i64, limit: usize,
         visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()> {
         let columns = crate::events::store::semantic_stage::projection_columns();
-        let sql = format!("SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')) ORDER BY seq LIMIT ?4");
+        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+        let sql = format!("SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4");
         let mut q = self.db.prepare(&sql)?;
         let mut rows = q.query(params![self.ns,file,after,limit as i64])?;
         while let Some(row) = rows.next()? {
@@ -456,7 +457,8 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         Ok(())
     }
     fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
-        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')))",params![self.ns,file,after],|r|r.get(0))
+        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+        self.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate})"),params![self.ns,file,after],|r|r.get(0))
     }
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
         if let Some(after) = after {
@@ -507,7 +509,8 @@ impl crate::events::store::semantic_stage::QualificationPort for ScopedQualifica
 fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported { return Err(refuse("semantic_nonprimitive_event_harness")); }
-    let peer: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND (e.k IN ('xsm','agm','tn') OR e.k='tool' AND e.n IN ('SendMessage','Task','Agent')))",[ns],|r|r.get(0)).map_err(error)?;
+    let predicate = crate::events::store::semantic_stage::projection_predicate("e.");
+    let peer: bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND {predicate})"),[ns],|r|r.get(0)).map_err(error)?;
     if peer { return Err(refuse("semantic_claude_native_frontier_pending")); }
     crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns }).map_err(error)
 }

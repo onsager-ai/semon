@@ -1129,6 +1129,10 @@ pub(crate) fn projection_candidate(row: &Row<'_>) -> rusqlite::Result<(usize, Ev
     let (_, seq, event) = read_event(row)?;
     Ok((seq, event))
 }
+/// One candidate predicate, expanded by each physical SQL adapter.
+pub(crate) fn projection_predicate(alias: &str) -> String {
+    format!("({alias}k IN ('xsm','agm','tn') OR {alias}k='tool' AND {alias}n IN ('SendMessage','Task','Agent'))")
+}
 pub(crate) fn projection_columns() -> &'static str { EVENT_COLUMNS }
 
 struct OrdinaryProjection<'a>(&'a Connection);
@@ -1144,7 +1148,8 @@ impl EventProjectionPort for OrdinaryProjection<'_> {
     }
     fn candidates(&self, file: i64, after: i64, limit: usize,
         visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()> {
-        let sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')) ORDER BY seq LIMIT ?3");
+        let predicate = projection_predicate("");
+        let sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate} ORDER BY seq LIMIT ?3");
         let mut q = self.0.prepare(&sql)?;
         let mut rows = q.query(params![file,after,limit as i64])?;
         while let Some(row) = rows.next()? {
@@ -1155,7 +1160,8 @@ impl EventProjectionPort for OrdinaryProjection<'_> {
         Ok(())
     }
     fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
-        self.0.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')))",params![file,after],|r|r.get(0))
+        let predicate = projection_predicate("");
+        self.0.query_row(&format!("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate})"),params![file,after],|r|r.get(0))
     }
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
         if let Some(after) = after {
