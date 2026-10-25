@@ -6,6 +6,7 @@ pub(crate) mod configured_index;
 pub(crate) mod history;
 pub(crate) mod namespace;
 pub(crate) mod navigation;
+pub(crate) mod proof_generations;
 pub(crate) mod publication;
 pub(crate) mod query;
 pub(crate) mod search;

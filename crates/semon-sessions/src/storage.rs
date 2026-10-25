@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 mod conformance;
 pub mod native_events;
 pub(crate) mod navigation;
+pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub mod source_observations;
 pub(crate) mod sqlite;
@@ -367,6 +368,8 @@ pub enum StorageError {
     NamespaceMismatch,
     NamespaceUnadmitted,
     NamespaceUpgradePending,
+    /// Retained History exceeds the bounded immutable-generation contract.
+    HistoryRetentionBounds,
     MultiSourceUnqualified,
     /// Reconcile the epoch and operation's durable observations before retrying.
     /// A missing commit reply does not establish rollback.
@@ -384,6 +387,7 @@ impl std::fmt::Display for StorageError {
             Self::NamespaceMismatch => "Logical storage namespace changed.",
             Self::NamespaceUnadmitted => "Logical storage namespace is not admitted.",
             Self::NamespaceUpgradePending => "Native namespace writer upgrade is pending.",
+            Self::HistoryRetentionBounds => "Retained History exceeds storage bounds.",
             Self::MultiSourceUnqualified => "Multi-source writers are not qualified.",
             Self::CommitUncertain => "Storage commit requires reconciliation.",
         })

@@ -991,6 +991,24 @@ impl Stage {
         .map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
+        super::proof_generations::publish(
+            &tx,
+            ns,
+            self.source.admission,
+            self.source
+                .config
+                .expected_stream_epoch
+                .as_deref()
+                .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+            &generation,
+            &proof_digest,
+            prepared,
+        )
+        .map_err(StoreError::Configured)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_generation_refs")
+            .map_err(error)?;
+        super::proof_generations::collect(&tx, ns, 16).map_err(error)?;
         publication_phase("claim_ack");
         for (path, claim) in &prepared.claims {
             if let Some(claim) = claim
@@ -1161,6 +1179,7 @@ impl Stage {
             .map_err(failed)?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER NOT NULL,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,epoch)) STRICT, WITHOUT ROWID;").map_err(failed)?;
             super::catalog_namespace::guard(&tx, "storage_semantic_publications")?;
+            super::proof_generations::initialize(&tx)?;
             tx.execute_batch("CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_update BEFORE UPDATE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END; CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_delete BEFORE DELETE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END;").map_err(failed)?;
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_semantic_profiles(namespace TEXT PRIMARY KEY,admission INTEGER NOT NULL,recipe TEXT NOT NULL,epoch INTEGER NOT NULL) STRICT;").map_err(failed)?;
