@@ -6448,9 +6448,22 @@ mod tests {
                     batch.paths.len(),
                     "no discovered owner may be omitted"
                 );
-                let model = cache
-                    .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
+                let model = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                // Ordinary publication consumes the prepared batch directly;
+                // its semantic_record contract accepts only earlier phases.
+                if cache.explicit_store || batch.phase != Phase::Publication {
+                    assert_eq!(
+                        cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                        Outcome::Written
+                    );
+                }
                 if batch.phase == Phase::Publication {
                     return (batch, model);
                 }
@@ -7421,13 +7434,8 @@ mod tests {
                         )
                         .unwrap();
                 } else {
-                    crate::events::scan_file(
-                        &input.full_path(options),
-                        "codex",
-                        cache,
-                        &mut false,
-                    )
-                    .unwrap();
+                    crate::events::scan_file(&input.full_path(options), "codex", cache, &mut false)
+                        .unwrap();
                 }
             }
             let paths = inputs
