@@ -77,7 +77,7 @@ jobs:
           import os, pathlib, re
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           source = root / 'cold-catalog-page.log'
-          wanted = ('catalog_page_stage=', 'production-first-page', 'phase=cold_total',
+          wanted = ('catalog_page_stage=', 'production-first-page', 'cold_lifecycle=', 'phase=cold_total',
                     'phase=worker_tick', 'initial_catalog_page_precedes_global_native_observation',
                     'bounded initial page took', 'test result:', 'error[', 'error:', 'panicked at')
           rows = [f"head={os.environ['GITHUB_SHA']} timing=1 diagnostic_only=true"]
