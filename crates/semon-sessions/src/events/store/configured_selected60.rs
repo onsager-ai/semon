@@ -678,6 +678,93 @@ fn configured_semantic_selected65_capture_unavailable_facts_is_per_row_unavailab
 }
 
 #[test]
+fn configured_semantic_selected80_facts_replacement_after_capture_never_substitutes_live_b() {
+    // PRIVATE UNIT: the real producer has no hook between initial capture and
+    // lazy family qualification. These are real prepared rows and Facts files,
+    // but this specifically exercises that private capture boundary.
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let facts_path = options.facts.as_ref().unwrap();
+    let mut facts_a = crate::facts::read_facts(facts_path).unwrap();
+    facts_a.codex_rollouts = Some([input.path.clone()].into_iter().collect());
+    crate::facts::write_facts(facts_path, &facts_a).unwrap();
+    cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
+    let (_, model) = model_ready(&f, &mut cache, options, input, "selected80-facts-race");
+    let row = &model.prepared().rows[0];
+
+    // A status already saved under A remains saved-only after B replaces Facts.
+    let mut saved = crate::storage::selected::PresentationObservations::capture(
+        options,
+        None,
+        model.prepared().rows.iter(),
+    );
+    assert_eq!(saved.captured_source_count(), row.sources.len());
+    let mut facts_b = facts_a.clone();
+    facts_b.codex_rollouts = Some(Default::default());
+    crate::facts::write_facts(facts_path, &facts_b).unwrap();
+    let saved_status = saved.capture_relative_status(row);
+    assert_ne!(saved_status, json!({"state":null,"observation":"unavailable"}));
+
+    // A row requiring a lazy lookup through A's now-invalid identity fails
+    // closed instead of taking B's current_codex answer.
+    crate::facts::write_facts(facts_path, &facts_a).unwrap();
+    let mut lazy = crate::storage::selected::PresentationObservations::capture(
+        options,
+        None,
+        model.prepared().rows.iter().skip(1),
+    );
+    assert_eq!(lazy.captured_source_count(), 0);
+    crate::facts::write_facts(facts_path, &facts_b).unwrap();
+    assert_eq!(
+        lazy.capture_relative_status(row),
+        json!({"state":null,"observation":"unavailable"})
+    );
+    let mut durable: crate::storage::selected::PresentationObservations =
+        serde_json::from_str(&serde_json::to_string(&lazy).unwrap()).unwrap();
+    assert_eq!(durable.captured_source_count(), 0);
+    assert_eq!(
+        durable.capture_relative_status(row),
+        json!({"state":null,"observation":"unavailable"})
+    );
+}
+
+#[test]
+fn configured_semantic_selected80_capture_ignores_unrelated_facts_history() {
+    // PRIVATE UNIT: capture receives real prepared rows, while unrelated
+    // current_codex metadata deliberately exceeds the selected cohort.
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let facts_path = options.facts.as_ref().unwrap();
+    let mut facts = crate::facts::read_facts(facts_path).unwrap();
+    let mut rollouts = std::collections::BTreeSet::new();
+    rollouts.insert(input.path.clone());
+    rollouts.extend((0..512).map(|number| format!("unrelated/history-{number}.jsonl")));
+    facts.codex_rollouts = Some(rollouts);
+    crate::facts::write_facts(facts_path, &facts).unwrap();
+    cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
+    let (_, model) = model_ready(&f, &mut cache, options, input, "selected80-bounds");
+    let mut observations = crate::storage::selected::PresentationObservations::capture(
+        options,
+        None,
+        model.prepared().rows.iter(),
+    );
+    assert_eq!(observations.captured_source_count(), 1);
+    assert_ne!(
+        observations.capture_relative_status(&model.prepared().rows[0]),
+        json!({"state":null,"observation":"unavailable"})
+    );
+    // A valid producer contributes at most 128 rows * 64 sources, so the
+    // 8192 guard is structurally unreachable without invalid admission.
+    assert!(128usize * 64usize <= 8192);
+}
+
+#[test]
 fn configured_semantic_selected60_history_witness_survives_gc_release_and_runtime_reopen() {
     use std::io::Write;
     let (f, _, options, inputs) = model_sources();
