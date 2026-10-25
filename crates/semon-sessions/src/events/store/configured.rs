@@ -151,7 +151,10 @@ pub(crate) fn metadata_sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    crate::native_timing::discovery_count(|counts| { counts.schema_probes+=1; counts.statements+=1; });
+    crate::native_timing::discovery_count(|counts| {
+        counts.schema_probes += 1;
+        counts.statements += 1;
+    });
     let (columns, namespace, key, values): (i64, i64, i64, i64) = db.prepare_cached(
         "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
     )?.query_row([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;

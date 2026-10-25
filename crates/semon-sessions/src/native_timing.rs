@@ -642,31 +642,51 @@ thread_local! {
     static DISCOVERY_RECORDS: std::cell::RefCell<Vec<(&'static str,DiscoveryCounts)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 pub(crate) fn discovery_count(update: impl FnOnce(&mut DiscoveryCounts)) {
-    DISCOVERY_COUNTS.with(|cell| { if let Some(mut counts)=cell.get() { update(&mut counts); cell.set(Some(counts)); } });
+    DISCOVERY_COUNTS.with(|cell| {
+        if let Some(mut counts) = cell.get() {
+            update(&mut counts);
+            cell.set(Some(counts));
+        }
+    });
 }
-pub(crate) struct DiscoveryProbe(Option<(String,&'static str,Instant)>);
+pub(crate) struct DiscoveryProbe(Option<(String, &'static str, Instant)>);
 impl DiscoveryProbe {
     pub(crate) fn new(index: &Path, phase: &'static str) -> Self {
-        let state=enabled().then(|| {
-            DISCOVERY_COUNTS.with(|cell| { assert!(cell.replace(Some(DiscoveryCounts::default())).is_none()); });
-            (id(index),phase,Instant::now())
+        let state = enabled().then(|| {
+            DISCOVERY_COUNTS.with(|cell| {
+                assert!(cell.replace(Some(DiscoveryCounts::default())).is_none());
+            });
+            (id(index), phase, Instant::now())
         });
         Self(state)
     }
 }
 impl Drop for DiscoveryProbe {
     fn drop(&mut self) {
-        if let Some((producer,phase,start))=&self.0 {
-            let counts=DISCOVERY_COUNTS.with(|cell|cell.take()).unwrap_or_default();
-            eprintln!("semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",start.elapsed().as_micros(),counts.statements,counts.schema_probes,counts.rows,counts.source_fullscan_steps,counts.committed_changes,counts.committed_changes>0,counts.factory_opens,counts.skipped);
+        if let Some((producer, phase, start)) = &self.0 {
+            let counts = DISCOVERY_COUNTS
+                .with(|cell| cell.take())
+                .unwrap_or_default();
+            eprintln!(
+                "semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",
+                start.elapsed().as_micros(),
+                counts.statements,
+                counts.schema_probes,
+                counts.rows,
+                counts.source_fullscan_steps,
+                counts.committed_changes,
+                counts.committed_changes > 0,
+                counts.factory_opens,
+                counts.skipped
+            );
             #[cfg(test)]
-            DISCOVERY_RECORDS.with(|records|records.borrow_mut().push((phase,counts)));
+            DISCOVERY_RECORDS.with(|records| records.borrow_mut().push((phase, counts)));
         }
     }
 }
 #[cfg(test)]
-pub(crate) fn take_discovery_records() -> Vec<(&'static str,DiscoveryCounts)> {
-    DISCOVERY_RECORDS.with(|records|std::mem::take(&mut *records.borrow_mut()))
+pub(crate) fn take_discovery_records() -> Vec<(&'static str, DiscoveryCounts)> {
+    DISCOVERY_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
 }
 
 /// Bounded operation aggregates: `(microseconds, workload units)`. Call sites
