@@ -7815,10 +7815,8 @@ mod tests {
                     Err(error) => {
                         assert_eq!(FAIL_EFFECT.with(|p| p.get()), None);
                         assert_eq!(
-                            error
-                                .get_ref()
-                                .and_then(|error| error.downcast_ref::<crate::storage::StorageError>()),
-                            Some(&crate::storage::StorageError::Unavailable)
+                            error.to_string(),
+                            crate::storage::StorageError::Unavailable.to_string()
                         );
                         owner_reached = true;
                         break;
