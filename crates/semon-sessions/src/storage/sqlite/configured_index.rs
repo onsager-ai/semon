@@ -391,7 +391,10 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         ids: &BTreeSet<String>,
     ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError> {
-        let runs = self.native.reported_runs(ids).map_err(StoreError::Configured)?;
+        let runs = self
+            .native
+            .reported_runs(ids)
+            .map_err(StoreError::Configured)?;
         self.reported_selection = Some(ids.clone());
         Ok(runs)
     }
@@ -410,6 +413,9 @@ impl IndexStore for ConfiguredIndex {
         runs: &[crate::facts::ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError> {
-        self.native.save_reported_runs(runs, stamp, self.reported_selection.as_ref()).map(Some).map_err(StoreError::Configured)
+        self.native
+            .save_reported_runs(runs, stamp, self.reported_selection.as_ref())
+            .map(Some)
+            .map_err(StoreError::Configured)
     }
 }

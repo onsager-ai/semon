@@ -11,6 +11,7 @@
   "native_event_metadata_composite": false,
   "semantic_stage_publication_qualification": 0,
   "semantic_stage_wip": [
+    "Facts118 WIP: reported-run namespace keys, registered Source owner guards, shared row/merge/codec plan, atomic observation/stamp operations and private PG typed persistence/read family; current fresh PG schema 5 adds reported_runs/reported_stamp. CI and independent acceptance pending; all public qualifications remain zero",
     "Worker43 WIP: typed PID/native-parent/lineage/endpoint/relation/withdrawal effects use the existing shared model and parent/root reducer; shared relation witness merge; namespace-keyed bounded incident replay; exact owner profile validation; explicit withdrawal-only Current retirement retains recipes/trace/history search; owner observations join durable model/proof witness; four real-producer collision/parity/rollback/refusal/withdrawal CI gates authored, not run; other owner retirement and complete selectors remain refused; public qualifications zero",
     "Worker40 WIP: complete namespace-keyed trace header/turn/edge/bookmark physical family and typed shared trace publication effects; exact trace/header/recipe producer witness participates in model record, publication proof and component generation; private runtime fingerprints bind logical Source/admission/stream plus aggregate runtime without opening Options.cache; stored trace, equal-native-ID Source isolation, unsupported nonempty profile refusal and trace rollback tests authored; CI not run and all public qualifications remain zero",
     "Worker38 private committed Index/ledger/proof model handoff avoids ingestion intents; same-runtime begin advances epoch atomically while retaining progress and model witness; ownership-backed Query listing uses semantic_listing_generation while global completeness stays partial and other reader factories refuse; current-schema-only, qualifications 0, CI and independent review pending",
@@ -94,6 +95,7 @@
     "storage/postgres/native_core/tests.rs",
     "storage/postgres/native_usage/tests.rs",
     "storage/postgres/native_usage_identity/tests.rs",
+    "storage/postgres/reported_facts.rs",
     "storage/postgres/tree_checkpoint/tests.rs",
     "storage/postgres/tree_writer/tests.rs",
     "test_hooks.rs",

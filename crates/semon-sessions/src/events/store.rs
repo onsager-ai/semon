@@ -6713,7 +6713,9 @@ fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Res
     } else if scope.is_empty() {
         format!("SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start")
     } else {
-        format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start")
+        format!(
+            "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start"
+        )
     })
 }
 
@@ -6732,7 +6734,13 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
     };
     super::reported_rows::ReportedRow::new(&run)
         .map(|row| row.run)
-        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error)))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
 }
 
 // ---- Writing -------------------------------------------------------------------------------
