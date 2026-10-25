@@ -12,6 +12,7 @@ mod schema;
 mod source_journal;
 mod sqlstate;
 pub(crate) mod tree_checkpoint;
+mod tree_writer;
 mod txn;
 
 pub use cancel::PgCancellation;
