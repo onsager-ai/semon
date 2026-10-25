@@ -1104,16 +1104,7 @@ pub(crate) trait IndexStore: Send {
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
-    fn discover_recovery_sources(
-        &mut self,
-        _operation: &crate::storage::source_observations::SourceOperation,
-    ) -> Result<
-        (
-            crate::storage::source_observations::SourceMutationReceipt,
-            bool,
-        ),
-        StoreError,
-    > {
+    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
         Err(StoreError::Configured(
             crate::storage::StorageError::NamespaceUpgradePending,
         ))
@@ -1894,35 +1885,13 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        // Recovery discovery owns a bounded source-tree page and durable
-        // witness; keep the page, invalidations and receipt in one transaction.
-        let operation = crate::storage::source_observations::SourceOperation::capture(
-            &self.observation_namespace,
-            "discover_recovery",
-            b"source-recovery-page-v1",
-        );
-        let result = self
-            .store
+        // Recovery and its publication witness remain in the native ledger TX.
+        // Durable typed Recovery intent/reconciliation belongs to the F4c port.
+        self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .discover_recovery_sources(&operation);
-        let (receipt, complete) = match result {
-            Ok(result) => result,
-            Err(error) => return Err(io::Error::other(error.to_string())),
-        };
-        match receipt {
-            crate::storage::source_observations::SourceMutationReceipt::Applied => Ok(complete),
-            // The page committed but its result was not observed. Continue with
-            // the next cursor on the next producer call; this may cost one
-            // harmless empty page after the final commit.
-            crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(false),
-            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "source recovery operation changed",
-                ))
-            }
-        }
+            .discover_recovery_sources()
+            .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_catalog_sources(
         &mut self,
