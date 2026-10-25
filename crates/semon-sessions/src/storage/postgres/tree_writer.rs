@@ -176,6 +176,8 @@ pub(super) fn publish(
     // host exclusive lock cannot change pricing until this transaction ends.
     let (_, pricing) = super::store_metadata::read(tx)?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    if locked.len()!=1 { return Err(StorageError::ScopeChanged); }
     let recipe = metadata(tx, b"catalog_semantic_recipe")?;
     let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     if fingerprint_rows.len()!=1 { return Err(StorageError::Conflict); }
