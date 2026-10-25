@@ -103,6 +103,9 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Strict published Tree scalar and deferred interpretation qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
