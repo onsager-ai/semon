@@ -13,16 +13,23 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 /// cannot be supplied by a caller or inferred from an Options path.
 pub(crate) struct AdmittedSource {
     config: StoreConfig,
+    owner: Option<crate::events::store::configured::NativeOwnership>,
     admission: u64,
     generation: Option<String>,
 }
 
 impl AdmittedSource {
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
-        NativeReaderBinding::Admitted(self.config.clone()).validate(db, &self.config.namespace)?;
-        crate::events::store::configured::validate_staging_owner(db, &self.config)?;
-        if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
-            return Err(StorageError::ScopeChanged);
+        if let Some(owner) = &self.owner {
+            owner.validate_ready(db)?;
+        } else {
+            NativeReaderBinding::Admitted(self.config.clone())
+                .validate(db, &self.config.namespace)?;
+            crate::events::store::configured::validate_staging_owner(db, &self.config)?;
+            if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission
+            {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         let admission = i64::try_from(self.admission).map_err(|_| StorageError::ScopeChanged)?;
         let profile: bool = db.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![self.config.namespace.as_str(),admission,crate::events::store::configured::semantic_recipe()], |r|r.get(0)).map_err(failed)?;
@@ -45,11 +52,40 @@ pub(crate) struct Stage {
 pub(crate) struct SemanticStaging {
     config: StoreConfig,
     reduction: bool,
+    owner: Option<crate::events::store::configured::NativeOwnership>,
 }
 
 impl SemanticStaging {
-    pub(super) fn config(&self) -> &StoreConfig {
-        &self.config
+    /// Explicit private admission into the authored composite native profile.
+    #[allow(dead_code)]
+    pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
+        let owner = crate::events::store::configured::NativeOwnership::admit(config)?;
+        let db = SourceJournal::owned(owner.clone()).connection()?;
+        db.execute_batch("BEGIN IMMEDIATE").map_err(failed)?;
+        owner.validate_ready(&db)?;
+        let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [], |r|r.get(0)).map_err(failed)?;
+        if !composite {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        db.execute_batch("COMMIT")
+            .map_err(|_| StorageError::CommitUncertain)?;
+        Ok(Self {
+            config: config.clone(),
+            reduction: true,
+            owner: Some(owner),
+        })
+    }
+    pub(super) fn journal(&self) -> SourceJournal {
+        self.owner
+            .as_ref()
+            .map(|owner| SourceJournal::owned(owner.clone()))
+            .unwrap_or_else(|| SourceJournal(self.config.clone()))
+    }
+    pub(super) fn writer(&self) -> crate::events::store::configured::Writer {
+        self.owner
+            .as_ref()
+            .map(|owner| crate::events::store::configured::Writer::owned(owner.clone()))
+            .unwrap_or_else(|| crate::events::store::configured::Writer::new(&self.config))
     }
     pub(crate) fn validate(config: &StoreConfig) -> Result<Self, StorageError> {
         crate::events::store::configured::validate_semantic_schema(config)?;
@@ -67,6 +103,7 @@ impl SemanticStaging {
         Ok(Self {
             config: config.clone(),
             reduction: true,
+            owner: None,
         })
     }
     pub(super) fn primitive(config: &StoreConfig) -> Result<Self, StorageError> {
@@ -203,10 +240,24 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
             "headerid" => {
-                "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                if crate::events::store::configured::metadata_sql(c, "", "namespace")
+                    .map_err(error)?
+                    == "namespace"
+                {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                } else {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                }
             }
             "headerparent" => {
-                "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                if crate::events::store::configured::metadata_sql(c, "", "namespace")
+                    .map_err(error)?
+                    == "namespace"
+                {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                } else {
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                }
             }
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
         };
@@ -309,14 +360,18 @@ fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
 impl Stage {
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
-        crate::events::store::configured::validate_semantic_schema(config)?;
-        let mut db = SourceJournal(config.clone()).connection()?;
+        let mut db = capability.journal().connection()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
-        NativeReaderBinding::Admitted(config.clone()).validate(&tx, &config.namespace)?;
-        crate::events::store::configured::validate_staging_owner(&tx, config)?;
-        let admission = namespace::require_admitted(&tx, &config.namespace)?.generation;
+        let admission = if let Some(owner) = &capability.owner {
+            owner.validate_ready(&tx)?;
+            owner.admission()
+        } else {
+            NativeReaderBinding::Admitted(config.clone()).validate(&tx, &config.namespace)?;
+            crate::events::store::configured::validate_staging_owner(&tx, config)?;
+            namespace::require_admitted(&tx, &config.namespace)?.generation
+        };
         let admission_sql = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
         // The private profile must already have authored composite stage keys.
         // Opening never converts an existing singleton stage or native family.
@@ -375,6 +430,7 @@ impl Stage {
             epoch,
             source: AdmittedSource {
                 config: config.clone(),
+                owner: capability.owner.clone(),
                 admission,
                 generation,
             },
@@ -401,6 +457,22 @@ impl Stage {
         {
             return Err(StoreError::Configured(StorageError::InvalidArguments));
         }
+        // Batch witnesses remain opaque to the shared reducer, but private
+        // native ownership also binds them to the logical Source admission.
+        let bound_runtime = self
+            .source
+            .owner
+            .as_ref()
+            .map(|owner| {
+                serde_json::to_string(&(
+                    self.source.config.namespace.as_str(),
+                    owner.admission(),
+                    runtime,
+                ))
+            })
+            .transpose()
+            .map_err(|_| refuse("semantic_runtime_binding"))?;
+        let runtime = bound_runtime.as_deref().unwrap_or(runtime);
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)

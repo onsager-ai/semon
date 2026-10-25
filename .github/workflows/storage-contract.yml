@@ -59,6 +59,12 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_ingest_and_stage_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_rollback_and_reopen_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_cross_namespace_capability_refused_zero_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_public_factory_still_refuses_second_source -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_runtime_capability_is_crate_private_and_public_factory_stays_closed -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_batch_reduces_events_native_keys_frontier_scoped -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_reset_and_reduction_rollback_zero_partial_writes -- --exact --nocapture

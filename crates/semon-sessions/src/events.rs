@@ -1104,6 +1104,11 @@ pub(crate) trait IndexStore: Send {
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
+    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
+        Err(StoreError::Configured(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ))
+    }
     fn discover_catalog_sources(
         &mut self,
         paths: &[String],
@@ -1558,6 +1563,18 @@ enum Base {
 }
 
 impl EventCache {
+    #[allow(dead_code)]
+    pub(crate) fn open_semantic(
+        capability: crate::storage::sqlite::semantic::SemanticStaging,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
+        Ok(Self {
+            store: Some(store),
+            scoped: true,
+            explicit_store: true,
+            ..Self::default()
+        })
+    }
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
     ) -> Result<Self, crate::storage::StorageError> {
@@ -1740,6 +1757,13 @@ impl EventCache {
             .as_ref()
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .backfill_state()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .discover_recovery_sources()
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_catalog_sources(
