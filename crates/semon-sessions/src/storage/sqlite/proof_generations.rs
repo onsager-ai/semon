@@ -75,6 +75,11 @@ pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+pub(super) struct PreparedPresentations<'a> {
+    pub(super) prepared: &'a crate::model::PreparedSources,
+    pub(super) rows: &'a [(String, String)],
+}
+
 pub(super) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
@@ -82,9 +87,10 @@ pub(super) fn publish(
     stream: &str,
     publication: &str,
     proof: &str,
-    prepared: &crate::model::PreparedSources,
-    presentations: &[(String, String)],
+    presentations: PreparedPresentations<'_>,
 ) -> Result<(), StorageError> {
+    let prepared = presentations.prepared;
+    let presentations = presentations.rows;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     for row in &prepared.rows {
@@ -657,8 +663,17 @@ pub(super) fn capture_presentations(
     Ok(result)
 }
 
-pub(super) fn bind_presentations(tx: &Transaction<'_>, ns: &str, publication: &str, base: &str, rows: &[(String,String)]) -> Result<String, StorageError> {
-    let manifest = serde_json::to_string(&rows.iter().map(|(key,text)|(key,digest(text.as_bytes()))).collect::<Vec<_>>()).map_err(|_| StorageError::Unavailable)?;
+pub(super) fn bind_presentations(tx: &Transaction<'_>, ns: &str, publication: &str, base: &str, rows: &[(String,String)], prepared: &crate::model::PreparedSources) -> Result<String, StorageError> {
+    let mut entries = Vec::new();
+    for (key,text) in rows {
+        let row = prepared.rows.iter().find(|row| &row.key == key).ok_or(StorageError::Unavailable)?;
+        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        let projection = prepared.transcripts.iter().find(|projection| &projection.key == key);
+        let slots = serde_json::to_string(&projection.map(|projection| &projection.slots)).map_err(|_| StorageError::Unavailable)?;
+        let bytes = serde_json::to_vec(&(&metadata,&slots,text)).map_err(|_| StorageError::Unavailable)?;
+        entries.push((key,digest(&bytes)));
+    }
+    let manifest = serde_json::to_string(&entries).map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 { return Err(StorageError::HistoryRetentionBounds); }
     let joined = joined_digest(base,&manifest)?;
     tx.execute("INSERT INTO storage_proof_presentation_roots VALUES(?1,?2,?3,?4,?5)",params![ns,publication,base,manifest,joined]).map_err(failed)?;
@@ -673,8 +688,9 @@ fn validate_presentation(db: &Connection, snapshot: &ReaderSnapshot, key: &str, 
     let (base,manifest,joined): (String,String,String) = db.query_row("SELECT base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2 AND digest=?3",params![snapshot.namespace.as_str(),snapshot.publication_generation,proof],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
     if manifest.len() > 1048576 || joined != proof || joined_digest(&base,&manifest)? != joined { return Err(StorageError::ScopeChanged); }
     let rows: Vec<(String,String)> = serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
-    let text: String = db.query_row("SELECT CASE WHEN octet_length(metadata)<=8388608 THEN metadata END FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|r.get(0)).map_err(failed)?;
-    if rows.iter().filter(|(k,_)|k == key).count() != 1 || !rows.iter().any(|(k,d)|k == key && *d == digest(text.as_bytes())) { return Err(StorageError::ScopeChanged); }
+    let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+    let bytes = serde_json::to_vec(&(&metadata,&slots,&text)).map_err(|_| StorageError::Unavailable)?;
+    if rows.iter().filter(|(k,_)|k == key).count() != 1 || !rows.iter().any(|(k,d)|k == key && *d == digest(&bytes)) { return Err(StorageError::ScopeChanged); }
     Ok(text)
 }
 

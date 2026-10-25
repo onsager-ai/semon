@@ -145,6 +145,59 @@ fn configured_semantic_selected57_tamper_cancel_deadline_and_frozen_admission() 
     db.execute_batch("CREATE TRIGGER storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;").unwrap();
     let first=read(&lease,&options[0],&host,&query);
     assert!(!first["entries"].as_array().unwrap().is_empty());
+    let original_raw=fs::read(&path).unwrap();
+    let damaged=String::from_utf8(original_raw.clone()).unwrap().replace("sanitized model fixture","corrupted model fixture");
+    assert_ne!(damaged.as_bytes(),original_raw.as_slice());
+    fs::write(&path,damaged).unwrap();
+    assert!(read_bound(&lease,&options[0],&host,&query,None,SessionSourceReadMode::LocalOrPinnedProvider,&crate::SelectedReadControl::default()).is_err());
+    fs::write(&path,&original_raw).unwrap();
+    assert_eq!(read(&lease,&options[0],&host,&query),first);
+    // Revoke the request after a real authorized Raw I/O has completed. The
+    // shared renderer may have buffered bytes, but the port must return none.
+    use crate::storage::selected::SelectedSnapshotStore;
+    struct CancelAfter<'a> { reader:&'a dyn crate::SessionSourceReader, flag:std::sync::Arc<std::sync::atomic::AtomicBool> }
+    impl crate::SessionSourceReader for CancelAfter<'_> {
+        fn read_range(&self,source:&crate::SessionSourceRef,expected:Option<&str>,offset:u64,max:usize)->std::io::Result<crate::SessionSourceRange> {
+            let bytes=self.reader.read_range(source,expected,offset,max)?;
+            self.flag.store(true,std::sync::atomic::Ordering::Release);
+            Ok(bytes)
+        }
+    }
+    let opened=lease.open_selected(&options[0],&host,&crate::SelectedReadControl::default()).unwrap();
+    let native=opened.sources.reader_with_mode(None,SessionSourceReadMode::LocalOrPinnedProvider);
+    let flag=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider=CancelAfter{reader:&native,flag:flag.clone()};
+    let control=crate::SelectedReadControl::new(std::time::Instant::now()+Duration::from_secs(10),flag.clone());
+    assert!(read_bound(&lease,&options[0],&host,&query,Some(&provider),SessionSourceReadMode::ProviderOnly,&control).is_err());
+    assert!(flag.load(std::sync::atomic::Ordering::Acquire));
     f.db().execute("UPDATE storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='source-a'",[]).unwrap();
     assert!(read_bound(&lease,&options[0],&host,&query,None,SessionSourceReadMode::LocalOrPinnedProvider,&crate::SelectedReadControl::default()).is_err());
+}
+
+#[test]
+fn configured_semantic_selected57_equal_native_ids_keep_authorized_host_identity() {
+    let (f,b,options,mut inputs)=model_sources();
+    inputs[1]=inputs[0].clone();
+    fs::copy(inputs[0].full_path(&options[0]),inputs[1].full_path(&options[1])).unwrap();
+    let mut replies=Vec::new();
+    for (i,config) in [&f.config,&b].into_iter().enumerate() {
+        let capability=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        let binding=capability.reader_binding().unwrap();
+        let mut cache=EventCache::open_semantic(capability).unwrap();
+        cache.ingest(&"a".repeat(64),&inputs[i].full_path(&options[i]),"codex").unwrap();
+        let (batch,model)=model_ready(&f,&mut cache,&options[i],&inputs[i],"selected57");
+        cache.publish_semantic_catalog(&batch,model.prepared()).unwrap();
+        let runtime=binding.reader_runtime().unwrap();
+        let key=&model.prepared().rows[0].key;
+        assert_eq!(key,"model-0");
+        let id=runtime.current_generation(key).unwrap();
+        let lease=runtime.selected_generation(key,&id,&"7".repeat(64),60000).unwrap();
+        let host=HostSourceBinding{source_key:config.namespace.as_str().into(),snapshot:lease.snapshot().clone()};
+        let reply=read(&lease,&options[i],&host,&format!("sid={key}&after=0&limit=1"));
+        assert_eq!(reply["identity"]["source_key"],config.namespace.as_str());
+        assert_eq!(reply["identity"]["native_ids"],json!(["model-0"]));
+        replies.push((id,reply));
+    }
+    assert_ne!(replies[0].0,replies[1].0);
+    assert_ne!(replies[0].1["entries"][0]["entry_id"],replies[1].1["entries"][0]["entry_id"]);
 }
