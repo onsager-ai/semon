@@ -7765,28 +7765,47 @@ mod tests {
             let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
             claude_ingest(&mut ordinary, options, &inputs);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            ordinary.begin_semantic_stage_with_journal(
-                &[inputs[0].full_path(options).to_string_lossy().into_owned()],
-                &runtime,
-                true,
-            ).unwrap();
+            ordinary
+                .begin_semantic_stage_with_journal(
+                    &[inputs[0].full_path(options).to_string_lossy().into_owned()],
+                    &runtime,
+                    true,
+                )
+                .unwrap();
             let ordinary_db = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
             let mut ordinary_paged = false;
             for _ in 0..256 {
                 let batch = ordinary.semantic_batch(64).unwrap().unwrap();
                 let pending: bool = ordinary_db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE kind='receipt' AND after_key<>'' AND done=0)", [], |r| r.get(0)).unwrap();
-                let enrolled: i64 = ordinary_db.query_row("SELECT count(*) FROM catalog_semantic_sources", [], |r| r.get(0)).unwrap();
+                let enrolled: i64 = ordinary_db
+                    .query_row("SELECT count(*) FROM catalog_semantic_sources", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
                 if pending && enrolled > 1 && enrolled <= 64 {
                     ordinary_paged = true;
                     break;
                 }
                 if !batch.paths.is_empty() {
                     assert_eq!(batch.phase, Phase::Indexing);
-                    let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
-                    ordinary.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                    let selected = inputs
+                        .iter()
+                        .filter(|i| {
+                            batch
+                                .paths
+                                .contains(&i.full_path(options).to_string_lossy().into_owned())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    ordinary
+                        .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
+                        .unwrap();
                 }
             }
-            assert!(ordinary_paged, "ordinary producer must demonstrate the same persisted receipt cursor");
+            assert!(
+                ordinary_paged,
+                "ordinary producer must demonstrate the same persisted receipt cursor"
+            );
             let mut cache = open(&f.config);
             claude_ingest(&mut cache, options, &inputs);
             cache
