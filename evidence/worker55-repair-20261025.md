@@ -46,14 +46,13 @@ reached; Root owns that CI observation.
 ## Delivery
 
 Base and remote before this repair: `178bc8b276b2ce2d0cd0965e97082e52bfd68a5e`
-on `origin/task/477-raw-sql-backends-20261024`. The commit SHA and verified
-remote SHA are recorded below after delivery.
+on `origin/task/477-raw-sql-backends-20261024`.
 
-Commit: _pending_
+Implementation commit: `fdc8fc9b4072330430c36dfa9c7b0559f6cb48f8`
 
 Parent: `178bc8b276b2ce2d0cd0965e97082e52bfd68a5e`
 
-Remote: `origin/task/477-raw-sql-backends-20261024` — _pending_
+Remote: `origin/task/477-raw-sql-backends-20261024` — pending push verification
 
 ## Remaining work
 
