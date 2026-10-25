@@ -617,10 +617,24 @@ impl NativeOwnership {
                 // Unported Catalog, history, descriptions, trace and pricing
                 // consumers are fenced even on this private fresh profile.
                 for operation in ["INSERT", "UPDATE", "DELETE"] {
-                    let condition=if ["session_catalog","session_catalog_sources","session_catalog_changes"].contains(&table.as_str()) {
-                        let scope=match operation { "UPDATE"=>"OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()", "DELETE"=>"OLD.namespace IS NOT semon_namespace()", _=>"NEW.namespace IS NOT semon_namespace()" };
+                    let condition = if [
+                        "session_catalog",
+                        "session_catalog_sources",
+                        "session_catalog_changes",
+                    ]
+                    .contains(&table.as_str())
+                    {
+                        let scope = match operation {
+                            "UPDATE" => {
+                                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"
+                            }
+                            "DELETE" => "OLD.namespace IS NOT semon_namespace()",
+                            _ => "NEW.namespace IS NOT semon_namespace()",
+                        };
                         format!("WHEN semon_semantic_publisher()<>1 OR {scope}")
-                    } else { String::new() };
+                    } else {
+                        String::new()
+                    };
                     tx.execute_batch(&format!("CREATE TRIGGER storage_private_unported_{index}_{operation} BEFORE {operation} ON \"{}\" {condition} BEGIN SELECT RAISE(ABORT,'private native family unported'); END;",table.replace('"',"\"\""))).map_err(failed)?;
                 }
             }
@@ -2570,121 +2584,250 @@ mod tests {
         (a, b, b_raw)
     }
 
-    fn publication_ready(store: &mut dyn IndexStore, path: &Path, runtime: &str) -> (crate::model::relation_stage::Batch, crate::model::PreparedSources) {
+    fn publication_ready(
+        store: &mut dyn IndexStore,
+        path: &Path,
+        runtime: &str,
+    ) -> (
+        crate::model::relation_stage::Batch,
+        crate::model::PreparedSources,
+    ) {
         use crate::model::relation_stage::Phase;
-        let paths=vec![path.to_string_lossy().into_owned()];
-        assert_eq!(store.begin_semantic_stage(&paths,runtime,true).unwrap(),Outcome::Written);
+        let paths = vec![path.to_string_lossy().into_owned()];
+        assert_eq!(
+            store.begin_semantic_stage(&paths, runtime, true).unwrap(),
+            Outcome::Written
+        );
         for _ in 0..128 {
-            let batch=store.semantic_batch(64).unwrap().unwrap();
-            if batch.paths.is_empty() { continue; }
-            let mut prepared=semantic_prepared_path(store,path,&batch);
+            let batch = store.semantic_batch(64).unwrap().unwrap();
+            if batch.paths.is_empty() {
+                continue;
+            }
+            let mut prepared = semantic_prepared_path(store, path, &batch);
             match batch.phase {
-                Phase::Indexing=>{},
-                Phase::Identity=>add_primitive_endpoint(&mut prepared),
-                Phase::Relations=>{},
-                Phase::Publication=>{
-                    prepared.rows=batch.context.endpoints.values().map(|e|e.row.clone()).collect();
-                    assert_eq!(prepared.rows.len(),1);
-                    return (batch,prepared);
+                Phase::Indexing => {}
+                Phase::Identity => add_primitive_endpoint(&mut prepared),
+                Phase::Relations => {}
+                Phase::Publication => {
+                    prepared.rows = batch
+                        .context
+                        .endpoints
+                        .values()
+                        .map(|e| e.row.clone())
+                        .collect();
+                    assert_eq!(prepared.rows.len(), 1);
+                    return (batch, prepared);
                 }
             }
-            assert_eq!(store.record_semantic_batch(&batch,&prepared).unwrap(),Outcome::Written);
+            assert_eq!(
+                store.record_semantic_batch(&batch, &prepared).unwrap(),
+                Outcome::Written
+            );
         }
         panic!("bounded semantic stage did not reach publication")
     }
 
     #[test]
     fn configured_semantic_two_source_publication_ack_finish_and_head() {
-        let (a,b,b_raw)=same_db_sources();
-        let mut stores=[owned_semantic(&a.config),owned_semantic(&b)];
-        for (i,path) in [&a.raw,&b_raw].into_iter().enumerate() {
-            let (batch,prepared)=publication_ready(&mut *stores[i],path,"publish");
-            let native=prepared.rows[0].native_ids[0].clone();
-            let selected=stores[i].semantic_select(batch.epoch,&crate::model::relation_stage::Selector::NativeKey { native:native.clone(),harness:"codex".into() }).unwrap();
-            assert_eq!(selected.key,Some(native));
-            let owners=vec![prepared.rows[0].key.clone()];
-            assert_eq!(stores[i].semantic_replay_page(batch.epoch,&owners,"").unwrap().endpoints.len(),1);
-            let (outcome,generation)=stores[i].publish_semantic_catalog(&batch,&prepared).unwrap();
-            assert_eq!(outcome,Outcome::Written);
+        let (a, b, b_raw) = same_db_sources();
+        let mut stores = [owned_semantic(&a.config), owned_semantic(&b)];
+        for (i, path) in [&a.raw, &b_raw].into_iter().enumerate() {
+            let (batch, prepared) = publication_ready(&mut *stores[i], path, "publish");
+            let native = prepared.rows[0].native_ids[0].clone();
+            let selected = stores[i]
+                .semantic_select(
+                    batch.epoch,
+                    &crate::model::relation_stage::Selector::NativeKey {
+                        native: native.clone(),
+                        harness: "codex".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(selected.key, Some(native));
+            let owners = vec![prepared.rows[0].key.clone()];
+            assert_eq!(
+                stores[i]
+                    .semantic_replay_page(batch.epoch, &owners, "")
+                    .unwrap()
+                    .endpoints
+                    .len(),
+                1
+            );
+            let (outcome, generation) = stores[i]
+                .publish_semantic_catalog(&batch, &prepared)
+                .unwrap();
+            assert_eq!(outcome, Outcome::Written);
             assert!(generation.is_some());
-            assert_eq!(stores[i].session_catalog_generation().unwrap(),generation);
-            assert!(stores[i].catalog_claims(&batch.paths).unwrap().iter().all(|(_,claim)|claim.is_none()));
-            assert_eq!(stores[i].finish_semantic_stage(batch.epoch).unwrap(),Outcome::Written);
-            assert_eq!(stores[i].session_catalog_generation().unwrap(),generation);
+            assert_eq!(stores[i].session_catalog_generation().unwrap(), generation);
+            assert!(
+                stores[i]
+                    .catalog_claims(&batch.paths)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, claim)| claim.is_none())
+            );
+            assert_eq!(
+                stores[i].finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(stores[i].session_catalog_generation().unwrap(), generation);
         }
-        let db=a.db();
-        for (ns,key) in [("source-a","native-session"),("source-b","native-b")] {
-            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,key],|r|r.get::<_,i64>(0)).unwrap(),1);
-            assert_eq!(db.query_row("SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap(),1);
-            assert!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap()>0);
-            assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_stage WHERE namespace=?1",[ns],|r|r.get::<_,i64>(0)).unwrap(),0);
-            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key<>?2",params![ns,key],|r|r.get::<_,i64>(0)).unwrap(),0);
+        let db = a.db();
+        for (ns, key) in [("source-a", "native-session"), ("source-b", "native-b")] {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                    params![ns, key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog_changes WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    > 0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog WHERE namespace=?1 AND session_key<>?2",
+                    params![ns, key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
         }
     }
 
     fn publication_snapshot_digest(f: &Fixture) -> String {
-        use sha2::{Digest,Sha256};
+        use sha2::{Digest, Sha256};
         // Ordered tables, rows and typed values give a deterministic witness.
-        format!("{:x}",Sha256::digest(format!("{:?}",shared_state(f)).as_bytes()))
+        format!(
+            "{:x}",
+            Sha256::digest(format!("{:?}", shared_state(f)).as_bytes())
+        )
     }
 
     #[test]
     fn configured_semantic_competing_publisher_and_begin_zero_writes() {
-        let (a,_,_)=same_db_sources();
-        let mut stale=owned_semantic(&a.config);
-        let (old,old_prepared)=publication_ready(&mut *stale,&a.raw,"old");
-        let mut winner=owned_semantic(&a.config);
-        let (current,prepared)=publication_ready(&mut *winner,&a.raw,"winner");
-        assert!(current.epoch>old.epoch);
-        assert_eq!(winner.publish_semantic_catalog(&current,&prepared).unwrap().0,Outcome::Written);
-        let before=shared_state(&a);
-        let digest=publication_snapshot_digest(&a);
-        assert_eq!(stale.publish_semantic_catalog(&old,&old_prepared).unwrap().0,Outcome::Conflict);
-        assert_eq!(shared_state(&a),before);
-        assert_eq!(stale.begin_semantic_stage(&old.paths,"stale-begin",true).unwrap(),Outcome::Conflict);
-        assert_eq!(shared_state(&a),before);
-        assert_eq!(publication_snapshot_digest(&a),digest);
+        let (a, _, _) = same_db_sources();
+        let mut stale = owned_semantic(&a.config);
+        let (old, old_prepared) = publication_ready(&mut *stale, &a.raw, "old");
+        let mut winner = owned_semantic(&a.config);
+        let (current, prepared) = publication_ready(&mut *winner, &a.raw, "winner");
+        assert!(current.epoch > old.epoch);
+        assert_eq!(
+            winner
+                .publish_semantic_catalog(&current, &prepared)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let before = shared_state(&a);
+        let digest = publication_snapshot_digest(&a);
+        assert_eq!(
+            stale
+                .publish_semantic_catalog(&old, &old_prepared)
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(
+            stale
+                .begin_semantic_stage(&old.paths, "stale-begin", true)
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(publication_snapshot_digest(&a), digest);
     }
 
     #[test]
     fn configured_semantic_publication_faults_rollback_ack_proof_and_hints() {
-        let (a,_,_)=same_db_sources();
-        let mut store=owned_semantic(&a.config);
-        let (batch,prepared)=publication_ready(&mut *store,&a.raw,"fault");
-        for fault in ["semantic_publish_rows","semantic_publish_proof","semantic_publish_ack","semantic_publish_head"] {
-            let before=shared_state(&a);
-            FAIL_EFFECT.with(|point|point.set(Some(fault)));
-            assert!(store.publish_semantic_catalog(&batch,&prepared).is_err(),"{fault}");
-            FAIL_EFFECT.with(|point|point.set(None));
-            assert_eq!(shared_state(&a),before,"{fault}");
+        let (a, _, _) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "fault");
+        for fault in [
+            "semantic_publish_rows",
+            "semantic_publish_proof",
+            "semantic_publish_ack",
+            "semantic_publish_head",
+        ] {
+            let before = shared_state(&a);
+            FAIL_EFFECT.with(|point| point.set(Some(fault)));
+            assert!(
+                store.publish_semantic_catalog(&batch, &prepared).is_err(),
+                "{fault}"
+            );
+            FAIL_EFFECT.with(|point| point.set(None));
+            assert_eq!(shared_state(&a), before, "{fault}");
         }
-        assert_eq!(store.publish_semantic_catalog(&batch,&prepared).unwrap().0,Outcome::Written);
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
     }
 
     #[test]
     fn configured_semantic_publication_replay_is_idempotent() {
-        let (a,_,_)=same_db_sources();
-        let mut store=owned_semantic(&a.config);
-        let (batch,prepared)=publication_ready(&mut *store,&a.raw,"replay");
-        let first=store.publish_semantic_catalog(&batch,&prepared).unwrap();
-        let before=shared_state(&a);
-        assert_eq!(store.publish_semantic_catalog(&batch,&prepared).unwrap(),first);
-        assert_eq!(shared_state(&a),before);
-        assert_eq!(store.finish_semantic_stage(batch.epoch).unwrap(),Outcome::Written);
-        let (next,prepared)=publication_ready(&mut *store,&a.raw,"replay-again");
-        assert_eq!(store.publish_semantic_catalog(&next,&prepared).unwrap(),first);
-        assert_eq!(store.session_catalog_generation().unwrap(),first.1);
+        let (a, _, _) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let (batch, prepared) = publication_ready(&mut *store, &a.raw, "replay");
+        let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
+        let before = shared_state(&a);
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap(),
+            first
+        );
+        assert_eq!(shared_state(&a), before);
+        assert_eq!(
+            store.finish_semantic_stage(batch.epoch).unwrap(),
+            Outcome::Written
+        );
+        let (next, prepared) = publication_ready(&mut *store, &a.raw, "replay-again");
+        assert_eq!(
+            store.publish_semantic_catalog(&next, &prepared).unwrap(),
+            first
+        );
+        assert_eq!(store.session_catalog_generation().unwrap(), first.1);
     }
 
     #[test]
     fn configured_semantic_publisher_keeps_unbound_head_refusal() {
-        let (a,_,_)=same_db_sources();
-        let mut db=a.db();
-        let before=shared_state(&a);
-        let tx=db.transaction().unwrap();
-        assert!(matches!(crate::storage::sqlite::publication::transitional_head(&tx),Err(StorageError::NamespaceUpgradePending)));
+        let (a, _, _) = same_db_sources();
+        let mut db = a.db();
+        let before = shared_state(&a);
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            crate::storage::sqlite::publication::transitional_head(&tx),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
         drop(tx);
-        assert_eq!(shared_state(&a),before);
+        assert_eq!(shared_state(&a), before);
     }
 
     #[test]

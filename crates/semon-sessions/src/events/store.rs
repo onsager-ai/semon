@@ -3921,7 +3921,13 @@ impl SqliteStore {
                             |row| row.get(0),
                         )
                         .map_err(failure)?;
-                    return_component_generation = Some(crate::storage::catalog::component_generation(&version,previous.as_deref(),&epoch,&metadata));
+                    return_component_generation =
+                        Some(crate::storage::catalog::component_generation(
+                            &version,
+                            previous.as_deref(),
+                            &epoch,
+                            &metadata,
+                        ));
                 } else {
                     for table in ["session_catalog", "session_history_catalog"] {
                         digest.update(table.as_bytes());
@@ -3938,7 +3944,7 @@ impl SqliteStore {
                         }
                     }
                 }
-                return_component_generation.unwrap_or_else(||format!("{:x}", digest.finalize()))
+                return_component_generation.unwrap_or_else(|| format!("{:x}", digest.finalize()))
             };
             if previous.as_deref() != Some(&generation)
                 || previous_version.as_deref() != Some(&version)

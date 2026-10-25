@@ -145,7 +145,14 @@ impl SourceJournal {
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         catalog_namespace::register(&db, &self.config.namespace)?;
-        db.create_scalar_function("semon_semantic_publisher",0,rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,|_|Ok(0_i64)).map_err(failed)?;
+        db.create_scalar_function(
+            "semon_semantic_publisher",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |_| Ok(0_i64),
+        )
+        .map_err(failed)?;
         if self.owner.is_some() {
             db.create_scalar_function(
                 "semon_event_writer",
