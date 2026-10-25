@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto';
 import { audit, qualifyCandidateEvidence } from './visual-pathname-audit.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const fingerprint = 'a'.repeat(64);
+const previousFingerprint = 'b'.repeat(64);
 const previousBytes = Buffer.from(
   JSON.stringify({ pathname: '/s/claude/harbor', selectors: { text: 'same', box: [0, 1] } }),
 );
@@ -40,13 +42,18 @@ function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
     ...state,
     reference: 'source-pin',
     referenceHub: 'hub-pin',
+    candidateFingerprint: previousFingerprint,
     artifactDigests: digests,
     reviewedCandidate: 'reviewed-head',
+    decision: 'accepted',
   };
   const baseReport = {
     scope,
+    candidateFingerprint: fingerprint,
     reference: 'source-pin',
     referenceHub: 'hub-pin',
+    errors: [],
+    failures: { coverage: [] },
     results: [
       {
         key: state.key,
@@ -71,7 +78,7 @@ function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
     fs.writeFileSync(reportPath, JSON.stringify(currentReport));
     return audit({ root, registry: { acceptances } });
   };
-  return { run, accepted, baseReport };
+  return { run, accepted, baseReport, root };
 }
 
 test('accepts only the exact pathname restoration or an identical accepted evidence hash', (t) => {
@@ -130,6 +137,42 @@ test('refuses changed PNG digests and reference pins', (t) => {
   const changedReference = structuredClone(baseReport);
   changedReference.reference = 'different-source-pin';
   assert.match(run({ report: changedReference }).refused[0].reason, /Reference pins changed/);
+});
+
+test('refuses a record without an accepted decision', (t) => {
+  const { run, accepted } = fixture(t);
+  for (const decision of [undefined, 'pending', 'rejected'])
+    assert.match(
+      run({ acceptances: [{ ...accepted, decision }] }).refused[0].reason,
+      /no accepted decision/,
+    );
+});
+
+test('refuses a duplicated current row and duplicate accepted registry record', (t) => {
+  const duplicateCurrent = fixture(t);
+  const report = structuredClone(duplicateCurrent.baseReport);
+  report.results.push(structuredClone(report.results[0]));
+  assert.match(duplicateCurrent.run({ report }).refused[0].reason, /duplicated/);
+
+  const duplicateRegistry = fixture(t);
+  assert.match(
+    duplicateRegistry.run({
+      acceptances: [duplicateRegistry.accepted, structuredClone(duplicateRegistry.accepted)],
+    }).refused[0].reason,
+    /one accepted state/,
+  );
+});
+
+test('refuses changed reference and diff evidence digests independently of PNG digests', (t) => {
+  const { run, baseReport } = fixture(t);
+  for (const [side, type] of [
+    ['reference', 'evidence'],
+    ['diff', 'evidence'],
+  ]) {
+    const changed = structuredClone(baseReport);
+    changed.results[0].artifactDigests[side][type] = hash(Buffer.from(`changed ${side} evidence`));
+    assert.match(run({ report: changed }).refused[0].reason, new RegExp(`${side}\\.evidence`));
+  }
 });
 
 test('resolves nested transport evidence from each report capture root', (t) => {

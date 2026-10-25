@@ -164,25 +164,25 @@ export function audit({ root, registry }) {
   for (const [comparator, source] of reportFiles(root)) {
     const reportPath = path.join(root, source);
     if (!fs.existsSync(reportPath)) continue;
-    const current = decodeJson(readBytes(reportPath));
+    const reportBytes = readBytes(reportPath);
+    const current = decodeJson(reportBytes);
     const currentRows = rows(current);
     totalRows += currentRows.length;
     if (totalRows > 1000) throw new Error('Combined reports exceed 1000 rows');
     const scope = current.scope ?? current.mode ?? 'required';
     reports.push({
       source,
+      reportSha256: digest(reportBytes),
+      candidateFingerprint: String(current.candidateFingerprint ?? '').slice(0, 128),
       scope: String(scope).slice(0, 100),
-      errorCount: Array.isArray(current.errors) ? current.errors.length : 0,
+      errorCount: Array.isArray(current.errors)
+        ? current.errors.length
+        : current.errors == null
+          ? 0
+          : 1,
       firstErrors: (Array.isArray(current.errors) ? current.errors : [])
         .slice(0, 4)
         .map((error) => String(error).slice(0, 180)),
-      coverageFailures:
-        typeof current.coverageFailures === 'number' ||
-        typeof current.coverageFailures === 'boolean' ||
-        current.coverageFailures === null ||
-        current.coverageFailures === undefined
-          ? (current.coverageFailures ?? null)
-          : String(current.coverageFailures).slice(0, 180),
     });
     for (const { kind, row } of currentRows.filter(({ row }) => row.pass === false)) {
       const exactState = { comparator, scope, kind, key: row.key };
@@ -202,6 +202,7 @@ export function audit({ root, registry }) {
         );
         if (matches.length !== 1) throw new Error('Expected one accepted state');
         const accepted = matches[0];
+        if (accepted.decision !== 'accepted') throw new Error('State has no accepted decision');
         if (!sameReferences(current, accepted)) throw new Error('Reference pins changed');
         const approved = accepted.artifactDigests;
         if (!isDigest(approved?.candidate?.evidence))
@@ -256,6 +257,8 @@ export function audit({ root, registry }) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.length !== 2)
+    throw new Error('Use visual-binding-proposal.mjs for binding proposals');
   const root = process.env.SEMON_UI_OUT;
   if (!root) throw new Error('SEMON_UI_OUT is required');
   const result = audit({
