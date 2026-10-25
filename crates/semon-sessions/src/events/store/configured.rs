@@ -7541,6 +7541,15 @@ mod tests {
                     }
                     Ok(Some(batch)) if !batch.paths.is_empty() => {
                         assert_ne!(batch.phase, Phase::Publication, "incident inputs must not publish without their event producer");
+                        for selector in [
+                            crate::model::relation_stage::Selector::ClaudeCall { id: "selector-call".into() },
+                            crate::model::relation_stage::Selector::ClaudeReceipt { id: "selector-message".into() },
+                        ] {
+                            let before_select = shared_state(&f);
+                            let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
+                            assert!(error.to_string().contains("semantic_claude_event_projection_pending"), "{error}");
+                            assert_eq!(shared_state(&f), before_select);
+                        }
                         cache.prepare_semantic_model_batch(options, std::slice::from_ref(input), &batch, 1_790_000_000_000).unwrap();
                     }
                     Ok(Some(_)) => {}
