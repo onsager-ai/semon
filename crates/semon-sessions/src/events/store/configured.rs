@@ -2789,7 +2789,11 @@ mod tests {
                     1_790_000_000_000,
                 )
                 .unwrap();
-                assert_eq!(shared_state(fixture), before_prepare, "model preparation cannot create ingestion intents or mutate source data");
+                assert_eq!(
+                    shared_state(fixture),
+                    before_prepare,
+                    "model preparation cannot create ingestion intents or mutate source data"
+                );
                 let before = shared_state(fixture);
                 FAIL_EFFECT.with(|point| point.set(Some("semantic_model_record")));
                 assert!(
@@ -2881,34 +2885,87 @@ mod tests {
         use crate::storage::query::QueryCatalogStore;
         let db = fixture.db();
         for row in &prepared.rows {
-            let stored: String = db.query_row("SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",params![config.namespace.as_str(),row.key],|r|r.get(0)).unwrap();
+            let stored: String = db
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                    params![config.namespace.as_str(), row.key],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(stored, serde_json::to_string(row).unwrap());
         }
         for projection in &prepared.transcripts {
             let slots: Vec<String> = db.prepare("SELECT metadata FROM session_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot").unwrap().query_map(params![config.namespace.as_str(),projection.key],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
             assert!(!slots.is_empty(), "persisted transcript must be useful");
-            assert_eq!(slots, projection.slots.iter().map(|slot|serde_json::to_string(slot).unwrap()).collect::<Vec<_>>());
-            assert!(projection.slots.iter().any(|slot| slot.file.is_some()), "persisted recipe binds actual native evidence");
+            assert_eq!(
+                slots,
+                projection
+                    .slots
+                    .iter()
+                    .map(|slot| serde_json::to_string(slot).unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                projection.slots.iter().any(|slot| slot.file.is_some()),
+                "persisted recipe binds actual native evidence"
+            );
             let version: u32 = db.query_row("SELECT version FROM session_slot_projections WHERE namespace=?1 AND session_key=?2",params![config.namespace.as_str(),projection.key],|r|r.get(0)).unwrap();
             assert_eq!(version, crate::slot_projection::VERSION);
         }
         let port = crate::storage::sqlite::query::SqliteQueryCatalog {
             options: options.clone(),
-            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap().reader_binding().unwrap(),
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(config)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
         };
         let mut remaining = 8 * 1024 * 1024;
-        let part = port.read_cohort(&config.namespace, 1_790_000_000_000, &mut remaining).unwrap();
+        let part = port
+            .read_cohort(&config.namespace, 1_790_000_000_000, &mut remaining)
+            .unwrap();
         let expected = query_row.query.as_ref().unwrap()["rows"][&query_row.key].clone();
-        assert_eq!(part.rows[&query_row.key], expected, "ordinary Query port reads exact persisted facts");
+        assert_eq!(
+            part.rows[&query_row.key], expected,
+            "ordinary Query port reads exact persisted facts"
+        );
         assert_eq!(part.rows.len(), 1, "foreign Source excluded");
         port.validate(&config.namespace, &part).unwrap();
-        let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(config.namespace.as_str().into(),options.clone())]));
+        let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
+            config.namespace.as_str().into(),
+            options.clone(),
+        )]));
         let mut query = crate::Query::from_sources(sources);
-        let reply = query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1_790_000_000_000, &port).unwrap();
+        let reply = query
+            .call_bound_catalog_at(
+                "list_sessions",
+                &serde_json::json!({}),
+                1_790_000_000_000,
+                &port,
+            )
+            .unwrap();
         assert_eq!(reply["total"], 1);
-        assert_eq!(reply["sessions"][0], expected["summary"], "existing Query filters/rendering consume persisted facts");
-        assert_eq!(db.query_row("SELECT count(*) FROM storage_namespaces WHERE writer_qualification<>0",[],|r|r.get::<_,i64>(0)).unwrap(), 0);
-        assert_eq!(db.query_row("SELECT count(*) FROM storage_event_tables WHERE qualification<>0",[],|r|r.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(
+            reply["sessions"][0], expected["summary"],
+            "existing Query filters/rendering consume persisted facts"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM storage_namespaces WHERE writer_qualification<>0",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM storage_event_tables WHERE qualification<>0",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2944,9 +3001,21 @@ mod tests {
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
             let mut original = EventCache::open_scoped(&options[i].cache).unwrap();
-            let original = crate::model::prepare_sources(&options[i], &mut original, std::slice::from_ref(&inputs[i]), 1_790_000_000_000).unwrap();
-            assert_eq!(serde_json::to_value(&model.prepared().rows).unwrap(), serde_json::to_value(&original.rows).unwrap());
-            assert_eq!(model.prepared().staged_projection_witness().unwrap(), original.staged_projection_witness().unwrap());
+            let original = crate::model::prepare_sources(
+                &options[i],
+                &mut original,
+                std::slice::from_ref(&inputs[i]),
+                1_790_000_000_000,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&model.prepared().rows).unwrap(),
+                serde_json::to_value(&original.rows).unwrap()
+            );
+            assert_eq!(
+                model.prepared().staged_projection_witness().unwrap(),
+                original.staged_projection_witness().unwrap()
+            );
             assert_eq!(
                 caches[i]
                     .publish_semantic_catalog(&batch, model.prepared())
@@ -2965,10 +3034,19 @@ mod tests {
             assert_eq!(shared_state(&a), published);
             assert_eq!(namespace_state(&a, foreign), before);
             let config = if i == 0 { &a.config } else { &b };
-            assert_stored_model(&a, config, &options[i], model.prepared(), &model.prepared().rows[0]);
+            assert_stored_model(
+                &a,
+                config,
+                &options[i],
+                model.prepared(),
+                &model.prepared().rows[0],
+            );
             let port = crate::storage::sqlite::query::SqliteQueryCatalog {
                 options: options[i].clone(),
-                binding: crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap().reader_binding().unwrap(),
+                binding: crate::storage::sqlite::semantic::SemanticStaging::admit(config)
+                    .unwrap()
+                    .reader_binding()
+                    .unwrap(),
             };
             let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
                 config.namespace.as_str().into(),
@@ -3047,19 +3125,26 @@ mod tests {
         let (old_batch, old_model) =
             model_ready(&a, &mut stale, &options[1], &inputs[1], "old-model");
         let old_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        let (batch, model) = model_ready(
-            &a,
-            &mut caches[1],
-            &options[1],
-            &inputs[1],
-            "old-model",
-        );
+        let (batch, model) = model_ready(&a, &mut caches[1], &options[1], &inputs[1], "old-model");
         assert!(batch.epoch > old_batch.epoch);
         let new_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        assert_eq!(new_witness, old_witness, "same-runtime takeover preserves exact model progress");
+        assert_eq!(
+            new_witness, old_witness,
+            "same-runtime takeover preserves exact model progress"
+        );
         let before = shared_state(&a);
-        assert_eq!(stale.publish_semantic_catalog(&old_batch, old_model.prepared()).unwrap().0, Outcome::Conflict);
-        assert_eq!(shared_state(&a), before, "old epoch refuses before generation advances");
+        assert_eq!(
+            stale
+                .publish_semantic_catalog(&old_batch, old_model.prepared())
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
+        assert_eq!(
+            shared_state(&a),
+            before,
+            "old epoch refuses before generation advances"
+        );
         for fault in [
             "semantic_publish_history",
             "semantic_publish_slots",
@@ -3113,34 +3198,100 @@ mod tests {
         use crate::storage::{native_events::NativeEventStore, query::QueryCatalogStore};
         let (a, b, options, inputs) = model_sources();
         let _other = owned_semantic(&b);
-        let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap()).unwrap();
-        cache.ingest(&"a".repeat(64), &inputs[0].full_path(&options[0]), "codex").unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
+        )
+        .unwrap();
+        cache
+            .ingest(&"a".repeat(64), &inputs[0].full_path(&options[0]), "codex")
+            .unwrap();
         let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "readiness");
-        cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
-        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap().reader_binding().unwrap();
-        let port = crate::storage::sqlite::query::SqliteQueryCatalog { options: options[0].clone(), binding: binding.clone() };
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config)
+            .unwrap()
+            .reader_binding()
+            .unwrap();
+        let port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: options[0].clone(),
+            binding: binding.clone(),
+        };
         let before = shared_state(&a);
-        let completeness: String = a.db().query_row("SELECT value FROM meta WHERE namespace='source-a' AND key='catalog_completeness'",[],|r|r.get(0)).unwrap();
+        let completeness: String = a
+            .db()
+            .query_row(
+                "SELECT value FROM meta WHERE namespace='source-a' AND key='catalog_completeness'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(completeness, "partial");
         let mut left = 1024 * 1024;
-        assert!(port.read_cohort(&a.config.namespace, 1_790_000_000_000, &mut left).is_ok());
-        assert!(port.read_cohort(&b.namespace, 1_790_000_000_000, &mut left).is_err());
-        assert!(port.has_search_slots(&a.config.namespace, "model-0", None).is_err());
-        assert!(matches!(binding.proof_snapshot(), Err(StorageError::NamespaceUpgradePending)));
+        assert!(
+            port.read_cohort(&a.config.namespace, 1_790_000_000_000, &mut left)
+                .is_ok()
+        );
+        assert!(
+            port.read_cohort(&b.namespace, 1_790_000_000_000, &mut left)
+                .is_err()
+        );
+        assert!(
+            port.has_search_slots(&a.config.namespace, "model-0", None)
+                .is_err()
+        );
+        assert!(matches!(
+            binding.proof_snapshot(),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
         let navigation = crate::storage::navigation_store(binding.clone());
-        assert_eq!(navigation.catalog_generation(), Err(StorageError::NamespaceUpgradePending));
-        assert_eq!(navigation.bookmarked_target_keys("model-0"), Err(StorageError::NamespaceUpgradePending));
-        assert!(matches!(navigation.native_resolution("codex", "model-0", crate::CatalogReadScope::Current, None), Err(StorageError::NamespaceUpgradePending)));
-        let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(a.config.namespace.as_str().into(), options[0].clone())]));
+        assert_eq!(
+            navigation.catalog_generation(),
+            Err(StorageError::NamespaceUpgradePending)
+        );
+        assert_eq!(
+            navigation.bookmarked_target_keys("model-0"),
+            Err(StorageError::NamespaceUpgradePending)
+        );
+        assert!(matches!(
+            navigation.native_resolution(
+                "codex",
+                "model-0",
+                crate::CatalogReadScope::Current,
+                None
+            ),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
+        let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
+            a.config.namespace.as_str().into(),
+            options[0].clone(),
+        )]));
         let mut query = crate::Query::from_sources(sources);
         for tool in ["stalls", "find", "get_session", "read_transcript"] {
-            assert!(query.call_bound_catalog_at(tool, &serde_json::json!({}), 1_790_000_000_000, &port).is_err(), "{tool}");
+            assert!(
+                query
+                    .call_bound_catalog_at(tool, &serde_json::json!({}), 1_790_000_000_000, &port)
+                    .is_err(),
+                "{tool}"
+            );
         }
-        assert!(a.config.query_metadata(&options[0], 1_790_000_000_000, 1024 * 1024).is_err());
+        assert!(
+            a.config
+                .query_metadata(&options[0], 1_790_000_000_000, 1024 * 1024)
+                .is_err()
+        );
         assert!(a.config.catalog_generation().is_err());
         let private = owned_semantic(&a.config);
-        assert!(matches!(private.session_slots(&model.prepared().rows[0], None, 64), Err(StoreError::Configured(StorageError::NamespaceUpgradePending))));
-        assert!(matches!(crate::storage::sqlite::open_configured_index(&a.config), Err(StorageError::MultiSourceUnqualified)));
+        assert!(matches!(
+            private.session_slots(&model.prepared().rows[0], None, 64),
+            Err(StoreError::Configured(
+                StorageError::NamespaceUpgradePending
+            ))
+        ));
+        assert!(matches!(
+            crate::storage::sqlite::open_configured_index(&a.config),
+            Err(StorageError::MultiSourceUnqualified)
+        ));
         assert_eq!(shared_state(&a), before);
     }
 
@@ -3148,18 +3299,41 @@ mod tests {
     fn configured_semantic_model_refuses_noncurrent_schema_and_changed_raw_zero_writes() {
         use crate::storage::native_events::NativeEventStore;
         let (a, _, options, inputs) = model_sources();
-        let mut cache = EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap()).unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
+        )
+        .unwrap();
         let path = inputs[0].full_path(&options[0]);
         cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
-        cache.begin_semantic_stage_with_journal(&[path.to_string_lossy().into_owned()], "read-only", true).unwrap();
+        cache
+            .begin_semantic_stage_with_journal(
+                &[path.to_string_lossy().into_owned()],
+                "read-only",
+                true,
+            )
+            .unwrap();
         let batch = cache.semantic_batch(64).unwrap().unwrap();
         fs::write(&path, "changed Raw\n").unwrap();
         let before = shared_state(&a);
-        assert!(crate::model::prepare_semantic_batch(&options[0], &mut cache, std::slice::from_ref(&inputs[0]), &batch, 1_790_000_000_000).is_err());
+        assert!(
+            crate::model::prepare_semantic_batch(
+                &options[0],
+                &mut cache,
+                std::slice::from_ref(&inputs[0]),
+                &batch,
+                1_790_000_000_000
+            )
+            .is_err()
+        );
         assert_eq!(shared_state(&a), before);
         // Only the current Semon contract is admitted. No upgrade/fallback.
-        a.db().pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
-        assert!(matches!(crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config), Err(StorageError::NamespaceUpgradePending)));
+        a.db()
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
+        assert!(matches!(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
         assert_eq!(shared_state(&a), before);
     }
 
@@ -3276,12 +3450,25 @@ mod tests {
         let before = shared_state(fixture);
         assert!(old.semantic_batch(64).is_err());
         assert_eq!(shared_state(fixture), before);
-        assert_eq!(old.record_semantic_batch(batch, prepared).unwrap(), Outcome::Conflict);
+        assert_eq!(
+            old.record_semantic_batch(batch, prepared).unwrap(),
+            Outcome::Conflict
+        );
         assert_eq!(shared_state(fixture), before);
-        assert_eq!(old.publish_semantic_catalog(batch, prepared).unwrap().0, Outcome::Conflict);
+        assert_eq!(
+            old.publish_semantic_catalog(batch, prepared).unwrap().0,
+            Outcome::Conflict
+        );
         assert_eq!(shared_state(fixture), before);
-        assert_eq!(old.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Conflict);
-        assert_eq!(old.begin_semantic_stage(&batch.paths, "stale-reset", true).unwrap(), Outcome::Conflict);
+        assert_eq!(
+            old.finish_semantic_stage(batch.epoch).unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(
+            old.begin_semantic_stage(&batch.paths, "stale-reset", true)
+                .unwrap(),
+            Outcome::Conflict
+        );
         assert_eq!(shared_state(fixture), before);
     }
 
@@ -3292,16 +3479,33 @@ mod tests {
         let (batch, prepared) = publication_ready(&mut *old, &a.raw, "same");
         let mut observer = owned_semantic(&a.config);
         let mut successor = owned_semantic(&a.config);
-        assert_eq!(successor.begin_semantic_stage(&batch.paths, "same", true).unwrap(), Outcome::Written);
+        assert_eq!(
+            successor
+                .begin_semantic_stage(&batch.paths, "same", true)
+                .unwrap(),
+            Outcome::Written
+        );
         let next = successor.semantic_batch(64).unwrap().unwrap();
         assert!(next.epoch > batch.epoch);
         assert_eq!(next.phase, batch.phase);
         assert_eq!(next.paths, batch.paths);
-        assert_eq!(serde_json::to_value(&next.context.endpoints).unwrap(), serde_json::to_value(&batch.context.endpoints).unwrap());
-        assert_eq!(successor.catalog_claims(&next.paths).unwrap(), prepared.claims);
+        assert_eq!(
+            serde_json::to_value(&next.context.endpoints).unwrap(),
+            serde_json::to_value(&batch.context.endpoints).unwrap()
+        );
+        assert_eq!(
+            successor.catalog_claims(&next.paths).unwrap(),
+            prepared.claims
+        );
         assert_old_epoch_zero_writes(&a, &mut *old, &batch, &prepared);
         assert_old_epoch_zero_writes(&a, &mut *observer, &batch, &prepared);
-        assert_eq!(successor.publish_semantic_catalog(&next, &prepared).unwrap().0, Outcome::Written);
+        assert_eq!(
+            successor
+                .publish_semantic_catalog(&next, &prepared)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
     }
 
     #[test]
@@ -3311,7 +3515,12 @@ mod tests {
         let (batch, prepared) = publication_ready(&mut *old, &a.raw, "old");
         let foreign = namespace_state(&a, "source-b");
         let mut successor = owned_semantic(&a.config);
-        assert_eq!(successor.begin_semantic_stage(&batch.paths, "new", true).unwrap(), Outcome::Written);
+        assert_eq!(
+            successor
+                .begin_semantic_stage(&batch.paths, "new", true)
+                .unwrap(),
+            Outcome::Written
+        );
         let next = successor.semantic_batch(64).unwrap().unwrap();
         assert!(next.epoch > batch.epoch);
         assert_eq!(next.phase, crate::model::relation_stage::Phase::Indexing);
@@ -3325,13 +3534,23 @@ mod tests {
         let mut old = owned_semantic(&a.config);
         let (batch, prepared) = publication_ready(&mut *old, &a.raw, "same");
         let mut successor = owned_semantic(&a.config);
-        successor.begin_semantic_stage(&batch.paths, "same", true).unwrap();
+        successor
+            .begin_semantic_stage(&batch.paths, "same", true)
+            .unwrap();
         assert_old_epoch_zero_writes(&a, &mut *old, &batch, &prepared);
         let current = successor.semantic_batch(64).unwrap().unwrap();
         let before = shared_state(&a);
-        assert_eq!(successor.begin_semantic_stage(&batch.paths, "same", true).unwrap(), Outcome::Written);
+        assert_eq!(
+            successor
+                .begin_semantic_stage(&batch.paths, "same", true)
+                .unwrap(),
+            Outcome::Written
+        );
         assert_eq!(shared_state(&a), before, "same holder begin is idempotent");
-        assert_eq!(successor.semantic_batch(64).unwrap().unwrap().epoch, current.epoch);
+        assert_eq!(
+            successor.semantic_batch(64).unwrap().unwrap().epoch,
+            current.epoch
+        );
     }
 
     #[test]
@@ -3339,16 +3558,29 @@ mod tests {
         let (a, _, _) = same_db_sources();
         let mut quiescent = owned_semantic(&a.config);
         let (first, prepared) = publication_ready(&mut *quiescent, &a.raw, "same");
-        quiescent.publish_semantic_catalog(&first, &prepared).unwrap();
+        quiescent
+            .publish_semantic_catalog(&first, &prepared)
+            .unwrap();
         quiescent.finish_semantic_stage(first.epoch).unwrap();
         let mut old = owned_semantic(&a.config);
         let (batch, prepared) = publication_ready(&mut *old, &a.raw, "same");
-        assert_eq!(quiescent.begin_semantic_stage(&batch.paths, "same", true).unwrap(), Outcome::Written);
+        assert_eq!(
+            quiescent
+                .begin_semantic_stage(&batch.paths, "same", true)
+                .unwrap(),
+            Outcome::Written
+        );
         let next = quiescent.semantic_batch(64).unwrap().unwrap();
         assert!(next.epoch > batch.epoch);
         assert_eq!(next.phase, batch.phase);
         assert_old_epoch_zero_writes(&a, &mut *old, &batch, &prepared);
-        assert_eq!(quiescent.publish_semantic_catalog(&next, &prepared).unwrap().0, Outcome::Written);
+        assert_eq!(
+            quiescent
+                .publish_semantic_catalog(&next, &prepared)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
     }
 
     #[test]
@@ -3359,11 +3591,18 @@ mod tests {
         let mut successor = owned_semantic(&a.config);
         let before = shared_state(&a);
         FAIL_EFFECT.with(|point| point.set(Some("semantic_reset")));
-        assert!(successor.begin_semantic_stage(&batch.paths, "same", true).is_err());
+        assert!(
+            successor
+                .begin_semantic_stage(&batch.paths, "same", true)
+                .is_err()
+        );
         FAIL_EFFECT.with(|point| point.set(None));
         assert_eq!(shared_state(&a), before);
         assert_eq!(old.semantic_batch(64).unwrap().unwrap().epoch, batch.epoch);
-        assert_eq!(old.publish_semantic_catalog(&batch, &prepared).unwrap().0, Outcome::Written);
+        assert_eq!(
+            old.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+            Outcome::Written
+        );
     }
 
     #[test]
