@@ -971,6 +971,13 @@ pub(crate) fn stored_receipt(
     operation: &SourceOperation,
 ) -> Result<Option<SourceMutationReceipt>, StorageError> {
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
+    let captured_digest: Option<String> = db.query_row(
+        "SELECT payload_digest FROM main.source_observation_intents WHERE namespace=?1 AND operation_id=?2",
+        params![namespace.unwrap_or(""), operation.id], |row| row.get(0),
+    ).optional().map_err(|error| phase_failed("intent-binding-read", error))?;
+    if captured_digest.as_ref().is_some_and(|digest| digest != &operation.payload_digest) {
+        return Ok(Some(SourceMutationReceipt::Conflict));
+    }
     let found: Option<(String, String)> = db.query_row(
         "SELECT payload_digest,outcome FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2",
         params![namespace.unwrap_or(""), operation.id],
@@ -1719,6 +1726,8 @@ mod tests {
         changed_operation.id = operation.id.clone();
         let changed = SourceIntent::Discover { operation: changed_operation.clone(), paths: changed_paths, complete: true };
         assert_eq!(store.persist_intent(&changed), Err(StorageError::Conflict));
+        assert_eq!(changed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(store.claims(&["changed".into()]).unwrap(), vec![("changed".into(), None)]);
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
         assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
         assert_eq!(store.acknowledge_intent(&changed_operation), Err(StorageError::Conflict));
