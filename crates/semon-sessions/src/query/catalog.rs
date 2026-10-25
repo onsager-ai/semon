@@ -223,6 +223,35 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
+        self.execute_catalog_store_at(tool, args, provider, mode, now, None)
+    }
+
+    /// Private single-Source binding for the admitted producer qualification.
+    /// Rendering, filtering, windows and validation use the ordinary Query path.
+    #[allow(dead_code)]
+    pub(crate) fn call_bound_catalog_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+        store: &dyn crate::storage::query::QueryCatalogStore,
+    ) -> Result<Value, QueryError> {
+        validate_query_call(tool, args)?;
+        if self.sources.machines.len() != 1 || tool != "list_sessions" {
+            return Err(unavailable("Admitted Query selector is not qualified"));
+        }
+        self.execute_catalog_store_at(tool, args, None, crate::SessionSourceReadMode::LocalThenProvider, now, Some(store))
+    }
+
+    fn execute_catalog_store_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        provider: Option<&CatalogReaderFactory>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+        bound: Option<&dyn crate::storage::query::QueryCatalogStore>,
+    ) -> Result<Value, QueryError> {
         #[cfg(test)]
         WORK.with(|work| work.set(Work::default()));
         if !matches!(tool, "list_sessions" | "stalls" | "find") {
@@ -274,8 +303,12 @@ impl Query {
                     &self.sources.machines[index].0
                 })
                 .map_err(unavailable)?;
-            let part = crate::storage::local_query_catalog(&source.options, namespace.clone())
-                .read_cohort(&namespace, now, &mut bytes_left)?;
+            let local;
+            let store = if let Some(store) = bound { store } else {
+                local = crate::storage::local_query_catalog(&source.options, namespace.clone());
+                &*local
+            };
+            let part = store.read_cohort(&namespace, now, &mut bytes_left)?;
             if part.runtime != identity_observations[index] {
                 return Err(unavailable(
                     "Native machine identity changed during the query",
@@ -417,8 +450,12 @@ impl Query {
                 source_key
             })
             .map_err(unavailable)?;
-            crate::storage::local_query_catalog(&source.options, namespace.clone())
-                .validate(&namespace, &part)?;
+            if let Some(store) = bound {
+                store.validate(&namespace, &part)?;
+            } else {
+                crate::storage::local_query_catalog(&source.options, namespace.clone())
+                    .validate(&namespace, &part)?;
+            }
         }
         if self.sources.is_retired() {
             return Err(unavailable("Native sources are closed"));

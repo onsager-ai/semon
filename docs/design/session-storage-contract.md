@@ -1334,3 +1334,46 @@ Public qualification is 0 and the public factory retains `semantic=None`.
 Immutable generations/leases/GC/Raw custody, remaining owners, public backend
 qualification, full PG parity/no hidden SQLite, migration/cutover/rollback and
 Hub #313 remain required. #380 must complete before #477 merges.
+
+### Worker36: real model feed and admitted metadata Query (private WIP)
+
+`model::prepare_semantic_batch` now dispatches the existing index/identity/staged
+model producers and returns an opaque `SemanticModelBatch`. EventCache's private
+runtime seam records that output before publish. Identity staging accepts real
+metadata/transcript preparation; publication staging captures the exact encoded
+model rows, slot recipes, repair flags and claims in an epoch-owned witness.
+Publish retains the independent identity/source checks and requires exact final
+Query/recipe agreement with that witness before any publication effect. Metadata
+and transcript recipes use the existing Current/History/slot/search effect ports.
+No alternate parser or derivation algorithm is introduced.
+
+Standalone Claude Top inputs without any candidate incident events now share
+this path with Codex. The existing relationship reducer candidate predicate
+rejects Claude messages/launches needing incident closure. PID, parent, lineage,
+relations and withdrawals retain refusals. Replacing a same-key source preserves
+original History and retires old source memberships through the shared port;
+changing affected owner keys refuses `semantic_affected_owner_retirement_pending`.
+Search readiness-marker orchestration, overview/trace effects and complete
+selected/proof/repair readers remain pending.
+
+A private Query listing entrypoint accepts the existing QueryCatalogStore port;
+filtering/rendering/window and post-read validation use the ordinary Query path.
+SQLite uses separately authored namespace selectors for the same cohort algorithm.
+A component becomes a complete metadata cohort only if it has model Query rows
+and recipes and covers every admitted file and Current owner. Other publications
+remain partial and Query refuses them. Public factories still have semantic=None;
+all public qualifications remain 0. This is not a usable backend.
+
+The replacement CI oracle remains unchanged. Static tracing identifies begin's
+actual-epoch comparison: after finish, the original handle is quiescent (None),
+while a competitor has created the next epoch. A quiescent same-generation handle
+now observes that successor like a newly opened handle. A handle bound to an old
+epoch or generation still refuses before writes. CI must confirm the diagnosis.
+
+Two explicit CI tests exercise real sanitized Codex + Claude ingest/model output,
+nonempty Query metadata and recipes, namespace-bound Query listings, replay,
+Claude replacement History, first model-record fault and every publication fault,
+and a full-model stale publisher with whole-database equality/digests. The frozen
+legacy oracle and prior replacement/stale/fault/search tests are retained.
+No local tests, formatting or CPU-bound checks ran; Root owns exact-head CI and
+format adoption. S1C is partial; S2 remains deferred and #380 holds #477 merge.

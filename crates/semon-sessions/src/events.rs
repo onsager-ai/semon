@@ -1979,6 +1979,23 @@ impl EventCache {
             .and_then(|store| store.semantic_rejection())
     }
 
+    /// Prepare with the shared native algorithm, then persist its exact staged
+    /// publication witness before exposing the payload to the publisher.
+    #[allow(dead_code)] // Private admitted runtime; public qualification is zero.
+    pub(crate) fn prepare_semantic_model_batch(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        batch: &crate::model::relation_stage::Batch,
+        now: i64,
+    ) -> io::Result<crate::model::SemanticModelBatch> {
+        let model = crate::model::prepare_semantic_batch(options, self, inputs, batch, now)?;
+        if self.record_semantic_batch(batch, model.prepared())? != Outcome::Written {
+            return Err(io::Error::other("semantic model stage changed"));
+        }
+        Ok(model)
+    }
+
     pub(crate) fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,
