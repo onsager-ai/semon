@@ -677,45 +677,105 @@ fn pg_tree_writer_witness_budget_and_mid_write_cancel_rollback_before_decode() {
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
-fn publish_fixture(tx: &mut PgTxn<'_>, data: &Fixture, previous: Option<&Ledger>) -> Result<bool,StorageError> {
-    let id=source(tx,&data.path)?;
-    let index=&data.sources.iter().find(|(p,_,_)|p==&data.path).unwrap().2;
-    publish(tx,&data.path,&data.ledger,previous,id,input(data),index.native_usage_observations.is_some())
+fn publish_fixture(
+    tx: &mut PgTxn<'_>,
+    data: &Fixture,
+    previous: Option<&Ledger>,
+) -> Result<bool, StorageError> {
+    let id = source(tx, &data.path)?;
+    let index = &data
+        .sources
+        .iter()
+        .find(|(p, _, _)| p == &data.path)
+        .unwrap()
+        .2;
+    publish(
+        tx,
+        &data.path,
+        &data.ledger,
+        previous,
+        id,
+        input(data),
+        index.native_usage_observations.is_some(),
+    )
 }
-fn oracle_record(data:&Fixture) -> serde_json::Value {
-    let db=rusqlite::Connection::open(crate::events::EventCache::path(&data.root.join("index.json"))).unwrap();
-    let path=data.path.strip_suffix("\0🦀").unwrap();
-    let encoded:String=db.query_row("SELECT value FROM meta WHERE key=?1",[format!("native_tree_summary:{path}")],|r|r.get(0)).unwrap();
+fn oracle_record(data: &Fixture) -> serde_json::Value {
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(
+        &data.root.join("index.json"),
+    ))
+    .unwrap();
+    let path = data.path.strip_suffix("\0🦀").unwrap();
+    let encoded: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{path}")],
+            |r| r.get(0),
+        )
+        .unwrap();
     serde_json::from_str(&encoded).unwrap()
 }
-fn scalar(tx:&mut PgTxn<'_>,data:&Fixture) -> serde_json::Value {
-    let bytes:Vec<u8>=tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE key=$1",&[&format!("native_tree_summary:{}",data.path).as_bytes()]).unwrap().get(0);
+fn scalar(tx: &mut PgTxn<'_>, data: &Fixture) -> serde_json::Value {
+    let bytes: Vec<u8> = tx
+        .driver
+        .query_one(
+            "SELECT value FROM semon_pg_native_meta WHERE key=$1",
+            &[&format!("native_tree_summary:{}", data.path).as_bytes()],
+        )
+        .unwrap()
+        .get(0);
     serde_json::from_slice(&bytes).unwrap()
 }
-fn interpretation_inputs(pool:&PgPool,data:&Fixture) {
+fn interpretation_inputs(pool: &PgPool, data: &Fixture) {
     use rusqlite::OptionalExtension;
-    let db=rusqlite::Connection::open(crate::events::EventCache::path(&data.root.join("index.json"))).unwrap();
-    let value=|key:&str|db.query_row("SELECT value FROM meta WHERE key=?1",[key],|r|r.get::<_,String>(0)).optional().unwrap();
-    let pricing=value("pricing_recompute_target");
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(
+        &data.root.join("index.json"),
+    ))
+    .unwrap();
+    let value = |key: &str| {
+        db.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .unwrap()
+    };
+    let pricing = value("pricing_recompute_target");
     if pricing.is_some() {
-        super::super::PgStoreMetadata::open(pool.clone(),&PgCancellation::default()).unwrap().set_pricing_target(&[1;32],0,pricing.as_deref(),&PgCancellation::default()).unwrap();
+        super::super::PgStoreMetadata::open(pool.clone(), &PgCancellation::default())
+            .unwrap()
+            .set_pricing_target(&[1; 32], 0, pricing.as_deref(), &PgCancellation::default())
+            .unwrap();
     }
-    let recipe=value("catalog_semantic_recipe");
-    if let Some(recipe)=recipe {
-        pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
-            tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)",&[&tx.namespace.as_str().as_bytes(),&b"catalog_semantic_recipe".as_slice(),&recipe.as_bytes()]).map_err(sqlstate::error)?;
-            Ok(())
-        }).unwrap();
+    let recipe = value("catalog_semantic_recipe");
+    if let Some(recipe) = recipe {
+        pool.transaction(
+            &ns("tree\0🦀"),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| {
+                tx.driver
+                    .execute(
+                        "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)",
+                        &[
+                            &tx.namespace.as_str().as_bytes(),
+                            &b"catalog_semantic_recipe".as_slice(),
+                            &recipe.as_bytes(),
+                        ],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok(())
+            },
+        )
+        .unwrap();
     }
 }
 
 #[test]
 fn pg_tree_publish_real_scalar_sqlite_oracle_noop_repair_and_restart() {
-    for harness in ["claude","codex"] {
-        let data=parser_fixture(harness);
-        let expected=oracle_record(&data);
-        let (pool,factory)=fixture(|_|{});
-        interpretation_inputs(&pool,&data);
+    for harness in ["claude", "codex"] {
+        let data = parser_fixture(harness);
+        let expected = oracle_record(&data);
+        let (pool, factory) = fixture(|_| {});
+        interpretation_inputs(&pool, &data);
         pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
             install_without_tree(tx,&data)?;
             assert!(publish_fixture(tx,&data,None)?);
@@ -732,50 +792,125 @@ fn pg_tree_publish_real_scalar_sqlite_oracle_noop_repair_and_restart() {
             Ok(())
         }).unwrap();
         drop(pool);
-        let reopened=PgPool::open(factory,limits()).unwrap();
-        let mut summary=Snapshot::restore(reopened,ns("tree\0🦀"),&data.path,&data.ledger,PgCancellation::default()).unwrap();
+        let reopened = PgPool::open(factory, limits()).unwrap();
+        let mut summary = Snapshot::restore(
+            reopened,
+            ns("tree\0🦀"),
+            &data.path,
+            &data.ledger,
+            PgCancellation::default(),
+        )
+        .unwrap();
         summary.load_shared_usage().unwrap();
         for tool in data.oracle.tools.keys() {
-            assert_eq!(summary.tool_name(tool).unwrap(),data.oracle.tool_name(tool).unwrap());
+            assert_eq!(
+                summary.tool_name(tool).unwrap(),
+                data.oracle.tool_name(tool).unwrap()
+            );
         }
-        assert!(serde_json::to_value(summary.usage_by_id).unwrap()==serde_json::to_value(&data.oracle.usage_by_id).unwrap());
+        assert!(
+            serde_json::to_value(summary.usage_by_id).unwrap()
+                == serde_json::to_value(&data.oracle.usage_by_id).unwrap()
+        );
         std::fs::remove_dir_all(data.root).unwrap();
     }
 }
 
 #[test]
 fn pg_tree_publish_every_effect_rollback_and_pricing_epoch_changes_interpretation() {
-    let data=parser_fixture("codex");
-    let (pool,_) =fixture(|_|{});
-    interpretation_inputs(&pool,&data);
-    for namespace in ["tree\0🦀","foreign"] {
-        pool.transaction(&ns(namespace),TxnKind::Write,&PgCancellation::default(),|tx|install_without_tree(tx,&data)).unwrap();
+    let data = parser_fixture("codex");
+    let (pool, _) = fixture(|_| {});
+    interpretation_inputs(&pool, &data);
+    for namespace in ["tree\0🦀", "foreign"] {
+        pool.transaction(
+            &ns(namespace),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| install_without_tree(tx, &data),
+        )
+        .unwrap();
     }
-    let baseline=|namespace:&str|pool.transaction(&ns(namespace),TxnKind::ReadSnapshot,&PgCancellation::default(),|tx|Ok(state(tx))).unwrap();
-    let own=baseline("tree\0🦀");let foreign=baseline("foreign");
-    let mut count=0;
+    let baseline = |namespace: &str| {
+        pool.transaction(
+            &ns(namespace),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            |tx| Ok(state(tx)),
+        )
+        .unwrap()
+    };
+    let own = baseline("tree\0🦀");
+    let foreign = baseline("foreign");
+    let mut count = 0;
     for fault in 1..64 {
-        FAIL_AFTER.with(|p|p.set(Some(fault)));
-        let result=pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx|publish_fixture(tx,&data,None));
-        let remaining=FAIL_AFTER.with(|p|p.replace(None));
-        if result.is_ok() { assert!(remaining.is_some());break; }
-        count+=1;
-        assert!(baseline("tree\0🦀")==own,"all native/store bytes rollback");
-        assert!(baseline("foreign")==foreign,"foreign bytes unchanged");
+        FAIL_AFTER.with(|p| p.set(Some(fault)));
+        let result = pool.transaction(
+            &ns("tree\0🦀"),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| publish_fixture(tx, &data, None),
+        );
+        let remaining = FAIL_AFTER.with(|p| p.replace(None));
+        if result.is_ok() {
+            assert!(remaining.is_some());
+            break;
+        }
+        count += 1;
+        assert!(
+            baseline("tree\0🦀") == own,
+            "all native/store bytes rollback"
+        );
+        assert!(baseline("foreign") == foreign, "foreign bytes unchanged");
     }
-    assert!(count>=10,"generation dimensions scalar complete and header boundaries");
-    let before=pool.transaction(&ns("tree\0🦀"),TxnKind::ReadSnapshot,&PgCancellation::default(),|tx|Ok(scalar(tx,&data))).unwrap();
-    let host=super::super::PgStoreMetadata::open(pool.clone(),&PgCancellation::default()).unwrap();
-    let revision=pool.transaction(&ns("tree\0🦀"),TxnKind::ReadSnapshot,&PgCancellation::default(),|tx|Ok(super::super::store_metadata::read(tx)?.0)).unwrap();
-    host.set_pricing_target(&[2;32],revision,Some("pricing-new\0🦀"),&PgCancellation::default()).unwrap();
-    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
-        assert!(publish_fixture(tx,&data,Some(&data.ledger))?);
-        let after=scalar(tx,&data);
-        assert_ne!(before["interpretation_witness"],after["interpretation_witness"]);
-        assert_eq!(before["projection_witness"],after["projection_witness"]);
-        assert!(before["summary"]==after["summary"],"pricing metadata cannot invent native facts");
-        Ok(())
-    }).unwrap();
+    assert!(
+        count >= 10,
+        "generation dimensions scalar complete and header boundaries"
+    );
+    let before = pool
+        .transaction(
+            &ns("tree\0🦀"),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            |tx| Ok(scalar(tx, &data)),
+        )
+        .unwrap();
+    let host =
+        super::super::PgStoreMetadata::open(pool.clone(), &PgCancellation::default()).unwrap();
+    let revision = pool
+        .transaction(
+            &ns("tree\0🦀"),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            |tx| Ok(super::super::store_metadata::read(tx)?.0),
+        )
+        .unwrap();
+    host.set_pricing_target(
+        &[2; 32],
+        revision,
+        Some("pricing-new\0🦀"),
+        &PgCancellation::default(),
+    )
+    .unwrap();
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            assert!(publish_fixture(tx, &data, Some(&data.ledger))?);
+            let after = scalar(tx, &data);
+            assert_ne!(
+                before["interpretation_witness"],
+                after["interpretation_witness"]
+            );
+            assert_eq!(before["projection_witness"], after["projection_witness"]);
+            assert!(
+                before["summary"] == after["summary"],
+                "pricing metadata cannot invent native facts"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
@@ -813,4 +948,32 @@ fn pg_tree_publish_real_append_and_replacement_complete_without_seeded_headers()
         }).unwrap();
         std::fs::remove_dir_all(initial.root).unwrap();
     }
+}
+
+#[test]
+fn pg_tree_publish_oversize_scalar_is_unreadable_and_exact_receipt_repairs() {
+    let data=parser_fixture("codex");
+    let (pool,_) =fixture(|_|{});
+    interpretation_inputs(&pool,&data);
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+        install_without_tree(tx,&data)?;
+        let id=source(tx,&data.path)?;
+        let mut big=input(&data).clone();
+        big.codex_turn.last=Some(crate::codex_lifecycle::TurnLifecycle {
+            thread_id:"x".repeat(1048576),turn_id:"oversize".into(),phase:crate::codex_lifecycle::TurnPhase::Completed,offset:0,source_generation:String::new()
+        });
+        assert!(!publish(tx,&data.path,&data.ledger,None,id,&big,true)?);
+        assert_eq!(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_tree_headers",&[]).unwrap().get::<_,i64>(0),0);
+        assert_eq!(metadata(tx,format!("native_tree_failure:{}",data.path).as_bytes())?,Some(header_ledger(&data.ledger)));
+        Ok(())
+    }).unwrap();
+    assert!(Snapshot::restore(pool.clone(),ns("tree\0🦀"),&data.path,&data.ledger,PgCancellation::default()).is_err());
+    pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+        assert!(stage_fixture(tx,&data).is_err(),"ordinary duplicate stage remains refused");
+        assert!(publish_fixture(tx,&data,None)?);
+        assert!(metadata(tx,format!("native_tree_failure:{}",data.path).as_bytes())?.is_none());
+        Ok(())
+    }).unwrap();
+    assert!(Snapshot::restore(pool,ns("tree\0🦀"),&data.path,&data.ledger,PgCancellation::default()).is_ok());
+    std::fs::remove_dir_all(data.root).unwrap();
 }

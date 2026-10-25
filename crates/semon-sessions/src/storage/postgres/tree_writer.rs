@@ -199,7 +199,9 @@ pub(super) fn publish(
     let (_, pricing) = super::store_metadata::read(tx)?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if locked.len()!=1 { return Err(StorageError::ScopeChanged); }
+    if locked.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
     let recipe = metadata(tx, b"catalog_semantic_recipe")?;
     let authority = tx.driver.query("SELECT s.usage_ready FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace=$1 AND c.source_path=$2 AND s.source_id=$3", &[&ns,&path.as_bytes(),&expected_source]).map_err(sqlstate::error)?;
     if authority.len()!=1 || authority[0].get::<_,bool>(0)!=normalized_usage { return Err(StorageError::Conflict); }
