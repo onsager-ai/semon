@@ -7745,6 +7745,9 @@ mod tests {
             let (f, foreign, options, _) = model_sources();
             let options = &options[1];
             let inputs = named_claude_inputs(options, 2);
+            let initiator = inputs[0].full_path(options);
+            let raw = fs::read_to_string(&initiator).unwrap().replace("\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"");
+            fs::write(initiator, raw).unwrap();
             let mut cache = open(&f.config);
             let mut other = open(&foreign);
             let (other_batch, other_model) = claude_ready(&mut other, options, &inputs);
@@ -7759,6 +7762,7 @@ mod tests {
             let selector = Selector::ClaudeName {
                 name: "worker".into(),
             };
+            let native_rows: i64 = f.db().query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
             let before_fault = shared_state(&f);
             FAIL_EFFECT.with(|p| p.set(Some("semantic_name_members_reset")));
             assert!(cache.semantic_select(batch.epoch, &selector).is_err());
@@ -7780,6 +7784,7 @@ mod tests {
                 Outcome::Conflict
             );
             assert_eq!(shared_state(&f), after_replay);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), native_rows);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
             drop(cache);
             let mut cache = open(&f.config);
@@ -7787,8 +7792,9 @@ mod tests {
                 claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             assert_eq!(
                 cache.semantic_select(fresh.epoch, &selector).unwrap().count,
-                2
+                1
             );
+            assert_eq!(f.db().query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), native_rows);
             oracle(&cache, options, &inputs, fresh_model.prepared());
             publish(&mut cache, &f, &fresh, &fresh_model);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
