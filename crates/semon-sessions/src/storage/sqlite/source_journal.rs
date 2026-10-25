@@ -676,7 +676,10 @@ impl LegacySourceJournal {
 }
 
 #[cfg(test)]
-fn local_persist_intent(connection: &mut Connection, intent: &SourceIntent) -> Result<(), StorageError> {
+fn local_persist_intent(
+    connection: &mut Connection,
+    intent: &SourceIntent,
+) -> Result<(), StorageError> {
     let db = connection;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -687,7 +690,9 @@ fn local_persist_intent(connection: &mut Connection, intent: &SourceIntent) -> R
     tx.commit().map_err(|_| StorageError::CommitUncertain)
 }
 
-pub(crate) fn local_pending_intents(connection: &Connection) -> Result<Vec<SourceIntent>, StorageError> {
+pub(crate) fn local_pending_intents(
+    connection: &Connection,
+) -> Result<Vec<SourceIntent>, StorageError> {
     let db = connection;
     let tx = db.unchecked_transaction().map_err(failed)?;
     refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
@@ -734,8 +739,7 @@ fn local_discover(
     if let Some(receipt) = stored_receipt(&tx, None, operation)? {
         return Ok(receipt);
     }
-    discover(&tx, None, paths, complete)
-        .map_err(|error| phase_failed("discover-effect", error))?;
+    discover(&tx, None, paths, complete).map_err(|error| phase_failed("discover-effect", error))?;
     crate::events::store::require_current_sql(&tx).map_err(failed)?;
     insert_receipt(&tx, None, operation)?;
     tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -803,7 +807,10 @@ pub(crate) fn local_claims(
     claims(db, None, paths).map_err(failed)
 }
 
-pub(crate) fn local_pending(connection: &Connection, limit: usize) -> Result<Vec<String>, StorageError> {
+pub(crate) fn local_pending(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<String>, StorageError> {
     if limit == 0 || limit > MAX_PATHS {
         return Err(StorageError::InvalidArguments);
     }
@@ -829,7 +836,9 @@ pub(crate) fn local_pending(connection: &Connection, limit: usize) -> Result<Vec
     Ok(paths)
 }
 
-pub(crate) fn local_backfill_state(connection: &Connection) -> Result<Option<String>, StorageError> {
+pub(crate) fn local_backfill_state(
+    connection: &Connection,
+) -> Result<Option<String>, StorageError> {
     let db = connection;
     refuse_bound(db, None, &mut JournalWork::default()).map_err(failed)?;
     crate::events::store::require_current_sql(db).map_err(failed)?;

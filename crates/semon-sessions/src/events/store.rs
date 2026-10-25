@@ -2248,8 +2248,8 @@ impl SourceObservationStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(source_journal::local_failure)?;
-        let witness = DiscoveryWitness::read(&tx, &self.discovery)
-            .map_err(source_journal::local_failure)?;
+        let witness =
+            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         let current = cached.as_ref().is_some_and(|(old, inputs, done)| {
             *old == witness && inputs == paths && *done == complete
         });
@@ -2269,8 +2269,8 @@ impl SourceObservationStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(source_journal::local_failure)?;
-        let witness = DiscoveryWitness::read(&tx, &self.discovery)
-            .map_err(source_journal::local_failure)?;
+        let witness =
+            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         require_current_sql(&tx).map_err(source_journal::local_failure)?;
         source_journal::persist_intent_sql(&tx, None, intent)?;
         let recovery_complete = self.discovery.recovery == Some(witness)
@@ -2281,8 +2281,8 @@ impl SourceObservationStore for SqliteStore {
                     |r| r.get::<_, bool>(0),
                 )
                 .map_err(source_journal::local_failure)?;
-        let committed = DiscoveryWitness::read(&tx, &self.discovery)
-            .map_err(source_journal::local_failure)?;
+        let committed =
+            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         // Intent triggers cannot smuggle a changed current contract into a witness.
         require_current_sql(&tx).map_err(source_journal::local_failure)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -2307,8 +2307,8 @@ impl SourceObservationStore for SqliteStore {
         complete: bool,
     ) -> Result<SourceMutationReceipt, StorageError> {
         validate_paths(paths)?;
-        let payload = serde_json::to_vec(&(paths, complete))
-            .map_err(|_| StorageError::InvalidArguments)?;
+        let payload =
+            serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
         if let Some(receipt) = operation_replay(operation, None, "discover", &payload)? {
             return Ok(receipt);
         }
@@ -2322,8 +2322,8 @@ impl SourceObservationStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(source_journal::local_failure)?;
-        let witness = DiscoveryWitness::read(&tx, &self.discovery)
-            .map_err(source_journal::local_failure)?;
+        let witness =
+            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         require_current_sql(&tx).map_err(source_journal::local_failure)?;
         if let Some(receipt) = source_journal::stored_receipt(&tx, None, operation)? {
             // Only a matching terminal receipt may consume a captured intent.
@@ -2347,8 +2347,8 @@ impl SourceObservationStore for SqliteStore {
                     |r| r.get::<_, bool>(0),
                 )
                 .map_err(source_journal::local_failure)?;
-        let committed = DiscoveryWitness::read(&tx, &self.discovery)
-            .map_err(source_journal::local_failure)?;
+        let committed =
+            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         if committed.contract != witness.contract
             || committed.main_schema != witness.main_schema
             || committed.temp_schema != witness.temp_schema
@@ -2876,7 +2876,6 @@ impl IndexStore for SqliteStore {
         read_append_evidence(&self.connection, path).map_err(failure)
     }
 
-
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
@@ -2899,7 +2898,6 @@ impl IndexStore for SqliteStore {
 
         self.connection.query_row(configured::metadata_sql(&self.connection, "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", "SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')").map_err(failure)?, [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
     }
-
 
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
         ledger_row(&self.connection, path)
@@ -7706,7 +7704,9 @@ mod tests {
                 .map_err(StoreError::Configured)?
             {
                 SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(()),
-                SourceMutationReceipt::Conflict => Err(StoreError::Configured(StorageError::Conflict)),
+                SourceMutationReceipt::Conflict => {
+                    Err(StoreError::Configured(StorageError::Conflict))
+                }
             }
         }
     }
@@ -8295,13 +8295,35 @@ mod tests {
                 .apply(IndexStore::source_observations_mut(&mut store).unwrap())
                 .is_err()
         );
-        assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(store.connection.query_row("SELECT count(*) FROM source_observation_receipts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM source_observation_receipts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(
             SourceObservationStore::pending_intents(&store).unwrap(),
             vec![intent.clone()]
         );
-        store.connection.execute_batch("DROP TRIGGER fail_owner_receipt;").unwrap();
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_owner_receipt;")
+            .unwrap();
         assert_eq!(
             intent
                 .apply(IndexStore::source_observations_mut(&mut store).unwrap())
@@ -8309,8 +8331,22 @@ mod tests {
             SourceMutationReceipt::Applied
         );
         // Completion is already durable before the producer's final ACK call.
-        assert!(SourceObservationStore::pending_intents(&store).unwrap().is_empty());
-        assert_eq!(store.connection.query_row("SELECT count(*) FROM source_observation_receipts", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert!(
+            SourceObservationStore::pending_intents(&store)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM source_observation_receipts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
         let changes = store.connection.total_changes();
         SourceObservationStore::acknowledge_intent(&mut store, &operation).unwrap();
         assert_eq!(store.connection.total_changes(), changes);
@@ -8347,10 +8383,14 @@ mod tests {
         let _recording = crate::native_timing::catalog_commit_tests::recording(true);
         crate::native_timing::take_discovery_records();
         assert!(cache.discover_recovery_sources().unwrap());
-        cache.discover_catalog_sources(&options, &inputs, false).unwrap();
+        cache
+            .discover_catalog_sources(&options, &inputs, false)
+            .unwrap();
         crate::native_timing::take_discovery_records();
         assert!(cache.discover_recovery_sources().unwrap());
-        cache.discover_catalog_sources(&options, &inputs, false).unwrap();
+        cache
+            .discover_catalog_sources(&options, &inputs, false)
+            .unwrap();
         let records = crate::native_timing::take_discovery_records();
         assert_eq!(records.len(), 2);
         for (_, counts) in records {
