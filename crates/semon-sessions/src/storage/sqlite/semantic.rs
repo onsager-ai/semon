@@ -429,7 +429,10 @@ fn lifecycle_current(prepared: &PreparedSources) -> bool {
     authority.current().unwrap_or(false)
 }
 
-struct ScopedProjection<'a> { db: &'a Connection, ns: &'a str }
+struct ScopedProjection<'a> {
+    db: &'a Connection,
+    ns: &'a str,
+}
 impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProjection<'_> {
     fn paths(&self) -> rusqlite::Result<Vec<String>> {
         self.db.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([self.ns],|r|r.get(0))?.collect()
@@ -440,19 +443,32 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
     fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)> {
         self.db.query_row("SELECT f.file_id,s.event_after FROM main.files f JOIN main.catalog_semantic_sources s ON s.namespace=f.namespace AND s.source_path=f.path WHERE f.namespace=?1 AND s.namespace=?1 AND f.path=?2",params![self.ns,path],|r|Ok((r.get(0)?,r.get(1)?)))
     }
-    fn candidates(&self, file: i64, after: i64, limit: usize,
-        visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()> {
+    fn candidates(
+        &self,
+        file: i64,
+        after: i64,
+        limit: usize,
+        visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()> {
         let columns = crate::events::store::semantic_stage::projection_columns();
         let predicate = crate::events::store::semantic_stage::projection_predicate("");
-        let sql = format!("SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4");
+        let sql = format!(
+            "SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4"
+        );
         let mut q = self.db.prepare(&sql)?;
-        let mut rows = q.query(params![self.ns,file,after,limit as i64])?;
+        let mut rows = q.query(params![self.ns, file, after, limit as i64])?;
         while let Some(row) = rows.next()? {
             let (seq, event) = crate::events::store::semantic_stage::projection_candidate(row)?;
-            let kind = serde_json::to_value(event.k).map_err(|_|rusqlite::Error::InvalidQuery)?;
+            let kind = serde_json::to_value(event.k).map_err(|_| rusqlite::Error::InvalidQuery)?;
             let kind = kind.as_str().ok_or(rusqlite::Error::InvalidQuery)?;
             let occurrence: i64 = self.db.query_row("SELECT COUNT(*) FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND o=?3 AND b=?4 AND k=?5 AND seq<?6",params![self.ns,file,i64::try_from(event.o).map_err(|_|rusqlite::Error::InvalidQuery)?,event.b,kind,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
-            if !visit(seq,event,usize::try_from(occurrence).map_err(|_|rusqlite::Error::InvalidQuery)?)? { break; }
+            if !visit(
+                seq,
+                event,
+                usize::try_from(occurrence).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            )? {
+                break;
+            }
         }
         Ok(())
     }
@@ -468,7 +484,10 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         }
         Ok(())
     }
-    fn put(&self, row: &crate::events::store::semantic_stage::ProjectedEvent) -> rusqlite::Result<()> {
+    fn put(
+        &self,
+        row: &crate::events::store::semantic_stage::ProjectedEvent,
+    ) -> rusqlite::Result<()> {
         let native = &row.native;
         self.db.execute("INSERT OR REPLACE INTO main.catalog_semantic_events(namespace,source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![self.ns,native.owner,row.key,native.owner,row.kind,row.msg,native.event.id,row.name,row.encoded,row.seq,crate::model::native_copy_identity(&native.event)])?;
         Ok(())
@@ -486,7 +505,10 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
     }
 }
 
-struct ScopedQualification<'a> { db: &'a Connection, ns: &'a str }
+struct ScopedQualification<'a> {
+    db: &'a Connection,
+    ns: &'a str,
+}
 impl crate::events::store::semantic_stage::QualificationPort for ScopedQualification<'_> {
     fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
         self.db.prepare("SELECT source_path,event_key,copy_key FROM main.catalog_semantic_events WHERE namespace=?1 AND qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([self.ns],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
@@ -508,11 +530,16 @@ impl crate::events::store::semantic_stage::QualificationPort for ScopedQualifica
 
 fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
-    if unsupported { return Err(refuse("semantic_nonprimitive_event_harness")); }
+    if unsupported {
+        return Err(refuse("semantic_nonprimitive_event_harness"));
+    }
     let predicate = crate::events::store::semantic_stage::projection_predicate("e.");
     let peer: bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND {predicate})"),[ns],|r|r.get(0)).map_err(error)?;
-    if peer { return Err(refuse("semantic_claude_native_frontier_pending")); }
-    crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns }).map_err(error)
+    if peer {
+        return Err(refuse("semantic_claude_native_frontier_pending"));
+    }
+    crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns })
+        .map_err(error)
 }
 
 fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
@@ -1332,15 +1359,23 @@ impl Stage {
         if !valid {
             return Err(refuse("stale semantic selector"));
         }
-        if matches!(selector, crate::model::relation_stage::Selector::ClaudeName { .. }) {
+        if matches!(
+            selector,
+            crate::model::relation_stage::Selector::ClaudeName { .. }
+        ) {
             return Err(refuse("semantic_claude_name_members_pending"));
         }
-        if matches!(selector, crate::model::relation_stage::Selector::ClaudeReceipt { .. }
-            | crate::model::relation_stage::Selector::ClaudeCall { .. }) {
+        if matches!(
+            selector,
+            crate::model::relation_stage::Selector::ClaudeReceipt { .. }
+                | crate::model::relation_stage::Selector::ClaudeCall { .. }
+        ) {
             // A negative is authoritative only after discovery, reduction and
             // the separate copied-event qualification sub-phase all complete.
             let complete: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND phase IN ('relations','publication')) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (index_done=0 OR events_done=0 OR identity_done=0)) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND qualified=0) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0)).map_err(error)?;
-            if !complete { return Err(refuse("semantic_claude_event_projection_pending")); }
+            if !complete {
+                return Err(refuse("semantic_claude_event_projection_pending"));
+            }
         }
         let mut lookup = AdmittedLookup {
             db: &tx,
@@ -1777,7 +1812,11 @@ impl Stage {
                         ns,
                     })
                     .map_err(error)?
-                    && crate::events::store::semantic_stage::qualify_with(&ScopedQualification { db: &tx, ns }).map_err(error)?
+                    && crate::events::store::semantic_stage::qualify_with(&ScopedQualification {
+                        db: &tx,
+                        ns,
+                    })
+                    .map_err(error)?
                 {
                     tx.execute("UPDATE main.catalog_semantic_stage SET phase='relations' WHERE namespace=?1 AND phase='identity'",[ns]).map_err(error)?;
                     result_phase = Phase::Relations;
