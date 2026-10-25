@@ -1,6 +1,21 @@
 //! Private read-only Tree family. Public backend selection remains closed.
-use super::{PgCancellation, PgPool, sqlstate, txn::{PgTxn, TxnKind}};
-use crate::{events::{Ledger, CACHE_VERSION, store::{header_ledger, tree_state::{SharedUsage, TreeCheckpoint}}}, native_tree::Summary, selected_read, storage::{LogicalSourceNamespace, StorageError, StoreConfig}, Tokens};
+use super::{
+    PgCancellation, PgPool, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
+use crate::{
+    Tokens,
+    events::{
+        CACHE_VERSION, Ledger,
+        store::{
+            header_ledger,
+            tree_state::{SharedUsage, TreeCheckpoint},
+        },
+    },
+    native_tree::Summary,
+    selected_read,
+    storage::{LogicalSourceNamespace, StorageError, StoreConfig},
+};
 use std::{collections::BTreeMap, fmt, io};
 
 #[cfg(test)]
@@ -19,7 +34,9 @@ pub(crate) struct Snapshot {
     poisoned: bool,
 }
 impl fmt::Debug for Snapshot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("PgTreeSnapshot") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PgTreeSnapshot")
+    }
 }
 fn io_error(error: StorageError) -> io::Error {
     match error {
@@ -27,48 +44,111 @@ fn io_error(error: StorageError) -> io::Error {
         _ => io::Error::other(error),
     }
 }
-fn budget(error: io::Error) -> StorageError {
-    let _ = error;
+fn budget(_: io::Error) -> StorageError {
     StorageError::Busy
 }
 
 impl Snapshot {
     // Deliberately private until the complete IndexStore owns capture.
     #[allow(dead_code)]
-    pub(crate) fn restore(pool: PgPool, namespace: LogicalSourceNamespace, path: &str, ledger: &Ledger, control: PgCancellation) -> io::Result<Summary> {
+    pub(crate) fn restore(
+        pool: PgPool,
+        namespace: LogicalSourceNamespace,
+        path: &str,
+        ledger: &Ledger,
+        control: PgCancellation,
+    ) -> io::Result<Summary> {
         let _scope = selected_read::Scope::ensure();
         selected_read::check()?;
         selected_read::charge(512, path.len())?;
-        let mut snapshot = Self { pool, namespace, path: path.into(), ledger: ledger.clone(), file: 0, projection: 0, source: 0, control, poisoned: false };
-        let (file, projection, source, mut summary) = snapshot.pool.transaction(&snapshot.namespace, TxnKind::ReadSnapshot, &snapshot.control, |tx| {
-            let (file, projection, source) = snapshot.authority(tx, false)?;
-            let mut summary = Summary::default();
-            rows(tx, "tree_labels", "projection_id", projection, &["label", "value"], 1, |values| {
-                let key = required(&values, 0)?;
-                let value = required(&values, 1)?;
-                match key.as_str() {
-                    "first" => summary.first = Some(value),
-                    "last" => summary.last = Some(value),
-                    "cwd" => summary.cwd = Some(value),
-                    "branch" => summary.branch = Some(value),
-                    "codex_turn" => summary.codex_turn = serde_json::from_str(&value).map_err(|_| StorageError::Unavailable)?,
-                    _ => return Err(StorageError::Unavailable),
-                }
-                Ok(())
+        let mut snapshot = Self {
+            pool,
+            namespace,
+            path: path.into(),
+            ledger: ledger.clone(),
+            file: 0,
+            projection: 0,
+            source: 0,
+            control,
+            poisoned: false,
+        };
+        let (file, projection, source, mut summary) = snapshot
+            .pool
+            .transaction(
+                &snapshot.namespace,
+                TxnKind::ReadSnapshot,
+                &snapshot.control,
+                |tx| {
+                    let (file, projection, source) = snapshot.authority(tx, false)?;
+                    let mut summary = Summary::default();
+                    rows(
+                        tx,
+                        "tree_labels",
+                        "projection_id",
+                        projection,
+                        &["label", "value"],
+                        1,
+                        |values| {
+                            let key = required(&values, 0)?;
+                            let value = required(&values, 1)?;
+                            match key.as_str() {
+                                "first" => summary.first = Some(value),
+                                "last" => summary.last = Some(value),
+                                "cwd" => summary.cwd = Some(value),
+                                "branch" => summary.branch = Some(value),
+                                "codex_turn" => {
+                                    summary.codex_turn = serde_json::from_str(&value)
+                                        .map_err(|_| StorageError::Unavailable)?
+                                }
+                                _ => return Err(StorageError::Unavailable),
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    rows(
+                        tx,
+                        "tree_models",
+                        "projection_id",
+                        projection,
+                        &["model"],
+                        1,
+                        |values| {
+                            summary.models.insert(required(&values, 0)?);
+                            Ok(())
+                        },
+                    )?;
+                    rows(
+                        tx,
+                        "tree_tools",
+                        "projection_id",
+                        projection,
+                        &["tool_id", "name", "convert_to(closed::text,'UTF8')"],
+                        1,
+                        |values| {
+                            let id = required(&values, 0)?;
+                            match required(&values, 2)?.as_str() {
+                                "false" => {
+                                    if let Some(name) = &values[1] {
+                                        summary.tools.insert(id, name.clone());
+                                    }
+                                }
+                                "true" => (),
+                                _ => return Err(StorageError::Unavailable),
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    Ok((file, projection, source, summary))
+                },
+            )
+            .map_err(|error| {
+                selected_read::check()
+                    .err()
+                    .unwrap_or_else(|| io_error(error))
             })?;
-            rows(tx, "tree_models", "projection_id", projection, &["model"], 1, |values| { summary.models.insert(required(&values, 0)?); Ok(()) })?;
-            rows(tx, "tree_tools", "projection_id", projection, &["tool_id", "name", "convert_to(closed::text,'UTF8')"], 1, |values| {
-                let id = required(&values, 0)?;
-                match required(&values, 2)?.as_str() {
-                    "false" => if let Some(name) = &values[1] { summary.tools.insert(id, name.clone()); },
-                    "true" => (),
-                    _ => return Err(StorageError::Unavailable),
-                }
-                Ok(())
-            })?;
-            Ok((file, projection, source, summary))
-        }).map_err(|error| selected_read::check().err().unwrap_or_else(|| io_error(error)))?;
-        snapshot.file = file; snapshot.projection = projection; snapshot.source = source;
+        snapshot.file = file;
+        snapshot.projection = projection;
+        snapshot.source = source;
         summary.stored = Some(TreeCheckpoint::Pg(snapshot));
         Ok(summary)
     }
@@ -84,18 +164,36 @@ impl Snapshot {
         selected_read::charge(64, 0).map_err(budget)?;
         let row = result.first().ok_or(StorageError::Busy)?;
         let actual = (row.get(0), row.get(1), row.get(2));
-        if bound && actual != (self.file, self.projection, self.source) { return Err(StorageError::Busy); }
+        if bound && actual != (self.file, self.projection, self.source) {
+            return Err(StorageError::Busy);
+        }
         Ok(actual)
     }
 
-    fn with<T>(&self, read: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>) -> io::Result<T> {
+    fn with<T>(
+        &self,
+        read: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
+    ) -> io::Result<T> {
         let _scope = selected_read::Scope::ensure();
         selected_read::check()?;
-        if self.poisoned { return Err(io::ErrorKind::WouldBlock.into()); }
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
-            self.authority(tx, true)?;
-            read(tx)
-        }).map_err(|error| selected_read::check().err().unwrap_or_else(|| io_error(error)))
+        if self.poisoned {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| {
+                    self.authority(tx, true)?;
+                    read(tx)
+                },
+            )
+            .map_err(|error| {
+                selected_read::check()
+                    .err()
+                    .unwrap_or_else(|| io_error(error))
+            })
     }
     pub(crate) fn bind_configured(&mut self, _config: StoreConfig) {
         // StoreConfig currently only selects SQLite. It cannot rebind PG.
@@ -139,31 +237,69 @@ impl Snapshot {
         })
     }
 }
-fn text(bytes: Vec<u8>) -> Result<String, StorageError> { String::from_utf8(bytes).map_err(|_| StorageError::Unavailable) }
-fn required(values: &[Option<String>], at: usize) -> Result<String, StorageError> { values[at].clone().ok_or(StorageError::Unavailable) }
+fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
+    String::from_utf8(bytes).map_err(|_| StorageError::Unavailable)
+}
+fn required(values: &[Option<String>], at: usize) -> Result<String, StorageError> {
+    values[at].clone().ok_or(StorageError::Unavailable)
+}
 
 // Adapter-local keyset reader: one fixed-size lengths row first, charge its
 // dynamic bytes eightfold using the existing budget, then fetch exactly one row
 // from the SAME repeatable-read snapshot. Driver allocation precedes decoding
 // but follows admission; no complete family Vec<Row> is constructed.
-fn rows(tx: &mut PgTxn<'_>, family: &str, owner: &str, id: i64, columns: &[&str], keys: usize, mut consume: impl FnMut(Vec<Option<String>>) -> Result<(), StorageError>) -> Result<(), StorageError> {
+fn rows(
+    tx: &mut PgTxn<'_>,
+    family: &str,
+    owner: &str,
+    id: i64,
+    columns: &[&str],
+    keys: usize,
+    mut consume: impl FnMut(Vec<Option<String>>) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
     let key = format!("ARRAY[{}]", columns[..keys].join(","));
-    let predicate = format!("FROM semon_pg_native_{family} WHERE namespace=$1 AND {owner}=$2 AND ($3::bytea[] IS NULL OR {key}>$3) ORDER BY {key} LIMIT 1");
-    let sizes = columns.iter().map(|col| format!("coalesce(octet_length({col}),0)::bigint")).collect::<Vec<_>>().join(",");
+    let predicate = format!(
+        "FROM semon_pg_native_{family} WHERE namespace=$1 AND {owner}=$2 AND ($3::bytea[] IS NULL OR {key}>$3) ORDER BY {key} LIMIT 1"
+    );
+    let sizes = columns
+        .iter()
+        .map(|col| format!("coalesce(octet_length({col}),0)::bigint"))
+        .collect::<Vec<_>>()
+        .join(",");
     let mut cursor: Option<Vec<Vec<u8>>> = None;
     loop {
         tx.check()?;
         selected_read::checkpoint("pg_tree_row").map_err(budget)?;
-        let lengths = tx.driver.query(&format!("SELECT {sizes} {predicate}"), &[&tx.namespace.as_str().as_bytes(), &id, &cursor]).map_err(sqlstate::error)?;
-        let Some(lengths) = lengths.first() else { break; };
-        let dynamic = (0..columns.len()).try_fold(0usize, |sum, i| usize::try_from(lengths.get::<_, i64>(i)).map(|n| sum.saturating_add(n)).map_err(|_| StorageError::Unavailable))?;
+        let lengths = tx
+            .driver
+            .query(
+                &format!("SELECT {sizes} {predicate}"),
+                &[&tx.namespace.as_str().as_bytes(), &id, &cursor],
+            )
+            .map_err(sqlstate::error)?;
+        let Some(lengths) = lengths.first() else {
+            break;
+        };
+        let dynamic = (0..columns.len()).try_fold(0usize, |sum, i| {
+            usize::try_from(lengths.get::<_, i64>(i))
+                .map(|n| sum.saturating_add(n))
+                .map_err(|_| StorageError::Unavailable)
+        })?;
         selected_read::charge(128, dynamic).map_err(budget)?;
         tx.check()?;
-        let row = tx.driver.query_one(&format!("SELECT {} {predicate}", columns.join(",")), &[&tx.namespace.as_str().as_bytes(), &id, &cursor]).map_err(sqlstate::error)?;
+        let row = tx
+            .driver
+            .query_one(
+                &format!("SELECT {} {predicate}", columns.join(",")),
+                &[&tx.namespace.as_str().as_bytes(), &id, &cursor],
+            )
+            .map_err(sqlstate::error)?;
         #[cfg(test)]
-        DECODED.with(|value| value.set(value.get()+1));
+        DECODED.with(|value| value.set(value.get() + 1));
         cursor = Some((0..keys).map(|i| row.get(i)).collect());
-        let values = (0..columns.len()).map(|i| row.get::<_, Option<Vec<u8>>>(i).map(text).transpose()).collect::<Result<_, _>>()?;
+        let values = (0..columns.len())
+            .map(|i| row.get::<_, Option<Vec<u8>>>(i).map(text).transpose())
+            .collect::<Result<_, _>>()?;
         consume(values)?;
     }
     Ok(())
