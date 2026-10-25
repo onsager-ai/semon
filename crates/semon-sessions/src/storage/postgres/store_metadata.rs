@@ -100,14 +100,24 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ).map_err(sqlstate::error)?.iter().map(|r| r.get(0)).collect();
         let mut expected = match table {
             "owner" => vec!["singleton", "(contract = 1)", "(epoch = 1)"],
-            "state" => vec!["singleton", "(revision >= 0)", "(octet_length(pricing_target) <= 1048576)"],
-            _ => vec!["(octet_length(operation_id) = 32)", "(octet_length(request_digest) = 32)", "(revision >= 0)"],
+            "state" => vec![
+                "singleton",
+                "(revision >= 0)",
+                "(octet_length(pricing_target) <= 1048576)",
+            ],
+            _ => vec![
+                "(octet_length(operation_id) = 32)",
+                "(octet_length(request_digest) = 32)",
+                "(revision >= 0)",
+            ],
         };
         expected.sort_unstable();
         let shape: bool = tx.driver.query_one(
             "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=$1::regclass AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=$1::regclass)", &[&name]
         ).map_err(sqlstate::error)?.get(0);
-        if checks != expected || !shape { return Err(StorageError::ScopeChanged); }
+        if checks != expected || !shape {
+            return Err(StorageError::ScopeChanged);
+        }
         let owners = tx
             .driver
             .query(
@@ -172,7 +182,9 @@ pub(super) fn read(tx: &mut PgTxn<'_>) -> Result<(i64, Option<String>), StorageE
         return Err(StorageError::ScopeChanged);
     }
     let bad_operation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_store_operations p CROSS JOIN semon_pg_store_owner o WHERE p.owner<>o.owner)", &[]).map_err(sqlstate::error)?.get(0);
-    if bad_operation { return Err(StorageError::ScopeChanged); }
+    if bad_operation {
+        return Err(StorageError::ScopeChanged);
+    }
     let bytes = rows[0].get::<_, Option<i64>>(1);
     if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) {
         return Err(StorageError::ScopeChanged);
@@ -245,7 +257,9 @@ impl PgStoreMetadata {
 thread_local! { static FAIL_MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 fn mutation_boundary(_point: u8) -> Result<(), StorageError> {
     #[cfg(test)]
-    if FAIL_MUTATION.with(|p| p.get() == _point) { return Err(StorageError::Busy); }
+    if FAIL_MUTATION.with(|p| p.get() == _point) {
+        return Err(StorageError::Busy);
+    }
     Ok(())
 }
 fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
@@ -344,13 +358,18 @@ mod tests {
 
     #[test]
     fn pg_store_metadata_pricing_waits_for_source_publication_lock() {
-        let (pool, _) = fixture(|_| {});
+        let (pool, factory) = fixture(|_| {});
         let control = PgCancellation::default();
         let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
+        let source_pool = PgPool::open(
+            crate::storage::postgres::tests::source_factory(&factory),
+            crate::storage::postgres::tests::limits(),
+        )
+        .unwrap();
         let (captured_tx, captured_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| {
-            let reader_pool = &pool;
+            let reader_pool = &source_pool;
             let reader_control = &control;
             let reader = scope.spawn(move || {
                 reader_pool.transaction(&ns("source"), TxnKind::Write, reader_control, |tx| {
