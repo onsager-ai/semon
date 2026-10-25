@@ -6474,18 +6474,26 @@ mod tests {
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
                 let result = cache.publish_semantic_catalog(batch, model.prepared());
                 assert!(result.is_err(), "{point}");
-                let refusal = match &result {
-                    Err(StoreError::Data(reason))
-                        if reason.starts_with("semantic_")
-                            && reason.len() < 128
-                            && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') => reason.as_str(),
-                    _ => "injected_or_other",
+                let reason = result.as_ref().err().map(ToString::to_string).unwrap_or_default();
+                let refusal = if reason.starts_with("semantic_")
+                    && reason.len() < 128
+                    && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                {
+                    reason.as_str()
+                } else {
+                    "injected_or_other"
                 };
                 assert_eq!(
                     FAIL_EFFECT.with(|p| p.get()),
                     None,
                     "unconsumed fault {point}; refusal={refusal}; max_slots={}",
-                    model.prepared().transcripts.iter().map(|p| p.slots.len()).max().unwrap_or(0)
+                    model
+                        .prepared()
+                        .transcripts
+                        .iter()
+                        .map(|p| p.slots.len())
+                        .max()
+                        .unwrap_or(0)
                 );
                 assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
             }
