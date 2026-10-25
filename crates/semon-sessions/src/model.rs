@@ -7469,9 +7469,10 @@ pub(crate) fn prepare_semantic_batch(
             crate::storage::selected::PresentationObservations::capture(
                 options,
                 binding.as_ref(),
-                prepared.rows.iter().chain(
-                    batch.context.endpoints.values().map(|endpoint| &endpoint.row),
-                ),
+                prepared
+                    .rows
+                    .iter()
+                    .chain(batch.context.endpoints.values().map(|endpoint| &endpoint.row)),
             ),
         );
     }

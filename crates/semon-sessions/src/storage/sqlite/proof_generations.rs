@@ -634,9 +634,16 @@ fn digest(bytes: &[u8]) -> String {
 }
 fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
     Ok(digest(
-        &serde_json::to_vec(&("selected-presentation-v1", base, manifest))
+        &serde_json::to_vec(&("selected-presentation-v2", base, manifest))
             .map_err(|_| StorageError::Unavailable)?,
     ))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresentationManifest {
+    entries: Vec<(String, String)>,
+    observations: Option<crate::storage::selected::PresentationObservations>,
 }
 
 /// The caller has completed every producer write in the same publication TX.
@@ -703,6 +710,7 @@ pub(super) fn capture_presentations(
                 has_history,
                 catalog,
                 context,
+                relative_statuses: std::mem::take(&mut observations.relative_statuses),
                 observations,
             })
         } else {
@@ -742,9 +750,13 @@ pub(super) fn bind_presentations(
             .map_err(|_| StorageError::Unavailable)?;
         let bytes = serde_json::to_vec(&(&metadata, &slots, text))
             .map_err(|_| StorageError::Unavailable)?;
-        entries.push((key, digest(&bytes)));
+        entries.push((key.clone(), digest(&bytes)));
     }
-    let manifest = serde_json::to_string(&entries).map_err(|_| StorageError::Unavailable)?;
+    let manifest = serde_json::to_string(&PresentationManifest {
+        entries,
+        observations: prepared.presentation_observations().cloned(),
+    })
+    .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
         return Err(StorageError::HistoryRetentionBounds);
     }
@@ -782,13 +794,13 @@ fn validate_presentation(
     if manifest.len() > 1048576 || joined != proof || joined_digest(&base, &manifest)? != joined {
         return Err(StorageError::ScopeChanged);
     }
-    let rows: Vec<(String, String)> =
+    let manifest: PresentationManifest =
         serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
     let bytes =
         serde_json::to_vec(&(&metadata, &slots, &text)).map_err(|_| StorageError::Unavailable)?;
-    if rows.iter().filter(|(k, _)| k == key).count() != 1
-        || !rows.iter().any(|(k, d)| k == key && *d == digest(&bytes))
+    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
+        || !manifest.entries.iter().any(|(k, d)| k == key && *d == digest(&bytes))
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -811,11 +823,18 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
         db.execute_batch("BEGIN DEFERRED")
             .map_err(io::Error::other)?;
         self.validate(&db).map_err(io::Error::other)?;
-        let text: String = db.query_row("SELECT metadata FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|r.get(0)).map_err(io::Error::other)?;
+        // validate() authenticated both blobs in this same read transaction.
+        let (text,manifest): (String,String) = db.query_row("SELECT p.metadata,r.manifest FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(io::Error::other)?;
         let witness: Option<crate::storage::selected::PresentationWitness> =
             serde_json::from_str(&text).map_err(io::Error::other)?;
-        let witness =
+        let mut witness =
             witness.ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
+        let manifest: PresentationManifest =
+            serde_json::from_str(&manifest).map_err(io::Error::other)?;
+        witness.observations = manifest
+            .observations
+            .ok_or_else(|| io::Error::other("selected observation witness unavailable"))?;
+        witness.observations.relative_statuses = std::mem::take(&mut witness.relative_statuses);
         let text: String = db.query_row("SELECT CASE WHEN octet_length(slots)<=1048576 THEN slots END FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|r.get(0)).map_err(io::Error::other)?;
         let slots: Option<Vec<crate::slot_projection::SavedSlot>> =
             serde_json::from_str(&text).map_err(io::Error::other)?;
