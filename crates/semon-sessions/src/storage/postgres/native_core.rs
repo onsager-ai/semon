@@ -131,7 +131,9 @@ fn ordinal(value: usize) -> Result<i64, StorageError> {
 /// Exact core CAS admission shared with the connected partial bundle.
 /// The namespace lock remains held until the caller's transaction ends.
 pub(super) fn qualify(
-    tx: &mut PgTxn<'_>, path: &str, expected: Option<&Ledger>,
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    expected: Option<&Ledger>,
 ) -> Result<(i64, bool), StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
