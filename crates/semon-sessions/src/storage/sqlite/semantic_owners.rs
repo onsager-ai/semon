@@ -137,6 +137,7 @@ enum ReplayEndpoint {
     Staged(Box<Endpoint>),
     Unpublished,
     Virtual,
+    Missing,
 }
 
 impl Owners<'_> {
@@ -154,7 +155,7 @@ impl Owners<'_> {
         if pending {
             Ok(ReplayEndpoint::Unpublished)
         } else {
-            Err(rusqlite::Error::InvalidQuery)
+            Ok(ReplayEndpoint::Missing)
         }
     }
     pub(super) fn replay(
@@ -186,7 +187,8 @@ impl Owners<'_> {
             for owner in owners {
                 let endpoint = match self.replay_endpoint(owner, false)? {
                     ReplayEndpoint::Staged(endpoint) => *endpoint,
-                    ReplayEndpoint::Unpublished => continue,
+                    ReplayEndpoint::Unpublished => return Err(invalid("semantic replay owner identity is unpublished")),
+                    ReplayEndpoint::Missing => return Err(invalid("semantic replay owner is missing")),
                     ReplayEndpoint::Virtual => return Err(rusqlite::Error::InvalidQuery),
                 };
                 bytes = bytes.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
@@ -213,7 +215,8 @@ impl Owners<'_> {
                         endpoints.insert(key.clone(), *endpoint);
                     }
                     ReplayEndpoint::Virtual => {}
-                    ReplayEndpoint::Unpublished => return Err(rusqlite::Error::InvalidQuery),
+                    ReplayEndpoint::Unpublished => return Err(invalid("semantic replay endpoint identity is unpublished")),
+                    ReplayEndpoint::Missing => return Err(invalid("semantic replay endpoint is missing")),
                 }
             }
             if next > 1048576 {
