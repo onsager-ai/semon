@@ -11505,7 +11505,10 @@ mod tests {
             Outcome::Written
         );
         let (_, mut initial) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
-        assert_eq!(initial.summary.tool_name("tree-tool").unwrap().as_deref(), Some("Bash"));
+        assert_eq!(
+            initial.summary.tool_name("tree-tool").unwrap().as_deref(),
+            Some("Bash")
+        );
         assert_eq!(initial.summary.tool_name("absent-tool").unwrap(), None);
         initial.summary.load_shared_usage().unwrap();
         assert!(initial.summary.usage_records.is_empty());
