@@ -11,6 +11,7 @@ mod schema;
 mod source_journal;
 mod sqlstate;
 mod txn;
+pub(crate) mod tree_checkpoint;
 
 pub use cancel::PgCancellation;
 pub use operations::{OperationIdentity, Reconciliation};
