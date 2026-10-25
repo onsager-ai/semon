@@ -302,7 +302,7 @@ impl Pinned {
             let sibling: [u8; 32] =
                 serde_json::from_str(&encoded).map_err(|_| StorageError::ScopeChanged)?;
             let mut hash = Sha256::new();
-            if at % 2 == 0 {
+            if at.is_multiple_of(2) {
                 hash.update(node);
                 hash.update(sibling);
             } else {
