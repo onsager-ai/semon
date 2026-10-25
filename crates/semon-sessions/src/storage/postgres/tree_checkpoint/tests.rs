@@ -65,7 +65,7 @@ fn parser_fixture(harness: &str) -> Fixture {
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
-    let mut rows = Vec::new();
+    let mut rows: OracleRows = Vec::new();
     for family in [
         "files",
         "usage",
@@ -129,7 +129,7 @@ fn parser_fixture(harness: &str) -> Fixture {
     // parser rows stay identical while its logical carrier includes NUL.
     for (_, family_rows) in &mut rows {
         for row in family_rows {
-            for (name, value) in row {
+            for (name, value) in row.iter_mut() {
                 if (name == "path" || name == "source_path")
                     && let Value::Text(path) = value
                 {
@@ -386,10 +386,19 @@ fn pg_tree_checkpoint_cancel_deadline_closed_nullable_and_unsigned_tokens() {
     .unwrap();
     let mut summary = restore(&pool, &data);
     let checkpoint = summary.stored.clone().unwrap();
-    pool.transaction(&ns("tree\0🦀"), TxnKind::ReadSnapshot, &PgCancellation::default(), |_| {
-        assert_eq!(checkpoint.tool_name("missing").unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        Ok(())
-    }).unwrap();
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |_| {
+            assert_eq!(
+                checkpoint.tool_name("missing").unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
     // Remove the oracle's carrier before PG callbacks; deferred PG consumers
     // cannot depend on the known SQLite store or create it as a fallback.
     let sqlite_path = EventCache::path(&data.root.join("index.json"));
@@ -461,19 +470,40 @@ fn pg_tree_checkpoint_cancel_deadline_closed_nullable_and_unsigned_tokens() {
 
 #[test]
 fn pg_tree_checkpoint_real_copilot_has_no_tree_authority() {
-    let root = std::env::temp_dir().join(format!("pg100-copilot-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = std::env::temp_dir().join(format!(
+        "pg100-copilot-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir(&root).unwrap();
     let path = root.join("copilot.jsonl");
     let line = serde_json::json!({"type":"session.start","data":{"sessionId":"s\0🦀"}});
-    std::fs::write(&path,format!("{line}\n")).unwrap();
+    std::fs::write(&path, format!("{line}\n")).unwrap();
     let cache_path = root.join("index.json");
     let mut cache = EventCache::open(&cache_path).unwrap();
-    let index = scan_file(&path,"copilot",&mut cache,&mut false).unwrap();
-    assert!(index.tree_summary.is_none(),"Copilot uses its own native metadata; do not invent a Tree generation");
-    cache.flush_cold_writes().unwrap();drop(cache);
+    let index = scan_file(&path, "copilot", &mut cache, &mut false).unwrap();
+    assert!(
+        index.tree_summary.is_none(),
+        "Copilot uses its own native metadata; do not invent a Tree generation"
+    );
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
-    let ledger = read_ledger(&sqlite,path.to_str().unwrap());drop(sqlite);
-    let (pool,_)=fixture(|_|{});
-    assert!(Snapshot::restore(pool,ns("tree\0🦀"),path.to_str().unwrap(),&ledger,PgCancellation::default()).is_err());
+    let ledger = read_ledger(&sqlite, path.to_str().unwrap());
+    drop(sqlite);
+    let (pool, _) = fixture(|_| {});
+    assert!(
+        Snapshot::restore(
+            pool,
+            ns("tree\0🦀"),
+            path.to_str().unwrap(),
+            &ledger,
+            PgCancellation::default()
+        )
+        .is_err()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
