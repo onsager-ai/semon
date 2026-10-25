@@ -6862,9 +6862,7 @@ mod tests {
         #[test]
         fn configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication()
          {
-            fn published_state(
-                f: &Fixture,
-            ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+            fn published_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
                 namespace_state(f, "source-a")
                     .into_iter()
                     .filter(|(table, _)| {
