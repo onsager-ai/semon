@@ -527,6 +527,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
+| `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
@@ -1584,3 +1586,21 @@ over-budget components and transitions without a complete positive replacement
 remain explicit pending/refusal classes. Public qualification remains 0/None,
 completeness partial, and selected factories closed. This increment requires
 exact-head CI and fresh scoped review; it does not complete D3/D4 or #477.
+
+## Worker114 connected private native file increment
+
+The PG partial bundle consumes the same native_commit Input/Effects sequence
+as SQLite in one borrowed transaction: exact Core CAS, Usage enrollment and
+facts, complete Tree scalar/checkpoint publication, dependencies/invalidation,
+shared Codex header/Claude sidecar/parent marker plans, archive metadata
+retirement and source-mutation retirement. Current PG physical schema includes
+source_mutations and relocation_candidates; pending relocation candidates
+refuse before family effects because relocation proof advancement is unported.
+
+This is WIP, not a successful native ingest. The returned PartialFile explicitly
+names missing immutable chunk-proof generations/reader lifetimes, launch calls
+and EOF markers, relocation qualification, and complete durable ingest receipt/Raw
+qualification. It has no conversion to EventReceipt. Public qualification stays
+zero; no public backend factory or IndexStore implementation is activated.
+Meaningful real-parser, independent SQLite metadata, connected rollback and
+stale-CAS tests are registered in the existing PG filter; exact CI is required.
