@@ -7207,10 +7207,12 @@ mod tests {
             );
             let (history_key, history_metadata) = history.iter().next().unwrap();
             let history_row =
-                serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata).unwrap();
-            let old =
-                serde_json::from_str::<crate::model::summary::CatalogRow>(&prior_current[history_key])
+                serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata)
                     .unwrap();
+            let old = serde_json::from_str::<crate::model::summary::CatalogRow>(
+                &prior_current[history_key],
+            )
+            .unwrap();
             assert_eq!(
                 serde_json::to_value(&history_row).unwrap(),
                 serde_json::to_value(&old).unwrap(),
