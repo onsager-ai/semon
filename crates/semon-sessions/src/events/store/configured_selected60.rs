@@ -58,10 +58,15 @@ fn configured_semantic_selected89_real_codec_roundtrip_and_one_byte_tamper_befor
         assert_eq!(pinned.consumed_prefix, decoded.prefix);
 
         // Change exactly one byte while preserving valid JSON and byte length.
-        let mut tampered = record.metadata.into_bytes();
-        let index = tampered.windows(6).position(|w| w == b"\"name\"").unwrap() + 2;
-        tampered[index] = b'A';
+        let saved = record.metadata;
+        let mut tampered = saved.as_bytes().to_vec();
+        let marker = b"\"harness\":\"";
+        let index = tampered.windows(marker.len()).position(|w| w == marker).unwrap() + marker.len();
+        tampered[index] = b'X';
+        assert_eq!(saved.len(), tampered.len());
+        assert_eq!(saved.bytes().zip(tampered.iter()).filter(|(a, b)| a != *b).count(), 1);
         let tampered = String::from_utf8(tampered).unwrap();
+        let _: crate::model::summary::CatalogRow = serde_json::from_str(&tampered).unwrap();
         db.execute_batch("DROP TRIGGER storage_proof_generation_immutable").unwrap();
         db.execute("UPDATE storage_proof_generations SET metadata=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
             params![tampered, snapshot.namespace.as_str(), snapshot.proof_generation.0, key]).unwrap();
