@@ -7904,7 +7904,7 @@ mod tests {
             let (batch, model) = claude_ready(&mut cache, options, &inputs);
             let path = inputs[0].full_path(options);
             let mut raw = fs::read_to_string(&path).unwrap();
-            raw.push_str("\n");
+            raw.push('\n');
             fs::write(&path, raw).unwrap();
             let before = shared_state(&f);
             assert!(
