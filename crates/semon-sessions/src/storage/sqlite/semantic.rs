@@ -1930,26 +1930,18 @@ impl Stage {
             || head(&tx).map_err(error)? != batch.base_generation
             || self.source.generation != batch.base_generation
         {
-            #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
             return Ok(Outcome::Conflict);
         }
         let claims = super::source_journal::claims(&tx, Some(ns), &batch.paths).map_err(error)?;
         if claims != prepared.claims {
-            #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
             if !lifecycle_current(prepared) {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             if (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
                 || prepared.rows.len() > 64
@@ -1962,15 +1954,11 @@ impl Stage {
             let mut keys = std::collections::BTreeSet::new();
             for row in &prepared.rows {
                 if !keys.insert(&row.key) || row.sources.is_empty() {
-                    #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                    return Ok(Outcome::Conflict);
                 }
                 let staged: Option<String> = tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
                 let Some(staged) = staged else {
-                    #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                    return Ok(Outcome::Conflict);
                 };
                 let _ = staged;
                 let endpoint = owners::Owners {
@@ -1985,9 +1973,7 @@ impl Stage {
                     != serde_json::to_string(&endpoint.row)
                         .map_err(|e| StoreError::Data(e.to_string()))?
                 {
-                    #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                    return Ok(Outcome::Conflict);
                 }
                 covered.extend(
                     row.sources
@@ -1998,9 +1984,7 @@ impl Stage {
                     .push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
             }
             if covered != batch.paths.iter().cloned().collect() {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             if self.source.owner.is_some() {
                 retirement_plan(&tx, &self.source, prepared)?;
@@ -2023,9 +2007,7 @@ impl Stage {
         }
         if batch.phase != Phase::Indexing {
             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             for path in &batch.paths {
                 let sql = if batch.phase == Phase::Identity {
@@ -2037,9 +2019,7 @@ impl Stage {
                     .query_row(sql, params![ns, path], |r| r.get(0))
                     .map_err(error)?;
                 if !pending {
-                    #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                    return Ok(Outcome::Conflict);
                 }
             }
             if batch.phase == Phase::Identity {
@@ -2070,16 +2050,12 @@ impl Stage {
                             .map(String::as_str)
                             .collect::<std::collections::BTreeSet<_>>()
                     {
-                        #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                        return Ok(Outcome::Conflict);
                     }
                     for source in &endpoint.row.sources {
                         let path = source.path.to_string_lossy().into_owned();
                         if !batch.paths.contains(&path) {
-                            #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                            return Ok(Outcome::Conflict);
                         }
                         let stored: String=tx.query_row("SELECT metadata FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2 AND harness=?3",params![ns,path,endpoint.row.harness],|r|r.get(0)).map_err(error)?;
                         let observed: crate::model::summary::CatalogSource =
@@ -2090,17 +2066,13 @@ impl Stage {
                             || (endpoint.row.harness != "claude" && key != endpoint.row.key)
                             || !endpoint.row.native_ids.contains(&source.native_id)
                         {
-                            #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                            return Ok(Outcome::Conflict);
                         }
                         covered.insert(path);
                     }
                     let canonical: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND session_key=?3 AND native_id IN (SELECT json_each.value FROM json_each(?4)))",params![ns,endpoint.row.harness,endpoint.row.key,serde_json::to_string(&endpoint.row.native_ids).map_err(|e|StoreError::Data(e.to_string()))?],|r|r.get(0)).map_err(error)?;
                     if !canonical {
-                        #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                        return Ok(Outcome::Conflict);
                     }
                     let text = serde_json::to_string(endpoint)
                         .map_err(|e| StoreError::Data(e.to_string()))?;
@@ -2111,9 +2083,7 @@ impl Stage {
                     encoded.push((endpoint, text));
                 }
                 if batch.paths.iter().any(|p| !covered.contains(p)) {
-                    #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                    return Ok(Outcome::Conflict);
                 }
                 for (endpoint, text) in encoded {
                     let _ = text;
@@ -2140,9 +2110,7 @@ impl Stage {
                 for endpoint in prepared.relationships.endpoints.values() {
                     let own: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,endpoint.row.key],|r|r.get(0)).map_err(error)?;
                     if !own {
-                        #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                        return Ok(Outcome::Conflict);
                     }
                     let text = serde_json::to_string(endpoint)
                         .map_err(|e| StoreError::Data(e.to_string()))?;
@@ -2156,18 +2124,21 @@ impl Stage {
                     return Err(refuse("semantic_relation_budget"));
                 }
                 for relation in prepared.relationships.relations.values() {
-                    if !prepared
-                        .relationships
-                        .endpoints
-                        .contains_key(&relation.from)
-                        || relation
-                            .to
-                            .as_ref()
-                            .is_some_and(|to| !prepared.relationships.endpoints.contains_key(to))
+                    // The shared native model represents unmatched calls and
+                    // receipts with explicit trace stubs. They carry no Raw
+                    // membership, just as in Owners::replay. Every relation
+                    // still needs a real owner and evidence for both ends.
+                    let real = |key: &String| prepared.relationships.endpoints.contains_key(key);
+                    let known = |key: &String| {
+                        real(key) || relation.stubs.iter().any(|stub| &stub.key == key)
+                    };
+                    if !(real(&relation.from) || relation.to.as_ref().is_some_and(real))
+                        || !known(&relation.from)
+                        || relation.to.as_ref().is_some_and(|to| !known(to))
                     {
                         #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                        eprintln!("semantic_record_conflict: relation_endpoint_evidence");
+                        return Ok(Outcome::Conflict);
                     }
                     effects.relation(relation).map_err(error)?;
                 }
@@ -2189,32 +2160,24 @@ impl Stage {
             return Ok(Outcome::Written);
         }
         if prepared.indexed_sources.len() + prepared.withdrawals.len() != batch.paths.len() {
-            #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
             return Ok(Outcome::Conflict);
         }
         let mut seen = std::collections::BTreeSet::new();
         for (_, source) in &prepared.indexed_sources {
             let path = source.path.to_string_lossy().into_owned();
             if !batch.paths.contains(&path) || !seen.insert(path.clone()) {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             let Some((_, ledger)) = crate::events::store::ledger_row(&tx, &path).map_err(error)?
             else {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             };
             let mut expected = ledger.source(&source.path, &source.native_id);
             expected.native_role = source.native_role.clone();
             if expected != *source
                 || crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
             {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             if !crate::events::store::admitted_roles_current(
                 &tx,
@@ -2223,15 +2186,11 @@ impl Stage {
             )
             .map_err(error)?
             {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             let captured: Option<Option<i64>> = tx.query_row("SELECT claim FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path], |r| r.get(0)).optional().map_err(error)?;
             if captured != claims.iter().find(|(p, _)| p == &path).map(|(_, c)| *c) {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
         }
         let mut negative_paths = std::collections::BTreeSet::new();
@@ -2242,9 +2201,7 @@ impl Stage {
                 || !withdrawal_runtime_matches(&self.source, batch, withdrawal)?
                 || !withdrawal.current().unwrap_or(false)
             {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             owners::Owners {
                 db: &tx,
@@ -2255,9 +2212,7 @@ impl Stage {
         }
         for (path, harness, native) in &prepared.indexed_native_parents {
             if !seen.contains(path) {
-                #[cfg(test)]
-            eprintln!("semantic_record_conflict line={} phase={:?}", line!(), batch.phase);
-            return Ok(Outcome::Conflict);
+                return Ok(Outcome::Conflict);
             }
             owners::Owners {
                 db: &tx,

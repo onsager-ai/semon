@@ -7760,9 +7760,35 @@ mod tests {
             let (f, _, options, _) = model_sources();
             let options = &options[1];
             let inputs = claude_inputs(options, 65, 0);
+            // The ordinary budget counts frontier observations, including empty
+            // tasks and already-enrolled paths; it does not promise 64 new rows.
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            claude_ingest(&mut ordinary, options, &inputs);
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            ordinary.begin_semantic_stage_with_journal(
+                &[inputs[0].full_path(options).to_string_lossy().into_owned()],
+                &runtime,
+                true,
+            ).unwrap();
+            let ordinary_db = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+            let mut ordinary_paged = false;
+            for _ in 0..256 {
+                let batch = ordinary.semantic_batch(64).unwrap().unwrap();
+                let pending: bool = ordinary_db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE kind='receipt' AND after_key<>'' AND done=0)", [], |r| r.get(0)).unwrap();
+                let enrolled: i64 = ordinary_db.query_row("SELECT count(*) FROM catalog_semantic_sources", [], |r| r.get(0)).unwrap();
+                if pending && enrolled > 1 && enrolled <= 64 {
+                    ordinary_paged = true;
+                    break;
+                }
+                if !batch.paths.is_empty() {
+                    assert_eq!(batch.phase, Phase::Indexing);
+                    let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                    ordinary.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                }
+            }
+            assert!(ordinary_paged, "ordinary producer must demonstrate the same persisted receipt cursor");
             let mut cache = open(&f.config);
             claude_ingest(&mut cache, options, &inputs);
-            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             cache
                 .begin_semantic_stage_with_journal(
                     &[inputs[0].full_path(options).to_string_lossy().into_owned()],
@@ -7787,8 +7813,8 @@ mod tests {
                     }
                     Ok(Some(batch)) => {
                         let enrolled:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get(0)).unwrap();
-                        eprintln!("receipt_frontier_enrolled={enrolled} phase={:?}", batch.phase);
-                        paged |= enrolled == 64;
+                        let pending_receipt: bool = f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='receipt' AND after_key<>'' AND done=0)", [], |r| r.get(0)).unwrap();
+                        paged |= enrolled > 1 && enrolled <= 64 && pending_receipt;
                         if !batch.paths.is_empty() {
                             assert_eq!(batch.phase, Phase::Indexing);
                             let selected = inputs
@@ -7815,7 +7841,7 @@ mod tests {
             }
             assert!(
                 paged,
-                "receipt discovery must persist the bounded 64-source page"
+                "receipt discovery must persist a bounded unfinished keyset page"
             );
             assert!(
                 reached,
@@ -7935,7 +7961,11 @@ mod tests {
                         cache
                             .record_semantic_batch(&batch, model.prepared())
                             .unwrap(),
-                        Outcome::Written
+                        Outcome::Written,
+                        "phase={:?}, admitted={}, rejection={:?}",
+                        batch.phase,
+                        cache.explicit_store,
+                        cache.semantic_rejection()
                     );
                 }
                 if batch.phase == Phase::Publication {
