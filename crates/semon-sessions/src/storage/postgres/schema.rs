@@ -5,7 +5,7 @@ use super::{
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use std::sync::Arc;
 
-pub(super) const VERSION: i32 = 1;
+pub(super) const VERSION: i32 = 2;
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx
@@ -43,21 +43,32 @@ impl PgPool {
                     .batch_execute(
                         "
                 CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY);
-                INSERT INTO semon_pg_schema VALUES (1);
+                INSERT INTO semon_pg_schema VALUES (2);
                 CREATE TABLE semon_pg_operations(
-                    namespace text NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 1024),
+                    namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
+                    namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
                     operation_id char(64) NOT NULL CHECK (operation_id ~ '^[0-9A-Fa-f]{64}$'),
                     kind text NOT NULL CHECK (octet_length(kind) BETWEEN 1 AND 128),
                     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
                     outcome jsonb NOT NULL CHECK (octet_length(outcome::text) <= 1048576),
                     committed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-                    PRIMARY KEY(namespace, operation_id)
+                    PRIMARY KEY(namespace_digest, operation_id)
                 );
                 ALTER TABLE semon_pg_operations ENABLE ROW LEVEL SECURITY;
                 ALTER TABLE semon_pg_operations FORCE ROW LEVEL SECURITY;
+                CREATE FUNCTION semon_pg_namespace_matches(stored bytea, digest bytea, expected bytea)
+                RETURNS boolean LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF expected IS NULL OR digest <> sha256(expected) THEN RETURN false; END IF;
+                    IF stored <> expected THEN
+                        RAISE EXCEPTION 'Logical namespace digest collision' USING ERRCODE = '55000';
+                    END IF;
+                    RETURN stored = expected;
+                END; $$;
                 CREATE POLICY semon_pg_operation_namespace ON semon_pg_operations
-                    USING (namespace = current_setting('semon.namespace', true))
-                    WITH CHECK (namespace = current_setting('semon.namespace', true));
+                    USING (semon_pg_namespace_matches(namespace, namespace_digest,
+                        decode(current_setting('semon.namespace', true), 'hex')))
+                    WITH CHECK (namespace = decode(current_setting('semon.namespace', true), 'hex'));
             ",
                     )
                     .map_err(sqlstate::error)?;

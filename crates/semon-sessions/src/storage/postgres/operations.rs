@@ -39,13 +39,18 @@ impl PgTxn<'_> {
         id: &OperationIdentity<'_>,
     ) -> Result<Reconciliation, StorageError> {
         self.check()?;
-        let rows = self.driver.query("SELECT kind, request_digest, outcome FROM semon_pg_operations WHERE namespace = $1 AND operation_id = $2",
-            &[&self.namespace.as_str(), &id.operation_id]).map_err(sqlstate::error)?;
+        let namespace = self.namespace.as_str().as_bytes();
+        let rows = self.driver.query("SELECT kind, request_digest, outcome, namespace FROM semon_pg_operations WHERE namespace_digest = sha256($1::bytea) AND operation_id = $2",
+            &[&namespace, &id.operation_id]).map_err(sqlstate::error)?;
         let Some(row) = rows.first() else {
             return Ok(Reconciliation::Absent);
         };
         let kind: String = row.try_get(0).map_err(|_| StorageError::Unavailable)?;
         let digest: Vec<u8> = row.try_get(1).map_err(|_| StorageError::Unavailable)?;
+        let stored_namespace: Vec<u8> = row.try_get(3).map_err(|_| StorageError::Unavailable)?;
+        if stored_namespace.as_slice() != namespace {
+            return Err(StorageError::ScopeChanged);
+        }
         if kind != id.kind || digest.as_slice() != &id.request_digest[..] {
             return Err(StorageError::InvalidArguments);
         }
@@ -83,12 +88,15 @@ impl PgPool {
             tx.check()?;
             // The unique key serializes competing identical operation IDs. On
             // conflict the next READ COMMITTED statement sees the winner's row.
-            let inserted = tx.driver.execute("INSERT INTO semon_pg_operations(namespace, operation_id, kind, request_digest, outcome) VALUES ($1,$2,$3,$4,'null'::jsonb) ON CONFLICT (namespace, operation_id) DO NOTHING",
-                &[&namespace.as_str(), &id.operation_id, &id.kind, &&id.request_digest[..]]).map_err(sqlstate::error)?;
+            let namespace_bytes = namespace.as_str().as_bytes();
+            let inserted = tx.driver.execute("INSERT INTO semon_pg_operations(namespace, operation_id, kind, request_digest, outcome) VALUES ($1,$2,$3,$4,'null'::jsonb) ON CONFLICT (namespace_digest, operation_id) DO NOTHING",
+                &[&namespace_bytes, &id.operation_id, &id.kind, &&id.request_digest[..]]).map_err(sqlstate::error)?;
             if inserted == 0 {
                 return match tx.lookup_operation(id)? {
                     Reconciliation::Committed(outcome) => Ok(outcome),
-                    Reconciliation::Absent => Err(StorageError::Conflict),
+                    // A conflicting key without a qualified receipt must
+                    // refuse, never execute under another logical identity.
+                    Reconciliation::Absent => Err(StorageError::ScopeChanged),
                 };
             }
             let outcome = effect(tx)?;
@@ -96,8 +104,9 @@ impl PgPool {
             // stored/decoded receipt; callers must choose compact typed output.
             if outcome.to_string().len() > 1024 * 1024 { return Err(StorageError::InvalidArguments); }
             tx.check()?;
-            tx.driver.execute("UPDATE semon_pg_operations SET outcome = $3 WHERE namespace = $1 AND operation_id = $2",
-                &[&namespace.as_str(), &id.operation_id, &outcome]).map_err(sqlstate::error)?;
+            let updated = tx.driver.execute("UPDATE semon_pg_operations SET outcome = $3 WHERE namespace_digest = sha256($1::bytea) AND namespace = $1 AND operation_id = $2",
+                &[&namespace_bytes, &id.operation_id, &outcome]).map_err(sqlstate::error)?;
+            if updated != 1 { return Err(StorageError::ScopeChanged); }
             Ok(outcome)
         })
     }

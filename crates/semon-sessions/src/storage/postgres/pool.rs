@@ -13,6 +13,10 @@ pub struct PoolLimits {
     pub lock_timeout: Duration,
     pub idle_in_tx_timeout: Duration,
     pub txn_deadline: Duration,
+    /// Validate a returned connection after this much idle time.
+    pub idle_timeout: Duration,
+    /// Retire connections older than this even when they remain healthy.
+    pub max_lifetime: Duration,
 }
 
 impl PoolLimits {
@@ -26,6 +30,8 @@ impl PoolLimits {
             self.lock_timeout,
             self.idle_in_tx_timeout,
             self.txn_deadline,
+            self.idle_timeout,
+            self.max_lifetime,
         ] {
             if duration.is_zero() || duration > Duration::from_secs(86_400) {
                 return Err(StorageError::InvalidArguments);
@@ -40,6 +46,8 @@ impl PoolLimits {
 pub struct PgConnection {
     pub(super) client: ::postgres::Client,
     pub(super) cancel: Arc<dyn Fn() -> Result<(), StorageError> + Send + Sync>,
+    pub(super) created_at: Instant,
+    pub(super) returned_at: Instant,
 }
 
 impl PgConnection {
@@ -53,6 +61,8 @@ impl PgConnection {
         Self {
             client,
             cancel: Arc::new(move || cancel(token.clone())),
+            created_at: Instant::now(),
+            returned_at: Instant::now(),
         }
     }
 }
@@ -116,11 +126,31 @@ impl PgPool {
                 .lock()
                 .map_err(|_| StorageError::Unavailable)?;
             if let Some(connection) = state.idle.pop() {
-                return Ok(Lease {
+                drop(state);
+                let mut lease = Lease {
                     connection: Some(connection),
                     inner: self.inner.clone(),
                     reuse: false,
-                });
+                };
+                let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
+                if connection.created_at.elapsed() >= self.inner.limits.max_lifetime {
+                    drop(lease); // Client teardown precedes slot release
+                    continue;
+                }
+                if connection.returned_at.elapsed() >= self.inner.limits.idle_timeout {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() { return Err(StorageError::Busy); }
+                    // Validation owns this Lease; no new slot is available
+                    // until the bounded call returns and any teardown finishes.
+                    if connection.client.is_valid(remaining).is_err() {
+                        drop(lease);
+                        continue;
+                    }
+                }
+                if cancel.is_cancelled() || Instant::now() >= deadline {
+                    return Err(StorageError::Busy);
+                }
+                return Ok(lease);
             }
             if state.count < self.inner.limits.max_connections {
                 state.count += 1; // reserve BEFORE starting any host work
@@ -199,6 +229,8 @@ impl Lease {
     /// refuses inside any transaction block. Verify local namespace clearance
     /// first, so DISCARD cannot hide a leaked namespace.
     pub(super) fn check_clean(&mut self) -> Result<(), StorageError> {
+        #[cfg(test)]
+        if super::tests::fail_clean() { return Err(StorageError::Unavailable); }
         let connection = self.connection.as_mut().ok_or(StorageError::Unavailable)?;
         let row = connection
             .client
@@ -212,6 +244,7 @@ impl Lease {
             .client
             .batch_execute("DISCARD ALL")
             .map_err(|_| StorageError::Unavailable)?;
+        connection.returned_at = Instant::now();
         self.reuse = true;
         Ok(())
     }
