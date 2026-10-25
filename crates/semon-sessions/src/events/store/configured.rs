@@ -7742,6 +7742,18 @@ mod tests {
             oracle(&cache, options, &inputs, model.prepared());
             publish(&mut cache, &f, &batch, &model);
             cache.finish_semantic_stage(batch.epoch).unwrap();
+            let original_current = model
+                .prepared()
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.key.clone(),
+                        rows(&f, "session_catalog", &row.key),
+                        rows(&f, "session_slot_projections", &row.key),
+                    )
+                })
+                .collect::<Vec<_>>();
             drop(cache);
             for (i, input) in inputs.iter().enumerate() {
                 let path = input.full_path(options);
@@ -7779,7 +7791,48 @@ mod tests {
             }
             let (batch, model) = claude_ready(&mut cache, options, &inputs);
             oracle(&cache, options, &inputs, model.prepared());
+            // Replacement custody is resumable. Drive only its explicit
+            // Deferred result before applying the unchanged whole-TX fault
+            // oracle: that oracle must start after private custody progress,
+            // and must never mistake a committed checkpoint for an owner error.
+            FAIL_EFFECT.with(|p| p.set(Some("semantic_publish_owners")));
+            let mut owner_reached = false;
+            for _ in 0..64 {
+                match cache.publish_semantic_catalog(&batch, model.prepared()) {
+                    Ok((Outcome::Deferred, None)) => {
+                        assert_eq!(
+                            FAIL_EFFECT.with(|p| p.get()),
+                            Some("semantic_publish_owners")
+                        );
+                        for (key, current, recipe) in &original_current {
+                            assert_eq!(rows(&f, "session_catalog", key), *current);
+                            assert_eq!(rows(&f, "session_slot_projections", key), *recipe);
+                        }
+                        eprintln!("semantic_append_history_checkpoint outcome=Deferred");
+                    }
+                    Err(error) => {
+                        assert_eq!(FAIL_EFFECT.with(|p| p.get()), None);
+                        assert!(matches!(
+                            error,
+                            crate::events::StoreError::Configured(
+                                crate::storage::StorageError::Unavailable
+                            )
+                        ));
+                        owner_reached = true;
+                        break;
+                    }
+                    Ok(_) => panic!("append must reach the injected owner fence before publication"),
+                }
+            }
+            assert!(
+                owner_reached,
+                "bounded append custody did not reach owner publication"
+            );
             publish(&mut cache, &f, &batch, &model);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            drop(cache);
+            let cache = open(&f.config);
+            oracle(&cache, options, &inputs, model.prepared());
         }
 
         fn named_claude_inputs(options: &crate::Options, copies: usize) -> Vec<crate::Input> {

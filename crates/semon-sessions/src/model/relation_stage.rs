@@ -573,11 +573,6 @@ impl Relation {
                 .filter(|key| before.get(*key) != after.get(*key))
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>();
-            #[cfg(test)]
-            eprintln!(
-                "semantic_relation_conflict fields={}",
-                fields.iter().copied().collect::<Vec<_>>().join(",")
-            );
             return Err(io::Error::other(format!(
                 "conflicting staged native relationship: kind={} fields={}",
                 self.kind,
