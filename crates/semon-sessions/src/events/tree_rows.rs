@@ -30,7 +30,9 @@ impl<'a> TreeRows<'a> {
     }
 
     pub(crate) fn labels(&self) -> impl Iterator<Item = (&'static str, &'a str)> + '_ {
-        self.labels.iter().filter_map(|&(key, value)| value.map(|value| (key, value)))
+        self.labels
+            .iter()
+            .filter_map(|&(key, value)| value.map(|value| (key, value)))
     }
 }
 
@@ -49,9 +51,27 @@ pub(crate) mod witness {
         let mut digest = Sha256::new();
         // Callers supply persisted rows in SQLite BINARY (UTF-8 byte) order.
         let families = [
-            ("SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label", labels.into_iter().map(|(key, value)| serde_json::to_string(&[key, value]).unwrap()).collect::<Vec<_>>()),
-            ("SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model", models.into_iter().map(|model| serde_json::to_string(&[model]).unwrap()).collect()),
-            ("SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id", tools.into_iter().map(|(id, name)| serde_json::to_string(&[id, name]).unwrap()).collect()),
+            (
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+                labels
+                    .into_iter()
+                    .map(|(key, value)| serde_json::to_string(&[key, value]).unwrap())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+                models
+                    .into_iter()
+                    .map(|model| serde_json::to_string(&[model]).unwrap())
+                    .collect(),
+            ),
+            (
+                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+                tools
+                    .into_iter()
+                    .map(|(id, name)| serde_json::to_string(&[id, name]).unwrap())
+                    .collect(),
+            ),
         ];
         for (domain, rows) in families {
             digest.update(domain.as_bytes());
