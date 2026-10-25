@@ -65,6 +65,9 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_competing_publisher_and_begin_zero_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_faults_rollback_ack_proof_and_hints -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_replay_is_idempotent -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_replacement_retains_history_and_fences_stale_publisher -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::catalog_typed_custody_and_slots_match_original_publication_digest -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib history_projection::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publisher_keeps_unbound_head_refusal -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_ingest_and_stage_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_rollback_and_reopen_isolated -- --exact --nocapture
