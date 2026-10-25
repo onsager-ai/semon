@@ -68,6 +68,15 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_replay_is_idempotent -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_replacement_retains_history_and_fences_stale_publisher -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_scoped_search_effects_replace_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_real_model_two_source_query_metadata_and_transcript -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t1_same_runtime_takeover_retains_progress_and_fences_epoch -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t2_different_runtime_takeover_scopes_reset -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t3_active_old_epoch_cannot_take_back_successor -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t4_quiescent_post_finish_takeover_fences_new_handle -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t5_same_runtime_takeover_rolls_back_whole_database -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t6_listing_readiness_does_not_qualify_other_readers -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_model_refuses_noncurrent_schema_and_changed_raw_zero_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::catalog_typed_custody_and_slots_match_original_publication_digest -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib history_projection::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publisher_keeps_unbound_head_refusal -- --exact --nocapture

@@ -22,6 +22,22 @@ impl ScopedRuntimeObservations {
     }
 }
 impl RuntimeObservations {
+    /// Configured producers/readers use the captured aggregate runtime under a
+    /// validated logical fence. They never reopen an Options-derived database.
+    pub(crate) fn bound(
+        binding: &crate::storage::QueryRuntimeBinding,
+        runtime: &str,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            facts: None,
+            local: false,
+            pids: BTreeMap::new(),
+            names: BTreeMap::new(),
+            runs: BTreeMap::new(),
+            connection: None,
+            fallback: Some(binding.witness(runtime)?),
+        })
+    }
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }

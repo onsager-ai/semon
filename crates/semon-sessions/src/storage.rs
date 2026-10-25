@@ -58,13 +58,39 @@ pub(crate) fn local_query_catalog(
 pub(crate) enum NativeReaderBinding {
     Admitted(StoreConfig),
     TransitionalUnboundLocal(StoreConfig),
+    /// Private producer custody; never constructed by public configuration.
+    Semantic(crate::events::store::configured::NativeOwnership),
 }
 
 impl NativeReaderBinding {
     pub(crate) fn config(&self) -> &StoreConfig {
         match self {
             Self::Admitted(config) | Self::TransitionalUnboundLocal(config) => config,
+            Self::Semantic(owner) => owner.config(),
         }
+    }
+}
+
+/// Logical runtime observation fence. Physical database coordinates are absent.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryRuntimeBinding {
+    pub(crate) namespace: LogicalSourceNamespace,
+    pub(crate) admission: u64,
+    pub(crate) stream_epoch: String,
+}
+
+impl QueryRuntimeBinding {
+    pub(crate) fn witness(&self, runtime: &str) -> std::io::Result<String> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(
+            "semon-source-runtime-v1",
+            self.namespace.as_str(),
+            self.admission,
+            &self.stream_epoch,
+            runtime,
+        ))
+        .map_err(std::io::Error::other)?;
+        Ok(format!("source-runtime-v1:{:x}", Sha256::digest(bytes)))
     }
 }
 
