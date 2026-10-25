@@ -4,21 +4,22 @@ use crate::{
     storage::postgres::tests::{fixture, limits, ns},
 };
 use rusqlite::types::Value;
+pub(crate) use rusqlite::types::Value as OracleValue;
 
 type OracleRows = Vec<(&'static str, Vec<Vec<(String, Value)>>)>;
 
-struct Fixture {
-    root: std::path::PathBuf,
-    path: String,
-    ledger: Ledger,
-    oracle: Summary,
-    sources: Vec<(String, Ledger, crate::events::FileIndex)>,
-    rows: OracleRows,
+pub(crate) struct Fixture {
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) path: String,
+    pub(crate) ledger: Ledger,
+    pub(crate) oracle: Summary,
+    pub(crate) sources: Vec<(String, Ledger, crate::events::FileIndex)>,
+    pub(crate) rows: OracleRows,
 }
 fn read_ledger(sqlite: &rusqlite::Connection, path: &str) -> Ledger {
     sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
 }
-fn parser_fixture(harness: &str) -> Fixture {
+pub(crate) fn parser_fixture(harness: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "pg100-{}-{}-{harness}",
         std::process::id(),
@@ -59,8 +60,14 @@ fn parser_fixture(harness: &str) -> Fixture {
     }
     cache.flush_cold_writes().unwrap();
     drop(cache);
+    capture_fixture(root, harness)
+}
+fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
+    let cache_path = root.join("index.json");
+    let path = root.join("one.jsonl");
     let mut cache = EventCache::open(&cache_path).unwrap();
     let index = scan_file(&path, harness, &mut cache, &mut false).unwrap();
+    cache.flush_cold_writes().unwrap();
     let mut oracle = index.tree_summary.clone().unwrap();
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
@@ -116,9 +123,16 @@ fn parser_fixture(harness: &str) -> Fixture {
         .into_iter()
         .map(|path| {
             let ledger = read_ledger(&sqlite, &path);
-            let index = crate::events::store::native_usage::parser_fixture(
+            let mut index = crate::events::FileIndex::default();
+            index.tree_summary.get_or_insert_default();
+            if harness == "codex" {
+                index.native_usage_observations.get_or_insert_default();
+            }
+            crate::events::store::native_usage::parser_append_fixture(
                 std::path::Path::new(&path),
                 harness,
+                &mut index,
+                0,
             );
             (format!("{path}\0🦀"), ledger, index)
         })
@@ -147,9 +161,56 @@ fn parser_fixture(harness: &str) -> Fixture {
         rows,
     }
 }
+pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
+    use std::io::Write;
+    let body = match harness {
+        "claude" => format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"user","uuid":"result🦀","timestamp":"2026-09-29T00:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool\0🦀","content":"done"}]}}),
+            serde_json::json!({"type":"assistant","uuid":"new-record🦀","timestamp":"2026-09-29T00:00:04Z","message":{"id":"new-message🦀","role":"assistant","model":"claude-new🦀","content":[{"type":"tool_use","id":"new-tool\0\u{1f}🦀","name":"Write\n\t'🦀","input":{}}],"usage":{"input_tokens":8,"output_tokens":5}}})
+        ),
+        "codex" => format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-new🦀","cwd":"/new🦀"}}),
+            serde_json::json!({"type":"token_usage_record","timestamp":"2026-09-29T00:00:03Z","payload":{"thread_id":"t\0🦀","session_id":"s\0🦀","turn_id":"new-turn","response_id":"new-response","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18,"cached_input_tokens":2,"reasoning_output_tokens":0}}})
+        ),
+        _ => unreachable!(),
+    };
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(data.root.join("one.jsonl"))
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    capture_fixture(data.root.clone(), harness)
+}
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
-fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
+    install_families(tx, fixture, true)
+}
+pub(crate) fn install_without_tree(
+    tx: &mut PgTxn<'_>,
+    fixture: &Fixture,
+) -> Result<(), StorageError> {
+    install_families(tx, fixture, false)
+}
+pub(crate) fn oracle_witness(data: &Fixture) -> String {
+    let db = rusqlite::Connection::open(EventCache::path(&data.root.join("index.json"))).unwrap();
+    let path = data.path.strip_suffix("\0🦀").unwrap();
+    let encoded: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{path}")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["projection_witness"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+fn install_families(tx: &mut PgTxn<'_>, fixture: &Fixture, tree: bool) -> Result<(), StorageError> {
     {
         let mut effects = super::super::native_usage::Usage::new(tx)?;
         for (path, ledger, index) in &fixture.sources {
@@ -170,6 +231,9 @@ fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
     }
     for (family, rows) in &fixture.rows {
         if matches!(*family, "usage_sources" | "usage_current") {
+            continue;
+        }
+        if !tree && family.starts_with("tree_") {
             continue;
         }
         let table = format!("semon_pg_native_{family}");

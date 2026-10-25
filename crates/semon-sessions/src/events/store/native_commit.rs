@@ -6,6 +6,7 @@ use crate::events::native_commit::{
 
 pub(super) struct Writer<'a, 'tx, 'conn> {
     pub(super) transaction: &'tx Transaction<'conn>,
+    pub(super) layout: &'a WriterLayout<'tx, 'conn>,
     pub(super) measurements: &'a mut crate::native_timing::Measurements,
     pub(super) namespace: Option<&'a str>,
     pub(super) usage_deletes: &'a mut UsageDeletes<'tx>,
@@ -34,16 +35,14 @@ impl Relationships for Writer<'_, '_, '_> {
                 "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
             ),
         };
-        self.transaction.execute(
-            semantic_stage::support_sql(self.transaction, singleton, composite)?,
-            [path],
-        )?;
+        self.transaction
+            .execute(self.layout.support(singleton, composite), [path])?;
         Ok(())
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> rusqlite::Result<()> {
-        self.transaction.execute(semantic_stage::support_sql(self.transaction,
+        self.transaction.execute(self.layout.support(
             "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",
-            "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)")?, params![path,harness,id])?;
+            "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)"), params![path,harness,id])?;
         Ok(())
     }
     fn finished(&mut self, group: RelationshipGroup) -> rusqlite::Result<()> {
@@ -107,7 +106,6 @@ impl Effects for Writer<'_, '_, '_> {
         input: &Input<'_>,
         changes: &super::super::DirtyRows,
     ) -> rusqlite::Result<()> {
-        let transaction = self.transaction;
         let measurements = &mut *self.measurements;
         let Input {
             path,
@@ -117,12 +115,12 @@ impl Effects for Writer<'_, '_, '_> {
         } = *input;
         let usage_deletes = &mut *self.usage_deletes;
         write_file_with_usage_deletes(
-            transaction,
             path,
             ledger,
             changes,
             index,
             measurements,
+            self.layout,
             usage_deletes,
         )?;
         Ok(())
@@ -148,7 +146,10 @@ impl Effects for Writer<'_, '_, '_> {
         let measurements = &mut *self.measurements;
         let started = measurements.start();
         transaction.execute(
-            native_metadata_delete(transaction)?,
+            self.layout.meta(
+                "DELETE FROM meta WHERE key=?1",
+                "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+            ),
             [archive_index_key(path)],
         )?;
         measurements.record("archive_metadata", started, 1);
@@ -182,9 +183,9 @@ impl Effects for Writer<'_, '_, '_> {
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
         transaction.execute(
-        semantic_stage::support_sql(transaction,
+        self.layout.support(
             "DELETE FROM session_source_mutations WHERE source_path=?1",
-            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,
+            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1"),
         [path],
     )?;
         measurements.record("mutation_retirement", started, 1);

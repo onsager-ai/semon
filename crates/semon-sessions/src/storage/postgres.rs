@@ -12,13 +12,16 @@ mod pool;
 mod schema;
 mod source_journal;
 mod sqlstate;
+mod store_metadata;
 pub(crate) mod tree_checkpoint;
+mod tree_writer;
 mod txn;
 
 pub use cancel::PgCancellation;
 pub use operations::{OperationIdentity, Reconciliation};
 pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLimits};
 pub use source_journal::PgSourceJournal;
+pub use store_metadata::PgStoreMetadata;
 
 /// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
 fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {

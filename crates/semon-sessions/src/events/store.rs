@@ -805,6 +805,102 @@ fn copied_usage_sql<'a>(
     Ok(if composite { scoped } else { legacy })
 }
 
+// A writer page has already passed its owner, namespace, schema and epoch
+// admission before this is constructed.  Keep the physical-family choices
+// borrowed by that owner transaction: they are never connection, thread or
+// process caches, and a fresh transaction must qualify them again.
+struct WriterLayout<'tx, 'connection> {
+    transaction: &'tx Transaction<'connection>,
+    core_composite: bool,
+    meta_composite: bool,
+    copied_usage_composite: bool,
+    support_composite: bool,
+    schema_version: i64,
+}
+
+impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
+    fn new(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
+        // Each selector retains its authored validation; use distinct sentinels
+        // only to retain the selected physical statement for this transaction.
+        let core_composite = configured::sql(transaction, "singleton", "composite")? == "composite";
+        let meta_composite =
+            configured::metadata_sql(transaction, "singleton", "composite")? == "composite";
+        let copied_usage_composite =
+            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
+        let support_composite =
+            semantic_stage::support_sql(transaction, "singleton", "composite")? == "composite";
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        Ok(Self {
+            transaction,
+            core_composite,
+            meta_composite,
+            copied_usage_composite,
+            support_composite,
+            schema_version,
+        })
+    }
+
+    #[cfg(test)]
+    fn copied_usage_only(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
+        let copied_usage_composite =
+            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        Ok(Self {
+            transaction,
+            core_composite: false,
+            meta_composite: false,
+            copied_usage_composite,
+            support_composite: false,
+            schema_version,
+        })
+    }
+
+    fn core<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.core_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn meta<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.meta_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn copied_usage<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.copied_usage_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn support<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.support_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn ensure_current(&self) -> rusqlite::Result<()> {
+        let observed: i64 = self
+            .transaction
+            .pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        if observed == self.schema_version {
+            Ok(())
+        } else {
+            Err(rusqlite::Error::InvalidQuery)
+        }
+    }
+}
+
 fn child_predicate(c: &Connection, table: &str) -> rusqlite::Result<&'static str> {
     match table {
         "usage_identity" | "usage" | "codex_usage" => {
@@ -2402,8 +2498,15 @@ impl SourceObservationStore for SqliteStore {
                 .map_err(source_journal::local_failure)?;
         let committed =
             DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        // Intent triggers cannot smuggle a changed current contract into a witness.
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        // Intent triggers cannot smuggle a changed physical contract into a
+        // committed witness. The admission qualification remains mandatory;
+        // this same-TX delta avoids re-probing an unchanged layout.
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         if recovery_complete {
             self.discovery.recovery = Some(committed);
@@ -3101,6 +3204,7 @@ impl IndexStore for SqliteStore {
         measurements.record("fences", started, files.len());
         write_activity.stage("fences", &transaction);
         let started = measurements.start();
+        let layout = WriterLayout::new(&transaction).map_err(failure)?;
         let mut usage_deletes = UsageDeletes::default();
         for (path, ledger, index) in files {
             write_index_changes_with_usage_deletes(
@@ -3112,6 +3216,7 @@ impl IndexStore for SqliteStore {
                 None,
                 &mut row_measurements,
                 None,
+                &layout,
                 &mut usage_deletes,
             )
             .map_err(failure)?;
@@ -4611,6 +4716,7 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         require_current_sql(&transaction)?;
+        let layout = WriterLayout::new(&transaction)?;
         let found = ledger_row(&transaction, path)?;
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
@@ -4620,7 +4726,15 @@ impl SqliteStore {
         {
             clear(&transaction, file_id)?;
         }
-        write_index_changes(&transaction, path, ledger, index, changes, expected)?;
+        write_index_changes(
+            &transaction,
+            path,
+            ledger,
+            index,
+            changes,
+            expected,
+            &layout,
+        )?;
         transaction.commit()?;
         crate::pricing::runtime::notify_reprice();
         Ok(Outcome::Written)
@@ -5961,18 +6075,7 @@ fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static 
     )
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TreeSummaryRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    #[serde(default)]
-    projection_witness: Option<String>,
-    #[serde(default)]
-    interpretation_witness: Option<String>,
-    summary: crate::native_tree::Summary,
-}
+use super::tree_rows::TreeSummaryRecord;
 
 fn tree_summary_key(path: &str) -> String {
     format!("native_tree_summary:{path}")
@@ -6001,7 +6104,12 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
             r.get(0)
         })?;
     values.push(pricing);
-    Ok(format!("{:x}", Sha256::digest(json(&values)?.as_bytes())))
+    super::tree_rows::interpretation(
+        &values
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn tree_reusable(
@@ -6098,14 +6206,13 @@ fn write_tree_summary(
     normalized_usage: bool,
 ) -> rusqlite::Result<()> {
     if let Some(summary) = summary {
-        let current = TreeSummaryRecord {
-            version: 3,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            projection_witness: tree_state::witness(transaction, path, ledger)?,
-            interpretation_witness: Some(tree_interpretation(transaction, path)?),
-            summary: summary.compact(normalized_usage),
-        };
+        let current = TreeSummaryRecord::new(
+            header_ledger(ledger),
+            tree_state::witness(transaction, path, ledger)?,
+            tree_interpretation(transaction, path)?,
+            summary,
+            normalized_usage,
+        );
         if current.projection_witness.is_some() {
             let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
@@ -6128,14 +6235,13 @@ fn write_tree_summary(
     let encoded = summary
         .map(|summary| {
             tree_state::write(transaction, path, ledger, summary)?;
-            json(&TreeSummaryRecord {
-                version: 3,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                projection_witness: tree_state::witness(transaction, path, ledger)?,
-                interpretation_witness: Some(tree_interpretation(transaction, path)?),
-                summary: summary.compact(normalized_usage),
-            })
+            json(&TreeSummaryRecord::new(
+                header_ledger(ledger),
+                tree_state::witness(transaction, path, ledger)?,
+                tree_interpretation(transaction, path)?,
+                summary,
+                normalized_usage,
+            ))
         })
         .transpose()?;
     if let Some(encoded) = encoded {
@@ -6833,6 +6939,7 @@ fn write_index_changes(
     index: &FileIndex,
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
+    layout: &WriterLayout<'_, '_>,
 ) -> rusqlite::Result<()> {
     write_index_changes_with_usage_deletes(
         transaction,
@@ -6843,6 +6950,7 @@ fn write_index_changes(
         expected,
         &mut crate::native_timing::Measurements::default(),
         None,
+        layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -6858,6 +6966,7 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let layout = WriterLayout::new(transaction)?;
     write_index_changes_with_usage_deletes(
         transaction,
         path,
@@ -6867,6 +6976,7 @@ fn write_index_changes_measured(
         expected,
         measurements,
         namespace,
+        &layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -6881,11 +6991,11 @@ fn write_index_changes_with_usage_deletes<'tx>(
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
+    layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
     let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
-    copied_usage_sql(transaction, "", "")?;
-    semantic_stage::support_sql(transaction, "", "")?;
+    layout.ensure_current()?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     // The source ledger fences raw bytes; the sidecar is an independent
@@ -6899,6 +7009,7 @@ fn write_index_changes_with_usage_deletes<'tx>(
     crate::events::native_commit::write(
         &mut native_commit::Writer {
             transaction,
+            layout,
             measurements,
             namespace,
             usage_deletes,
@@ -6951,29 +7062,30 @@ fn write_file(
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
+    let layout = WriterLayout::new(transaction)?;
     write_file_with_usage_deletes(
-        transaction,
         path,
         ledger,
         changes,
         index,
         measurements,
+        &layout,
         &mut UsageDeletes::default(),
     )
 }
 
 fn write_file_with_usage_deletes<'tx>(
-    transaction: &'tx Transaction<'_>,
     path: &str,
     ledger: &Ledger,
     changes: &super::DirtyRows,
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
+    layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
+    let transaction = layout.transaction;
     let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
     let file_row = super::file_rows::FileRow::new(ledger, index);
-    copied_usage_sql(transaction, "", "")?;
     let FileIndex {
         tree_summary,
         source_chunks,
@@ -7045,11 +7157,8 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
-        let mut statement = transaction.prepare_cached(configured::sql(
-            transaction,
-            PUT_FILE,
-            configured::PUT_FILE,
-        )?)?;
+        let mut statement =
+            transaction.prepare_cached(layout.core(PUT_FILE, configured::PUT_FILE))?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -7110,13 +7219,9 @@ fn write_file_with_usage_deletes<'tx>(
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(
-        transaction,
-        PUT_EVENT,
-        configured::PUT_EVENT,
-    )?)?;
+    let mut put = transaction.prepare_cached(layout.core(PUT_EVENT, configured::PUT_EVENT))?;
     let mut cut = transaction
-        .prepare_cached(configured::sql(transaction, "DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?)?;
+        .prepare_cached(layout.core("DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3"))?;
     for (extra, rows) in [(false, &row_plan.events), (true, &row_plan.extras)] {
         rows.apply(
             |seq, event| put_event(&mut put, file_id, extra, seq, event),
@@ -7132,11 +7237,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(
-        transaction,
-        PUT_SIGNAL,
-        configured::PUT_SIGNAL,
-    )?)?;
+    let mut put = transaction.prepare_cached(layout.core(PUT_SIGNAL, configured::PUT_SIGNAL))?;
     row_plan.signals.apply(
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
@@ -7155,7 +7256,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    configured::sql(transaction, "DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
+                    layout.core("DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -7174,6 +7275,7 @@ fn write_file_with_usage_deletes<'tx>(
         changes,
         usage_by_id,
         measurements,
+        layout,
         usage_deletes,
     )?;
     measurements.record("usage", started, changes.usage.len());
@@ -7183,11 +7285,8 @@ fn write_file_with_usage_deletes<'tx>(
 
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
-    let mut put = transaction.prepare_cached(copied_usage_sql(
-        transaction,
-        PUT_CODEX_USAGE,
-        COMPOSITE_PUT_CODEX_USAGE,
-    )?)?;
+    let mut put = transaction
+        .prepare_cached(layout.copied_usage(PUT_CODEX_USAGE, COMPOSITE_PUT_CODEX_USAGE))?;
     row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
@@ -7216,7 +7315,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    copied_usage_sql(transaction, "DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
+                    layout.copied_usage("DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -7261,12 +7360,14 @@ fn write_copied_usage_rows(
     usage_by_id: &BTreeMap<String, MessageUsage>,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<UsageDeleteWork> {
+    let layout = WriterLayout::copied_usage_only(transaction)?;
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
         changes,
         usage_by_id,
         measurements,
+        &layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -7277,25 +7378,23 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     changes: &super::DirtyRows,
     usage_by_id: &BTreeMap<String, MessageUsage>,
     measurements: &mut crate::native_timing::Measurements,
+    layout: &WriterLayout<'tx, '_>,
     deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<UsageDeleteWork> {
+    layout.ensure_current()?;
     let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
-    let mut put = transaction.prepare_cached(copied_usage_sql(
-        transaction,
-        PUT_USAGE,
-        COMPOSITE_PUT_USAGE,
-    )?)?;
+    let mut put =
+        transaction.prepare_cached(layout.copied_usage(PUT_USAGE, COMPOSITE_PUT_USAGE))?;
     let mut put_identity = transaction.prepare_cached(
-        copied_usage_sql(transaction, "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)")?,
+        layout.copied_usage("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)"),
     )?;
     for (id, usage) in rows.iter() {
         let started = measurements.start();
-        let selected = copied_usage_sql(
-            transaction,
+        let selected = layout.copied_usage(
             "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
             "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-        )?;
+        );
         measurements.record("usage_identity_delete_qualification", started, 1);
         if deletes
             .identity
@@ -7325,11 +7424,10 @@ fn write_copied_usage_rows_with_deletes<'tx>(
             }
         } else {
             let started = measurements.start();
-            let selected = copied_usage_sql(
-                transaction,
+            let selected = layout.copied_usage(
                 "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
                 "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-            )?;
+            );
             measurements.record("usage_delete_qualification", started, 1);
             if deletes
                 .usage
@@ -11862,6 +11960,7 @@ mod tests {
             };
             let before = usage_delete_snapshot(&db);
             let tx = db.unchecked_transaction().unwrap();
+            let layout = WriterLayout::copied_usage_only(&tx).unwrap();
             let mut deletes = UsageDeletes::default();
             tx.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
             for _ in 0..2 {
@@ -11872,6 +11971,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .unwrap_err();
@@ -11889,6 +11989,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .is_err()
@@ -11903,6 +12004,7 @@ mod tests {
                 &changes,
                 &BTreeMap::new(),
                 &mut Default::default(),
+                &layout,
                 &mut deletes,
             )
             .unwrap();
@@ -11918,6 +12020,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .unwrap();
