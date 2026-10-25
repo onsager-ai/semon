@@ -8552,7 +8552,8 @@ mod tests {
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
         let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
         assert_eq!(
-            store.pending_catalog_sources(64).unwrap(),
+            crate::storage::source_observations::SourceObservationStore::pending(&store, 64)
+                .unwrap(),
             vec![path.clone()]
         );
         assert_eq!(

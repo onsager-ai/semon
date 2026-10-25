@@ -1346,7 +1346,7 @@ mod tests {
     use crate::events::EventCache;
     use crate::storage::{
         LogicalSourceNamespace, StoreBackend,
-        source_observations::{SourceClaims, SourceObservationStore},
+        source_observations::SourceClaims,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3685,10 +3685,7 @@ mod tests {
             serde_json::to_value(&next.context.endpoints).unwrap(),
             serde_json::to_value(&batch.context.endpoints).unwrap()
         );
-        assert_eq!(
-            source_claims(&*successor, &next.paths),
-            prepared.claims
-        );
+        assert_eq!(source_claims(&*successor, &next.paths), prepared.claims);
         assert_old_epoch_zero_writes(&a, &mut *old, &batch, &prepared);
         assert_old_epoch_zero_writes(&a, &mut *observer, &batch, &prepared);
         assert_eq!(
