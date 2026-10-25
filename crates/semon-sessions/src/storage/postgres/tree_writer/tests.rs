@@ -916,16 +916,16 @@ fn pg_tree_publish_every_effect_rollback_and_pricing_epoch_changes_interpretatio
 
 #[test]
 fn pg_tree_publish_real_append_and_replacement_complete_without_seeded_headers() {
-    for harness in ["claude","codex"] {
-        let initial=parser_fixture(harness);
-        let (pool,_) =fixture(|_|{});
-        interpretation_inputs(&pool,&initial);
+    for harness in ["claude", "codex"] {
+        let initial = parser_fixture(harness);
+        let (pool, _) = fixture(|_| {});
+        interpretation_inputs(&pool, &initial);
         let first=pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
             install_without_tree(tx,&initial)?;assert!(publish_fixture(tx,&initial,None)?);
             Ok(tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&initial.path.as_bytes()]).unwrap().get::<_,i64>(0))
         }).unwrap();
-        let appended=append_fixture(&initial,harness);
-        let expected=oracle_record(&appended);
+        let appended = append_fixture(&initial, harness);
+        let expected = oracle_record(&appended);
         pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
             let index=&appended.sources.iter().find(|(p,_,_)|p==&appended.path).unwrap().2;
             let mut usage=crate::storage::postgres::native_usage::Usage::new(tx)?;

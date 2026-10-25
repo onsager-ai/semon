@@ -105,7 +105,15 @@ pub(super) fn stage(
     expected_source: i64,
     summary: &Summary,
 ) -> Result<(i64, String), StorageError> {
-    stage_inner(tx,path,ledger,expected_header,expected_source,summary,false)
+    stage_inner(
+        tx,
+        path,
+        ledger,
+        expected_header,
+        expected_source,
+        summary,
+        false,
+    )
 }
 
 fn stage_inner(
@@ -141,12 +149,18 @@ fn stage_inner(
     // exact operation identity, never replayed as another generation. This
     // check is serialized by the same namespace lock as the first writer.
     let pending=tx.driver.query("SELECT projection_id FROM semon_pg_native_tree_generations WHERE namespace=$1 AND source_id=$2 AND NOT complete", &[&ns,&expected_source]).map_err(sqlstate::error)?;
-    let repair_projection = if pending.is_empty() { None } else {
-        let marker=metadata(tx,format!("native_tree_failure:{path}").as_bytes())?;
-        if !repair || pending.len()!=1 || marker.as_deref()!=Some(receipt.as_str()) { return Err(StorageError::Conflict); }
-        let id:i64=pending[0].get(0);
+    let repair_projection = if pending.is_empty() {
+        None
+    } else {
+        let marker = metadata(tx, format!("native_tree_failure:{path}").as_bytes())?;
+        if !repair || pending.len() != 1 || marker.as_deref() != Some(receipt.as_str()) {
+            return Err(StorageError::Conflict);
+        }
+        let id: i64 = pending[0].get(0);
         let valid:bool=tx.driver.query_one("SELECT receipt=$3 AND version=3 AND work_pending FROM semon_pg_native_tree_generations WHERE namespace=$1 AND projection_id=$2", &[&ns,&id,&receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        if !valid { return Err(StorageError::Conflict); }
+        if !valid {
+            return Err(StorageError::Conflict);
+        }
         Some(id)
     };
     let file: i64 = files[0].get(0);
@@ -161,7 +175,8 @@ fn stage_inner(
     let reuse = headers
         .first()
         .filter(|r| r.get::<_, i64>(1) == expected_source)
-        .map(|r| r.get::<_, i64>(0)).or(repair_projection);
+        .map(|r| r.get::<_, i64>(0))
+        .or(repair_projection);
     let mut writer = Writer { tx };
     let projection = match reuse {
         Some(id) => {
@@ -204,7 +219,9 @@ pub(super) fn publish(
     }
     let recipe = metadata(tx, b"catalog_semantic_recipe")?;
     let authority = tx.driver.query("SELECT s.usage_ready FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace=$1 AND c.source_path=$2 AND s.source_id=$3", &[&ns,&path.as_bytes(),&expected_source]).map_err(sqlstate::error)?;
-    if authority.len()!=1 || authority[0].get::<_,bool>(0)!=normalized_usage { return Err(StorageError::Conflict); }
+    if authority.len() != 1 || authority[0].get::<_, bool>(0) != normalized_usage {
+        return Err(StorageError::Conflict);
+    }
     let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     if fingerprint_rows.len() != 1 {
         return Err(StorageError::Conflict);
@@ -221,7 +238,15 @@ pub(super) fn publish(
         .map_err(|_| StorageError::ScopeChanged)?;
     let interpretation = crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
         .map_err(|_| StorageError::Unavailable)?;
-    let (projection, digest) = stage_inner(tx, path, ledger, expected_header, expected_source, summary, true)?;
+    let (projection, digest) = stage_inner(
+        tx,
+        path,
+        ledger,
+        expected_header,
+        expected_source,
+        summary,
+        true,
+    )?;
     // The persisted witness is reverified after staging. This covers retained
     // rows and never substitutes a digest of the input Summary.
     if persisted_witness(tx, projection)? != digest {
