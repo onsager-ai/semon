@@ -585,6 +585,14 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
             "id"
         };
         let dependency = if parent { "parent" } else { "native" };
+        // These authored partial indexes match the JSON expression and native
+        // key predicate below. Pin the access path: the namespace/key primary
+        // key is also eligible, but scans unrelated native headers.
+        let index = if parent {
+            "semantic_codex_header_parent"
+        } else {
+            "semantic_codex_header_native"
+        };
         let header_scoped = self.layout.header_scoped;
         let support_scoped = self.layout.support_scoped;
         let owner = if header_scoped {
@@ -610,7 +618,7 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
             String::new()
         };
         let sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM main.meta m {owner} WHERE {guard} m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})"
+            "SELECT EXISTS(SELECT 1 FROM main.meta m INDEXED BY {index} {owner} WHERE {guard} m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})"
         );
         self.db.query_row(&sql, params![self.ns, id], |r| r.get(0))
     }
@@ -717,6 +725,7 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         }
         let steps = Arc::new(AtomicUsize::new(0));
         let observed = steps.clone();
+        let started = std::time::Instant::now();
         c.progress_handler(
             1,
             Some(move || {
@@ -742,7 +751,14 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
             }
         }
         c.progress_handler(0, None::<fn() -> bool>);
-        result.push((kind.to_owned(), steps.load(Ordering::Relaxed)));
+        let elapsed = started.elapsed();
+        let steps = steps.load(Ordering::Relaxed);
+        eprintln!(
+            "native_frontier_query kind={kind} vm_steps={steps} elapsed_us={}",
+            elapsed.as_micros()
+        );
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        result.push((kind.to_owned(), steps));
         c.execute_batch("ROLLBACK TO native_vm_probe; RELEASE native_vm_probe")
             .unwrap();
     }
@@ -841,16 +857,16 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             }
             "headerid" => {
                 if layout.header_scoped {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 }
             }
             "headerparent" => {
                 if layout.header_scoped {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
                 }
             }
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
