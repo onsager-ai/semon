@@ -904,6 +904,21 @@ impl Context {
                         })
                         .collect(),
                     order: {
+                        let outgoing = builder.placed.iter().find_map(|(at, entries)| {
+                            entries
+                                .iter()
+                                .any(|(handoff, place)| *handoff == index && *place == Place::Out)
+                                .then_some(*at)
+                        });
+                        let receipt = builder.placed.iter().find_map(|(at, entries)| {
+                            (h.out.kind == "relay"
+                                && outgoing.is_none()
+                                && builder.files[at.0].harness() == "claude"
+                                && entries.iter().any(|(handoff, place)| {
+                                    *handoff == index && *place == Place::In
+                                }))
+                            .then_some(*at)
+                        });
                         let owner = if h.out.kind == "spawn" {
                             h.out.to.as_ref().unwrap_or(&h.out.from)
                         } else {
@@ -916,22 +931,23 @@ impl Context {
                         ) {
                             ("spawn", Some("claude")) => 0,
                             ("spawn", _) => 1,
+                            ("relay", _) if receipt.is_some() => 3,
                             ("relay", Some("claude")) => 2,
-                            _ => 3,
+                            _ => 4,
                         };
                         let first = endpoint
                             .and_then(|endpoint| endpoint.row.start)
                             .unwrap_or(i64::MAX);
-                        let path = endpoint
-                            .and_then(|endpoint| endpoint.row.sources.first())
-                            .map(|source| source.path.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let location = builder.placed.iter().find_map(|(at, entries)| {
-                            entries
-                                .iter()
-                                .any(|(handoff, place)| *handoff == index && *place == Place::Out)
-                                .then(|| event(builder.files, *at))
-                        });
+                        // Ordinary relays draw all orphan receipts after sends,
+                        // sorted by native receipt key, never by the hashed id.
+                        let path = receipt.map_or_else(
+                            || endpoint
+                                .and_then(|endpoint| endpoint.row.sources.first())
+                                .map(|source| source.path.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            |at| builder.orphan_relay_source(at),
+                        );
+                        let location = outgoing.map(|at| event(builder.files, at));
                         (
                             phase,
                             if h.out.kind == "spawn" { first } else { 0 },
