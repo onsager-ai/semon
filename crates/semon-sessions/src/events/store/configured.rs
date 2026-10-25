@@ -6479,16 +6479,32 @@ mod tests {
             ] {
                 let before = shared_state(f);
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
-                assert!(
-                    cache
-                        .publish_semantic_catalog(batch, model.prepared())
-                        .is_err(),
-                    "{point}"
-                );
+                let result = cache.publish_semantic_catalog(batch, model.prepared());
+                assert!(result.is_err(), "{point}");
+                let reason = result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let refusal = if reason.starts_with("semantic_")
+                    && reason.len() < 128
+                    && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                {
+                    reason.as_str()
+                } else {
+                    "injected_or_other"
+                };
                 assert_eq!(
                     FAIL_EFFECT.with(|p| p.get()),
                     None,
-                    "unconsumed fault {point}"
+                    "unconsumed fault {point}; refusal={refusal}; max_slots={}",
+                    model
+                        .prepared()
+                        .transcripts
+                        .iter()
+                        .map(|p| p.slots.len())
+                        .max()
+                        .unwrap_or(0)
                 );
                 assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
             }
@@ -7661,25 +7677,71 @@ mod tests {
         }
 
         #[test]
-        fn configured_semantic_domain67_claude_event_producer_remains_explicitly_closed() {
-            let (f, _, options, inputs) = model_sources();
+        fn configured_semantic_domain67_claude_event_producer_projects_real_call() {
+            let (f, _, options, _) = model_sources();
             let options = &options[1];
-            let input = &inputs[1];
-            let mut raw = fs::read_to_string(input.full_path(options)).unwrap();
-            raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":"model-1","uuid":"native-call","timestamp":"2026-10-01T00:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"selector-call","name":"Agent","input":{"prompt":"sanitized work"}}]}})));
-            fs::write(input.full_path(options), raw).unwrap();
+            let inputs = claude_inputs(options, 1, 1);
             let mut cache = open(&f.config);
+            let (batch, model) = claude_ready(&mut cache, options, &inputs);
+            assert_eq!(
+                cache
+                    .semantic_select(
+                        batch.epoch,
+                        &crate::model::relation_stage::Selector::ClaudeCall {
+                            id: "claude-call-0".into()
+                        }
+                    )
+                    .unwrap()
+                    .count,
+                1
+            );
+            oracle(&cache, options, &inputs, model.prepared());
+            publish(&mut cache, &f, &batch, &model);
+        }
+        #[test]
+        fn configured_semantic_domain72_claude_unsupported_name_and_native_peer_refuse() {
+            use crate::model::relation_stage::Selector;
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = claude_inputs(options, 1, 1);
+            let mut cache = open(&f.config);
+            let (batch, model) = claude_ready(&mut cache, options, &inputs);
+            let before = shared_state(&f);
+            assert_eq!(
+                cache
+                    .semantic_select(
+                        batch.epoch,
+                        &Selector::ClaudeName {
+                            name: "worker".into()
+                        }
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                "semantic_claude_name_members_pending"
+            );
+            assert_eq!(shared_state(&f), before);
+            publish(&mut cache, &f, &batch, &model);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            let path = inputs[0].full_path(options);
+            let raw = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if record.get("origin").is_some() {
+                        record["origin"]["from"] = serde_json::json!("unported-peer");
+                    }
+                    format!("{record}\n")
+                })
+                .collect::<String>();
+            fs::write(&path, raw).unwrap();
             cache
-                .ingest(
-                    &format!("{:064x}", 6899),
-                    &input.full_path(options),
-                    "claude",
-                )
+                .ingest(&format!("{:064x}", 7299), &path, "claude")
                 .unwrap();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             cache
                 .begin_semantic_stage_with_journal(
-                    &[input.full_path(options).to_string_lossy().into_owned()],
+                    &[path.to_string_lossy().into_owned()],
                     &runtime,
                     true,
                 )
@@ -7689,60 +7751,143 @@ mod tests {
                 let before = shared_state(&f);
                 match cache.semantic_batch(64) {
                     Err(error) => {
-                        assert!(
-                            error
-                                .to_string()
-                                .contains("semantic_nonprimitive_event_harness"),
-                            "{error}"
-                        );
+                        assert_eq!(error.to_string(), "semantic_claude_native_frontier_pending");
                         assert_eq!(
                             shared_state(&f),
                             before,
-                            "producer refusal rolls back whole transaction"
+                            "unported native discovery cannot publish negatives or partial events"
                         );
                         reached = true;
                         break;
                     }
                     Ok(Some(batch)) if !batch.paths.is_empty() => {
-                        assert_ne!(
-                            batch.phase,
-                            Phase::Publication,
-                            "incident inputs must not publish without their event producer"
-                        );
-                        for selector in [
-                            crate::model::relation_stage::Selector::ClaudeCall {
-                                id: "selector-call".into(),
-                            },
-                            crate::model::relation_stage::Selector::ClaudeReceipt {
-                                id: "selector-message".into(),
-                            },
-                        ] {
-                            let before_select = shared_state(&f);
-                            let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
-                            assert!(
-                                error
-                                    .to_string()
-                                    .contains("semantic_claude_event_projection_pending"),
-                                "{error}"
-                            );
-                            assert_eq!(shared_state(&f), before_select);
-                        }
+                        assert_eq!(batch.phase, Phase::Indexing);
                         cache
                             .prepare_semantic_model_batch(
                                 options,
-                                std::slice::from_ref(input),
+                                &inputs,
                                 &batch,
                                 1_790_000_000_000,
                             )
                             .unwrap();
                     }
                     Ok(Some(_)) => {}
-                    Ok(None) => panic!("stage disappeared before producer refusal"),
+                    Ok(None) => panic!("peer stage disappeared"),
+                }
+            }
+            assert!(reached);
+        }
+
+        #[test]
+        fn configured_semantic_domain72_receipt_frontier_pages_to_source_capacity_refusal() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = claude_inputs(options, 65, 0);
+            // The ordinary budget counts frontier observations, including empty
+            // tasks and already-enrolled paths; it does not promise 64 new rows.
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            claude_ingest(&mut ordinary, options, &inputs);
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            ordinary
+                .begin_semantic_stage_with_journal(
+                    &[inputs[0].full_path(options).to_string_lossy().into_owned()],
+                    &runtime,
+                    true,
+                )
+                .unwrap();
+            let ordinary_db = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+            let mut ordinary_paged = false;
+            for _ in 0..256 {
+                let batch = ordinary.semantic_batch(64).unwrap().unwrap();
+                let pending: bool = ordinary_db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE kind='receipt' AND after_key<>'' AND done=0)", [], |r| r.get(0)).unwrap();
+                let enrolled: i64 = ordinary_db
+                    .query_row("SELECT count(*) FROM catalog_semantic_sources", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                if pending && enrolled > 1 && enrolled <= 64 {
+                    ordinary_paged = true;
+                    break;
+                }
+                if !batch.paths.is_empty() {
+                    assert_eq!(batch.phase, Phase::Indexing);
+                    let selected = inputs
+                        .iter()
+                        .filter(|i| {
+                            batch
+                                .paths
+                                .contains(&i.full_path(options).to_string_lossy().into_owned())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    ordinary
+                        .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
+                        .unwrap();
                 }
             }
             assert!(
+                ordinary_paged,
+                "ordinary producer must demonstrate the same persisted receipt cursor"
+            );
+            let mut cache = open(&f.config);
+            claude_ingest(&mut cache, options, &inputs);
+            cache
+                .begin_semantic_stage_with_journal(
+                    &[inputs[0].full_path(options).to_string_lossy().into_owned()],
+                    &runtime,
+                    true,
+                )
+                .unwrap();
+            let mut reached = false;
+            let mut paged = false;
+            for _ in 0..256 {
+                let before = shared_state(&f);
+                match cache.semantic_batch(64) {
+                    Err(error) => {
+                        assert_eq!(error.to_string(), "semantic_component_source_budget");
+                        assert_eq!(
+                            shared_state(&f),
+                            before,
+                            "capacity refusal rolls back all namespaces"
+                        );
+                        reached = true;
+                        break;
+                    }
+                    Ok(Some(batch)) => {
+                        let enrolled:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get(0)).unwrap();
+                        let pending_receipt: bool = f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='receipt' AND after_key<>'' AND done=0)", [], |r| r.get(0)).unwrap();
+                        paged |= enrolled > 1 && enrolled <= 64 && pending_receipt;
+                        if !batch.paths.is_empty() {
+                            assert_eq!(batch.phase, Phase::Indexing);
+                            let selected = inputs
+                                .iter()
+                                .filter(|i| {
+                                    batch.paths.contains(
+                                        &i.full_path(options).to_string_lossy().into_owned(),
+                                    )
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            cache
+                                .prepare_semantic_model_batch(
+                                    options,
+                                    &selected,
+                                    &batch,
+                                    1_790_000_000_000,
+                                )
+                                .unwrap();
+                        }
+                    }
+                    Ok(None) => panic!("receipt frontier disappeared"),
+                }
+            }
+            assert!(
+                paged,
+                "receipt discovery must persist a bounded unfinished keyset page"
+            );
+            assert!(
                 reached,
-                "real Agent input must reach the actual producer refusal"
+                "65th physical receipt source must hit the real source bound"
             );
             assert_eq!(
                 f.db()
@@ -7754,6 +7899,469 @@ mod tests {
                     .unwrap(),
                 0
             );
+        }
+        fn claude_inputs(
+            options: &crate::Options,
+            copies: usize,
+            events: usize,
+        ) -> Vec<crate::Input> {
+            (0..copies).map(|i| {
+                let input = crate::Input { root: crate::InputRoot::Claude, path: format!("projects/sanitized/claude72-{i}.jsonl").into() };
+                let mut raw = format!("{}\n",serde_json::json!({"type":"user","sessionId":format!("claude72-{i}"),"uuid":format!("first-{i}"),"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":"native work"}}));
+                for n in 0..events {
+                    raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":format!("claude72-{i}"),"uuid":format!("call-row-{n}"),"timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":format!("claude-call-{n}"),"name":"Agent","input":{"prompt":"sanitized work"}}]}})));
+                }
+                raw.push_str(&format!("{}\n",serde_json::json!({"type":"user","sessionId":format!("claude72-{i}"),"uuid":"receipt-shared","timestamp":"2026-10-01T00:02:00Z","origin":{"kind":"peer","msg_id":"claude-message","name":"worker"},"message":{"role":"user","content":"recorded receipt"}})));
+                fs::write(input.full_path(options),raw).unwrap();
+                input
+            }).collect()
+        }
+
+        fn claude_ingest(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) {
+            for (i, input) in inputs.iter().enumerate() {
+                if cache.explicit_store {
+                    cache
+                        .ingest(
+                            &format!("{:064x}", 7200 + i),
+                            &input.full_path(options),
+                            "claude",
+                        )
+                        .unwrap();
+                } else {
+                    crate::events::scan_file(
+                        &input.full_path(options),
+                        "claude",
+                        cache,
+                        &mut false,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        fn ordinary_claude_ready(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> Batch {
+            assert!(!cache.explicit_store);
+            claude_ingest(cache, options, inputs);
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            for _ in 0..256 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let mut selected = batch
+                    .paths
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                if batch.phase == Phase::Relations {
+                    selected.extend(batch.context.parent_paths(&batch.paths));
+                    selected.extend(batch.context.companions.iter().cloned());
+                }
+                assert!(selected.len() <= 64);
+                let selected = selected
+                    .iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(path), options).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let prepared = match batch.phase {
+                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
+                        options,
+                        cache,
+                        &selected,
+                        1_790_000_000_000,
+                    ),
+                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
+                        options,
+                        cache,
+                        &selected,
+                        &batch.context,
+                        1_790_000_000_000,
+                    ),
+                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
+                        options,
+                        cache,
+                        &selected,
+                        &batch.context,
+                        batch.phase == Phase::Relations,
+                        1_790_000_000_000,
+                    ),
+                }
+                .unwrap();
+                if batch.phase == Phase::Publication {
+                    return batch;
+                }
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                    Outcome::Written
+                );
+            }
+            panic!("ordinary Claude producer did not finish");
+        }
+
+        fn claude_ready(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> (Batch, crate::model::SemanticModelBatch) {
+            claude_ingest(cache, options, inputs);
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            for _ in 0..256 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if cache.explicit_store && matches!(batch.phase, Phase::Indexing | Phase::Identity)
+                {
+                    let error = cache
+                        .semantic_select(
+                            batch.epoch,
+                            &crate::model::relation_stage::Selector::ClaudeCall {
+                                id: "claude-call-0".into(),
+                            },
+                        )
+                        .unwrap_err();
+                    assert_eq!(
+                        error.to_string(),
+                        "semantic_claude_event_projection_pending"
+                    );
+                }
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|i| {
+                        batch
+                            .paths
+                            .contains(&i.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                let model = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                if cache.explicit_store || batch.phase != Phase::Publication {
+                    assert_eq!(
+                        cache
+                            .record_semantic_batch(&batch, model.prepared())
+                            .unwrap(),
+                        Outcome::Written,
+                        "phase={:?}, admitted={}, rejection={:?}",
+                        batch.phase,
+                        cache.explicit_store,
+                        cache.semantic_rejection()
+                    );
+                }
+                if batch.phase == Phase::Publication {
+                    return (batch, model);
+                }
+            }
+            panic!("real Claude producer did not finish");
+        }
+
+        fn projection_rows(db: &Connection, ns: Option<&str>) -> Vec<String> {
+            let predicate = if ns.is_some() {
+                "WHERE namespace=?1"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT json_array(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key,copied,qualified) FROM catalog_semantic_events {predicate} ORDER BY source_path,event_key"
+            );
+            let mut q = db.prepare(&sql).unwrap();
+            if let Some(ns) = ns {
+                q.query_map([ns], |r| r.get(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap()
+            } else {
+                q.query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap()
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain72_claude_receipt_call_real_producer_oracle() {
+            use crate::model::relation_stage::Selector;
+            for copies in [1, 2] {
+                let (f, _, options, _) = model_sources();
+                let options = &options[1];
+                let inputs = claude_inputs(options, copies, 1);
+                let mut admitted = open(&f.config);
+                let (batch, model) = claude_ready(&mut admitted, options, &inputs);
+                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+                let ordinary_db =
+                    Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+                let actual = projection_rows(&f.db(), Some("source-a"));
+                assert_eq!(
+                    actual.len(),
+                    copies * 2,
+                    "real calls and receipts were projected"
+                );
+                assert_eq!(
+                    actual,
+                    projection_rows(&ordinary_db, None),
+                    "all event metadata and physical owner fields"
+                );
+                for selector in [
+                    Selector::ClaudeCall {
+                        id: "claude-call-0".into(),
+                    },
+                    Selector::ClaudeReceipt {
+                        id: "claude-message".into(),
+                    },
+                ] {
+                    let actual = admitted.semantic_select(batch.epoch, &selector).unwrap();
+                    let expected = ordinary
+                        .semantic_select(reference.epoch, &selector)
+                        .unwrap();
+                    assert_eq!(
+                        actual.count,
+                        if matches!(selector, Selector::ClaudeCall { .. }) {
+                            copies
+                        } else {
+                            1
+                        }
+                    );
+                    assert_eq!(selector_value(actual), selector_value(expected));
+                }
+                oracle(&admitted, options, &inputs, model.prepared());
+                publish(&mut admitted, &f, &batch, &model);
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain72_claude_foreign_namespace_projection_isolated() {
+            let (f, b, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = claude_inputs(options, 1, 1);
+            let mut foreign = open(&b);
+            let (foreign_batch, foreign_model) = claude_ready(&mut foreign, options, &inputs);
+            assert_eq!(
+                foreign
+                    .publish_semantic_catalog(&foreign_batch, foreign_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            let before = namespace_state(&f, "source-b");
+            let mut own = open(&f.config);
+            let (batch, model) = claude_ready(&mut own, options, &inputs);
+            let mut altered = crate::model::prepare_staged_sources(
+                options,
+                &mut own,
+                &inputs,
+                &batch.context,
+                false,
+                1_790_000_000_000,
+            )
+            .unwrap();
+            let stub = altered
+                .transcripts
+                .iter()
+                .position(|projection| !altered.rows.iter().any(|row| row.key == projection.key))
+                .expect("real unmatched native call produces a virtual transcript");
+            let real_key = altered.transcripts[stub].key.clone();
+            let unchanged = shared_state(&f);
+            altered.transcripts[stub].key = "unrecorded-virtual-owner".into();
+            assert_eq!(
+                own.publish_semantic_catalog(&batch, &altered)
+                    .unwrap_err()
+                    .to_string(),
+                "semantic_publication_projection_owner"
+            );
+            assert_eq!(
+                shared_state(&f),
+                unchanged,
+                "arbitrary virtual projection has zero effects"
+            );
+            altered.transcripts[stub].key = real_key.clone();
+            let relation = altered
+                .relationships
+                .relations
+                .values_mut()
+                .find(|relation| relation.stubs.iter().any(|stub| stub.key == real_key))
+                .unwrap();
+            relation
+                .stubs
+                .iter_mut()
+                .find(|stub| stub.key == real_key)
+                .unwrap()
+                .name
+                .push_str("-unrecorded");
+            assert_eq!(
+                own.publish_semantic_catalog(&batch, &altered).unwrap().0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                unchanged,
+                "typed anchored stub must match the recorded producer witness"
+            );
+            publish(&mut own, &f, &batch, &model);
+            for table in [
+                "session_catalog",
+                "session_catalog_sources",
+                "session_slot_projections",
+                "session_slots",
+                "catalog_semantic_owner_sources",
+            ] {
+                assert_eq!(
+                    f.db().query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE namespace='source-a' AND session_key=?1"),
+                        [&real_key],
+                        |row| row.get::<_, i64>(0),
+                    ).unwrap(),
+                    0,
+                    "virtual stubs have no persisted owner or Raw membership in {table}"
+                );
+            }
+            assert_eq!(
+                namespace_state(&f, "source-b"),
+                before,
+                "identical paths, native IDs and message IDs stay foreign"
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain72_claude_projection_epoch_reopen_has_zero_effects() {
+            use crate::model::relation_stage::Selector;
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = claude_inputs(options, 1, 130);
+            let mut old = open(&f.config);
+            claude_ingest(&mut old, options, &inputs);
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            old.begin_semantic_stage_with_journal(&paths, &runtime, true)
+                .unwrap();
+            let mut reached = false;
+            for _ in 0..64 {
+                let batch = old.semantic_batch(64).unwrap().unwrap();
+                let count:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_events WHERE namespace='source-a' AND qualified=0",[],|r|r.get(0)).unwrap();
+                if count > 0 {
+                    assert!(count <= 64, "one bounded projection page before reopening");
+                    crate::facts::write_facts(
+                        options.facts.as_ref().unwrap(),
+                        &crate::Facts {
+                            version: 2,
+                            hostname: "reopened-event-source".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let mut next = open(&f.config);
+                    let runtime =
+                        crate::native_evidence::query_runtime_generation(options).unwrap();
+                    next.begin_semantic_stage_with_journal(&paths, &runtime, true)
+                        .unwrap();
+                    let before = shared_state(&f);
+                    assert!(
+                        old.semantic_select(
+                            batch.epoch,
+                            &Selector::ClaudeCall {
+                                id: "claude-call-0".into()
+                            }
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(shared_state(&f), before);
+                    assert!(old.semantic_batch(64).is_err());
+                    assert_eq!(
+                        shared_state(&f),
+                        before,
+                        "stale projection holder cannot change any namespace"
+                    );
+                    reached = true;
+                    break;
+                }
+                if !batch.paths.is_empty() {
+                    old.prepare_semantic_model_batch(options, &inputs, &batch, 1_790_000_000_000)
+                        .unwrap();
+                }
+            }
+            assert!(reached);
+        }
+
+        #[test]
+        fn configured_semantic_domain72_claude_copied_events_qualify_after_reduce_in_pages() {
+            use crate::model::relation_stage::Selector;
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = claude_inputs(options, 2, 65);
+            let old = inputs[0].full_path(options);
+            let mut raw = fs::read_to_string(&old).unwrap();
+            raw.push_str(&format!("{}\n",serde_json::json!({"type":"continued-in","sessionId":"claude72-0","continuedInSessionId":"claude72-1","timestamp":"2026-10-01T00:03:00Z"})));
+            fs::write(old, raw).unwrap();
+            let mut admitted = open(&f.config);
+            let (batch, model) = claude_ready(&mut admitted, options, &inputs);
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let db = f.db();
+            let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(
+                counts,
+                (132, 132, 66),
+                "continued source copies are suppressed only after physical ownership resolves"
+            );
+            let ordinary_db = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+            assert_eq!(
+                projection_rows(&db, Some("source-a")),
+                projection_rows(&ordinary_db, None)
+            );
+            let selector = Selector::ClaudeCall {
+                id: "claude-call-0".into(),
+            };
+            let actual = admitted.semantic_select(batch.epoch, &selector).unwrap();
+            assert_eq!(actual.count, 1, "copy cannot create call ambiguity");
+            assert_eq!(
+                selector_value(actual),
+                selector_value(
+                    ordinary
+                        .semantic_select(reference.epoch, &selector)
+                        .unwrap()
+                )
+            );
+            oracle(&admitted, options, &inputs, model.prepared());
+            publish(&mut admitted, &f, &batch, &model);
         }
     }
     mod selected57 {

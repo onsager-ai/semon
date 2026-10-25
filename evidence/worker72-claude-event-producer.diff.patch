@@ -1,0 +1,800 @@
+diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
+index 0a9247c0..efe210ff 100644
+--- a/crates/semon-sessions/src/events/store/configured.rs
++++ b/crates/semon-sessions/src/events/store/configured.rs
+@@ -7654,99 +7654,253 @@ mod tests {
+         }
+ 
+         #[test]
+-        fn configured_semantic_domain67_claude_event_producer_remains_explicitly_closed() {
+-            let (f, _, options, inputs) = model_sources();
++        fn configured_semantic_domain67_claude_event_producer_projects_real_call() {
++            let (f, _, options, _) = model_sources();
+             let options = &options[1];
+-            let input = &inputs[1];
+-            let mut raw = fs::read_to_string(input.full_path(options)).unwrap();
+-            raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":"model-1","uuid":"native-call","timestamp":"2026-10-01T00:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"selector-call","name":"Agent","input":{"prompt":"sanitized work"}}]}})));
+-            fs::write(input.full_path(options), raw).unwrap();
++            let inputs = claude_inputs(options, 1, 1);
+             let mut cache = open(&f.config);
+-            cache
+-                .ingest(
+-                    &format!("{:064x}", 6899),
+-                    &input.full_path(options),
+-                    "claude",
+-                )
+-                .unwrap();
+-            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+-            cache
+-                .begin_semantic_stage_with_journal(
+-                    &[input.full_path(options).to_string_lossy().into_owned()],
+-                    &runtime,
+-                    true,
+-                )
+-                .unwrap();
+-            let mut reached = false;
++            let (batch, model) = claude_ready(&mut cache, options, &inputs);
++            assert_eq!(cache.semantic_select(batch.epoch, &crate::model::relation_stage::Selector::ClaudeCall { id: "claude-call-0".into() }).unwrap().count, 1);
++            oracle(&cache, options, &inputs, model.prepared());
++            publish(&mut cache, &f, &batch, &model);
++        }
++        #[test]
++        fn configured_semantic_domain72_claude_unsupported_name_and_native_peer_refuse() {
++            use crate::model::relation_stage::Selector;
++            let (f,_,options,_)=model_sources();
++            let options=&options[1];
++            let inputs=claude_inputs(options,1,1);
++            let mut cache=open(&f.config);
++            let (batch,model)=claude_ready(&mut cache,options,&inputs);
++            let before=shared_state(&f);
++            assert_eq!(cache.semantic_select(batch.epoch,&Selector::ClaudeName {name:"worker".into()}).unwrap_err().to_string(),"semantic_claude_name_members_pending");
++            assert_eq!(shared_state(&f),before);
++            publish(&mut cache,&f,&batch,&model);
++            cache.finish_semantic_stage(batch.epoch).unwrap();
++            let path=inputs[0].full_path(options);
++            let raw=fs::read_to_string(&path).unwrap().lines().map(|line| {
++                let mut record:serde_json::Value=serde_json::from_str(line).unwrap();
++                if record.get("origin").is_some() { record["origin"]["from"]=serde_json::json!("unported-peer"); }
++                format!("{record}\n")
++            }).collect::<String>();
++            fs::write(&path,raw).unwrap();
++            cache.ingest(&format!("{:064x}",7299),&path,"claude").unwrap();
++            let runtime=crate::native_evidence::query_runtime_generation(options).unwrap();
++            cache.begin_semantic_stage_with_journal(&[path.to_string_lossy().into_owned()],&runtime,true).unwrap();
++            let mut reached=false;
+             for _ in 0..128 {
+-                let before = shared_state(&f);
++                let before=shared_state(&f);
+                 match cache.semantic_batch(64) {
+                     Err(error) => {
+-                        assert!(
+-                            error
+-                                .to_string()
+-                                .contains("semantic_nonprimitive_event_harness"),
+-                            "{error}"
+-                        );
+-                        assert_eq!(
+-                            shared_state(&f),
+-                            before,
+-                            "producer refusal rolls back whole transaction"
+-                        );
+-                        reached = true;
++                        assert_eq!(error.to_string(),"semantic_claude_native_frontier_pending");
++                        assert_eq!(shared_state(&f),before,"unported native discovery cannot publish negatives or partial events");
++                        reached=true;
+                         break;
+                     }
+                     Ok(Some(batch)) if !batch.paths.is_empty() => {
+-                        assert_ne!(
+-                            batch.phase,
+-                            Phase::Publication,
+-                            "incident inputs must not publish without their event producer"
+-                        );
+-                        for selector in [
+-                            crate::model::relation_stage::Selector::ClaudeCall {
+-                                id: "selector-call".into(),
+-                            },
+-                            crate::model::relation_stage::Selector::ClaudeReceipt {
+-                                id: "selector-message".into(),
+-                            },
+-                        ] {
+-                            let before_select = shared_state(&f);
+-                            let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
+-                            assert!(
+-                                error
+-                                    .to_string()
+-                                    .contains("semantic_claude_event_projection_pending"),
+-                                "{error}"
+-                            );
+-                            assert_eq!(shared_state(&f), before_select);
++                        assert_eq!(batch.phase,Phase::Indexing);
++                        cache.prepare_semantic_model_batch(options,&inputs,&batch,1_790_000_000_000).unwrap();
++                    }
++                    Ok(Some(_)) => {},
++                    Ok(None) => panic!("peer stage disappeared"),
++                }
++            }
++            assert!(reached);
++        }
++
++        #[test]
++        fn configured_semantic_domain72_receipt_frontier_pages_to_source_capacity_refusal() {
++            let (f,_,options,_)=model_sources();
++            let options=&options[1];
++            let inputs=claude_inputs(options,65,0);
++            let mut cache=open(&f.config);
++            claude_ingest(&mut cache,options,&inputs);
++            let runtime=crate::native_evidence::query_runtime_generation(options).unwrap();
++            cache.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()],&runtime,true).unwrap();
++            let mut reached=false;
++            let mut paged=false;
++            for _ in 0..256 {
++                let before=shared_state(&f);
++                match cache.semantic_batch(64) {
++                    Err(error) => {
++                        assert_eq!(error.to_string(),"semantic_component_source_budget");
++                        assert_eq!(shared_state(&f),before,"capacity refusal rolls back all namespaces");
++                        reached=true;
++                        break;
++                    }
++                    Ok(Some(batch)) => {
++                        let enrolled:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get(0)).unwrap();
++                        paged |= enrolled==64;
++                        if !batch.paths.is_empty() {
++                            assert_eq!(batch.phase,Phase::Indexing);
++                            let selected=inputs.iter().filter(|i|batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
++                            cache.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
+                         }
+-                        cache
+-                            .prepare_semantic_model_batch(
+-                                options,
+-                                std::slice::from_ref(input),
+-                                &batch,
+-                                1_790_000_000_000,
+-                            )
+-                            .unwrap();
+                     }
+-                    Ok(Some(_)) => {}
+-                    Ok(None) => panic!("stage disappeared before producer refusal"),
++                    Ok(None) => panic!("receipt frontier disappeared"),
+                 }
+             }
+-            assert!(
+-                reached,
+-                "real Agent input must reach the actual producer refusal"
+-            );
+-            assert_eq!(
+-                f.db()
+-                    .query_row(
+-                        "SELECT count(*) FROM session_catalog WHERE namespace='source-a'",
+-                        [],
+-                        |r| r.get::<_, i64>(0)
+-                    )
+-                    .unwrap(),
+-                0
+-            );
++            assert!(paged,"receipt discovery must persist the bounded 64-source page");
++            assert!(reached,"65th physical receipt source must hit the real source bound");
++            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
++        }
++        fn claude_inputs(options: &crate::Options, copies: usize, events: usize) -> Vec<crate::Input> {
++            (0..copies).map(|i| {
++                let input = crate::Input { root: crate::InputRoot::Claude, path: format!("projects/sanitized/claude72-{i}.jsonl").into() };
++                let mut raw = format!("{}\n",serde_json::json!({"type":"user","sessionId":format!("claude72-{i}"),"uuid":format!("first-{i}"),"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":"native work"}}));
++                for n in 0..events {
++                    raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":format!("claude72-{i}"),"uuid":format!("call-row-{n}"),"timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":format!("claude-call-{n}"),"name":"Agent","input":{"prompt":"sanitized work"}}]}})));
++                }
++                raw.push_str(&format!("{}\n",serde_json::json!({"type":"user","sessionId":format!("claude72-{i}"),"uuid":"receipt-shared","timestamp":"2026-10-01T00:02:00Z","origin":{"kind":"peer","msg_id":"claude-message","name":"worker"},"message":{"role":"user","content":"recorded receipt"}})));
++                fs::write(input.full_path(options),raw).unwrap();
++                input
++            }).collect()
++        }
++
++        fn claude_ingest(cache: &mut EventCache, options: &crate::Options, inputs: &[crate::Input]) {
++            for (i, input) in inputs.iter().enumerate() {
++                if cache.explicit_store {
++                    cache.ingest(&format!("{:064x}",7200+i),&input.full_path(options),"claude").unwrap();
++                } else {
++                    crate::events::scan_file(&input.full_path(options),"claude",cache,&mut false).unwrap();
++                }
++            }
++        }
++
++        fn claude_ready(cache: &mut EventCache, options: &crate::Options, inputs: &[crate::Input]) -> (Batch, crate::model::SemanticModelBatch) {
++            claude_ingest(cache,options,inputs);
++            let paths = inputs.iter().map(|i|i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            assert_eq!(cache.begin_semantic_stage_with_journal(&paths,&runtime,true).unwrap(),Outcome::Written);
++            for _ in 0..256 {
++                let batch = cache.semantic_batch(64).unwrap().unwrap();
++                if cache.explicit_store && matches!(batch.phase,Phase::Indexing|Phase::Identity) {
++                    let error=cache.semantic_select(batch.epoch,&crate::model::relation_stage::Selector::ClaudeCall { id:"claude-call-0".into() }).unwrap_err();
++                    assert_eq!(error.to_string(),"semantic_claude_event_projection_pending");
++                }
++                if batch.paths.is_empty() { continue; }
++                let selected=inputs.iter().filter(|i|batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
++                assert_eq!(selected.len(),batch.paths.len());
++                let model=crate::model::prepare_semantic_batch(options,cache,&selected,&batch,1_790_000_000_000).unwrap();
++                if cache.explicit_store || batch.phase!=Phase::Publication {
++                    assert_eq!(cache.record_semantic_batch(&batch,model.prepared()).unwrap(),Outcome::Written);
++                }
++                if batch.phase==Phase::Publication { return (batch,model); }
++            }
++            panic!("real Claude producer did not finish");
++        }
++
++        fn projection_rows(db: &Connection, ns: Option<&str>) -> Vec<String> {
++            let predicate=if ns.is_some() { "WHERE namespace=?1" } else { "" };
++            let sql=format!("SELECT json_array(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key,copied,qualified) FROM catalog_semantic_events {predicate} ORDER BY source_path,event_key");
++            let mut q=db.prepare(&sql).unwrap();
++            if let Some(ns)=ns { q.query_map([ns],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap() }
++            else { q.query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap() }
+         }
++
++        #[test]
++        fn configured_semantic_domain72_claude_receipt_call_real_producer_oracle() {
++            use crate::model::relation_stage::Selector;
++            for copies in [1,2] {
++                let (f,_,options,_)=model_sources();
++                let options=&options[1];
++                let inputs=claude_inputs(options,copies,1);
++                let mut admitted=open(&f.config);
++                let (batch,model)=claude_ready(&mut admitted,options,&inputs);
++                let mut ordinary=EventCache::open_scoped(&options.cache).unwrap();
++                let (reference,_)=claude_ready(&mut ordinary,options,&inputs);
++                let ordinary_db=Connection::open(options.cache.with_extension("sqlite3")).unwrap();
++                let actual=projection_rows(&f.db(),Some("source-a"));
++                assert_eq!(actual.len(),copies*2,"real calls and receipts were projected");
++                assert_eq!(actual,projection_rows(&ordinary_db,None),"all event metadata and physical owner fields");
++                for selector in [Selector::ClaudeCall { id:"claude-call-0".into() },Selector::ClaudeReceipt { id:"claude-message".into() }] {
++                    let actual=admitted.semantic_select(batch.epoch,&selector).unwrap();
++                    let expected=ordinary.semantic_select(reference.epoch,&selector).unwrap();
++                    assert_eq!(actual.count,if matches!(selector,Selector::ClaudeCall {..}) {copies} else {1});
++                    assert_eq!(selector_value(actual),selector_value(expected));
++                }
++                oracle(&admitted,options,&inputs,model.prepared());
++                publish(&mut admitted,&f,&batch,&model);
++            }
++        }
++
++        #[test]
++        fn configured_semantic_domain72_claude_foreign_namespace_projection_isolated() {
++            let (f,b,options,_)=model_sources();
++            let options=&options[1];
++            let inputs=claude_inputs(options,1,1);
++            let mut foreign=open(&b);
++            let (foreign_batch,foreign_model)=claude_ready(&mut foreign,options,&inputs);
++            assert_eq!(foreign.publish_semantic_catalog(&foreign_batch,foreign_model.prepared()).unwrap().0,Outcome::Written);
++            let before=namespace_state(&f,"source-b");
++            let mut own=open(&f.config);
++            let (batch,model)=claude_ready(&mut own,options,&inputs);
++            publish(&mut own,&f,&batch,&model);
++            assert_eq!(namespace_state(&f,"source-b"),before,"identical paths, native IDs and message IDs stay foreign");
++        }
++
++        #[test]
++        fn configured_semantic_domain72_claude_projection_epoch_reopen_has_zero_effects() {
++            use crate::model::relation_stage::Selector;
++            let (f,_,options,_)=model_sources();
++            let options=&options[1];
++            let inputs=claude_inputs(options,1,130);
++            let mut old=open(&f.config);
++            claude_ingest(&mut old,options,&inputs);
++            let paths=inputs.iter().map(|i|i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
++            let runtime=crate::native_evidence::query_runtime_generation(options).unwrap();
++            old.begin_semantic_stage_with_journal(&paths,&runtime,true).unwrap();
++            let mut reached=false;
++            for _ in 0..64 {
++                let batch=old.semantic_batch(64).unwrap().unwrap();
++                let count:i64=f.db().query_row("SELECT count(*) FROM catalog_semantic_events WHERE namespace='source-a' AND qualified=0",[],|r|r.get(0)).unwrap();
++                if count>0 {
++                    assert!(count<=64,"one bounded projection page before reopening");
++                    crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts {version:2,hostname:"reopened-event-source".into(),..Default::default()}).unwrap();
++                    let mut next=open(&f.config);
++                    let runtime=crate::native_evidence::query_runtime_generation(options).unwrap();
++                    next.begin_semantic_stage_with_journal(&paths,&runtime,true).unwrap();
++                    let before=shared_state(&f);
++                    assert!(old.semantic_select(batch.epoch,&Selector::ClaudeCall {id:"claude-call-0".into()}).is_err());
++                    assert_eq!(shared_state(&f),before);
++                    assert!(old.semantic_batch(64).is_err());
++                    assert_eq!(shared_state(&f),before,"stale projection holder cannot change any namespace");
++                    reached=true;
++                    break;
++                }
++                if !batch.paths.is_empty() {
++                    old.prepare_semantic_model_batch(options,&inputs,&batch,1_790_000_000_000).unwrap();
++                }
++            }
++            assert!(reached);
++        }
++
++        #[test]
++        fn configured_semantic_domain72_claude_copied_events_qualify_after_reduce_in_pages() {
++            use crate::model::relation_stage::Selector;
++            let (f,_,options,_)=model_sources();
++            let options=&options[1];
++            let inputs=claude_inputs(options,2,65);
++            let old=inputs[0].full_path(options);
++            let mut raw=fs::read_to_string(&old).unwrap();
++            raw.push_str(&format!("{}\n",serde_json::json!({"type":"continued-in","sessionId":"claude72-0","continuedInSessionId":"claude72-1","timestamp":"2026-10-01T00:03:00Z"})));
++            fs::write(old,raw).unwrap();
++            let mut admitted=open(&f.config);
++            let (batch,model)=claude_ready(&mut admitted,options,&inputs);
++            let mut ordinary=EventCache::open_scoped(&options.cache).unwrap();
++            let (reference,_)=claude_ready(&mut ordinary,options,&inputs);
++            let db=f.db();
++            let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
++            assert_eq!(counts,(132,132,66),"continued source copies are suppressed only after physical ownership resolves");
++            let ordinary_db=Connection::open(options.cache.with_extension("sqlite3")).unwrap();
++            assert_eq!(projection_rows(&db,Some("source-a")),projection_rows(&ordinary_db,None));
++            let selector=Selector::ClaudeCall {id:"claude-call-0".into()};
++            let actual=admitted.semantic_select(batch.epoch,&selector).unwrap();
++            assert_eq!(actual.count,1,"copy cannot create call ambiguity");
++            assert_eq!(selector_value(actual),selector_value(ordinary.semantic_select(reference.epoch,&selector).unwrap()));
++            oracle(&admitted,options,&inputs,model.prepared());
++            publish(&mut admitted,&f,&batch,&model);
++        }
++
+     }
+ }
+diff --git a/crates/semon-sessions/src/events/store/semantic_stage.rs b/crates/semon-sessions/src/events/store/semantic_stage.rs
+index aeaa338d..5bbe878b 100644
+--- a/crates/semon-sessions/src/events/store/semantic_stage.rs
++++ b/crates/semon-sessions/src/events/store/semantic_stage.rs
+@@ -984,27 +984,43 @@ fn owner_closure(c: &Connection, seed: &str) -> rusqlite::Result<Vec<String>> {
+     }
+     Ok(paths.into_iter().collect())
+ }
+-fn qualify_events(c: &Connection) -> rusqlite::Result<bool> {
+-    let candidates=c.prepare("SELECT source_path,event_key,copy_key FROM catalog_semantic_events WHERE qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
+-    for (path, key, identity) in &candidates {
+-        let copied = if let Some(identity) = identity {
+-            c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_inputs target JOIN catalog_semantic_owner_sources own ON own.source_path=target.source_path JOIN catalog_semantic_owner_sources predecessor ON predecessor.session_key=own.session_key AND predecessor.source_path<>target.source_path JOIN files source ON source.path=predecessor.source_path JOIN events event ON event.file_id=source.file_id WHERE target.source_path=?1 AND target.is_top=1 AND event.extra=0 AND COALESCE(event.u,CASE WHEN event.k IN ('tool','xsm') THEN event.id END)=?2 AND EXISTS(SELECT 1 FROM json_each(source.links,'$.continued_in') WHERE value=target.native_id))",params![path,identity],|r|r.get::<_,bool>(0))?
+-        } else {
+-            false
+-        };
+-        let owner: String = c.query_row(
+-            "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
+-            [path],
+-            |r| r.get(0),
+-        )?;
+-        c.execute("UPDATE catalog_semantic_events SET owner=?3,copied=?4,qualified=1 WHERE source_path=?1 AND event_key=?2",params![path,key,owner,copied])?;
++/// Qualification is a separate bounded Identity sub-phase after reduction.
++pub(crate) trait QualificationPort {
++    fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>>;
++    fn copied(&self, path: &str, identity: &str) -> rusqlite::Result<bool>;
++    fn owner(&self, path: &str) -> rusqlite::Result<String>;
++    fn qualify(&self, path: &str, key: &str, owner: &str, copied: bool) -> rusqlite::Result<()>;
++    fn done(&self) -> rusqlite::Result<bool>;
++}
++pub(crate) fn qualify_with(port: &impl QualificationPort) -> rusqlite::Result<bool> {
++    for (path, key, identity) in port.pending()? {
++        let copied = if let Some(identity) = identity { port.copied(&path, &identity)? } else { false };
++        let owner = port.owner(&path)?;
++        port.qualify(&path, &key, &owner, copied)?;
++    }
++    port.done()
++}
++struct OrdinaryQualification<'a>(&'a Connection);
++impl QualificationPort for OrdinaryQualification<'_> {
++    fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
++        self.0.prepare("SELECT source_path,event_key,copy_key FROM catalog_semantic_events WHERE qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
++    }
++    fn copied(&self, path: &str, identity: &str) -> rusqlite::Result<bool> {
++        self.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_inputs target JOIN catalog_semantic_owner_sources own ON own.source_path=target.source_path JOIN catalog_semantic_owner_sources predecessor ON predecessor.session_key=own.session_key AND predecessor.source_path<>target.source_path JOIN files source ON source.path=predecessor.source_path JOIN events event ON event.file_id=source.file_id WHERE target.source_path=?1 AND target.is_top=1 AND event.extra=0 AND COALESCE(event.u,CASE WHEN event.k IN ('tool','xsm') THEN event.id END)=?2 AND EXISTS(SELECT 1 FROM json_each(source.links,'$.continued_in') WHERE value=target.native_id))",params![path,identity],|r|r.get(0))
++    }
++    fn owner(&self, path: &str) -> rusqlite::Result<String> {
++        self.0.query_row("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",[path],|r|r.get(0))
++    }
++    fn qualify(&self, path: &str, key: &str, owner: &str, copied: bool) -> rusqlite::Result<()> {
++        self.0.execute("UPDATE catalog_semantic_events SET owner=?3,copied=?4,qualified=1 WHERE source_path=?1 AND event_key=?2",params![path,key,owner,copied])?;
++        Ok(())
++    }
++    fn done(&self) -> rusqlite::Result<bool> {
++        self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE qualified=0)",[],|r|r.get(0))
+     }
+-    c.query_row(
+-        "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE qualified=0)",
+-        [],
+-        |r| r.get(0),
+-    )
+ }
++fn qualify_events(c: &Connection) -> rusqlite::Result<bool> { qualify_with(&OrdinaryQualification(c)) }
++
+ fn decode_event(
+     c: &Connection,
+     text: Option<String>,
+@@ -1019,121 +1035,155 @@ fn decode_event(
+         used,
+     )
+ }
+-/// Read candidates one row at a time. Both the persistent cursor and accepted
+-/// encoded page stay within the existing 64-row / 1MiB metadata budgets.
+-fn event_page(c: &Connection) -> rusqlite::Result<bool> {
+-    let paths=c.prepare("SELECT source_path FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
++pub(crate) struct ProjectedEvent {
++    pub(crate) native: crate::model::relation_stage::NativeEvent,
++    pub(crate) key: String,
++    pub(crate) kind: &'static str,
++    pub(crate) msg: Option<String>,
++    pub(crate) name: Option<String>,
++    pub(crate) encoded: String,
++    pub(crate) seq: i64,
++}
++
++/// Physical operations only; the shared recipe owns decoding, page accounting,
++/// event classification and frontier decisions.
++pub(crate) trait EventProjectionPort {
++    fn paths(&self) -> rusqlite::Result<Vec<String>>;
++    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, Option<String>)>>;
++    fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)>;
++    fn candidates(&self, file: i64, after: i64, limit: usize,
++        visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()>;
++    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool>;
++    fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()>;
++    fn put(&self, row: &ProjectedEvent) -> rusqlite::Result<()>;
++    fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()>;
++    fn native(&self, id: &str) -> rusqlite::Result<()>;
++    fn done(&self) -> rusqlite::Result<bool>;
++}
++
++pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Result<bool> {
+     let mut budget = 64usize;
+     let mut bytes = 0usize;
+-    for path in paths {
+-        if budget == 0 {
+-            break;
+-        }
+-        let input:Option<(String,Option<String>)>=c.query_row("SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_inputs WHERE source_path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
++    for path in port.paths()? {
++        if budget == 0 { break; }
++        let input = port.input(&path)?;
+         let Some((harness, text)) = input else {
+-            c.execute(
+-                "UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",
+-                [&path],
+-            )?;
++            port.finish(&path, None, true)?;
+             budget -= 1;
+             continue;
+         };
+         if harness != "claude" {
+-            c.execute(
+-                "UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",
+-                [&path],
+-            )?;
++            port.finish(&path, None, true)?;
+             budget -= 1;
+             continue;
+         }
+         let source: crate::model::summary::CatalogSource = bounded(text, &mut 0)?;
+-        let (file,after):(i64,i64)=c.query_row("SELECT f.file_id,s.event_after FROM files f JOIN catalog_semantic_sources s ON s.source_path=f.path WHERE f.path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?)))?;
+-        let sql = format!(
+-            "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')) ORDER BY seq LIMIT ?3"
+-        );
+-        let mut q = c.prepare(&sql)?;
+-        let mut rows = q.query(params![file, after, budget as i64])?;
++        let (file, after) = port.cursor(&path)?;
+         let mut end = after;
+         let mut stopped = false;
+-        while let Some(row) = rows.next()? {
+-            let (_, seq, event) = read_event(row)?;
+-            let occurrence:i64=c.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,int(event.o),event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
+-            let occurrence =
+-                usize::try_from(occurrence).map_err(|_| rusqlite::Error::InvalidQuery)?;
++        port.candidates(file, after, budget, &mut |seq, event, occurrence| {
+             let native = crate::model::relation_stage::NativeEvent {
+                 owner: path.clone(),
+                 at: crate::model::relation_stage::Location {
+-                    source: source.clone(),
+-                    offset: event.o,
+-                    block: event.b,
+-                    kind: event.k,
+-                    occurrence,
++                    source: source.clone(), offset: event.o, block: event.b,
++                    kind: event.k, occurrence,
+                 },
+                 event,
+             };
+             let encoded = json(&native)?;
+-            if encoded.len() > MAX_CONTEXT {
+-                return Err(rusqlite::Error::InvalidQuery);
+-            }
++            if encoded.len() > MAX_CONTEXT { return Err(rusqlite::Error::InvalidQuery); }
+             if bytes + encoded.len() > MAX_CONTEXT {
+                 stopped = true;
+-                break;
+-            }
+-            let kind = if native.event.k == super::super::Kind::Xsm {
+-                "xsm"
+-            } else if native.event.n.as_deref() == Some("SendMessage") {
+-                if native
+-                    .event
+-                    .r
+-                    .as_ref()
+-                    .is_some_and(|reply| reply.f & super::super::PIN == 0)
+-                {
+-                    "send"
+-                } else {
+-                    "other"
+-                }
+-            } else if native.event.k == super::super::Kind::Tool {
+-                "call"
+-            } else {
+-                "other"
+-            };
+-            let msg = if kind == "xsm" {
+-                native.event.id.as_deref()
+-            } else if kind == "send" {
+-                native.event.r.as_ref().and_then(|r| r.m.as_deref())
+-            } else {
+-                None
+-            };
+-            let name = (kind == "xsm")
+-                .then(|| native.event.n.as_deref().map(crate::model::plain_name))
+-                .flatten();
+-            c.execute("INSERT OR REPLACE INTO catalog_semantic_events(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![path,location_key(&native.at)?,path,kind,msg,native.event.id,name,encoded,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?,crate::model::native_copy_identity(&native.event)])?;
+-            if let Some(msg) = msg {
+-                queue(c, "receipt", msg, "")?;
+-                queue(c, "sender", msg, "")?;
+-            }
+-            if let Some(peer) = native
+-                .event
+-                .peer
+-                .as_ref()
+-                .and_then(|peer| peer.sock.as_deref())
+-            {
+-                native_frontier(c, "claude", peer)?;
+-            }
+-            end = i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?;
++                return Ok(false);
++            }
++            let kind = if native.event.k == super::super::Kind::Xsm { "xsm" }
++                else if native.event.n.as_deref() == Some("SendMessage") {
++                    if native.event.r.as_ref().is_some_and(|reply| reply.f & super::super::PIN == 0) { "send" } else { "other" }
++                } else if native.event.k == super::super::Kind::Tool { "call" } else { "other" };
++            let msg = if kind == "xsm" { native.event.id.clone() }
++                else if kind == "send" { native.event.r.as_ref().and_then(|r| r.m.clone()) } else { None };
++            let name = (kind == "xsm").then(|| native.event.n.as_deref().map(crate::model::plain_name)).flatten();
++            let row = ProjectedEvent { key: location_key(&native.at)?, native, kind, msg, name, encoded,
++                seq: i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)? };
++            port.put(&row)?;
++            if let Some(msg) = &row.msg {
++                port.enqueue("receipt", msg)?;
++                port.enqueue("sender", msg)?;
++            }
++            if let Some(peer) = row.native.event.peer.as_ref().and_then(|peer| peer.sock.as_deref()) {
++                port.native(peer)?;
++            }
++            end = row.seq;
+             budget -= 1;
+-            bytes += encoded.len();
++            bytes += row.encoded.len();
++            Ok(true)
++        })?;
++        port.finish(&path, Some(end), !port.more(file, end)?)?;
++        if stopped { break; }
++    }
++    port.done()
++}
++
++/// Decode the same physical event columns in both SQLite adapters.
++pub(crate) fn projection_candidate(row: &Row<'_>) -> rusqlite::Result<(usize, Event)> {
++    let (_, seq, event) = read_event(row)?;
++    Ok((seq, event))
++}
++/// One candidate predicate, expanded by each physical SQL adapter.
++pub(crate) fn projection_predicate(alias: &str) -> String {
++    format!("({alias}k IN ('xsm','agm','tn') OR {alias}k='tool' AND {alias}n IN ('SendMessage','Task','Agent'))")
++}
++pub(crate) fn projection_columns() -> &'static str { EVENT_COLUMNS }
++
++struct OrdinaryProjection<'a>(&'a Connection);
++impl EventProjectionPort for OrdinaryProjection<'_> {
++    fn paths(&self) -> rusqlite::Result<Vec<String>> {
++        self.0.prepare("SELECT source_path FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([],|r|r.get(0))?.collect()
++    }
++    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, Option<String>)>> {
++        self.0.query_row("SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_inputs WHERE source_path=?1",[path],|r|Ok((r.get(0)?,r.get(1)?))).optional()
++    }
++    fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)> {
++        self.0.query_row("SELECT f.file_id,s.event_after FROM files f JOIN catalog_semantic_sources s ON s.source_path=f.path WHERE f.path=?1",[path],|r|Ok((r.get(0)?,r.get(1)?)))
++    }
++    fn candidates(&self, file: i64, after: i64, limit: usize,
++        visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()> {
++        let predicate = projection_predicate("");
++        let sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate} ORDER BY seq LIMIT ?3");
++        let mut q = self.0.prepare(&sql)?;
++        let mut rows = q.query(params![file,after,limit as i64])?;
++        while let Some(row) = rows.next()? {
++            let (seq, event) = projection_candidate(row)?;
++            let occurrence: i64 = self.0.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,int(event.o),event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
++            if !visit(seq,event,usize::try_from(occurrence).map_err(|_|rusqlite::Error::InvalidQuery)?)? { break; }
+         }
+-        drop(rows);
+-        drop(q);
+-        let more:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')))",params![file,end],|r|r.get(0))?;
+-        c.execute("UPDATE catalog_semantic_sources SET event_after=?2,events_done=?3 WHERE source_path=?1",params![path,end,!more])?;
+-        if stopped {
+-            break;
++        Ok(())
++    }
++    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
++        let predicate = projection_predicate("");
++        self.0.query_row(&format!("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate})"),params![file,after],|r|r.get(0))
++    }
++    fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
++        if let Some(after) = after {
++            self.0.execute("UPDATE catalog_semantic_sources SET event_after=?2,events_done=?3 WHERE source_path=?1",params![path,after,done])?;
++        } else {
++            self.0.execute("UPDATE catalog_semantic_sources SET events_done=1 WHERE source_path=?1",[path])?;
+         }
++        Ok(())
++    }
++    fn put(&self, row: &ProjectedEvent) -> rusqlite::Result<()> {
++        let native = &row.native;
++        self.0.execute("INSERT OR REPLACE INTO catalog_semantic_events(source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![native.owner,row.key,native.owner,row.kind,row.msg,native.event.id,row.name,row.encoded,row.seq,crate::model::native_copy_identity(&native.event)])?;
++        Ok(())
++    }
++    fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()> { queue(self.0,kind,value,"") }
++    fn native(&self, id: &str) -> rusqlite::Result<()> { native_frontier(self.0,"claude",id) }
++    fn done(&self) -> rusqlite::Result<bool> {
++        self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0)",[],|r|r.get(0))
+     }
+-    c.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE index_done=1 AND events_done=0)",[],|r|r.get(0))
+ }
++fn event_page(c: &Connection) -> rusqlite::Result<bool> { event_page_with(&OrdinaryProjection(c)) }
++
+ fn reset(c: &Connection, runtime: &str) -> rusqlite::Result<()> {
+     c.execute(metadata_increment(c)?, ["semantic_epoch"])?;
+     c.execute(configured::metadata_sql(c,
+diff --git a/crates/semon-sessions/src/storage/sqlite/semantic.rs b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+index 19477c54..efaef3ec 100644
+--- a/crates/semon-sessions/src/storage/sqlite/semantic.rs
++++ b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+@@ -429,16 +429,90 @@ fn lifecycle_current(prepared: &PreparedSources) -> bool {
+     authority.current().unwrap_or(false)
+ }
+ 
++struct ScopedProjection<'a> { db: &'a Connection, ns: &'a str }
++impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProjection<'_> {
++    fn paths(&self) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64")?.query_map([self.ns],|r|r.get(0))?.collect()
++    }
++    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, Option<String>)>> {
++        self.db.query_row("SELECT harness,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2",params![self.ns,path],|r|Ok((r.get(0)?,r.get(1)?))).optional()
++    }
++    fn cursor(&self, path: &str) -> rusqlite::Result<(i64, i64)> {
++        self.db.query_row("SELECT f.file_id,s.event_after FROM main.files f JOIN main.catalog_semantic_sources s ON s.namespace=f.namespace AND s.source_path=f.path WHERE f.namespace=?1 AND s.namespace=?1 AND f.path=?2",params![self.ns,path],|r|Ok((r.get(0)?,r.get(1)?)))
++    }
++    fn candidates(&self, file: i64, after: i64, limit: usize,
++        visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>) -> rusqlite::Result<()> {
++        let columns = crate::events::store::semantic_stage::projection_columns();
++        let predicate = crate::events::store::semantic_stage::projection_predicate("");
++        let sql = format!("SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4");
++        let mut q = self.db.prepare(&sql)?;
++        let mut rows = q.query(params![self.ns,file,after,limit as i64])?;
++        while let Some(row) = rows.next()? {
++            let (seq, event) = crate::events::store::semantic_stage::projection_candidate(row)?;
++            let kind = serde_json::to_value(event.k).map_err(|_|rusqlite::Error::InvalidQuery)?;
++            let kind = kind.as_str().ok_or(rusqlite::Error::InvalidQuery)?;
++            let occurrence: i64 = self.db.query_row("SELECT COUNT(*) FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND o=?3 AND b=?4 AND k=?5 AND seq<?6",params![self.ns,file,i64::try_from(event.o).map_err(|_|rusqlite::Error::InvalidQuery)?,event.b,kind,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
++            if !visit(seq,event,usize::try_from(occurrence).map_err(|_|rusqlite::Error::InvalidQuery)?)? { break; }
++        }
++        Ok(())
++    }
++    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
++        let predicate = crate::events::store::semantic_stage::projection_predicate("");
++        self.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate})"),params![self.ns,file,after],|r|r.get(0))
++    }
++    fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
++        if let Some(after) = after {
++            self.db.execute("UPDATE main.catalog_semantic_sources SET event_after=?3,events_done=?4 WHERE namespace=?1 AND source_path=?2",params![self.ns,path,after,done])?;
++        } else {
++            self.db.execute("UPDATE main.catalog_semantic_sources SET events_done=1 WHERE namespace=?1 AND source_path=?2",params![self.ns,path])?;
++        }
++        Ok(())
++    }
++    fn put(&self, row: &crate::events::store::semantic_stage::ProjectedEvent) -> rusqlite::Result<()> {
++        let native = &row.native;
++        self.db.execute("INSERT OR REPLACE INTO main.catalog_semantic_events(namespace,source_path,event_key,owner,kind,msg_id,tool_id,name,metadata,native_seq,copy_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![self.ns,native.owner,row.key,native.owner,row.kind,row.msg,native.event.id,row.name,row.encoded,row.seq,crate::model::native_copy_identity(&native.event)])?;
++        Ok(())
++    }
++    fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()> {
++        self.db.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge='' WHERE catalog_semantic_frontier.done=1",params![self.ns,kind,value])?;
++        Ok(())
++    }
++    fn native(&self, _id: &str) -> rusqlite::Result<()> {
++        // The preflight gives this unported discovery family a typed refusal.
++        Err(rusqlite::Error::InvalidQuery)
++    }
++    fn done(&self) -> rusqlite::Result<bool> {
++        self.db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0)",[self.ns],|r|r.get(0))
++    }
++}
++
++struct ScopedQualification<'a> { db: &'a Connection, ns: &'a str }
++impl crate::events::store::semantic_stage::QualificationPort for ScopedQualification<'_> {
++    fn pending(&self) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
++        self.db.prepare("SELECT source_path,event_key,copy_key FROM main.catalog_semantic_events WHERE namespace=?1 AND qualified=0 ORDER BY source_path,event_key LIMIT 64")?.query_map([self.ns],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
++    }
++    fn copied(&self, path: &str, identity: &str) -> rusqlite::Result<bool> {
++        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs target JOIN main.catalog_semantic_owner_sources own ON own.namespace=target.namespace AND own.source_path=target.source_path JOIN main.catalog_semantic_owner_sources predecessor ON predecessor.namespace=own.namespace AND predecessor.session_key=own.session_key AND predecessor.source_path<>target.source_path JOIN main.files source ON source.namespace=predecessor.namespace AND source.path=predecessor.source_path JOIN main.events event ON event.namespace=source.namespace AND event.file_id=source.file_id WHERE target.namespace=?1 AND own.namespace=?1 AND predecessor.namespace=?1 AND source.namespace=?1 AND event.namespace=?1 AND target.source_path=?2 AND target.is_top=1 AND event.extra=0 AND COALESCE(event.u,CASE WHEN event.k IN ('tool','xsm') THEN event.id END)=?3 AND EXISTS(SELECT 1 FROM json_each(source.links,'$.continued_in') WHERE value=target.native_id))",params![self.ns,path,identity],|r|r.get(0))
++    }
++    fn owner(&self, path: &str) -> rusqlite::Result<String> {
++        self.db.query_row("SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2",params![self.ns,path],|r|r.get(0))
++    }
++    fn qualify(&self, path: &str, key: &str, owner: &str, copied: bool) -> rusqlite::Result<()> {
++        self.db.execute("UPDATE main.catalog_semantic_events SET owner=?4,copied=?5,qualified=1 WHERE namespace=?1 AND source_path=?2 AND event_key=?3",params![self.ns,path,key,owner,copied])?;
++        Ok(())
++    }
++    fn done(&self) -> rusqlite::Result<bool> {
++        self.db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND qualified=0)",[self.ns],|r|r.get(0))
++    }
++}
++
+ fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+-    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0))) OR EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND (e.k IN ('xsm','agm','tn') OR e.k='tool' AND e.n IN ('SendMessage','Task','Agent')))",[ns],|r|r.get(0)).map_err(error)?;
+-    if unsupported {
+-        return Err(refuse("semantic_nonprimitive_event_harness"));
+-    }
+-    // Codex and standalone Claude sources without relationship candidates need
+-    // no relationship-event projection. The exact existing reducer candidate
+-    // predicate above refuses Claude incident events until their port lands.
+-    c.execute("UPDATE main.catalog_semantic_sources SET events_done=1 WHERE namespace=?1 AND source_path IN (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0 ORDER BY source_path LIMIT 64)",[ns]).map_err(error)?;
+-    c.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0)",[ns],|r|r.get(0)).map_err(error)
++    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
++    if unsupported { return Err(refuse("semantic_nonprimitive_event_harness")); }
++    let predicate = crate::events::store::semantic_stage::projection_predicate("e.");
++    let peer: bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND {predicate})"),[ns],|r|r.get(0)).map_err(error)?;
++    if peer { return Err(refuse("semantic_claude_native_frontier_pending")); }
++    crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns }).map_err(error)
+ }
+ 
+ fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+@@ -481,6 +555,12 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+                     "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+                 ).map_err(error)?
+             }
++            "receipt" => {
++                "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='xsm' AND e.id=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
++            }
++            "sender" => {
++                "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='tool' AND e.n='SendMessage' AND e.reply_m=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
++            }
+             "dependency" => {
+                 "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+             }
+@@ -1252,15 +1332,15 @@ impl Stage {
+         if !valid {
+             return Err(refuse("stale semantic selector"));
+         }
+-        // The real admitted event producer still refuses Claude incident
+-        // candidates. Until it exists, an empty staging event table cannot
+-        // certify a negative Receipt/Call result, even during indexing.
+-        if matches!(
+-            selector,
+-            crate::model::relation_stage::Selector::ClaudeReceipt { .. }
+-                | crate::model::relation_stage::Selector::ClaudeCall { .. }
+-        ) {
+-            return Err(refuse("semantic_claude_event_projection_pending"));
++        if matches!(selector, crate::model::relation_stage::Selector::ClaudeName { .. }) {
++            return Err(refuse("semantic_claude_name_members_pending"));
++        }
++        if matches!(selector, crate::model::relation_stage::Selector::ClaudeReceipt { .. }
++            | crate::model::relation_stage::Selector::ClaudeCall { .. }) {
++            // A negative is authoritative only after discovery, reduction and
++            // the separate copied-event qualification sub-phase all complete.
++            let complete: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND phase IN ('relations','publication')) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (index_done=0 OR events_done=0 OR identity_done=0)) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND qualified=0) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0)).map_err(error)?;
++            if !complete { return Err(refuse("semantic_claude_event_projection_pending")); }
+         }
+         let mut lookup = AdmittedLookup {
+             db: &tx,
+@@ -1697,6 +1777,7 @@ impl Stage {
+                         ns,
+                     })
+                     .map_err(error)?
++                    && crate::events::store::semantic_stage::qualify_with(&ScopedQualification { db: &tx, ns }).map_err(error)?
+                 {
+                     tx.execute("UPDATE main.catalog_semantic_stage SET phase='relations' WHERE namespace=?1 AND phase='identity'",[ns]).map_err(error)?;
+                     result_phase = Phase::Relations;
