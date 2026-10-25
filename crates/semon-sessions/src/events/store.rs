@@ -5392,9 +5392,12 @@ fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
         configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe'")?, [], |row| row.get(0),
     ).optional()?;
     if let Some(recipe) = recipe {
-        let Some((family, current)) = semantic_stage::RECIPE
-            .rsplit_once("-v")
-            .and_then(|(family, version)| contract_number(version).map(|version| (family, version)))
+        let Some((family, current)) =
+            semantic_stage::RECIPE
+                .rsplit_once("-v")
+                .and_then(|(family, version)| {
+                    contract_number(version).map(|version| (family, version))
+                })
         else {
             return Ok(found);
         };

@@ -7797,8 +7797,17 @@ mod tests {
                 native_rows
             );
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
+            let cursors = || {
+                f.db().prepare("SELECT value,after_key,done FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='members' ORDER BY value").unwrap()
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            let saved = cursors();
+            assert!(!saved.is_empty());
+            assert!(saved.iter().all(|(_, after, done)| !after.is_empty() && *done));
             drop(cache);
             let mut cache = open(&f.config);
+            assert_eq!(cursors(), saved, "member keysets survive reopening before reset resumes");
             let (fresh, fresh_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             assert_eq!(
@@ -7925,6 +7934,91 @@ mod tests {
                 Outcome::Conflict
             );
             assert_eq!(shared_state(&f), before);
+        }
+
+        #[test]
+        fn configured_semantic_domain94_name_members_source_overflow_rolls_back_before_raw() {
+            use crate::model::relation_stage::Selector;
+            let (f, foreign, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 65);
+            let initiator = inputs[0].full_path(options);
+            fs::write(&initiator, fs::read_to_string(&initiator).unwrap().replace(
+                "\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"",
+            )).unwrap();
+            let mut other = open(&foreign);
+            let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs[..1]);
+            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            let foreign_before = namespace_state(&f, "source-b");
+            let mut cache = open(&f.config);
+            // All 64 hinted owners are real, independently published native
+            // sessions. The initiator would make their replay a 65-source unit.
+            for seeds in [&inputs[1..33], &inputs[33..]] {
+                let (batch, model) = claude_ready_from(&mut cache, options, &inputs, seeds);
+                publish(&mut cache, &f, &batch, &model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            let (batch, _model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            // Unavailable peer bodies distinguish metadata capacity refusal
+            // from any attempt to read/reparse the discovered native history.
+            for input in &inputs[1..] {
+                let path = input.full_path(options);
+                fs::rename(&path, path.with_extension("held")).unwrap();
+            }
+            let before = shared_state(&f);
+            let selector = Selector::ClaudeName { name: "worker".into() };
+            for _ in 0..2 {
+                let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
+                assert_eq!(error.to_string(), "semantic_component_source_budget");
+                assert_eq!(shared_state(&f), before, "overflow rolls back the cursor and every namespace");
+            }
+            assert_eq!(namespace_state(&f, "source-b"), foreign_before);
+            assert_eq!(shared_state(&f), before);
+            drop(cache);
+            let mut cache = open(&f.config);
+            assert_eq!(cache.semantic_select(batch.epoch, &selector).unwrap_err().to_string(), "semantic_component_source_budget");
+            assert_eq!(shared_state(&f), before, "restart cannot bypass the source bound");
+        }
+
+        #[test]
+        fn configured_semantic_domain94_late_native_member_fences_publication_and_restarts() {
+            use crate::model::relation_stage::Selector;
+            let (f, foreign, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 2);
+            let initiator = inputs[0].full_path(options);
+            fs::write(&initiator, fs::read_to_string(&initiator).unwrap().replace(
+                "\"customTitle\":\"worker\"", "\"customTitle\":\"initiator\"",
+            )).unwrap();
+            let mut other = open(&foreign);
+            let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs);
+            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            let foreign_before = namespace_state(&f, "source-b");
+            let mut cache = open(&f.config);
+            let (old, model) = claude_ready(&mut cache, options, &inputs[..1]);
+            let selector = Selector::ClaudeName { name: "worker".into() };
+            assert_eq!(cache.semantic_select(old.epoch, &selector).unwrap().count, 0);
+            // The old caller has finished reduction and holds a publication
+            // model when an actually new native member is admitted.
+            cache.ingest(&"a".repeat(64), &inputs[1].full_path(options), "claude").unwrap();
+            let before = shared_state(&f);
+            assert!(cache.semantic_select(old.epoch, &selector).is_err());
+            assert_eq!(cache.record_semantic_batch(&old, model.prepared()).unwrap(), Outcome::Conflict);
+            assert_eq!(cache.publish_semantic_catalog(&old, model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(shared_state(&f), before, "late-member refusals have no partial writes");
+            assert_eq!(namespace_state(&f, "source-b"), foreign_before);
+            drop(cache);
+            let mut cache = open(&f.config);
+            let (fresh, fresh_model) = claude_ready(&mut cache, options, &inputs);
+            assert_ne!(fresh.epoch, old.epoch);
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
+            assert_eq!(actual.count, 1);
+            assert_eq!(selector_value(actual), selector_value(ordinary.semantic_select(reference.epoch, &selector).unwrap()));
+            oracle(&cache, options, &inputs, fresh_model.prepared());
+            publish(&mut cache, &f, &fresh, &fresh_model);
+            assert_eq!(namespace_state(&f, "source-b"), foreign_before);
         }
 
         #[test]
