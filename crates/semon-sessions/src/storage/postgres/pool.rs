@@ -101,7 +101,7 @@ impl PgPool {
                 let factory = self.inner.factory.clone();
                 let control = cancel.clone();
                 let (send, receive) = mpsc::sync_channel(1);
-                std::thread::Builder::new().name("semon-pg-connect".into()).spawn(move || {
+                let opening = std::thread::Builder::new().name("semon-pg-connect".into()).spawn(move || {
                     let mut lease = lease;
                     let result = factory.connect(deadline, &control).map(|connection| {
                         lease.connection = Some(connection);
@@ -118,6 +118,9 @@ impl PgPool {
                     let wait = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(10));
                     match receive.recv_timeout(wait) {
                         Ok(result) => {
+                            // No factory work remains after delivery. Join the
+                            // successful helper before admitting the lease.
+                            opening.join().map_err(|_| StorageError::Unavailable)?;
                             if cancel.is_cancelled() || Instant::now() >= deadline {
                                 drop(result);
                                 return Err(StorageError::Busy);
