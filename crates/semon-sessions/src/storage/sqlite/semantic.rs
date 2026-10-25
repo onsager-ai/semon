@@ -975,7 +975,7 @@ impl Stage {
         publication_phase("publication_proof");
         let selected_observed_at = crate::model::now_ms();
         let presentations = super::proof_generations::capture_presentations(&tx, ns, &generation, prepared, selected_observed_at).map_err(StoreError::Configured)?;
-        let proof_digest = super::proof_generations::bind_presentations(&tx, ns, &generation, &proof_digest, &presentations).map_err(StoreError::Configured)?;
+        let proof_digest = super::proof_generations::bind_presentations(&tx, ns, &generation, &proof_digest, &presentations, prepared).map_err(StoreError::Configured)?;
         tx.execute(
             "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
@@ -1005,8 +1005,7 @@ impl Stage {
                 .ok_or_else(|| refuse("semantic_stream_epoch"))?,
             &generation,
             &proof_digest,
-            prepared,
-            &presentations,
+            super::proof_generations::PreparedPresentations { prepared, rows: &presentations },
         )
         .map_err(StoreError::Configured)?;
         #[cfg(test)]
