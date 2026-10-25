@@ -7692,7 +7692,7 @@ mod tests {
             publish(&mut cache, &f, &batch, &model);
         }
         #[test]
-        fn configured_semantic_domain72_claude_unsupported_name_and_native_peer_refuse() {
+        fn configured_semantic_domain72_claude_unsupported_name_refuses() {
             use crate::model::relation_stage::Selector;
             let (f, _, options, _) = model_sources();
             let options = &options[1];
@@ -7715,60 +7715,6 @@ mod tests {
             assert_eq!(shared_state(&f), before);
             publish(&mut cache, &f, &batch, &model);
             cache.finish_semantic_stage(batch.epoch).unwrap();
-            let path = inputs[0].full_path(options);
-            let raw = fs::read_to_string(&path)
-                .unwrap()
-                .lines()
-                .map(|line| {
-                    let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
-                    if record.get("origin").is_some() {
-                        record["origin"]["from"] = serde_json::json!("unported-peer");
-                    }
-                    format!("{record}\n")
-                })
-                .collect::<String>();
-            fs::write(&path, raw).unwrap();
-            cache
-                .ingest(&format!("{:064x}", 7299), &path, "claude")
-                .unwrap();
-            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            cache
-                .begin_semantic_stage_with_journal(
-                    &[path.to_string_lossy().into_owned()],
-                    &runtime,
-                    true,
-                )
-                .unwrap();
-            let mut reached = false;
-            for _ in 0..128 {
-                let before = shared_state(&f);
-                match cache.semantic_batch(64) {
-                    Err(error) => {
-                        assert_eq!(error.to_string(), "semantic_claude_native_frontier_pending");
-                        assert_eq!(
-                            shared_state(&f),
-                            before,
-                            "unported native discovery cannot publish negatives or partial events"
-                        );
-                        reached = true;
-                        break;
-                    }
-                    Ok(Some(batch)) if !batch.paths.is_empty() => {
-                        assert_eq!(batch.phase, Phase::Indexing);
-                        cache
-                            .prepare_semantic_model_batch(
-                                options,
-                                &inputs,
-                                &batch,
-                                1_790_000_000_000,
-                            )
-                            .unwrap();
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => panic!("peer stage disappeared"),
-                }
-            }
-            assert!(reached);
         }
 
         #[test]
@@ -8015,8 +7961,16 @@ mod tests {
             options: &crate::Options,
             inputs: &[crate::Input],
         ) -> (Batch, crate::model::SemanticModelBatch) {
+            claude_ready_from(cache, options, inputs, inputs)
+        }
+        fn claude_ready_from(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+            seeds: &[crate::Input],
+        ) -> (Batch, crate::model::SemanticModelBatch) {
             claude_ingest(cache, options, inputs);
-            let paths = inputs
+            let paths = seeds
                 .iter()
                 .map(|i| i.full_path(options).to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
@@ -8355,6 +8309,62 @@ mod tests {
             );
             oracle(&admitted, options, &inputs, model.prepared());
             publish(&mut admitted, &f, &batch, &model);
+        }
+
+        fn peer_inputs(options: &crate::Options, copies: usize, peer: &str) -> Vec<crate::Input> {
+            let inputs = claude_inputs(options, copies, 1);
+            for (i, input) in inputs.iter().enumerate() {
+                let path = input.full_path(options);
+                let raw = fs::read_to_string(&path).unwrap().lines().map(|line| {
+                    let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if record.get("origin").is_some() {
+                        record["origin"]["msg_id"] = serde_json::json!(format!("peer81-message-{i}"));
+                        if i == 0 { record["origin"]["from"] = serde_json::json!(peer); }
+                    }
+                    format!("{record}\n")
+                }).collect::<String>();
+                fs::write(path, raw).unwrap();
+            }
+            inputs
+        }
+        #[test]
+        fn configured_semantic_domain81_peer_filename_discovery_and_absent_negative_oracle() {
+            for known in [false, true] {
+                let (f, _, options, _) = model_sources();
+                let options = &options[1];
+                let peer = if known { "claude72-1" } else { "absent81" };
+                let inputs = peer_inputs(options, if known { 2 } else { 1 }, peer);
+                let mut admitted = open(&f.config);
+                let (batch, model) = claude_ready_from(&mut admitted, options, &inputs, &inputs[..1]);
+                let db = f.db();
+                assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap(), "no negative or identity may precede completed discovery");
+                let indexed: i64 = db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get(0)).unwrap();
+                assert_eq!(indexed, inputs.len() as i64);
+                if known {
+                    assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND value='claude72-1.jsonl' AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap(), "target must be discovered by the native filename frontier");
+                }
+                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                ordinary_claude_ready(&mut ordinary, options, &inputs);
+                let reference = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+                assert_eq!(projection_rows(&db,Some("source-a")),projection_rows(&reference,None));
+                oracle(&admitted, options, &inputs, model.prepared());
+                publish(&mut admitted, &f, &batch, &model);
+            }
+        }
+        #[test]
+        fn configured_semantic_domain81_native_peer_stale_epoch_zero_effects() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = peer_inputs(options, 2, "claude72-1");
+            let mut old = open(&f.config);
+            let (batch, model) = claude_ready_from(&mut old, options, &inputs, &inputs[..1]);
+            let mut successor = open(&f.config);
+            successor.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()], "peer81-successor", true).unwrap();
+            let before = shared_state(&f);
+            assert!(old.semantic_batch(64).is_err());
+            assert_eq!(shared_state(&f),before);
+            assert_eq!(old.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
+            assert_eq!(shared_state(&f),before);
         }
     }
 }

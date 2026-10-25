@@ -591,19 +591,74 @@ fn enqueue(c: &Connection, path: &str) -> rusqlite::Result<()> {
     }
     Ok(())
 }
-/// Filename matches only enqueue bounded discovery. Native role and ID come
-/// exclusively from the subsequent verified shared native preparation.
-fn filename_hint(c: &Connection, id: &str) -> rusqlite::Result<bool> {
+/// Physical lookups only; matching order and frontier decisions are shared.
+pub(crate) trait NativeFrontierPort {
+    fn needed_native(&self, harness: &str, id: &str) -> rusqlite::Result<bool>;
+    fn needed_dependency(&self, harness: &str, id: &str) -> rusqlite::Result<bool>;
+    fn needed_nativeall(&self, id: &str) -> rusqlite::Result<bool>;
+    fn needed_filename(&self, copilot: bool, value: &str) -> rusqlite::Result<bool>;
+    fn needed_header(&self, parent: bool, qualified: bool, id: &str) -> rusqlite::Result<bool>;
+    fn queue(&self, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()>;
+}
+fn filename_hint_with(port: &impl NativeFrontierPort, id: &str) -> rusqlite::Result<bool> {
     let basename = format!("{id}.jsonl");
-    let unseen:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM files f WHERE substr(path,length(rtrim(path,replace(path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=f.path) UNION ALL SELECT 1 FROM session_catalog_invalidations i WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=i.source_path))",[&basename],|r|r.get(0))?;
-    if unseen {
-        queue(c, "claudeid", &basename, "")?;
-    }
-    let copilot:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM files f WHERE path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=f.path) UNION ALL SELECT 1 FROM session_catalog_invalidations i WHERE source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=i.source_path))",[id],|r|r.get(0))?;
-    if copilot {
-        queue(c, "copilotid", id, "")?;
-    }
+    let unseen = port.needed_filename(false, &basename)?;
+    if unseen { port.queue("claudeid", &basename, "")?; }
+    let copilot = port.needed_filename(true, id)?;
+    if copilot { port.queue("copilotid", id, "")?; }
     Ok(unseen || copilot)
+}
+fn identity_hint_with(port: &impl NativeFrontierPort, id: &str) -> rusqlite::Result<bool> {
+    let mut unseen = filename_hint_with(port, id)?;
+    if port.needed_nativeall(id)? { port.queue("nativeall", id, "")?; unseen = true; }
+    if port.needed_header(false, false, id)? { port.queue("headerid", id, "")?; unseen = true; }
+    Ok(unseen)
+}
+pub(crate) fn native_frontier_with(port: &impl NativeFrontierPort, harness: &str, id: &str) -> rusqlite::Result<()> {
+    if port.needed_native(harness, id)? { port.queue("native", id, harness)?; }
+    for prefix in ["", "lineage:", "bridge:", "semantic-parent:", "semantic-native:"] {
+        let dependency = format!("{prefix}{harness}");
+        if port.needed_dependency(&dependency, id)? { port.queue("dependency", id, &dependency)?; }
+    }
+    if port.needed_nativeall(id)? { port.queue("nativeall", id, "")?; }
+    identity_hint_with(port, id)?;
+    if harness == "codex" {
+        for (kind, parent) in [("headerid", false), ("headerparent", true)] {
+            if port.needed_header(parent, true, id)? { port.queue(kind, id, "")?; }
+        }
+    }
+    Ok(())
+}
+struct OrdinaryNativeFrontier<'a>(&'a Connection);
+impl NativeFrontierPort for OrdinaryNativeFrontier<'_> {
+    fn needed_native(&self, harness: &str, id: &str) -> rusqlite::Result<bool> { self.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources own WHERE own.harness=?1 AND own.native_id=?2 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=own.source_path))",params![harness,id],|r|r.get(0)) }
+    fn needed_dependency(&self, harness: &str, id: &str) -> rusqlite::Result<bool> { self.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=d.source_path))",params![harness,id],|r|r.get(0)) }
+    fn needed_nativeall(&self, id: &str) -> rusqlite::Result<bool> { self.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources own WHERE native_id=?1 AND lifecycle='current' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=own.source_path))",[id],|r|r.get(0)) }
+    fn needed_filename(&self, copilot: bool, value: &str) -> rusqlite::Result<bool> {
+        self.0.query_row(if copilot { "SELECT EXISTS(SELECT 1 FROM files f WHERE path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=f.path) UNION ALL SELECT 1 FROM session_catalog_invalidations i WHERE source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=i.source_path))" } else { "SELECT EXISTS(SELECT 1 FROM files f WHERE substr(path,length(rtrim(path,replace(path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=f.path) UNION ALL SELECT 1 FROM session_catalog_invalidations i WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=i.source_path))" },[value],|r|r.get(0))
+    }
+    fn needed_header(&self, parent: bool, qualified: bool, id: &str) -> rusqlite::Result<bool> {
+        let c = self.0;
+        let field = if parent { "metadata.parent_thread" } else { "id" };
+        if !qualified {
+            return c.query_row(configured::metadata_sql(c,
+        "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))",
+        "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))")?,[id],|r|r.get(0));
+        }
+            let dependency = if !parent {
+                "native"
+            } else {
+                "parent"
+            };
+            let legacy = format!(
+                "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
+            );
+            let scoped = format!(
+                "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
+            );
+        c.query_row(configured::metadata_sql(c, &legacy, &scoped)?, [id], |r|r.get(0))
+    }
+    fn queue(&self, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> { queue(self.0, kind, value, harness) }
 }
 /// Only cross-harness collisions need prefixed-key reservation discovery.
 /// The cursor is reset whenever new primitive native evidence joins the epoch.
@@ -664,66 +719,8 @@ fn native_keys_page(c: &Connection) -> rusqlite::Result<bool> {
     c.execute("UPDATE catalog_semantic_stage SET key_after_harness=?1,key_after_native=?2,keys_done=?3,key_candidate=?4",params![after.0,after.1,complete,candidate])?;
     Ok(complete)
 }
-fn identity_hint(c: &Connection, id: &str) -> rusqlite::Result<bool> {
-    let mut unseen = filename_hint(c, id)?;
-    let existing:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources own WHERE native_id=?1 AND lifecycle='current' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=own.source_path))",[id],|r|r.get(0))?;
-    if existing {
-        queue(c, "nativeall", id, "")?;
-        unseen = true;
-    }
-    let cached:bool=c.query_row(configured::metadata_sql(c,
-        "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))",
-        "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))")?,[id],|r|r.get(0))?;
-    if cached {
-        queue(c, "headerid", id, "")?;
-        unseen = true;
-    }
-    Ok(unseen)
-}
-fn native_frontier(c: &Connection, harness: &str, id: &str) -> rusqlite::Result<()> {
-    let needed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources own WHERE own.harness=?1 AND own.native_id=?2 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=own.source_path))",params![harness,id],|r|r.get(0))?;
-    if needed {
-        queue(c, "native", id, harness)?;
-    }
-    for prefix in [
-        "",
-        "lineage:",
-        "bridge:",
-        "semantic-parent:",
-        "semantic-native:",
-    ] {
-        let dependency = format!("{prefix}{harness}");
-        if c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=d.source_path))",params![dependency,id],|r|r.get::<_,bool>(0))? {queue(c,"dependency",id,&dependency)?;}
-    }
-    if c.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources own WHERE native_id=?1 AND lifecycle='current' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=own.source_path))",[id],|r|r.get::<_,bool>(0))?{queue(c,"nativeall",id,"")?;}
-    identity_hint(c, id)?;
-    if harness == "codex" {
-        for (kind, field) in [
-            ("headerid", "id"),
-            ("headerparent", "metadata.parent_thread"),
-        ] {
-            let dependency = if kind == "headerid" {
-                "native"
-            } else {
-                "parent"
-            };
-            let legacy = format!(
-                "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
-            );
-            let scoped = format!(
-                "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
-            );
-            let needed: bool =
-                c.query_row(configured::metadata_sql(c, &legacy, &scoped)?, [id], |r| {
-                    r.get(0)
-                })?;
-            if needed {
-                queue(c, kind, id, "")?;
-            }
-        }
-    }
-    Ok(())
-}
+fn identity_hint(c: &Connection, id: &str) -> rusqlite::Result<bool> { identity_hint_with(&OrdinaryNativeFrontier(c), id) }
+fn native_frontier(c: &Connection, harness: &str, id: &str) -> rusqlite::Result<()> { native_frontier_with(&OrdinaryNativeFrontier(c), harness, id) }
 fn endpoint_frontier(c: &Connection, e: &Endpoint) -> rusqlite::Result<()> {
     for source in &e.row.sources {
         enqueue(c, source.path.to_string_lossy().as_ref())?;
