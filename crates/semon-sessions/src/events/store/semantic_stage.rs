@@ -518,7 +518,9 @@ fn native_key(c: &Connection, native: &str, harness: &str) -> rusqlite::Result<S
     // selector consumes its result; it never replays an arbitrarily long chain.
     c.query_row("SELECT keys.session_key FROM catalog_semantic_keys keys JOIN catalog_semantic_stage stage ON keys.key_epoch=stage.key_epoch WHERE keys.harness=?1 AND keys.native_id=?2",params![harness,native],|r|r.get(0))
 }
-pub(super) fn primitive_native_key(native: &str) -> &str { native }
+pub(super) fn primitive_native_key(native: &str) -> &str {
+    native
+}
 #[cfg(test)]
 std::thread_local! {
     static NATIVE_OCCUPANCY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1311,22 +1313,26 @@ pub(crate) trait ReductionStore {
 pub(crate) fn reduce_with(store: &impl ReductionStore) -> rusqlite::Result<bool> {
     let mut budget = 64usize;
     while budget > 0 {
-        let parents=store.parents(budget)?;
+        let parents = store.parents(budget)?;
         if !parents.is_empty() {
             budget -= parents.len();
-            for key in parents { store.parent(&key)?; }
+            for key in parents {
+                store.parent(&key)?;
+            }
             continue;
         }
-        let roots=store.roots(budget)?;
+        let roots = store.roots(budget)?;
         if !roots.is_empty() {
             budget -= roots.len();
-            for key in roots { store.root(&key)?; }
+            for key in roots {
+                store.root(&key)?;
+            }
             continue;
         }
         if store.missing_roots()? {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let costs=store.leaves(budget)?;
+        let costs = store.leaves(budget)?;
         if costs.is_empty() {
             return if store.unfinished_costs()? {
                 Err(rusqlite::Error::InvalidQuery)
@@ -1335,21 +1341,27 @@ pub(crate) fn reduce_with(store: &impl ReductionStore) -> rusqlite::Result<bool>
             };
         }
         budget -= costs.len();
-        for key in costs { store.cost(&key)?; }
+        for key in costs {
+            store.cost(&key)?;
+        }
     }
     store.complete()
 }
 
-fn reduce(c: &Connection) -> rusqlite::Result<bool> { reduce_with(&UnboundReduction(c)) }
+fn reduce(c: &Connection) -> rusqlite::Result<bool> {
+    reduce_with(&UnboundReduction(c))
+}
 struct UnboundReduction<'a>(&'a Connection);
 impl ReductionStore for UnboundReduction<'_> {
     fn parents(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
         self.0.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_resolved=0 ORDER BY parent_native,session_key LIMIT ?1")?.query_map([limit as i64],|r|r.get(0))?.collect()
     }
     fn parent(&self, key: &str) -> rusqlite::Result<()> {
-        let c=self.0;
+        let c = self.0;
         let ambiguous:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_native own JOIN catalog_semantic_native peer USING(harness,native_id) WHERE own.session_key=?1 AND peer.session_key<>?1)",[key],|r|r.get(0))?;
-        if ambiguous { return Err(rusqlite::Error::InvalidQuery); }
+        if ambiguous {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         c.execute("UPDATE catalog_semantic_endpoints SET parent_key=COALESCE((SELECT session_key FROM catalog_semantic_native n WHERE n.harness=COALESCE(catalog_semantic_endpoints.parent_native_harness,catalog_semantic_endpoints.harness) AND n.native_id=catalog_semantic_endpoints.parent_native),parent_key),parent_resolved=1,family_cost=cost WHERE session_key=?1",[key])?;
         c.execute("UPDATE catalog_semantic_endpoints SET root_key=CASE WHEN parent_key IS NULL OR NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints p WHERE p.session_key=catalog_semantic_endpoints.parent_key) THEN session_key ELSE (SELECT root_key FROM catalog_semantic_endpoints p WHERE p.session_key=catalog_semantic_endpoints.parent_key) END WHERE session_key=?1",[key])?;
         c.execute("UPDATE catalog_semantic_paths SET root_key=(SELECT root_key FROM catalog_semantic_endpoints WHERE session_key=?1) WHERE session_key=?1",[key])?;
@@ -1359,21 +1371,46 @@ impl ReductionStore for UnboundReduction<'_> {
     fn roots(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
         self.0.prepare("SELECT e.session_key FROM catalog_semantic_endpoints e WHERE e.root_key IS NULL AND EXISTS(SELECT 1 FROM catalog_semantic_endpoints p WHERE p.session_key=e.parent_key AND p.root_key IS NOT NULL) ORDER BY e.session_key LIMIT ?1")?.query_map([limit as i64],|r|r.get(0))?.collect()
     }
-    fn root(&self,key:&str)->rusqlite::Result<()> {
+    fn root(&self, key: &str) -> rusqlite::Result<()> {
         self.0.execute("UPDATE catalog_semantic_endpoints SET root_key=(SELECT root_key FROM catalog_semantic_endpoints p WHERE p.session_key=catalog_semantic_endpoints.parent_key) WHERE session_key=?1",[key])?;
         self.0.execute("UPDATE catalog_semantic_paths SET root_key=(SELECT root_key FROM catalog_semantic_endpoints WHERE session_key=?1) WHERE session_key=?1",[key])?;
         Ok(())
     }
-    fn missing_roots(&self)->rusqlite::Result<bool> { self.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE root_key IS NULL)",[],|r|r.get(0)) }
-    fn leaves(&self,limit:usize)->rusqlite::Result<Vec<String>> { self.0.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE cost_done=0 AND children_pending=0 ORDER BY session_key LIMIT ?1")?.query_map([limit as i64],|r|r.get(0))?.collect() }
-    fn unfinished_costs(&self)->rusqlite::Result<bool> { self.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE cost_done=0)",[],|r|r.get(0)) }
-    fn cost(&self,key:&str)->rusqlite::Result<()> {
-        let(parent,cost):(Option<String>,Option<f64>)=self.0.query_row("SELECT parent_key,family_cost FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        self.0.execute("UPDATE catalog_semantic_endpoints SET cost_done=1 WHERE session_key=?1",[key])?;
-        if let Some(parent)=parent { self.0.execute("UPDATE catalog_semantic_endpoints SET children_pending=children_pending-1,family_cost=CASE WHEN family_cost IS NULL OR ?2 IS NULL THEN NULL ELSE family_cost+?2 END WHERE session_key=?1 AND cost_done=0 AND children_pending>0",params![parent,cost])?; }
+    fn missing_roots(&self) -> rusqlite::Result<bool> {
+        self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE root_key IS NULL)",
+            [],
+            |r| r.get(0),
+        )
+    }
+    fn leaves(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE cost_done=0 AND children_pending=0 ORDER BY session_key LIMIT ?1")?.query_map([limit as i64],|r|r.get(0))?.collect()
+    }
+    fn unfinished_costs(&self) -> rusqlite::Result<bool> {
+        self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE cost_done=0)",
+            [],
+            |r| r.get(0),
+        )
+    }
+    fn cost(&self, key: &str) -> rusqlite::Result<()> {
+        let (parent, cost): (Option<String>, Option<f64>) = self.0.query_row(
+            "SELECT parent_key,family_cost FROM catalog_semantic_endpoints WHERE session_key=?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        self.0.execute(
+            "UPDATE catalog_semantic_endpoints SET cost_done=1 WHERE session_key=?1",
+            [key],
+        )?;
+        if let Some(parent) = parent {
+            self.0.execute("UPDATE catalog_semantic_endpoints SET children_pending=children_pending-1,family_cost=CASE WHEN family_cost IS NULL OR ?2 IS NULL THEN NULL ELSE family_cost+?2 END WHERE session_key=?1 AND cost_done=0 AND children_pending>0",params![parent,cost])?;
+        }
         Ok(())
     }
-    fn complete(&self)->rusqlite::Result<bool> { self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE parent_resolved=0 OR root_key IS NULL OR cost_done=0)",[],|r|r.get(0)) }
+    fn complete(&self) -> rusqlite::Result<bool> {
+        self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE parent_resolved=0 OR root_key IS NULL OR cost_done=0)",[],|r|r.get(0))
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct RelationCursor {

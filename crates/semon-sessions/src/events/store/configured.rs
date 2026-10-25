@@ -411,7 +411,9 @@ pub(crate) fn semantic_tables() -> &'static [&'static str] {
 pub(crate) fn semantic_recipe() -> &'static str {
     semantic_stage::RECIPE
 }
-pub(crate) fn primitive_native_key(native: &str) -> &str { semantic_stage::primitive_native_key(native) }
+pub(crate) fn primitive_native_key(native: &str) -> &str {
+    semantic_stage::primitive_native_key(native)
+}
 pub(crate) fn validate_staging_owner(
     db: &Connection,
     config: &StoreConfig,
@@ -2029,115 +2031,229 @@ mod tests {
 
     #[test]
     fn configured_semantic_runtime_capability_is_crate_private_and_public_factory_stays_closed() {
-        let f=semantic_fixture("runtime-a");
-        let capability=crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
-        let mut runtime=crate::storage::sqlite::configured_index::open_semantic(capability).unwrap();
-        let paths=[f.raw.to_string_lossy().into_owned()];
-        assert_eq!(runtime.begin_semantic_stage(&paths,"runtime",true).unwrap(),Outcome::Written);
-        let before=f.state();
-        let mut public=crate::storage::sqlite::open_configured_index(&f.config).unwrap();
-        assert!(public.begin_semantic_stage(&paths,"runtime",true).is_err());
-        assert_eq!(f.state(),before);
-        let singleton=Fixture::new();
+        let f = semantic_fixture("runtime-a");
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
+        let mut runtime =
+            crate::storage::sqlite::configured_index::open_semantic(capability).unwrap();
+        let paths = [f.raw.to_string_lossy().into_owned()];
+        assert_eq!(
+            runtime
+                .begin_semantic_stage(&paths, "runtime", true)
+                .unwrap(),
+            Outcome::Written
+        );
+        let before = f.state();
+        let mut public = crate::storage::sqlite::open_configured_index(&f.config).unwrap();
+        assert!(
+            public
+                .begin_semantic_stage(&paths, "runtime", true)
+                .is_err()
+        );
+        assert_eq!(f.state(), before);
+        let singleton = Fixture::new();
         drop(singleton.config.native_events().unwrap());
-        let before=singleton.state();
-        assert!(crate::storage::sqlite::semantic::SemanticStaging::validate(&singleton.config).is_err());
-        assert_eq!(singleton.state(),before,"capability validation must not convert schema");
+        let before = singleton.state();
+        assert!(
+            crate::storage::sqlite::semantic::SemanticStaging::validate(&singleton.config).is_err()
+        );
+        assert_eq!(
+            singleton.state(),
+            before,
+            "capability validation must not convert schema"
+        );
         assert!(!singleton.state().contains_key("storage_semantic_profiles"));
-        assert_eq!(crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,0);
+        assert_eq!(
+            crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
+            0
+        );
     }
 
     #[test]
     fn configured_semantic_batch_reduces_events_native_keys_frontier_scoped() {
         use crate::model::relation_stage::Phase;
-        let f=semantic_fixture("reducer-a");
-        let mut store=runtime_semantic(&f.config);
-        let paths=[f.raw.to_string_lossy().into_owned()];
-        let claims=store.catalog_claims(&paths).unwrap();
-        let generation=store.session_catalog_generation().unwrap();
-        store.begin_semantic_stage(&paths,"runtime",true).unwrap();
-        let indexing=store.semantic_batch(64).unwrap().unwrap();
-        assert_eq!(indexing.phase,Phase::Indexing);
-        let prepared=semantic_prepared(&mut *store,&f,&indexing);
-        assert_eq!(store.record_semantic_batch(&indexing,&prepared).unwrap(),Outcome::Written);
-        let identity=store.semantic_batch(64).unwrap().unwrap();
-        assert_eq!(identity.phase,Phase::Identity);
-        assert_eq!(identity.base_generation,generation);
-        let mut prepared=semantic_prepared(&mut *store,&f,&identity);
+        let f = semantic_fixture("reducer-a");
+        let mut store = runtime_semantic(&f.config);
+        let paths = [f.raw.to_string_lossy().into_owned()];
+        let claims = store.catalog_claims(&paths).unwrap();
+        let generation = store.session_catalog_generation().unwrap();
+        store.begin_semantic_stage(&paths, "runtime", true).unwrap();
+        let indexing = store.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(indexing.phase, Phase::Indexing);
+        let prepared = semantic_prepared(&mut *store, &f, &indexing);
+        assert_eq!(
+            store.record_semantic_batch(&indexing, &prepared).unwrap(),
+            Outcome::Written
+        );
+        let identity = store.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(identity.phase, Phase::Identity);
+        assert_eq!(identity.base_generation, generation);
+        let mut prepared = semantic_prepared(&mut *store, &f, &identity);
         add_primitive_endpoint(&mut prepared);
-        assert_eq!(store.record_semantic_batch(&identity,&prepared).unwrap(),Outcome::Written);
-        let relations=store.semantic_batch(64).unwrap().unwrap();
-        assert_eq!(relations.phase,Phase::Relations);
-        assert_eq!(relations.context.endpoints["native-session"].root,"native-session");
-        let db=f.db();
-        assert_eq!(db.query_row("SELECT events_done FROM catalog_semantic_sources WHERE namespace='reducer-a'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(
+            store.record_semantic_batch(&identity, &prepared).unwrap(),
+            Outcome::Written
+        );
+        let relations = store.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(relations.phase, Phase::Relations);
+        assert_eq!(
+            relations.context.endpoints["native-session"].root,
+            "native-session"
+        );
+        let db = f.db();
+        assert_eq!(
+            db.query_row(
+                "SELECT events_done FROM catalog_semantic_sources WHERE namespace='reducer-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         // Shared event reduction deliberately creates no Claude relationship
         // events for primitive Codex. Original native events remain authoritative.
-        assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_events WHERE namespace='reducer-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM catalog_semantic_events WHERE namespace='reducer-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
         assert_eq!(db.query_row("SELECT session_key FROM catalog_semantic_keys WHERE namespace='reducer-a' AND harness='codex' AND native_id='native-session'",[],|r|r.get::<_,String>(0)).unwrap(),"native-session");
         assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_frontier WHERE namespace='reducer-a' AND done=0",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(db.query_row("SELECT parent_resolved+cost_done FROM catalog_semantic_endpoints WHERE namespace='reducer-a'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
-        assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_keys WHERE namespace<>'reducer-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-        let prepared=semantic_prepared(&mut *store,&f,&relations);
-        assert_eq!(store.record_semantic_batch(&relations,&prepared).unwrap(),Outcome::Written);
-        assert_eq!(store.catalog_claims(&paths).unwrap(),claims);
-        assert_eq!(store.session_catalog_generation().unwrap(),generation);
-        assert!(store.semantic_batch(64).is_err(),"publication remains unqualified");
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM catalog_semantic_keys WHERE namespace<>'reducer-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let prepared = semantic_prepared(&mut *store, &f, &relations);
+        assert_eq!(
+            store.record_semantic_batch(&relations, &prepared).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(store.catalog_claims(&paths).unwrap(), claims);
+        assert_eq!(store.session_catalog_generation().unwrap(), generation);
+        assert!(
+            store.semantic_batch(64).is_err(),
+            "publication remains unqualified"
+        );
     }
 
     #[test]
     fn configured_semantic_reset_and_reduction_rollback_zero_partial_writes() {
-        let f=semantic_fixture("rollback-a");
-        let paths=[f.raw.to_string_lossy().into_owned()];
-        let mut store=runtime_semantic(&f.config);
-        store.begin_semantic_stage(&paths,"runtime",true).unwrap();
-        let batch=store.semantic_batch(64).unwrap().unwrap();
-        let prepared=semantic_prepared(&mut *store,&f,&batch);
-        store.record_semantic_batch(&batch,&prepared).unwrap();
-        let before=f.state();
-        FAIL_EFFECT.with(|fault|fault.set(Some("semantic_reduction")));
+        let f = semantic_fixture("rollback-a");
+        let paths = [f.raw.to_string_lossy().into_owned()];
+        let mut store = runtime_semantic(&f.config);
+        store.begin_semantic_stage(&paths, "runtime", true).unwrap();
+        let batch = store.semantic_batch(64).unwrap().unwrap();
+        let prepared = semantic_prepared(&mut *store, &f, &batch);
+        store.record_semantic_batch(&batch, &prepared).unwrap();
+        let before = f.state();
+        FAIL_EFFECT.with(|fault| fault.set(Some("semantic_reduction")));
         assert!(store.semantic_batch(64).is_err());
-        assert_eq!(f.state(),before);
-        let identity=store.semantic_batch(64).unwrap().unwrap();
-        let mut other=runtime_semantic(&f.config);
-        let before=f.state();
-        FAIL_EFFECT.with(|fault|fault.set(Some("semantic_reset")));
-        assert!(other.begin_semantic_stage(&paths,"runtime-2",true).is_err());
-        assert_eq!(f.state(),before);
-        assert_eq!(other.begin_semantic_stage(&paths,"runtime-2",true).unwrap(),Outcome::Written);
-        let before=f.state();
-        assert!(store.semantic_batch(64).is_err(),"stale epoch must refuse before reduction writes");
-        assert_eq!(store.begin_semantic_stage(&paths,"runtime",true).unwrap(),Outcome::Conflict);
-        let mut stale=semantic_prepared(&mut *other,&f,&identity);
-        stale.base_generation=Some("stale-generation".into());
-        assert_eq!(other.record_semantic_batch(&identity,&stale).unwrap(),Outcome::Conflict);
-        assert_eq!(f.state(),before);
-        let restarted=other.semantic_batch(64).unwrap().unwrap();
-        assert_eq!(restarted.paths,paths);
-        assert!(restarted.epoch>identity.epoch);
-        assert_eq!(other.catalog_claims(&paths).unwrap(),prepared.claims);
+        assert_eq!(f.state(), before);
+        let identity = store.semantic_batch(64).unwrap().unwrap();
+        let mut other = runtime_semantic(&f.config);
+        let before = f.state();
+        FAIL_EFFECT.with(|fault| fault.set(Some("semantic_reset")));
+        assert!(
+            other
+                .begin_semantic_stage(&paths, "runtime-2", true)
+                .is_err()
+        );
+        assert_eq!(f.state(), before);
+        assert_eq!(
+            other
+                .begin_semantic_stage(&paths, "runtime-2", true)
+                .unwrap(),
+            Outcome::Written
+        );
+        let before = f.state();
+        assert!(
+            store.semantic_batch(64).is_err(),
+            "stale epoch must refuse before reduction writes"
+        );
+        assert_eq!(
+            store.begin_semantic_stage(&paths, "runtime", true).unwrap(),
+            Outcome::Conflict
+        );
+        let mut stale = semantic_prepared(&mut *other, &f, &identity);
+        stale.base_generation = Some("stale-generation".into());
+        assert_eq!(
+            other.record_semantic_batch(&identity, &stale).unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(f.state(), before);
+        let restarted = other.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(restarted.paths, paths);
+        assert!(restarted.epoch > identity.epoch);
+        assert_eq!(other.catalog_claims(&paths).unwrap(), prepared.claims);
     }
 
-    fn runtime_semantic(config:&StoreConfig)->Box<dyn IndexStore> {
-        let capability=crate::storage::sqlite::semantic::SemanticStaging::validate(config).unwrap();
+    fn runtime_semantic(config: &StoreConfig) -> Box<dyn IndexStore> {
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::validate(config).unwrap();
         crate::storage::sqlite::configured_index::open_semantic(capability).unwrap()
     }
 
-    fn add_primitive_endpoint(prepared:&mut crate::model::PreparedSources) {
-        let source=prepared.indexed_sources[0].1.clone();
-        let key=source.native_id.clone();
-        let row=crate::model::summary::CatalogRow {
-            overview:None,trace:None,query:None,lifecycle:Default::default(),key:key.clone(),name:key.clone(),
-            harness:"codex".into(),kind:"codex-run".into(),presentation_kind:None,native_ids:vec![key.clone()],
-            parent:None,parent_source:None,repo:None,branch:None,model:String::new(),effort:None,start:None,last:None,
-            tokens:[0.0;3],cost:Default::default(),sources:vec![source],
+    fn add_primitive_endpoint(prepared: &mut crate::model::PreparedSources) {
+        let source = prepared.indexed_sources[0].1.clone();
+        let key = source.native_id.clone();
+        let row = crate::model::summary::CatalogRow {
+            overview: None,
+            trace: None,
+            query: None,
+            lifecycle: Default::default(),
+            key: key.clone(),
+            name: key.clone(),
+            harness: "codex".into(),
+            kind: "codex-run".into(),
+            presentation_kind: None,
+            native_ids: vec![key.clone()],
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: String::new(),
+            effort: None,
+            start: None,
+            last: None,
+            tokens: [0.0; 3],
+            cost: Default::default(),
+            sources: vec![source],
         };
-        let endpoint=crate::model::relation_stage::Endpoint {
-            row,paths:Vec::new(),nickname:None,names:Vec::new(),alive:false,busy:false,waiting:false,lane:false,role:false,
-            state:"recorded".into(),turn_lifecycle:None,parent:None,native_parents:Vec::new(),root:key.clone(),root_alive:false,
-            tokens:Default::default(),facts_kind:"codex-run".into(),pid:None,observed_alive:None,recorded_status:None,run:None,turns_truncated:false,
+        let endpoint = crate::model::relation_stage::Endpoint {
+            row,
+            paths: Vec::new(),
+            nickname: None,
+            names: Vec::new(),
+            alive: false,
+            busy: false,
+            waiting: false,
+            lane: false,
+            role: false,
+            state: "recorded".into(),
+            turn_lifecycle: None,
+            parent: None,
+            native_parents: Vec::new(),
+            root: key.clone(),
+            root_alive: false,
+            tokens: Default::default(),
+            facts_kind: "codex-run".into(),
+            pid: None,
+            observed_alive: None,
+            recorded_status: None,
+            run: None,
+            turns_truncated: false,
         };
-        prepared.relationships.endpoints.insert(key,endpoint);
+        prepared.relationships.endpoints.insert(key, endpoint);
     }
 
     #[test]
