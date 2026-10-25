@@ -94,6 +94,159 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
 }
 
 #[test]
+fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows() {
+    use crate::storage::selected::SelectedSnapshotStore;
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected65-private");
+    for row in &model.prepared().rows {
+        assert!(row.query.as_ref().unwrap().get("selected_presentation_observations").is_none());
+    }
+    let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    let saved: String = db.query_row(
+        "SELECT projections FROM storage_semantic_model_batches WHERE namespace='source-a'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut altered: Value = serde_json::from_str(&saved).unwrap();
+    assert!(altered[1]["sources"].as_object().unwrap().len() <= 128 * 64);
+    assert!(altered[1].get("roots").is_none());
+    assert!(altered[1].get("current_codex").is_none());
+    altered[1]["machine_label"] = json!("tampered-private-input");
+    db.execute(
+        "UPDATE storage_semantic_model_batches SET projections=?1 WHERE namespace='source-a'",
+        [serde_json::to_string(&altered).unwrap()],
+    ).unwrap();
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
+    db.execute(
+        "UPDATE storage_semantic_model_batches SET projections=?1 WHERE namespace='source-a'",
+        [saved],
+    ).unwrap();
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
+    let selected = lease.open_selected(options, &host, &crate::SelectedReadControl::default()).unwrap();
+    for name in ["catalog_generation", "catalog_completeness", "catalog_observed_at"] {
+        let committed: String = db.query_row(
+            "SELECT value FROM main.meta WHERE namespace='source-a' AND key=?1",
+            [name], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(selected.witness.catalog.get(name), Some(&committed));
+        if name == "catalog_generation" {
+            assert_eq!(committed, lease.snapshot().publication_generation);
+        }
+    }
+    let reply = read(&lease, options, &host, &format!("sid={key}&after=0&limit=1"));
+    assert_eq!(reply["identity"]["generation"], lease.snapshot().publication_generation);
+}
+
+#[test]
+fn configured_semantic_selected65_witness_and_manifest_tamper_refuse_before_raw() {
+    struct Count(std::sync::atomic::AtomicUsize);
+    impl crate::SessionSourceReader for Count {
+        fn read_range(&self, _: &crate::SessionSourceRef, _: Option<&str>, _: u64, _: usize) -> std::io::Result<crate::SessionSourceRange> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(std::io::Error::other("unexpected Raw access"))
+        }
+    }
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected65-tamper");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
+    let query = format!("sid={key}&after=0&limit=1");
+    assert!(!read(&lease, options, &host, &query)["entries"].as_array().unwrap().is_empty());
+    let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    let saved: String = db.query_row(
+        "SELECT metadata FROM storage_proof_presentations WHERE namespace='source-a' AND session_key=?1",
+        [key], |row| row.get(0),
+    ).unwrap();
+    let mut altered: Value = serde_json::from_str(&saved).unwrap();
+    altered["observations"]["machine_label"] = json!("tampered-witness");
+    db.execute_batch("DROP TRIGGER storage_proof_presentation_immutable").unwrap();
+    db.execute("UPDATE storage_proof_presentations SET metadata=?1 WHERE namespace='source-a' AND session_key=?2", params![serde_json::to_string(&altered).unwrap(), key]).unwrap();
+    let provider = Count(std::sync::atomic::AtomicUsize::new(0));
+    let refuse = || {
+        assert!(read_bound(&lease, options, &host, &query, Some(&provider), SessionSourceReadMode::ProviderOnly, &crate::SelectedReadControl::default()).is_err());
+        assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    };
+    refuse();
+    db.execute("UPDATE storage_proof_presentations SET metadata=?1 WHERE namespace='source-a' AND session_key=?2", params![saved, key]).unwrap();
+    db.execute_batch("CREATE TRIGGER storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;").unwrap();
+    let manifest: String = db.query_row("SELECT manifest FROM storage_proof_presentation_roots WHERE namespace='source-a' AND publication=?1", [&lease.snapshot().publication_generation], |row| row.get(0)).unwrap();
+    db.execute_batch("DROP TRIGGER storage_proof_presentation_root_immutable").unwrap();
+    db.execute("UPDATE storage_proof_presentation_roots SET manifest='[]' WHERE namespace='source-a' AND publication=?1", [&lease.snapshot().publication_generation]).unwrap();
+    refuse();
+    db.execute("UPDATE storage_proof_presentation_roots SET manifest=?1 WHERE namespace='source-a' AND publication=?2", params![manifest, lease.snapshot().publication_generation]).unwrap();
+    db.execute_batch("CREATE TRIGGER storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;").unwrap();
+    assert!(!read(&lease, options, &host, &query)["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn configured_semantic_selected65_gc_requires_both_history_and_lease_to_be_gone() {
+    use std::io::Write;
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let path = input.full_path(options);
+    cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected65-gc");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let mut lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    cache.finish_semantic_stage(batch.epoch).unwrap();
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(concat!(
+        "{\"timestamp\":\"2026-10-01T00:03:00Z\",\"type\":\"response_item\",",
+        "\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"generation B\"}]}}\n"
+    ).as_bytes()).unwrap();
+    cache.ingest(&"b".repeat(64), &path, "codex").unwrap();
+    let (next, next_model) = model_ready(&f, &mut cache, options, input, "selected65-gc");
+    assert_eq!(cache.publish_semantic_catalog(&next, next_model.prepared()).unwrap().0, Outcome::Written);
+    assert_ne!(runtime.current_generation(key).unwrap(), id);
+    let mut db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    let history: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace='source-a' AND session_key=?1 AND id=?2 AND kind='history')", params![key, id.0], |row| row.get(0)).unwrap();
+    assert!(history);
+    // Test-only retirement of the History reference, independently of lease
+    // release. This does not alter production retention policy or Raw custody.
+    db.execute("DELETE FROM storage_proof_refs WHERE namespace='source-a' AND session_key=?1 AND id=?2 AND kind='history'", params![key, id.0]).unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    crate::storage::sqlite::proof_generations::collect(&tx, "source-a", 64).unwrap();
+    tx.commit().unwrap();
+    let count = |db: &Connection| -> i64 {
+        db.query_row("SELECT count(*) FROM storage_proof_generations WHERE namespace='source-a' AND session_key=?1 AND id=?2", params![key, id.0], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(count(&db), 1, "active lease alone preserves A");
+    lease.release().unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    crate::storage::sqlite::proof_generations::collect(&tx, "source-a", 64).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(count(&db), 0, "unreferenced A is collected");
+    assert!(runtime.selected_generation(key, &id, &"8".repeat(64), 60_000).is_err());
+    assert!(path.exists());
+}
+
+#[test]
 fn configured_semantic_selected60_history_witness_survives_gc_release_and_runtime_reopen() {
     use std::io::Write;
     let (f, _, options, inputs) = model_sources();

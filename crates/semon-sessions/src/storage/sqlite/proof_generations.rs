@@ -687,14 +687,10 @@ pub(super) fn capture_presentations(
             ]
             .into_iter()
             .collect();
-            let observations = row
-                .query
-                .as_ref()
-                .and_then(|query| query.get("selected_presentation_observations"))
+            let mut observations = prepared
+                .presentation_observations()
+                .cloned()
                 .ok_or(StorageError::Unavailable)?;
-            let mut observations: crate::storage::selected::PresentationObservations =
-                serde_json::from_value(observations.clone())
-                    .map_err(|_| StorageError::Unavailable)?;
             let context =
                 CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative| {
                     observations.capture_relative_status(relative)

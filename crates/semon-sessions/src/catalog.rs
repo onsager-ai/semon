@@ -1135,7 +1135,7 @@ pub(crate) fn read_page_snapshot(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
-        let runtime = pinned.map(|saved| saved.runtime.clone()).or_else(|| {
+        let runtime = pinned.and_then(|saved| saved.runtime.clone()).or_else(|| {
             runtime_observations
                 .as_ref()
                 .and_then(|runtime| runtime.expected(&row))
