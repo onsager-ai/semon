@@ -1769,7 +1769,22 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "native ownership publication did not finish"
+                "native ownership publication did not finish; source states: {:?}",
+                core.views()
+                    .iter()
+                    .map(|(key, view)| {
+                        let identity = match crate::catalog::qualified_current_identity(
+                            view.options(),
+                            key,
+                            "replacement",
+                        ) {
+                            Ok(Some(_)) => "present",
+                            Ok(None) => "absent",
+                            Err(_) => "unavailable",
+                        };
+                        (key.clone(), view.catalog_observation_pending(), identity)
+                    })
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
