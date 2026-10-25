@@ -924,6 +924,11 @@ struct AdmittedLookup<'a> {
     replay: Vec<String>,
 }
 
+fn member_capacity(c: &Connection, ns: &str, replay: &[String]) -> Result<usize, StoreError> {
+    let keys = serde_json::to_string(replay).map_err(|e| StoreError::Data(e.to_string()))?;
+    c.query_row("SELECT count(*) FROM (SELECT DISTINCT source_path FROM (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 UNION ALL SELECT member.source_path FROM json_each(?2) requested JOIN main.session_catalog_sources member ON member.namespace=?1 AND member.session_key=requested.value AND member.lifecycle='current') LIMIT 65)", params![ns,keys], |r| r.get(0)).map_err(error)
+}
+
 #[cfg(test)]
 pub(crate) fn name_members_vm_probe(
     c: &Connection,
@@ -955,7 +960,7 @@ pub(crate) fn name_members_vm_probe(
     eprintln!("name_members_setup vm_steps={setup}");
     let mut result = vec![("setup".into(), setup, 0)];
     let mut targets = Vec::new();
-    for kind in ["hints", "candidates", "members"] {
+    for kind in ["hints", "candidates", "capacity", "members"] {
         tx.execute_batch("SAVEPOINT name_members_probe").unwrap();
         let steps = Arc::new(AtomicUsize::new(0));
         let observed = steps.clone();
@@ -979,6 +984,7 @@ pub(crate) fn name_members_vm_probe(
                 targets.len()
             }
             "candidates" => lookup.name_candidates(name).unwrap().len(),
+            "capacity" => member_capacity(&tx, ns, &targets).unwrap(),
             _ => {
                 for target in &targets {
                     tx.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'members',?2,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key=''", params![ns,target]).unwrap();
@@ -1846,10 +1852,7 @@ impl Stage {
             // Capacity is a property of the complete requested component,
             // not of this tick's discovery page. Check it before committing
             // an unfinished cursor or admitting any Raw preparation.
-            let keys = serde_json::to_string(&replay)
-                .map_err(|e| StoreError::Data(e.to_string()))?;
-            let count: usize = tx.query_row("SELECT count(*) FROM (SELECT DISTINCT source_path FROM (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 UNION ALL SELECT member.source_path FROM json_each(?2) requested JOIN main.session_catalog_sources member ON member.namespace=?1 AND member.session_key=requested.value AND member.lifecycle='current') LIMIT 65)", params![ns,keys], |r| r.get(0)).map_err(error)?;
-            if count > 64 {
+            if member_capacity(&tx, ns, &replay)? > 64 {
                 return Err(refuse("semantic_affected_owner_source_budget"));
             }
             crate::model::relation_stage::replay_members_with(
