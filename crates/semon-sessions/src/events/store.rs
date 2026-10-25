@@ -4739,6 +4739,7 @@ impl SqliteStore {
         if !current(&transaction)? {
             return Ok(None);
         }
+        validate_prior_reported(&transaction, &rows)?;
         {
             let mut put = transaction.prepare(PUT_RUN)?;
             for row in rows {
@@ -6717,6 +6718,18 @@ fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Res
             "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start"
         )
     })
+}
+
+fn validate_prior_reported(connection: &Connection, rows: &[super::reported_rows::ReportedRow]) -> rusqlite::Result<()> {
+    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    let mut statement = connection.prepare(&format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 AND start=?2"))?;
+    for row in rows {
+        let mut prior = statement.query(params![row.run.last_session_id,row.run.last_start_time])?;
+        if let Some(prior) = prior.next()? { read_run(prior)?; }
+    }
+    let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
+    if let Some(stamp) = stamp { from_json::<ReportedFileStamp>(0,&stamp)?; }
+    Ok(())
 }
 
 fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
