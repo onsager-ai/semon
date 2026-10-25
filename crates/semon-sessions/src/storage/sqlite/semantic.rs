@@ -413,7 +413,9 @@ impl Stage {
             let endpoint:Option<String>=tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
             let Some(endpoint)=endpoint else { return Ok((Outcome::Conflict,None)); };
             let endpoint:crate::model::relation_stage::Endpoint=serde_json::from_str(&endpoint).map_err(|e|StoreError::Data(e.to_string()))?;
-            if endpoint.row.sources!=row.sources || endpoint.row.native_ids!=row.native_ids || endpoint.row.harness!=row.harness { return Ok((Outcome::Conflict,None)); }
+            // This bounded publisher admits the exact staged primitive row.
+            // Final transcript/query/slot derivation remains a separate port.
+            if serde_json::to_string(&endpoint.row).map_err(|e|StoreError::Data(e.to_string()))?!=*encoded { return Ok((Outcome::Conflict,None)); }
             let old:Option<String>=tx.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
             unchanged &= old.as_ref()==Some(encoded);
             if old.as_ref().is_some_and(|old|old!=encoded) { return Err(refuse("semantic_publication_retained_history_pending")); }
