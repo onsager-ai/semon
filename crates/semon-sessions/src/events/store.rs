@@ -822,10 +822,14 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
         // Each selector retains its authored validation; use distinct sentinels
         // only to retain the selected physical statement for this transaction.
         let core_composite = configured::sql(transaction, "singleton", "composite")? == "composite";
-        let meta_composite = configured::metadata_sql(transaction, "singleton", "composite")? == "composite";
-        let copied_usage_composite = copied_usage_sql(transaction, "singleton", "composite")? == "composite";
-        let support_composite = semantic_stage::support_sql(transaction, "singleton", "composite")? == "composite";
-        let schema_version = transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let meta_composite =
+            configured::metadata_sql(transaction, "singleton", "composite")? == "composite";
+        let copied_usage_composite =
+            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
+        let support_composite =
+            semantic_stage::support_sql(transaction, "singleton", "composite")? == "composite";
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
             _transaction: transaction,
             core_composite,
@@ -840,7 +844,8 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     fn copied_usage_only(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
         let copied_usage_composite =
             copied_usage_sql(transaction, "singleton", "composite")? == "composite";
-        let schema_version = transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
             _transaction: transaction,
             core_composite: false,
@@ -852,25 +857,41 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     }
 
     fn core<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.core_composite { composite } else { singleton }
+        if self.core_composite {
+            composite
+        } else {
+            singleton
+        }
     }
 
     fn meta<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.meta_composite { composite } else { singleton }
+        if self.meta_composite {
+            composite
+        } else {
+            singleton
+        }
     }
 
     fn copied_usage<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.copied_usage_composite { composite } else { singleton }
+        if self.copied_usage_composite {
+            composite
+        } else {
+            singleton
+        }
     }
 
     fn support<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.support_composite { composite } else { singleton }
+        if self.support_composite {
+            composite
+        } else {
+            singleton
+        }
     }
 
     fn ensure_current(&self) -> rusqlite::Result<()> {
-        let observed: i64 = self
-            ._transaction
-            .pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let observed: i64 =
+            self._transaction
+                .pragma_query_value(None, "schema_version", |row| row.get(0))?;
         if observed == self.schema_version {
             Ok(())
         } else {
@@ -4697,7 +4718,15 @@ impl SqliteStore {
         {
             clear(&transaction, file_id)?;
         }
-        write_index_changes(&transaction, path, ledger, index, changes, expected, &layout)?;
+        write_index_changes(
+            &transaction,
+            path,
+            ledger,
+            index,
+            changes,
+            expected,
+            &layout,
+        )?;
         transaction.commit()?;
         crate::pricing::runtime::notify_reprice();
         Ok(Outcome::Written)
@@ -7081,7 +7110,10 @@ fn write_index_changes_with_usage_deletes<'tx>(
     configured::effect("semantic_dependencies")?;
     let started = measurements.start();
     transaction.execute(
-        layout.meta("DELETE FROM meta WHERE key=?1", "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1"),
+        layout.meta(
+            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+        ),
         [archive_index_key(path)],
     )?;
     measurements.record("archive_metadata", started, 1);
@@ -7282,10 +7314,8 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
-        let mut statement = transaction.prepare_cached(layout.core(
-            PUT_FILE,
-            configured::PUT_FILE,
-        ))?;
+        let mut statement =
+            transaction.prepare_cached(layout.core(PUT_FILE, configured::PUT_FILE))?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -7346,10 +7376,7 @@ fn write_file_with_usage_deletes<'tx>(
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(layout.core(
-        PUT_EVENT,
-        configured::PUT_EVENT,
-    ))?;
+    let mut put = transaction.prepare_cached(layout.core(PUT_EVENT, configured::PUT_EVENT))?;
     let mut cut = transaction
         .prepare_cached(layout.core("DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3"))?;
     for (extra, rows) in [(false, &row_plan.events), (true, &row_plan.extras)] {
@@ -7367,10 +7394,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(layout.core(
-        PUT_SIGNAL,
-        configured::PUT_SIGNAL,
-    ))?;
+    let mut put = transaction.prepare_cached(layout.core(PUT_SIGNAL, configured::PUT_SIGNAL))?;
     row_plan.signals.apply(
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
@@ -7418,10 +7442,8 @@ fn write_file_with_usage_deletes<'tx>(
 
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
-    let mut put = transaction.prepare_cached(layout.copied_usage(
-        PUT_CODEX_USAGE,
-        COMPOSITE_PUT_CODEX_USAGE,
-    ))?;
+    let mut put = transaction
+        .prepare_cached(layout.copied_usage(PUT_CODEX_USAGE, COMPOSITE_PUT_CODEX_USAGE))?;
     row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
@@ -7519,10 +7541,8 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     layout.ensure_current()?;
     let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
-    let mut put = transaction.prepare_cached(layout.copied_usage(
-        PUT_USAGE,
-        COMPOSITE_PUT_USAGE,
-    ))?;
+    let mut put =
+        transaction.prepare_cached(layout.copied_usage(PUT_USAGE, COMPOSITE_PUT_USAGE))?;
     let mut put_identity = transaction.prepare_cached(
         layout.copied_usage("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)"),
     )?;
