@@ -5251,6 +5251,13 @@ mod tests {
             let (batch,model)=ready(&mut cache,&f,options,std::slice::from_ref(input));
             assert!(model.prepared().rows.is_empty());
             assert_eq!(model.prepared().withdrawals.len(),1);
+            let before_rebind=shared_state(&f);
+            crate::facts::write_facts(options.facts.as_ref().unwrap(),&crate::Facts{version:2,hostname:"domain-rebound".into(),codex_rollouts:Some(Default::default()),..Default::default()}).unwrap();
+            assert!(cache.publish_semantic_catalog(&batch,model.prepared()).is_err());
+            assert_eq!(shared_state(&f),before_rebind,"changed withdrawal authority makes zero publication writes");
+            drop(cache);
+            let mut cache=EventCache::open_semantic(crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap()).unwrap();
+            let (batch,model)=ready(&mut cache,&f,options,std::slice::from_ref(input));
             publish(&mut cache,&f,&batch,&model);
             let db=f.db();
             assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
@@ -5258,6 +5265,9 @@ mod tests {
             let retained:crate::model::summary::CatalogRow=serde_json::from_str(&retained).unwrap();
             assert_eq!(retained.lifecycle,crate::model::summary::CatalogLifecycle::Retained);
             assert!(!retained.sources.is_empty());
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND lifecycle='retained'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_trace_headers WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
             let after:Vec<String>=db.prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
             assert_eq!(after,slots);
             assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);

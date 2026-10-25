@@ -276,13 +276,22 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
     Ok(true)
 }
 
+fn withdrawal_runtime_matches(source: &AdmittedSource, batch: &Batch, withdrawal: &crate::model::relation_stage::Withdrawal) -> Result<bool, StoreError> {
+    let runtime = if source.owner.is_some() {
+        serde_json::to_string(&(source.namespace(),source.admission,&withdrawal.runtime)).map_err(|e|StoreError::Data(e.to_string()))?
+    } else { withdrawal.runtime.clone() };
+    Ok(runtime == batch.runtime)
+}
+
 fn validate_withdrawals(
-    db: &Connection, ns: &str, batch: &Batch, prepared: &PreparedSources,
+    db: &Connection, source: &AdmittedSource, batch: &Batch, prepared: &PreparedSources,
 ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+    let ns = source.namespace();
     let mut paths = std::collections::BTreeSet::new();
     for withdrawal in &prepared.withdrawals {
         if !paths.insert(withdrawal.path.clone()) || !batch.paths.contains(&withdrawal.path)
-            || withdrawal.runtime != batch.runtime || !withdrawal.current().unwrap_or(false) {
+            || prepared.rows.iter().flat_map(|row|&row.sources).any(|source|source.path == std::path::Path::new(&withdrawal.path))
+            || !withdrawal_runtime_matches(source, batch, withdrawal)? || !withdrawal.current().unwrap_or(false) {
             return Err(refuse("semantic_withdrawal_changed"));
         }
         let encoded = serde_json::to_string(withdrawal).map_err(|e|StoreError::Data(e.to_string()))?;
@@ -645,7 +654,7 @@ impl Stage {
         if unfinished {
             return Ok((Outcome::Conflict, None));
         }
-        let mut covered = validate_withdrawals(&tx, ns, batch, prepared)?;
+        let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
         let mut keys = std::collections::BTreeSet::new();
         let mut unchanged = true;
         for (row, encoded) in prepared.rows.iter().zip(&metadata) {
@@ -842,6 +851,9 @@ impl Stage {
                     owner_effects.dependency(source.path.to_string_lossy().as_ref(), "runtime:pid", &pid.to_string()).map_err(error)?;
                 }
             }
+        }
+        for relation in prepared.relationships.relations.values() {
+            owner_effects.relation(relation).map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_owners").map_err(error)?;
@@ -1210,7 +1222,14 @@ impl Stage {
         {
             return Ok(Outcome::Conflict);
         }
-        if existing.as_ref().is_some_and(|(old, _)| old != runtime) {
+        let authority: Option<String> = if existing.is_some() {
+            tx.query_row("SELECT withdrawal_authority FROM main.catalog_semantic_stage WHERE namespace=?1",[ns],|r|r.get(0)).map_err(error)?
+        } else { None };
+        let invalid_authority = authority.as_deref().map(|text| {
+            serde_json::from_str::<crate::model::relation_stage::Withdrawal>(text)
+                .map(|w| !w.authority_current().unwrap_or(false)).map_err(|e|StoreError::Data(e.to_string()))
+        }).transpose()?.unwrap_or(false);
+        if invalid_authority || existing.as_ref().is_some_and(|(old, _)| old != runtime) {
             if !self.reduction {
                 return Err(StoreError::Configured(
                     StorageError::NamespaceUpgradePending,
@@ -1424,7 +1443,7 @@ impl Stage {
                 return Err(refuse("semantic_publication_component_budget"));
             }
             let mut metadata = Vec::new();
-            let mut covered = validate_withdrawals(&tx, ns, batch, prepared)?;
+            let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
             let mut keys = std::collections::BTreeSet::new();
             for row in &prepared.rows {
                 if !keys.insert(&row.key) || row.sources.is_empty() {
@@ -1626,7 +1645,7 @@ impl Stage {
         }
         let mut negative_paths = std::collections::BTreeSet::new();
         for withdrawal in &prepared.withdrawals {
-            if !negative_paths.insert(&withdrawal.path) || !batch.paths.contains(&withdrawal.path) || seen.contains(&withdrawal.path) || withdrawal.runtime != batch.runtime || !withdrawal.current().unwrap_or(false) {
+            if !negative_paths.insert(&withdrawal.path) || !batch.paths.contains(&withdrawal.path) || seen.contains(&withdrawal.path) || !withdrawal_runtime_matches(&self.source, batch, withdrawal)? || !withdrawal.current().unwrap_or(false) {
                 return Ok(Outcome::Conflict);
             }
             owners::Owners { db: &tx, namespace: ns }.withdrawal(withdrawal).map_err(error)?;
