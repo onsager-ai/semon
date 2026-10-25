@@ -231,6 +231,115 @@ pub(crate) struct Selection {
     pub(crate) key: Option<String>,
 }
 
+/// Bounded physical lookups only. Native matching and selection assembly live
+/// in `select_with`, shared by ordinary and admitted stores.
+pub(crate) trait SelectorLookup {
+    type Error;
+    fn invalid(&self, message: &'static str) -> Self::Error;
+    fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
+    fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
+    fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
+    fn event_metadata(&self, path: &str, key: &str) -> Result<Option<String>, Self::Error>;
+    fn event_owner(&self, path: &str) -> Result<String, Self::Error>;
+    fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, Self::Error>;
+    fn root_alive(&self, key: &str) -> Result<bool, Self::Error>;
+    fn name_candidates(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn name_hints(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn request_members_replay(&mut self, keys: Vec<String>) -> Result<(), Self::Error>;
+    fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_relay(&self, root: &str, target: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> Result<Vec<String>, Self::Error>;
+}
+
+pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
+
+pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
+    text: Option<String>,
+    used: &mut usize,
+) -> io::Result<T> {
+    let text = text.ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    *used = used.checked_add(text.len())
+        .ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    if *used > 1048576 {
+        return Err(io::Error::other("semantic_selector_metadata_budget"));
+    }
+    serde_json::from_str(&text).map_err(io::Error::other)
+}
+
+pub(crate) fn selector_event<P: SelectorLookup>(
+    port: &P,
+    text: Option<String>,
+    used: &mut usize,
+) -> Result<NativeEvent, P::Error> {
+    let mut native: NativeEvent = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
+    Ok(native)
+}
+
+pub(crate) fn selector_endpoint<P: SelectorLookup>(
+    port: &P,
+    key: &str,
+    used: &mut usize,
+    require_root: bool,
+) -> Result<Endpoint, P::Error> {
+    let (text, parent, root) = port.endpoint_row(key)?;
+    if require_root && root.is_none() {
+        return Err(port.invalid("semantic_selector_root_missing"));
+    }
+    let mut endpoint: Endpoint = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    endpoint.parent = parent.clone();
+    endpoint.row.parent = parent;
+    endpoint.root = root.unwrap_or_else(|| key.to_owned());
+    endpoint.root_alive = port.root_alive(&endpoint.root)?;
+    Ok(endpoint)
+}
+
+pub(crate) fn select_with<P: SelectorLookup>(
+    port: &mut P,
+    selector: &Selector,
+) -> Result<Selection, P::Error> {
+    let (keys, endpoint) = match selector {
+        Selector::NativeKey { native, harness } => return port.native_key(native, harness),
+        Selector::ClaudeReceipt { id } => {
+            let Some(text) = port.receipt_first(id)? else {
+                return Ok(Selection::default());
+            };
+            let native = selector_event(port, text, &mut 0)?;
+            return Ok(Selection { count: 1, location: Some(native.at), ..Default::default() });
+        }
+        Selector::ClaudeCall { id } => {
+            let keys = port.call_owners(id)?;
+            if keys.len() != 1 {
+                return Ok(Selection { count: keys.len(), ..Default::default() });
+            }
+            let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
+            let mut used = 0;
+            let native = selector_event(port, text, &mut used)?;
+            let endpoint = selector_endpoint(port, &native.owner, &mut used, false)?;
+            return Ok(Selection { count: 1, endpoint: Some(endpoint), location: Some(native.at), ..Default::default() });
+        }
+        Selector::ClaudeName { name } => {
+            let hints = port.name_hints(name)?;
+            if !hints.is_empty() {
+                port.request_members_replay(hints)?;
+                return Err(port.invalid("native name companion requires semantic replay"));
+            }
+            (port.name_candidates(name)?, true)
+        }
+        Selector::CodexSibling { parent, task } => (port.codex_sibling(parent, task)?, false),
+        Selector::CodexRelay { root, target } => (port.codex_relay(root, target)?, true),
+        Selector::CodexWait { root, target, exclude } => (port.codex_wait(root, target, exclude)?, true),
+    };
+    let found = if endpoint && keys.len() == 1 {
+        Some(selector_endpoint(port, &keys[0], &mut 0, true)?)
+    } else {
+        None
+    };
+    Ok(Selection { count: keys.len(), endpoint: found, ..Default::default() })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {

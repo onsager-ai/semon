@@ -535,6 +535,60 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     c.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0)).map_err(error)
 }
 
+struct AdmittedLookup<'a> {
+    db: &'a Connection,
+    ns: &'a str,
+    replay: Vec<String>,
+}
+
+impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
+    type Error = rusqlite::Error;
+    fn invalid(&self, message: &'static str) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
+    }
+    fn native_key(&self, native: &str, harness: &str) -> rusqlite::Result<crate::model::relation_stage::Selection> {
+        let key: Option<String> = self.db.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3", params![self.ns,harness,native], |r| r.get(0)).optional()?;
+        Ok(crate::model::relation_stage::Selection { count: usize::from(key.is_some()), key, ..Default::default() })
+    }
+    fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![self.ns, id], |r| r.get(0)).optional()
+    }
+    fn call_owners(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        self.db.prepare("SELECT source_path,event_key FROM main.catalog_semantic_events WHERE namespace=?1 AND kind='call' AND tool_id=?2 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2")?.query_map(params![self.ns, id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+    }
+    fn event_metadata(&self, path: &str, key: &str) -> rusqlite::Result<Option<String>> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key=?3", params![self.ns, path, key], |r| r.get(0))
+    }
+    fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
+        self.db.query_row("SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2", params![self.ns, path], |r| r.get(0))
+    }
+    fn endpoint_row(&self, key: &str) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
+        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    }
+    fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns, key], |r| r.get(0)).optional().map(|v| v.unwrap_or(false))
+    }
+    fn name_candidates(&self, name: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM main.catalog_semantic_names n JOIN main.catalog_semantic_endpoints e ON e.namespace=n.namespace AND e.session_key=n.session_key WHERE n.namespace=?1 AND e.namespace=?1 AND n.name=?2 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM main.catalog_semantic_events sent JOIN main.catalog_semantic_events receipt ON receipt.namespace=sent.namespace AND receipt.msg_id=sent.msg_id JOIN main.catalog_semantic_endpoints e ON e.namespace=sent.namespace AND e.session_key=sent.owner JOIN main.catalog_semantic_endpoints root ON root.namespace=e.namespace AND root.session_key=e.root_key WHERE sent.namespace=?1 AND receipt.namespace=?1 AND e.namespace=?1 AND root.namespace=?1 AND sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?2 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM main.catalog_semantic_events first WHERE first.namespace=?1 AND first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
+    }
+    fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT d.session_key FROM main.session_descriptions d JOIN main.session_catalog owner ON owner.namespace=d.namespace AND owner.session_key=d.session_key WHERE d.namespace=?1 AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?2) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
+    }
+    fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND parent_native=?2 AND task=?3 LIMIT 2")?.query_map(params![self.ns, parent, task], |r| r.get(0))?.collect()
+    }
+    fn codex_relay(&self, root: &str, target: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND root_key=?2 AND (nickname=?3 OR EXISTS(SELECT 1 FROM main.catalog_semantic_paths p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?2 AND p.path=?3)) LIMIT 2")?.query_map(params![self.ns, root, target], |r| r.get(0))?.collect()
+    }
+    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND root_key=?2 AND session_key<>?4 AND (session_key=?3 OR EXISTS(SELECT 1 FROM main.catalog_semantic_paths p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?2 AND p.path=?3)) LIMIT 2")?.query_map(params![self.ns, root, target, exclude], |r| r.get(0))?.collect()
+    }
+    fn request_members_replay(&mut self, keys: Vec<String>) -> rusqlite::Result<()> {
+        self.replay = keys;
+        Ok(())
+    }
+}
+
 struct ScopedReduction<'a> {
     db: &'a Connection,
     ns: &'a str,
@@ -1187,17 +1241,14 @@ impl Stage {
         if !valid {
             return Err(refuse("stale semantic selector"));
         }
-        match selector {
-            crate::model::relation_stage::Selector::NativeKey { native, harness } => {
-                let key:Option<String>=tx.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3",params![ns,harness,native],|r|r.get(0)).optional().map_err(error)?;
-                Ok(crate::model::relation_stage::Selection {
-                    count: usize::from(key.is_some()),
-                    key,
-                    ..Default::default()
-                })
-            }
-            _ => Err(refuse("semantic_nonprimitive_selector_pending")),
+        let mut lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
+        let result = crate::model::relation_stage::select_with(&mut lookup, selector);
+        // Hints cannot become authoritative negative matches. The admitted
+        // durable members replay is deliberately still closed in this slice.
+        if !lookup.replay.is_empty() {
+            return Err(refuse("semantic_claude_name_members_pending"));
         }
+        result.map_err(error)
     }
 
     pub(crate) fn replay(
