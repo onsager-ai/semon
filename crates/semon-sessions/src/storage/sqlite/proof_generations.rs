@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id 
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_source_path ON storage_proof_sources(namespace,path,ledger,id);
 CREATE TABLE IF NOT EXISTS storage_proof_refs(namespace TEXT NOT NULL,session_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('current','history')),id TEXT NOT NULL,PRIMARY KEY(namespace,session_key,kind,id)) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS storage_proof_leases(namespace TEXT NOT NULL,token TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,owner_epoch INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(namespace,token)) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS storage_proof_reader_owners(namespace TEXT PRIMARY KEY,epoch INTEGER NOT NULL CHECK(epoch>0)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_leases(namespace TEXT NOT NULL,token TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,owner_epoch INTEGER NOT NULL,serial INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(namespace,token)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_reader_owners(namespace TEXT PRIMARY KEY,epoch INTEGER NOT NULL CHECK(epoch>0),next_lease INTEGER NOT NULL CHECK(next_lease>=0)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_lease_generation ON storage_proof_leases(namespace,id,session_key,expires);
 CREATE TRIGGER IF NOT EXISTS storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END;
 CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON storage_proof_sources BEGIN SELECT RAISE(ABORT,'immutable proof source'); END;
@@ -111,6 +111,7 @@ pub(crate) fn collect(tx: &Transaction<'_>, namespace: &str, budget: usize) -> r
 pub(crate) struct Lease {
     owner: NativeOwnership,
     owner_epoch: i64,
+    serial: i64,
     token: String,
     snapshot: ReaderSnapshot,
     row: CatalogRow,
@@ -136,7 +137,7 @@ impl NativeReaderBinding {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
         owner.validate_ready(&tx)?;
         let ns = owner.config().namespace.as_str();
-        if tx.execute("INSERT INTO storage_proof_reader_owners VALUES(?1,1) ON CONFLICT(namespace) DO UPDATE SET epoch=epoch+1 WHERE epoch<9223372036854775807", [ns]).map_err(failed)? != 1 {
+        if tx.execute("INSERT INTO storage_proof_reader_owners VALUES(?1,1,0) ON CONFLICT(namespace) DO UPDATE SET epoch=epoch+1,next_lease=0 WHERE epoch<9223372036854775807", [ns]).map_err(failed)? != 1 {
             return Err(StorageError::Conflict);
         }
         let epoch = tx.query_row("SELECT epoch FROM storage_proof_reader_owners WHERE namespace=?1", [ns], |r| r.get(0)).map_err(failed)?;
@@ -172,12 +173,12 @@ impl ReaderRuntime {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
         self.validate(&tx)?;
         let ns = owner.config().namespace.as_str();
-        let existing: Option<(String, String)> = tx.query_row("SELECT id,session_key FROM storage_proof_leases WHERE namespace=?1 AND token=?2", params![ns, token], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(failed)?;
-        let id = if let Some((id, session)) = existing {
+        let existing: Option<(String, String, i64)> = tx.query_row("SELECT id,session_key,serial FROM storage_proof_leases WHERE namespace=?1 AND token=?2", params![ns, token], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional().map_err(failed)?;
+        let (id, serial) = if let Some((id, session, serial)) = existing {
             if session != key || id != expected.0 {
                 return Err(StorageError::Conflict);
             }
-            id
+            (id, serial)
         } else {
             // Expired/fenced rows are no longer admitted readers. Their removal
             // cannot rebind a retry: expected generation is an explicit input.
@@ -186,8 +187,12 @@ impl ReaderRuntime {
             if count >= LEASE_CAP {
                 return Err(StorageError::Busy);
             }
-            tx.execute("INSERT INTO storage_proof_leases VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![ns, token, expected.0, key, owner.admission(), owner.config().expected_stream_epoch, self.epoch, expires]).map_err(failed)?;
-            expected.0.clone()
+            if tx.execute("UPDATE storage_proof_reader_owners SET next_lease=next_lease+1 WHERE namespace=?1 AND epoch=?2 AND next_lease<9223372036854775807", params![ns, self.epoch]).map_err(failed)? != 1 {
+                return Err(StorageError::Conflict);
+            }
+            let serial: i64 = tx.query_row("SELECT next_lease FROM storage_proof_reader_owners WHERE namespace=?1", [ns], |r| r.get(0)).map_err(failed)?;
+            tx.execute("INSERT INTO storage_proof_leases VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![ns, token, expected.0, key, owner.admission(), owner.config().expected_stream_epoch, self.epoch, serial, expires]).map_err(failed)?;
+            (expected.0.clone(), serial)
         };
         let (publication, metadata, prefix, admission, stream): (String, String, String, u64, String) = tx.query_row("SELECT publication,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(failed)?;
         if admission != owner.admission() || Some(&stream) != owner.config().expected_stream_epoch.as_ref() {
@@ -197,7 +202,7 @@ impl ReaderRuntime {
         if crate::retention::source_generation(&row.sources).map_err(|_| StorageError::Unavailable)? != prefix {
             return Err(StorageError::ScopeChanged);
         }
-        let lease = Lease { owner: owner.clone(), owner_epoch: self.epoch, token: token.into(), snapshot: ReaderSnapshot { namespace: owner.config().namespace.clone(), admission, stream_epoch: stream, publication_generation: publication, proof_generation: ProofGenerationId(id), consumed_prefix: prefix }, row, released: false };
+        let lease = Lease { owner: owner.clone(), owner_epoch: self.epoch, serial, token: token.into(), snapshot: ReaderSnapshot { namespace: owner.config().namespace.clone(), admission, stream_epoch: stream, publication_generation: publication, proof_generation: ProofGenerationId(id), consumed_prefix: prefix }, row, released: false };
         lease.validate(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(lease)
@@ -207,7 +212,7 @@ impl Lease {
     fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         self.owner.validate_ready(db)?;
         let metadata = serde_json::to_string(&self.row).map_err(|_| StorageError::Unavailable)?;
-        let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key WHERE l.namespace=?1 AND l.token=?2 AND l.id=?3 AND l.session_key=?4 AND l.admission=?5 AND l.stream=?6 AND l.owner_epoch=?8 AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.expires>?7 AND g.admission=l.admission AND g.stream=l.stream AND g.metadata=?9 AND g.prefix=?10 AND g.publication=?11)", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.row.key, self.snapshot.admission, self.snapshot.stream_epoch, crate::model::now_ms(), self.owner_epoch, metadata, self.snapshot.consumed_prefix, self.snapshot.publication_generation], |r| r.get(0)).map_err(failed)?;
+        let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key WHERE l.namespace=?1 AND l.token=?2 AND l.id=?3 AND l.session_key=?4 AND l.admission=?5 AND l.stream=?6 AND l.owner_epoch=?8 AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.expires>?7 AND g.admission=l.admission AND g.stream=l.stream AND g.metadata=?9 AND g.prefix=?10 AND g.publication=?11 AND l.serial=?12)", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.row.key, self.snapshot.admission, self.snapshot.stream_epoch, crate::model::now_ms(), self.owner_epoch, metadata, self.snapshot.consumed_prefix, self.snapshot.publication_generation, self.serial], |r| r.get(0)).map_err(failed)?;
         if self.released || !valid {
             return Err(StorageError::ScopeChanged);
         }
@@ -251,7 +256,7 @@ impl ProofReaderLease for Lease {
         if epoch != self.owner_epoch {
             return Err(StorageError::ScopeChanged);
         }
-        tx.execute("DELETE FROM storage_proof_leases WHERE namespace=?1 AND token=?2 AND id=?3 AND owner_epoch=?4", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.owner_epoch]).map_err(failed)?;
+        tx.execute("DELETE FROM storage_proof_leases WHERE namespace=?1 AND token=?2 AND id=?3 AND owner_epoch=?4 AND serial=?5", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.owner_epoch, self.serial]).map_err(failed)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         self.released = true;
         Ok(())
