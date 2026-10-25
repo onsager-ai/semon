@@ -180,35 +180,62 @@ pub(super) fn publish(
     if locked.len()!=1 { return Err(StorageError::ScopeChanged); }
     let recipe = metadata(tx, b"catalog_semantic_recipe")?;
     let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
-    if fingerprint_rows.len()!=1 { return Err(StorageError::Conflict); }
-    let bytes=fingerprint_rows[0].get::<_,Option<i64>>(0);
-    if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) { return Err(StorageError::ScopeChanged); }
-    selected_read::charge(64,bytes.unwrap_or(0) as usize).map_err(|_|StorageError::Busy)?;
+    if fingerprint_rows.len() != 1 {
+        return Err(StorageError::Conflict);
+    }
+    let bytes = fingerprint_rows[0].get::<_, Option<i64>>(0);
+    if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) {
+        return Err(StorageError::ScopeChanged);
+    }
+    selected_read::charge(64, bytes.unwrap_or(0) as usize).map_err(|_| StorageError::Busy)?;
     let fingerprint:Option<Vec<u8>>=tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    let fingerprint=fingerprint.map(String::from_utf8).transpose().map_err(|_|StorageError::ScopeChanged)?;
-    let interpretation=crate::events::tree_rows::interpretation(&[pricing,recipe,fingerprint]).map_err(|_|StorageError::Unavailable)?;
-    let (projection, digest)=stage(tx,path,ledger,expected_header,expected_source,summary)?;
+    let fingerprint = fingerprint
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| StorageError::ScopeChanged)?;
+    let interpretation = crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
+        .map_err(|_| StorageError::Unavailable)?;
+    let (projection, digest) = stage(tx, path, ledger, expected_header, expected_source, summary)?;
     // The persisted witness is reverified after staging. This covers retained
     // rows and never substitutes a digest of the input Summary.
-    if persisted_witness(tx,projection)?!=digest { return Err(StorageError::Conflict); }
-    let receipt=header_ledger(ledger);
-    let record=crate::events::tree_rows::TreeSummaryRecord::new(receipt.clone(),Some(digest),interpretation,summary,normalized_usage);
-    let encoded=serde_json::to_vec(&record).map_err(|_|StorageError::Unavailable)?;
-    let mut writer=Writer{tx};
-    let put="INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value";
-    let failure=format!("native_tree_failure:{path}");
-    if encoded.len()>1048576 {
-        writer.effect(put,&[&ns,&failure.as_bytes(),&receipt.as_bytes()])?;
+    if persisted_witness(tx, projection)? != digest {
+        return Err(StorageError::Conflict);
+    }
+    let receipt = header_ledger(ledger);
+    let record = crate::events::tree_rows::TreeSummaryRecord::new(
+        receipt.clone(),
+        Some(digest),
+        interpretation,
+        summary,
+        normalized_usage,
+    );
+    let encoded = serde_json::to_vec(&record).map_err(|_| StorageError::Unavailable)?;
+    let mut writer = Writer { tx };
+    let put = "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value";
+    let failure = format!("native_tree_failure:{path}");
+    if encoded.len() > 1048576 {
+        writer.effect(put, &[&ns, &failure.as_bytes(), &receipt.as_bytes()])?;
         // Generation remains incomplete and cannot be returned by readers.
         let changed=writer.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$3 WHERE namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes(),&b"blocked_metadata".as_slice()]).map_err(sqlstate::error)?;
-        if changed>1 { return Err(StorageError::Conflict); }
+        if changed > 1 {
+            return Err(StorageError::Conflict);
+        }
         writer.tx.check()?;
         return Ok(false);
     }
-    let key=format!("native_tree_summary:{path}");
-    writer.effect(put,&[&ns,&key.as_bytes(),&encoded])?;
-    let changed=writer.tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&failure.as_bytes()]).map_err(sqlstate::error)?;
-    if changed>1 { return Err(StorageError::Conflict); }
+    let key = format!("native_tree_summary:{path}");
+    writer.effect(put, &[&ns, &key.as_bytes(), &encoded])?;
+    let changed = writer
+        .tx
+        .driver
+        .execute(
+            "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+            &[&ns, &failure.as_bytes()],
+        )
+        .map_err(sqlstate::error)?;
+    if changed > 1 {
+        return Err(StorageError::Conflict);
+    }
     // SourceState is still locked and the exact file/Usage fences were matched
     // before the first generation effect. Publish header last in this txn.
     writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
@@ -216,15 +243,28 @@ pub(super) fn publish(
     Ok(true)
 }
 
-fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>,StorageError> {
-    let ns=tx.namespace.as_str().as_bytes();
+fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>, StorageError> {
+    let ns = tx.namespace.as_str().as_bytes();
     let rows=tx.driver.query("SELECT octet_length(value)::bigint FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key]).map_err(sqlstate::error)?;
-    let Some(row)=rows.first() else { return Ok(None); };
-    let bytes:i64=row.get(0);
-    if !(0..=1048576).contains(&bytes) { return Err(StorageError::ScopeChanged); }
-    selected_read::charge(64,bytes as usize).map_err(|_|StorageError::Busy)?;
-    let value:Vec<u8>=tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key]).map_err(sqlstate::error)?.get(0);
-    String::from_utf8(value).map(Some).map_err(|_|StorageError::ScopeChanged)
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let bytes: i64 = row.get(0);
+    if !(0..=1048576).contains(&bytes) {
+        return Err(StorageError::ScopeChanged);
+    }
+    selected_read::charge(64, bytes as usize).map_err(|_| StorageError::Busy)?;
+    let value: Vec<u8> = tx
+        .driver
+        .query_one(
+            "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+            &[&ns, &key],
+        )
+        .map_err(sqlstate::error)?
+        .get(0);
+    String::from_utf8(value)
+        .map(Some)
+        .map_err(|_| StorageError::ScopeChanged)
 }
 
 // Read only persisted rows, bytea keyset order, one admitted row at a time.
