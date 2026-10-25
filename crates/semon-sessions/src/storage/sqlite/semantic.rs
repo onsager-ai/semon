@@ -919,13 +919,27 @@ struct AdmittedLookup<'a> {
 }
 
 #[cfg(test)]
-pub(crate) fn name_members_vm_probe(c: &Connection, ns: &str, name: &str) -> Vec<(String, usize, usize)> {
+pub(crate) fn name_members_vm_probe(
+    c: &Connection,
+    ns: &str,
+    name: &str,
+) -> Vec<(String, usize, usize)> {
     use crate::model::relation_stage::SelectorLookup;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     let tx = c.unchecked_transaction().unwrap();
     let steps = Arc::new(AtomicUsize::new(0));
     let observed = steps.clone();
-    c.progress_handler(1, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+    c.progress_handler(
+        1,
+        Some(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    )
+    .unwrap();
     let started = std::time::Instant::now();
     let layout = FrontierLayout::bind(&tx).unwrap();
     c.progress_handler(0, None::<fn() -> bool>).unwrap();
@@ -939,11 +953,25 @@ pub(crate) fn name_members_vm_probe(c: &Connection, ns: &str, name: &str) -> Vec
         tx.execute_batch("SAVEPOINT name_members_probe").unwrap();
         let steps = Arc::new(AtomicUsize::new(0));
         let observed = steps.clone();
-        c.progress_handler(1, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+        c.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
         let started = std::time::Instant::now();
-        let lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
+        let lookup = AdmittedLookup {
+            db: &tx,
+            ns,
+            replay: Vec::new(),
+        };
         let rows = match kind {
-            "hints" => { targets = lookup.name_hints(name).unwrap(); targets.len() }
+            "hints" => {
+                targets = lookup.name_hints(name).unwrap();
+                targets.len()
+            }
             "candidates" => lookup.name_candidates(name).unwrap().len(),
             _ => {
                 for target in &targets {
@@ -960,7 +988,8 @@ pub(crate) fn name_members_vm_probe(c: &Connection, ns: &str, name: &str) -> Vec
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         eprintln!("name_members_query kind={kind} vm_steps={steps} rows={rows}");
         result.push((kind.into(), steps, rows));
-        tx.execute_batch("ROLLBACK TO name_members_probe; RELEASE name_members_probe").unwrap();
+        tx.execute_batch("ROLLBACK TO name_members_probe; RELEASE name_members_probe")
+            .unwrap();
     }
     result
 }
@@ -1537,7 +1566,8 @@ impl Stage {
                 endpoint,
                 || rusqlite::Error::InvalidQuery,
                 |path, name| owner_effects.dependency(path, "name:claude", name),
-            ).map_err(error)?;
+            )
+            .map_err(error)?;
             for source in &endpoint.row.sources {
                 if let Some(pid) = endpoint.pid {
                     owner_effects
@@ -1776,16 +1806,25 @@ impl Stage {
                 return Err(refuse("semantic_claude_event_projection_pending"));
             }
         }
-        if matches!(selector, crate::model::relation_stage::Selector::ClaudeName { .. }) {
+        if matches!(
+            selector,
+            crate::model::relation_stage::Selector::ClaudeName { .. }
+        ) {
             let current: bool = tx.query_row("SELECT revision=(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
             if !current {
                 return Err(refuse("stale semantic selector"));
             }
             for path in staged_paths(&tx, ns)? {
-                let Some((_, ledger)) = crate::events::store::ledger_row(&tx, &path).map_err(error)? else {
+                let Some((_, ledger)) =
+                    crate::events::store::ledger_row(&tx, &path).map_err(error)?
+                else {
                     return Err(refuse("stale semantic selector"));
                 };
-                if crate::events::Stat::of(std::path::Path::new(&path)).ok().as_ref() != Some(&ledger.stat) {
+                if crate::events::Stat::of(std::path::Path::new(&path))
+                    .ok()
+                    .as_ref()
+                    != Some(&ledger.stat)
+                {
                     return Err(refuse("stale semantic selector"));
                 }
             }
@@ -1830,7 +1869,8 @@ impl Stage {
                 )
                 .map_err(error)?;
             #[cfg(test)]
-            crate::events::store::configured::effect("semantic_name_members_reset").map_err(error)?;
+            crate::events::store::configured::effect("semantic_name_members_reset")
+                .map_err(error)?;
             tx.commit().map_err(error)?;
             self.epoch = Some(next_epoch);
             return Err(refuse("semantic_claude_name_members_pending"));
