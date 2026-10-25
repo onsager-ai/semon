@@ -467,16 +467,16 @@ jobs:
         if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         run: node tests/ui/visual-provenance.mjs
       - name: Audit exact pathname-only and fingerprint-only visual bindings
-        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        if: ${{ always() && (github.head_ref == 'task/380-predecessor-closure-20261024' || github.head_ref == 'task/477-integration-20261025') && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         run: node tests/ui/visual-pathname-audit.mjs
       - name: Propose exact visual binding updates for review
-        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        if: ${{ always() && (github.head_ref == 'task/380-predecessor-closure-20261024' || github.head_ref == 'task/477-integration-20261025') && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         continue-on-error: true
         env:
           SEMON_VISUAL_PROPOSAL_SUITE: ${{ matrix.suite }}
         run: node tests/ui/visual-binding-proposal.mjs
       - name: Upload exact visual binding proposal
-        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        if: ${{ always() && (github.head_ref == 'task/380-predecessor-closure-20261024' || github.head_ref == 'task/477-integration-20261025') && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
