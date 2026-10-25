@@ -111,18 +111,8 @@ pub(super) fn publish(
             slots,
             prefix,
         };
-        // Validate precisely the same typed values that are persisted; the
-        // SQLite transaction still owns the write and its constraints.
-        let (record, _) = proof_codec::decode_generation(
-            record,
-            proof_codec::ExpectedGeneration {
-                namespace,
-                id: &id,
-                admission,
-                stream,
-                proof,
-            },
-        )?;
+        // These values came directly from the prepared model in this owner
+        // transaction. Decode only persisted input, not this freshly encoded row.
         tx.execute(
             "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
@@ -419,6 +409,8 @@ impl ReaderRuntime {
                     .as_deref()
                     .ok_or(StorageError::ScopeChanged)?,
                 proof: &proof,
+                publication: &publication,
+                prefix: &prefix,
             },
         )?;
         let prefix = record.prefix;
@@ -812,7 +804,7 @@ pub(super) fn replayed_presentation(
     Ok(saved == base
         && manifest.len() <= 1048576
         && joined == expected
-        && joined_digest(&saved, &manifest)? == joined)
+        && proof_codec::verify_presentation_digest(&saved, &manifest, &joined).is_ok())
 }
 fn validate_presentation(
     db: &Connection,
@@ -821,9 +813,10 @@ fn validate_presentation(
     proof: &str,
 ) -> Result<String, StorageError> {
     let (base,manifest,joined): (String,String,String) = db.query_row("SELECT base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2 AND digest=?3",params![snapshot.namespace.as_str(),snapshot.publication_generation,proof],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-    if manifest.len() > 1048576 || joined != proof || joined_digest(&base, &manifest)? != joined {
+    if manifest.len() > 1048576 || joined != proof {
         return Err(StorageError::ScopeChanged);
     }
+    proof_codec::verify_presentation_digest(&base, &manifest, &joined)?;
     let manifest: PresentationManifest =
         serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;

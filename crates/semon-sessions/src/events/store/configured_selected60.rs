@@ -1,5 +1,79 @@
 use super::*;
 
+// Shared existing negative-read hook: a refused proof must never call Raw.
+struct ProviderCounter(std::sync::atomic::AtomicUsize);
+impl crate::SessionSourceReader for ProviderCounter {
+    fn read_range(&self, _: &crate::SessionSourceRef, _: Option<&str>, _: u64, _: usize) -> std::io::Result<crate::SessionSourceRange> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(std::io::Error::other("unexpected Raw access"))
+    }
+}
+
+#[test]
+fn configured_semantic_selected89_real_codec_roundtrip_and_one_byte_tamper_before_raw() {
+    use crate::storage::proof_codec::{self, ExpectedGeneration, GenerationRecord};
+    use crate::storage::selected::SelectedSnapshotStore;
+    selected75_native(&[], |lease, options, host, key, db, _, _, _| {
+        let snapshot = lease.snapshot();
+        let record = db.query_row(
+            "SELECT namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3",
+            params![snapshot.namespace.as_str(), snapshot.proof_generation.0, key],
+            |r| Ok(GenerationRecord {
+                namespace: r.get(0)?, id: crate::storage::proof_lifetime::ProofGenerationId(r.get(1)?),
+                session_key: r.get(2)?, publication: r.get(3)?, proof: r.get(4)?,
+                admission: r.get(5)?, stream: r.get(6)?, metadata: r.get(7)?,
+                slots: r.get(8)?, prefix: r.get(9)?,
+            }),
+        ).unwrap();
+        let (publication, base, manifest, digest): (String, String, String, String) = db.query_row(
+            "SELECT publication,base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2",
+            params![snapshot.namespace.as_str(), record.proof],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(publication, snapshot.publication_generation);
+        assert_eq!(digest, record.proof);
+        proof_codec::verify_presentation_digest(&base, &manifest, &digest).unwrap();
+        let (decoded, row) = proof_codec::decode_generation(record.clone(), ExpectedGeneration {
+            namespace: snapshot.namespace.as_str(), id: &snapshot.proof_generation,
+            admission: snapshot.admission, stream: &snapshot.stream_epoch,
+            proof: &digest, publication: &snapshot.publication_generation,
+            prefix: &snapshot.consumed_prefix,
+        }).unwrap();
+        assert_eq!(decoded, record);
+        assert_eq!(serde_json::to_string(&row).unwrap(), serde_json::to_string(lease.row()).unwrap());
+        let control = crate::SelectedReadControl::default();
+        let opened = lease.open_selected(options, host, &control).unwrap();
+        assert_eq!(opened.snapshot.proof_generation, decoded.id);
+        assert_eq!(opened.snapshot.consumed_prefix, decoded.prefix);
+        assert_eq!(serde_json::to_string(&opened.row).unwrap(), record.metadata);
+        drop(opened);
+        let query = format!("sid={key}&after=0&limit=1");
+        let (pinned, reply) = read_bound(lease, options, host, &query, None, SessionSourceReadMode::LocalOrPinnedProvider, &control).unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(pinned.namespace, snapshot.namespace);
+        assert_eq!(pinned.admission, snapshot.admission);
+        assert_eq!(pinned.stream_epoch, snapshot.stream_epoch);
+        assert_eq!(pinned.publication_generation, decoded.publication);
+        assert_eq!(pinned.proof_generation, decoded.id);
+        assert_eq!(pinned.consumed_prefix, decoded.prefix);
+
+        // Change exactly one byte while preserving valid JSON and byte length.
+        let mut tampered = record.metadata.into_bytes();
+        let index = tampered.windows(6).position(|w| w == b"\"name\"").unwrap() + 2;
+        tampered[index] = b'A';
+        let tampered = String::from_utf8(tampered).unwrap();
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable").unwrap();
+        db.execute("UPDATE storage_proof_generations SET metadata=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
+            params![tampered, snapshot.namespace.as_str(), snapshot.proof_generation.0, key]).unwrap();
+        db.execute_batch("CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END;").unwrap();
+        let provider = ProviderCounter(std::sync::atomic::AtomicUsize::new(0));
+        assert!(read_bound(lease, options, host, &query, Some(&provider), SessionSourceReadMode::ProviderOnly, &control).is_err());
+        assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(lease.open_selected(options, host, &control).is_err());
+        assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    });
+}
+
 // Both stores run the native producer independently. Only the independently
 // committed publication coordinates enter the existing publication oracle.
 fn selected75_native(
@@ -555,13 +629,6 @@ fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows
 
 #[test]
 fn configured_semantic_selected65_witness_and_manifest_tamper_refuse_before_raw() {
-    struct Count(std::sync::atomic::AtomicUsize);
-    impl crate::SessionSourceReader for Count {
-        fn read_range(&self, _: &crate::SessionSourceRef, _: Option<&str>, _: u64, _: usize) -> std::io::Result<crate::SessionSourceRange> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(std::io::Error::other("unexpected Raw access"))
-        }
-    }
     let (f, _, options, inputs) = model_sources();
     let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
     let binding = capability.reader_binding().unwrap();
@@ -588,7 +655,7 @@ fn configured_semantic_selected65_witness_and_manifest_tamper_refuse_before_raw(
     db.execute_batch("DROP TRIGGER storage_proof_presentation_immutable").unwrap();
     db.execute("UPDATE storage_proof_presentations SET metadata=?1 WHERE namespace='source-a' AND session_key=?2", params![serde_json::to_string(&altered).unwrap(), key]).unwrap();
     db.execute_batch("CREATE TRIGGER storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;").unwrap();
-    let provider = Count(std::sync::atomic::AtomicUsize::new(0));
+    let provider = ProviderCounter(std::sync::atomic::AtomicUsize::new(0));
     let refuse = || {
         assert!(read_bound(&lease, options, &host, &query, Some(&provider), SessionSourceReadMode::ProviderOnly, &crate::SelectedReadControl::default()).is_err());
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
