@@ -8627,7 +8627,7 @@ mod tests {
                         };
                         db.execute(&insert, params![namespace, 10000 + i, path])
                             .unwrap();
-                        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'bounded-work-noise',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
+                        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'changed',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
                         db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
                     }
                 }
