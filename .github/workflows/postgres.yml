@@ -13,6 +13,7 @@ permissions:
 env:
   SEMON_PRICING_REFRESH: "off"
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+  SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
   SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
 
 jobs:
@@ -51,6 +52,8 @@ jobs:
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          CREATE ROLE semon_source LOGIN PASSWORD 'ephemeral-source' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT ON DATABASE postgres TO semon_source;
           SQL
       - name: Ephemeral verified TLS PostgreSQL service
         run: |

@@ -95,10 +95,23 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         {
             return Err(StorageError::ScopeChanged);
         }
+        let checks: Vec<String> = tx.driver.query(
+            "SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=$1::regclass AND contype='c' AND convalidated ORDER BY 1", &[&name]
+        ).map_err(sqlstate::error)?.iter().map(|r| r.get(0)).collect();
+        let mut expected = match table {
+            "owner" => vec!["singleton", "(contract = 1)", "(epoch = 1)"],
+            "state" => vec!["singleton", "(revision >= 0)", "(octet_length(pricing_target) <= 1048576)"],
+            _ => vec!["(octet_length(operation_id) = 32)", "(octet_length(request_digest) = 32)", "(revision >= 0)"],
+        };
+        expected.sort_unstable();
+        let shape: bool = tx.driver.query_one(
+            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND (NOT convalidated OR contype NOT IN ('p','c')))", &[&name]
+        ).map_err(sqlstate::error)?.get(0);
+        if checks != expected || !shape { return Err(StorageError::ScopeChanged); }
         let owners = tx
             .driver
             .query(
-                "SELECT owner::text,contract,epoch FROM semon_pg_store_owner WHERE singleton",
+                "SELECT owner::text,contract,epoch FROM semon_pg_store_owner LIMIT 2",
                 &[],
             )
             .map_err(sqlstate::error)?;
@@ -143,16 +156,12 @@ pub(super) fn lock(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageErr
 }
 
 pub(super) fn lock_publication(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
-    let rows = tx
-        .driver
-        .query(
-            "SELECT revision FROM semon_pg_store_state WHERE singleton FOR SHARE",
-            &[],
-        )
-        .map_err(sqlstate::error)?;
-    if rows.len() != 1 {
-        return Err(StorageError::ScopeChanged);
-    }
+    // SELECT FOR SHARE requires UPDATE privilege in PostgreSQL. Source roles
+    // deliberately have SELECT only on STORE tables. Their shared advisory
+    // lock (acquired before this call) fences every authorized host mutation;
+    // the exclusive host path also locks the state row. No definer function
+    // or UPDATE grant is used to turn a Source into a STORE controller.
+    read(tx)?;
     tx.check()
 }
 
@@ -162,6 +171,8 @@ pub(super) fn read(tx: &mut PgTxn<'_>) -> Result<(i64, Option<String>), StorageE
     if rows.len() != 1 || !rows[0].get::<_, bool>(2) || rows[0].get::<_, i64>(0) < 0 {
         return Err(StorageError::ScopeChanged);
     }
+    let bad_operation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_store_operations p CROSS JOIN semon_pg_store_owner o WHERE p.owner<>o.owner)", &[]).map_err(sqlstate::error)?.get(0);
+    if bad_operation { return Err(StorageError::ScopeChanged); }
     let bytes = rows[0].get::<_, Option<i64>>(1);
     if bytes.is_some_and(|n| !(0..=1048576).contains(&n)) {
         return Err(StorageError::ScopeChanged);
@@ -220,12 +231,22 @@ impl PgStoreMetadata {
             let (revision,_) = read(tx)?;
             if revision!=expected_revision { return Err(StorageError::Conflict); }
             let next=revision.checked_add(1).ok_or(StorageError::Conflict)?;
+            mutation_boundary(1)?;
             if tx.driver.execute("UPDATE semon_pg_store_state SET revision=$1,pricing_target=$2 WHERE singleton AND revision=$3", &[&next,&target.map(str::as_bytes),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            mutation_boundary(2)?;
             if tx.driver.execute("INSERT INTO semon_pg_store_operations(operation_id,owner,request_digest,revision) VALUES($1,CURRENT_USER,$2,$3)", &[&&operation[..],&digest,&next]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            mutation_boundary(3)?;
             tx.check()?;
             Ok(next)
         })
     }
+}
+#[cfg(test)]
+thread_local! { static FAIL_MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+fn mutation_boundary(_point: u8) -> Result<(), StorageError> {
+    #[cfg(test)]
+    if FAIL_MUTATION.with(|p| p.get() == _point) { return Err(StorageError::Busy); }
+    Ok(())
 }
 fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let allowed:bool=tx.driver.query_one("SELECT owner=CURRENT_USER AND has_table_privilege('semon_pg_store_state','UPDATE') AND has_table_privilege('semon_pg_store_operations','INSERT') FROM semon_pg_store_owner WHERE singleton", &[]).map_err(sqlstate::error)?.get(0);
@@ -235,6 +256,10 @@ fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     read(tx)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "store_metadata/tests.rs"]
+mod authority_tests;
 
 #[cfg(test)]
 mod tests {

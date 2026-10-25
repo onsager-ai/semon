@@ -1584,3 +1584,26 @@ over-budget components and transitions without a complete positive replacement
 remain explicit pending/refusal classes. Public qualification remains 0/None,
 completeness partial, and selected factories closed. This increment requires
 exact-head CI and fresh scoped review; it does not complete D3/D4 or #477.
+
+### Private PG STORE authority qualification (UNIT115, pending CI/review)
+
+The host provisioning LOGIN owns the immutable STORE owner row and resources;
+Source LOGINs receive Source-table/sequence access and SELECT only on STORE
+metadata. Neither a Source namespace nor a GUC establishes STORE control.
+Transactions acquire the schema STORE advisory lock before SourceState, file or
+UsageSource locks. Source publication holds a shared advisory lock; host metadata
+mutation takes its exclusive form, then the STORE state row FOR UPDATE, and
+never requests SourceState. PostgreSQL requires UPDATE privilege for FOR SHARE,
+so Source does not take a STORE row lock or receive UPDATE privilege. Independently
+authorized host mutations must use this lock protocol; arbitrary host SQL that
+ignores it is outside the injected control contract.
+
+Warm admission checks STORE shape, validated checks, keys, defaults, policies,
+forced RLS, effective privileges, actual table owners and immutable owner/epoch.
+Mutation reauthorizes its host role and uses revision CAS with a durable STORE
+receipt. These receipts cannot acknowledge Source ingestion. The distinct-login
+CI fixture exercises the normal injected pool and Source observation conformance;
+STORE fault hooks cover before state write, after state write and after receipt.
+This component is pending exact-head CI and independent review. Writer/backend
+qualification remains zero, and complete native bundle, read/repricing integration,
+no-SQLite proof and migration/cutover/rollback are still required.
