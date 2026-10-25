@@ -51,8 +51,19 @@ pub(crate) fn publish_current_sources<P: CurrentPublicationStore>(
     store: &P,
     row: &CatalogRow,
 ) -> Result<(), P::Error> {
+    publish_current_sources_measured(store, row, &mut crate::native_timing::Measurements::new(false))
+}
+
+pub(crate) fn publish_current_sources_measured<P: CurrentPublicationStore>(
+    store: &P,
+    row: &CatalogRow,
+    measurements: &mut crate::native_timing::Measurements,
+) -> Result<(), P::Error> {
+    let started = measurements.start();
     store.retire_sources(&row.key)?;
+    measurements.record("source_retirement", started, 1);
     for source in &row.sources {
+        let started = measurements.start();
         store.clear_dependencies(source)?;
         let parent = source.native_role.as_ref().and_then(|role| {
             role.pointer("/Agent/parent").and_then(Value::as_str).or_else(|| {
@@ -71,7 +82,10 @@ pub(crate) fn publish_current_sources<P: CurrentPublicationStore>(
         if let Some(parent) = parent {
             store.dependency(source, &row.harness, parent)?;
         }
+        measurements.record("native_dependencies", started, 1);
+        let started = measurements.start();
         store.source(row, source)?;
+        measurements.record("catalog_sources", started, 1);
     }
     Ok(())
 }
