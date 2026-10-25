@@ -91,7 +91,7 @@ impl IndexStore for ConfiguredIndex {
         expected: &[(String, Option<i64>)],
     ) -> Result<bool, StoreError> {
         self.journal
-            .invalidate(expected)
+            .invalidate_current(expected)
             .map_err(StoreError::Configured)
     }
     fn describe(&self) -> String {
@@ -172,14 +172,34 @@ impl IndexStore for ConfiguredIndex {
         paths: &[String],
         complete: bool,
     ) -> Result<(), StoreError> {
-        self.journal
-            .discover(paths, complete)
-            .map_err(StoreError::Configured)
+        let payload = serde_json::to_vec(&(paths, complete))
+            .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?;
+        let operation = self.journal.operation("discover", &payload);
+        match SourceObservationStore::discover(&mut self.journal, &operation, paths, complete)
+            .map_err(StoreError::Configured)?
+        {
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => Ok(()),
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Err(StoreError::Configured(StorageError::Conflict))
+            }
+        }
     }
-    fn finish_catalog_backfill(&mut self, _expected: Option<&str>) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError> {
+        let payload = serde_json::to_vec(&expected)
+            .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?;
+        let operation = self.journal.operation("finish_backfill", &payload);
+        match SourceObservationStore::finish_backfill(&mut self.journal, &operation, expected)
+            .map_err(StoreError::Configured)?
+        {
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+            | crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied => {
+                Ok(Outcome::Written)
+            }
+            crate::storage::source_observations::SourceMutationReceipt::Conflict => {
+                Ok(Outcome::Conflict)
+            }
+        }
     }
     fn resolve_catalog_input(
         &mut self,

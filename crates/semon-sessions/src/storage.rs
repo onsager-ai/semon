@@ -209,7 +209,7 @@ impl StoreConfig {
     pub fn source_observations(
         &self,
     ) -> Result<Box<dyn source_observations::SourceObservationStore>, StorageError> {
-        Ok(Box::new(crate::events::EventCache::open_configured(self)?))
+        sqlite::source_journal::open(self)
     }
 
     /// Resolve configuration without creating, resetting or repairing storage.
