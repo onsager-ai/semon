@@ -7821,7 +7821,9 @@ mod tests {
                         owner_reached = true;
                         break;
                     }
-                    Ok(_) => panic!("append must reach the injected owner fence before publication"),
+                    Ok(_) => {
+                        panic!("append must reach the injected owner fence before publication")
+                    }
                 }
             }
             assert!(
