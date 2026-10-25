@@ -702,10 +702,22 @@ fn pg_digest_collision_refuses_without_alias_or_effect() {
             &[&b"b".as_slice(), &b"a".as_slice(), &identity().operation_id, &identity().kind, &&identity().request_digest[..]]).unwrap();
         Ok(())
     }).unwrap();
-    assert_eq!(pool.transaction_inner(&ns("a"), TxnKind::ReadSnapshot, &PgCancellation::default(), false, |tx| {
-        tx.driver.query("SELECT namespace FROM semon_pg_operations", &[]).map_err(super::sqlstate::error)?;
-        Ok(())
-    }), Err(StorageError::Unavailable), "the RLS collision guard still refuses independently of admission");
+    assert_eq!(
+        pool.transaction_inner(
+            &ns("a"),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            false,
+            |tx| {
+                tx.driver
+                    .query("SELECT namespace FROM semon_pg_operations", &[])
+                    .map_err(super::sqlstate::error)?;
+                Ok(())
+            }
+        ),
+        Err(StorageError::Unavailable),
+        "the RLS collision guard still refuses independently of admission"
+    );
     assert_eq!(
         pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
         Err(StorageError::ScopeChanged)
