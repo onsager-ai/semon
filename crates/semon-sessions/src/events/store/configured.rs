@@ -7726,6 +7726,45 @@ mod tests {
             }
         }
 
+        #[test]
+        fn configured_semantic_domain94_receipt_order_ties_append_and_restart_oracle() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 3);
+            let mut cache = open(&f.config);
+            let (batch, model) = claude_ready(&mut cache, options, &inputs);
+            oracle(&cache, options, &inputs, model.prepared());
+            publish(&mut cache, &f, &batch, &model);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            drop(cache);
+            for (i, input) in inputs.iter().enumerate() {
+                let path = input.full_path(options);
+                let mut raw = fs::read_to_string(&path).unwrap();
+                // Equal times preserve native receipt-key order, including
+                // unkeyed receipts. Appending must not inherit hash/SQL order.
+                for id in [Some(format!("append-{}", 2 - i)), None] {
+                    let mut origin = serde_json::json!({"kind":"peer","name":"worker"});
+                    if let Some(id) = id {
+                        origin["msg_id"] = serde_json::json!(id);
+                    }
+                    raw.push_str(&format!(
+                        "{}\n",
+                        serde_json::json!({
+                            "type":"user", "sessionId":format!("claude72-{i}"),
+                            "uuid":format!("append-{i}-{}", origin.get("msg_id").is_some()),
+                            "timestamp":"2026-10-01T00:02:00Z", "origin":origin,
+                            "message":{"role":"user","content":"sanitized appended receipt"}
+                        })
+                    ));
+                }
+                fs::write(path, raw).unwrap();
+            }
+            let mut cache = open(&f.config);
+            let (batch, model) = claude_ready(&mut cache, options, &inputs);
+            oracle(&cache, options, &inputs, model.prepared());
+            publish(&mut cache, &f, &batch, &model);
+        }
+
         fn named_claude_inputs(options: &crate::Options, copies: usize) -> Vec<crate::Input> {
             let inputs = claude_inputs(options, copies, 1);
             for (i, input) in inputs.iter().enumerate() {

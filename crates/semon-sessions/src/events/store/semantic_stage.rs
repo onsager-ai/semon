@@ -6,9 +6,9 @@ use crate::model::relation_stage::{
 };
 use std::collections::{BTreeSet, HashMap};
 
-// Earlier stages may contain parent turns derived from partial receipt sets.
-// Rebuild their witnesses using complete physical sender receipt boundaries.
-pub(super) const RECIPE: &str = "recorded-origin-turn-native-name-hints-v4";
+// Receipt keys retain ordinary relay order through bounded staged replay.
+// Other stored recipes are unsupported under the current producer contract.
+pub(super) const RECIPE: &str = "recorded-origin-turn-native-receipt-order-v5";
 pub(super) fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(

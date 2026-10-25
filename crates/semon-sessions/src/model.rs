@@ -4086,15 +4086,9 @@ impl<'a> Builder<'a> {
         let mut orphans: Vec<(String, Ref)> = received
             .iter()
             .filter(|(id, _)| !joined.contains(*id))
-            .filter_map(|(id, found)| found.first().map(|at| (format!("relay:{id}"), *at)))
+            .filter_map(|(_, found)| found.first().map(|at| (self.orphan_relay_source(*at), *at)))
             .collect();
-        orphans.extend(unkeyed.into_iter().map(|at| {
-            let file = &self.files[at.0];
-            (
-                format!("relay:recv:{}:{}", file.id, event(self.files, at).o),
-                at,
-            )
-        }));
+        orphans.extend(unkeyed.into_iter().map(|at| (self.orphan_relay_source(at), at)));
         orphans.sort_by(|a, b| a.0.cmp(&b.0));
         for (source, at) in orphans {
             let to = self.of_file[at.0];
@@ -4175,6 +4169,20 @@ impl<'a> Builder<'a> {
             )]));
         }
         Ok(())
+    }
+
+    /// Native receipt order, before hashing its handoff identity. Both ordinary
+    /// assembly and staged replay must keep this key, including keyed receipts
+    /// and agent messages whose id names the sender rather than the message.
+    fn orphan_relay_source(&self, at: Ref) -> String {
+        let found = event(self.files, at);
+        if found.k == Kind::Xsm
+            && let Some(id) = &found.id
+        {
+            format!("relay:{id}")
+        } else {
+            format!("relay:recv:{}:{}", self.files[at.0].id, found.o)
+        }
     }
 
     /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
