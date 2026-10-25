@@ -6888,9 +6888,13 @@ mod tests {
                     .unwrap();
             }
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            let paths = inputs
+                .iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
             cache
                 .begin_semantic_stage_with_journal(
-                    &[inputs[0].full_path(options).to_string_lossy().into_owned()],
+                    &paths,
                     &runtime,
                     true,
                 )
