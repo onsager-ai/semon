@@ -15,14 +15,34 @@ pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex
 }
 
 #[cfg(test)]
-pub(crate) fn parser_append_fixture(path: &std::path::Path, harness: &str, index: &mut FileIndex, from: u64) {
+pub(crate) fn parser_append_fixture(
+    path: &std::path::Path,
+    harness: &str,
+    index: &mut FileIndex,
+    from: u64,
+) {
     let mut file = crate::sealed::LogFile::open(path).unwrap();
-    super::super::parse(&mut file, from, harness, index, None, None,
-        &mut crate::native_timing::Measurements::default()).unwrap();
+    super::super::parse(
+        &mut file,
+        from,
+        harness,
+        index,
+        None,
+        None,
+        &mut crate::native_timing::Measurements::default(),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
-pub(crate) fn sqlite_fixture(db: &mut Connection, path: &str, expected: Option<&Ledger>, ledger: &Ledger, append: bool, index: &FileIndex) -> i64 {
+pub(crate) fn sqlite_fixture(
+    db: &mut Connection,
+    path: &str,
+    expected: Option<&Ledger>,
+    ledger: &Ledger,
+    append: bool,
+    index: &FileIndex,
+) -> i64 {
     let tx = db.transaction().unwrap();
     let id = begin_source(&tx, path, expected, ledger, append).unwrap();
     write(&tx, path, ledger, index).unwrap();
@@ -328,7 +348,10 @@ impl SqliteEffects<'_, '_> {
     }
 }
 
-fn with_effects<T>(tx: &Transaction<'_>, f: impl FnOnce(&mut SqliteEffects<'_, '_>) -> Result<T, StorageError>) -> rusqlite::Result<T> {
+fn with_effects<T>(
+    tx: &Transaction<'_>,
+    f: impl FnOnce(&mut SqliteEffects<'_, '_>) -> Result<T, StorageError>,
+) -> rusqlite::Result<T> {
     let mut effects = SqliteEffects { tx, error: None };
     f(&mut effects).map_err(|_| effects.error.unwrap_or(rusqlite::Error::InvalidQuery))
 }
@@ -382,19 +405,36 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         })();
         self.result(result)
     }
-    fn first(&mut self, id: i64, scope: &str, identity: &str) -> Result<Option<String>, StorageError> {
+    fn first(
+        &mut self,
+        id: i64,
+        scope: &str,
+        identity: &str,
+    ) -> Result<Option<String>, StorageError> {
         let tx = self.tx;
-        let result = (|| tx.query_row(sql(tx,
+        let result = (|| {
+            tx.query_row(sql(tx,
             "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.source_id=?1 AND i.scope=?2 AND i.identity=?3",
-            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3")?,params![id,scope,identity],|r|r.get(0)).optional())();
+            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3")?,params![id,scope,identity],|r|r.get(0)).optional()
+        })();
         self.result(result)
     }
-    fn identity(&mut self, id: i64, scope: &str, identity: &str, offset: u64) -> Result<(), StorageError> {
+    fn identity(
+        &mut self,
+        id: i64,
+        scope: &str,
+        identity: &str,
+        offset: u64,
+    ) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached(sql(tx, "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
-                "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)")?)?.execute(params![id,scope,identity,offset])?;
+            tx.prepare_cached(sql(
+                tx,
+                "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
+                "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
+            )?)?
+            .execute(params![id, scope, identity, offset])?;
             Ok(())
         })();
         self.result(result)
@@ -403,13 +443,31 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(fact.offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached(sql(tx, "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)")?)?.execute(params![fact.source,offset,fact.identity,fact.payload,fact.record,fact.tree,fact.model])?;
+            tx.prepare_cached(sql(
+                tx,
+                "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
+            )?)?
+            .execute(params![
+                fact.source,
+                offset,
+                fact.identity,
+                fact.payload,
+                fact.record,
+                fact.tree,
+                fact.model
+            ])?;
             Ok(())
         })();
         self.result(result)
     }
-    fn dimension(&mut self, id: i64, kind: &str, key: &str, value: &str) -> Result<(), StorageError> {
+    fn dimension(
+        &mut self,
+        id: i64,
+        kind: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
             tx.prepare_cached(sql(tx,
@@ -422,7 +480,8 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn ready(&mut self, id: i64, checkpoint: u64) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            let checkpoint = i64::try_from(checkpoint).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let checkpoint =
+                i64::try_from(checkpoint).map_err(|_| rusqlite::Error::InvalidQuery)?;
             tx.execute(sql(tx, "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE source_id=?1",
                 "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,params![id,checkpoint])?;
             Ok(())
@@ -431,16 +490,35 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     }
 }
 
-pub(super) fn write(tx: &Transaction<'_>, path: &str, ledger: &Ledger, index: &FileIndex) -> rusqlite::Result<()> {
+pub(super) fn write(
+    tx: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+) -> rusqlite::Result<()> {
     with_effects(tx, |effects| algorithm::write(effects, path, ledger, index))
 }
 
-pub(super) fn begin_source(tx: &Transaction<'_>, path: &str, expected: Option<&Ledger>, ledger: &Ledger, append: bool) -> rusqlite::Result<i64> {
-    with_effects(tx, |effects| algorithm::begin(effects, path, expected, ledger, append))
+pub(super) fn begin_source(
+    tx: &Transaction<'_>,
+    path: &str,
+    expected: Option<&Ledger>,
+    ledger: &Ledger,
+    append: bool,
+) -> rusqlite::Result<i64> {
+    with_effects(tx, |effects| {
+        algorithm::begin(effects, path, expected, ledger, append)
+    })
 }
 
 #[cfg(test)]
-fn put_dimension<T: Serialize>(tx: &Transaction<'_>, id: i64, kind: &str, key: &str, value: &T) -> rusqlite::Result<()> {
+fn put_dimension<T: Serialize>(
+    tx: &Transaction<'_>,
+    id: i64,
+    kind: &str,
+    key: &str,
+    value: &T,
+) -> rusqlite::Result<()> {
     use algorithm::Effects;
     let value = json(value)?;
     with_effects(tx, |effects| effects.dimension(id, kind, key, &value))
