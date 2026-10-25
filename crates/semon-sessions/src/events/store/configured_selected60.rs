@@ -94,6 +94,79 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
 }
 
 #[test]
+fn configured_semantic_selected70_real_native_multi_window_range_oracle() {
+    use std::io::Write;
+
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let path = input.full_path(options);
+    let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for (index, text) in ["window one", "window two", "window three"].into_iter().enumerate() {
+        writeln!(
+            raw,
+            "{}",
+            json!({
+                "timestamp": format!("2026-10-01T00:0{}:00Z", index + 2),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            })
+        )
+        .unwrap();
+    }
+    drop(raw);
+    cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected70-windows");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
+
+    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let prepared = crate::model::prepare_sources(
+        options,
+        &mut ordinary,
+        std::slice::from_ref(input),
+        1_790_000_000_000,
+    )
+    .unwrap();
+    ordinary
+        .publish_catalog_projection(
+            &crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) },
+            prepared.base_generation.as_deref(),
+        )
+        .unwrap();
+    let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+
+    for after in 0..3 {
+        let query = format!("sid={key}&after={after}&limit=1");
+        let actual = read(&lease, options, &host, &query);
+        let mut expected = body(crate::session_transcript_range_with_mode(
+            options,
+            &host.source_key,
+            &query,
+            None,
+            SessionSourceReadMode::LocalOrPinnedProvider,
+        ));
+        publication_oracle(&mut expected, &db, "source-a");
+        assert_eq!(actual, expected, "complete native range reply at window {after}");
+        assert_eq!(actual["identity"]["generation"], lease.snapshot().publication_generation);
+        assert_eq!(actual["range"]["first"], after);
+        assert_eq!(actual["range"]["end"], after + 1);
+    }
+    cache.finish_semantic_stage(batch.epoch).unwrap();
+}
+
+#[test]
 fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows() {
     use crate::storage::selected::SelectedSnapshotStore;
     let (f, _, options, inputs) = model_sources();
