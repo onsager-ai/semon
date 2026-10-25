@@ -6713,6 +6713,7 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
     copied_usage_sql(transaction, "", "")?;
     semantic_stage::support_sql(transaction, "", "")?;
     #[cfg(test)]
