@@ -490,36 +490,48 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    let mut digest = Sha256::new();
-    for sql in [
-        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-    ] {
-        digest.update(sql.as_bytes());
-        let scoped = match sql {
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label" => {
-                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label"
-            }
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model" => {
-                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model"
-            }
-            _ => {
-                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id"
-            }
-        };
-        let mut statement = c.prepare(self::sql(c, sql, scoped)?)?;
+    // Typed rows in BINARY order feed the backend-neutral production recipe.
+    let mut labels = Vec::<(String, String)>::new();
+    let mut models = Vec::<String>::new();
+    let mut tools = Vec::<(String, String)>::new();
+    for (family, (plain, scoped)) in [
+        (
+            "SELECT label,value FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT label,value FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+        ),
+        (
+            "SELECT model,NULL FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+            "SELECT model,NULL FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+        ),
+        (
+            "SELECT tool_id,name FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT tool_id,name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut statement = c.prepare(sql(c, plain, scoped)?)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
             crate::selected_read::checkpoint("tree_witness")
                 .map_err(crate::selected_read::sql_error)?;
-            let value: String = row.get(0)?;
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
+            let key: String = row.get(0)?;
+            match family {
+                0 => labels.push((key, row.get(1)?)),
+                1 => models.push(key),
+                _ => tools.push((key, row.get(1)?)),
+            }
         }
     }
-    Ok(Some(format!("{:x}", digest.finalize())))
+    crate::events::tree_rows::witness::digest(
+        labels.iter().map(|(key, value)| (key.as_str(), value.as_str())),
+        models.iter().map(String::as_str),
+        tools.iter().map(|(id, name)| (id.as_str(), name.as_str())),
+    )
+    .map(Some)
+    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {

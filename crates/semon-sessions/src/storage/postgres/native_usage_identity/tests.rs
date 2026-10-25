@@ -212,3 +212,119 @@ fn pg_native_copied_identity_trigger_and_function_drift_refuses_before_effects()
         ));
     }
 }
+
+#[test]
+fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
+    use crate::events::{EventCache, scan_file, tree_rows::witness};
+    use sha2::{Digest, Sha256};
+    let root = std::env::temp_dir().join(format!(
+        "pg93-witness-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let cache_path = root.join("index.json");
+    let mut cache = EventCache::open(&cache_path).unwrap();
+    // Actual shared Claude parser rows; PG receives only typed Tree dimensions.
+    let lines = [
+        serde_json::json!({"type":"user","uuid":"u\0🦀","sessionId":"s🦀","cwd":"/w\0🦀","gitBranch":"b🦀","timestamp":"2026-09-29T00:00:00Z","message":{"role":"user","content":"first\0🦀"}}),
+        serde_json::json!({"type":"assistant","uuid":"a\0🦀","sessionId":"s🦀","cwd":"/w\0🦀","gitBranch":"b🦀","timestamp":"2026-09-29T00:00:01Z","message":{"id":"m\0🦀","role":"assistant","model":"claude-🦀","content":[{"type":"tool_use","id":"toolu\0🦀","name":"Bash\0🦀","input":{}}],"usage":{"input_tokens":3,"output_tokens":2}}}),
+    ];
+    let path = root.join("1.jsonl");
+    std::fs::write(&path, format!("{}\n{}\n", lines[0], lines[1])).unwrap();
+    scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
+    let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+    let projection: i64 = sqlite
+        .query_row(
+            "SELECT projection_id FROM native_tree_labels ORDER BY projection_id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let strings = |sql: &str, columns: usize| -> Vec<Vec<String>> {
+        let mut statement = sqlite.prepare(sql).unwrap();
+        statement
+            .query_map([projection], |r| {
+                (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<_>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let labels = strings("SELECT label,value FROM native_tree_labels WHERE projection_id=?1", 2);
+    let models = strings("SELECT model FROM native_tree_models WHERE projection_id=?1", 1);
+    let tools: Vec<(String, Option<String>, bool)> = sqlite
+        .prepare("SELECT tool_id,name,closed FROM native_tree_tools WHERE projection_id=?1")
+        .unwrap()
+        .query_map([projection], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(labels.iter().any(|l| l[1] == "/w\0🦀"), "fixture must execute actual cwd label");
+    assert!(models.iter().any(|m| m[0] == "claude-🦀"));
+    assert!(tools.iter().any(|t| t.0 == "toolu\0🦀"));
+    // Independent oracle: the original SQLite json_array witness bytes.
+    let mut oracle = Sha256::new();
+    for sql in [
+        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+    ] {
+        oracle.update(sql.as_bytes());
+        for row in strings(sql, 1) {
+            oracle.update((row[0].len() as u64).to_be_bytes());
+            oracle.update(row[0].as_bytes());
+        }
+    }
+    let oracle = format!("{:x}", oracle.finalize());
+    let (pool, _factory) = fixture(|bounds| bounds.max_connections = 1);
+    let control = PgCancellation::default();
+    let namespace = ns("witness\0🦀");
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        // Insert in reverse order; the reader alone must establish byte order.
+        for l in labels.iter().rev() {
+            tx.driver.execute("INSERT INTO semon_pg_native_tree_labels(namespace,projection_id,label,value) VALUES($1,$2,$3,$4)", &[&ns, &projection, &l[0].as_bytes(), &l[1].as_bytes()]).map_err(sqlstate::error)?;
+        }
+        for m in models.iter().rev() {
+            tx.driver.execute("INSERT INTO semon_pg_native_tree_models(namespace,projection_id,model) VALUES($1,$2,$3)", &[&ns, &projection, &m[0].as_bytes()]).map_err(sqlstate::error)?;
+        }
+        for t in tools.iter().rev() {
+            tx.driver.execute("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,$4,$5)", &[&ns, &projection, &t.0.as_bytes(), &t.1.as_deref().map(str::as_bytes), &t.2]).map_err(sqlstate::error)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let pg_witness = |namespace: &crate::storage::LogicalSourceNamespace| {
+        pool.transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let text = |b: Vec<u8>| String::from_utf8(b).map_err(|_| StorageError::Unavailable);
+            let mut families = Vec::new();
+            for sql in [
+                "SELECT label,value FROM semon_pg_native_tree_labels WHERE projection_id=$1 ORDER BY label",
+                "SELECT model,model FROM semon_pg_native_tree_models WHERE projection_id=$1 ORDER BY model",
+                "SELECT tool_id,name FROM semon_pg_native_tree_tools WHERE projection_id=$1 AND NOT closed AND name IS NOT NULL ORDER BY tool_id",
+            ] {
+                let mut rows = Vec::new();
+                for row in tx.driver.query(sql, &[&projection]).map_err(sqlstate::error)? {
+                    tx.check()?;
+                    rows.push((text(row.get(0))?, text(row.get(1))?));
+                }
+                families.push(rows);
+            }
+            witness::digest(
+                families[0].iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                families[1].iter().map(|(m, _)| m.as_str()),
+                families[2].iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            )
+            .map_err(|_| StorageError::Unavailable)
+        })
+    };
+    assert_eq!(pg_witness(&namespace), Ok(oracle.clone()));
+    // A warm connection in another namespace sees none of these rows.
+    assert_ne!(pg_witness(&ns("witness\0é")), Ok(oracle));
+}
