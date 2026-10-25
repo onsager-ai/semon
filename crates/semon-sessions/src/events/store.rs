@@ -809,7 +809,7 @@ fn copied_usage_sql<'a>(
 // borrowed by that owner transaction: they are never connection, thread or
 // process caches, and a fresh transaction must qualify them again.
 struct WriterLayout<'tx, 'connection> {
-    _transaction: &'tx Transaction<'connection>,
+    transaction: &'tx Transaction<'connection>,
     core_composite: bool,
     meta_composite: bool,
     copied_usage_composite: bool,
@@ -831,7 +831,7 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
         let schema_version =
             transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
-            _transaction: transaction,
+            transaction,
             core_composite,
             meta_composite,
             copied_usage_composite,
@@ -847,7 +847,7 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
         let schema_version =
             transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
-            _transaction: transaction,
+            transaction,
             core_composite: false,
             meta_composite: false,
             copied_usage_composite,
@@ -890,7 +890,7 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
 
     fn ensure_current(&self) -> rusqlite::Result<()> {
         let observed: i64 =
-            self._transaction
+            self.transaction
                 .pragma_query_value(None, "schema_version", |row| row.get(0))?;
         if observed == self.schema_version {
             Ok(())
@@ -7030,7 +7030,6 @@ fn write_index_changes_with_usage_deletes<'tx>(
     };
     measurements.record("dirty_rows", started, 1);
     write_file_with_usage_deletes(
-        transaction,
         path,
         ledger,
         changes.unwrap_or(&full),
@@ -7188,7 +7187,6 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let layout = WriterLayout::new(transaction)?;
     write_file_with_usage_deletes(
-        transaction,
         path,
         ledger,
         changes,
@@ -7200,7 +7198,6 @@ fn write_file(
 }
 
 fn write_file_with_usage_deletes<'tx>(
-    transaction: &'tx Transaction<'_>,
     path: &str,
     ledger: &Ledger,
     changes: &super::DirtyRows,
@@ -7209,6 +7206,7 @@ fn write_file_with_usage_deletes<'tx>(
     layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
+    let transaction = layout.transaction;
     let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
     let FileIndex {
         dirty_rows: _,
