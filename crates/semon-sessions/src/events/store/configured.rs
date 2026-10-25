@@ -6378,8 +6378,6 @@ mod tests {
         );
     }
     mod domain52 {
-        use std::collections::BTreeSet;
-
         use super::*;
         use crate::model::relation_stage::{Batch, Phase};
         use crate::storage::native_events::NativeEventStore;
@@ -7168,58 +7166,18 @@ mod tests {
             let (batch, model) = final_model.expect("bounded native restart reaches publication");
             assert_eq!(model.prepared().rows.len(), 4);
             oracle(&cache, options, &inputs, model.prepared());
-            // History is custody, not a Current mirror. Derive its exact
-            // expected set from the pre-incident owners and the ordinary
-            // final producer model: same-harness owners with no disappeared
-            // source clear History; a disappeared source composes one
-            // retained row with the current owner. This fixture has neither
-            // prior originals nor cross-harness replacements.
+            // The admitted writer preserves a differing Current observation
+            // as an original before composing History. With the explicitly
+            // empty prior History above, changed owners therefore retain
+            // their exact prior metadata, including Query facts and sources.
             let mut expected_history = prior_history;
-            let final_paths = model
-                .prepared()
-                .rows
-                .iter()
-                .flat_map(|row| row.sources.iter().map(|source| source.path.clone()))
-                .collect::<BTreeSet<_>>();
             for current in &model.prepared().rows {
                 let Some(old) = prior_current.get(&current.key) else {
                     continue;
                 };
-                let old = serde_json::from_str::<crate::model::summary::CatalogRow>(old)
-                    .unwrap();
-                assert_eq!(old.harness, current.harness);
-                let current_paths = current
-                    .sources
-                    .iter()
-                    .map(|source| source.path.clone())
-                    .collect::<BTreeSet<_>>();
-                let missing = old
-                    .sources
-                    .iter()
-                    .filter(|source| {
-                        !current_paths.contains(&source.path)
-                            && !final_paths.contains(&source.path)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if missing.is_empty() {
-                    expected_history.remove(&current.key);
-                    continue;
+                if old != &serde_json::to_string(current).unwrap() {
+                    expected_history.insert(current.key.clone(), old.clone());
                 }
-                let mut retained = current.clone();
-                retained.query = None;
-                retained.sources.extend(missing);
-                retained.native_ids = retained
-                    .sources
-                    .iter()
-                    .map(|source| source.native_id.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                expected_history.insert(
-                    current.key.clone(),
-                    serde_json::to_string(&retained).unwrap(),
-                );
             }
             publish(&mut cache, &f, &batch, &model);
             let db = f.db();
@@ -7245,36 +7203,18 @@ mod tests {
             assert_eq!(
                 history.len(),
                 1,
-                "one disappeared parent source retains custody"
+                "one changed parent observation retains original custody"
             );
             let (history_key, history_metadata) = history.iter().next().unwrap();
             let history_row =
                 serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata).unwrap();
-            assert!(
-                history_row.query.is_none(),
-                "composite custody omits current Query facts"
-            );
             let old =
                 serde_json::from_str::<crate::model::summary::CatalogRow>(&prior_current[history_key])
                     .unwrap();
-            let current = model
-                .prepared()
-                .rows
-                .iter()
-                .find(|row| row.key == *history_key)
-                .unwrap();
-            assert!(
-                old.sources.iter().any(|source| {
-                    history_row
-                        .sources
-                        .iter()
-                        .any(|retained| retained.path == source.path)
-                        && !current
-                            .sources
-                            .iter()
-                            .any(|present| present.path == source.path)
-                }),
-                "the disappeared original source is retained"
+            assert_eq!(
+                serde_json::to_value(&history_row).unwrap(),
+                serde_json::to_value(&old).unwrap(),
+                "original Query facts, source provenance and consumed prefixes are immutable"
             );
             assert!(
                 db.query_row(
