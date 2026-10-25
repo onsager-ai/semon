@@ -48,45 +48,78 @@ pub(super) fn contract() -> [&'static str; 2] {
 }
 
 fn schema(tx: &mut PgTxn<'_>) -> Result<String, StorageError> {
-    let name: String = tx.driver.query_one("SELECT current_schema()", &[])
-        .map_err(sqlstate::error)?.try_get(0).map_err(|_| StorageError::ScopeChanged)?;
+    let name: String = tx
+        .driver
+        .query_one("SELECT current_schema()", &[])
+        .map_err(sqlstate::error)?
+        .try_get(0)
+        .map_err(|_| StorageError::ScopeChanged)?;
     Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
 pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let schema = schema(tx)?;
-    for (name, body) in [("semon_pg_native_identity_lock", LOCK), ("semon_pg_native_identity_copies", COPIES)] {
+    for (name, body) in [
+        ("semon_pg_native_identity_lock", LOCK),
+        ("semon_pg_native_identity_copies", COPIES),
+    ] {
         let body = body.replace("@SCHEMA@", &schema);
-        tx.driver.batch_execute(&format!("CREATE FUNCTION {schema}.{name}() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS $native${body}$native$;")).map_err(sqlstate::error)?;
+        let body = body.replace('\'', "''");
+        tx.driver.batch_execute(&format!("CREATE FUNCTION {schema}.{name}() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS '{body}';")).map_err(sqlstate::error)?;
     }
-    tx.driver.batch_execute(&format!("
+    tx.driver
+        .batch_execute(&format!(
+            "
         CREATE TRIGGER semon_pg_native_identity_lock BEFORE INSERT OR UPDATE OR DELETE
             ON {schema}.semon_pg_native_usage_identity FOR EACH STATEMENT
             EXECUTE FUNCTION {schema}.semon_pg_native_identity_lock();
         CREATE TRIGGER semon_pg_native_identity_copies AFTER INSERT OR UPDATE OR DELETE
             ON {schema}.semon_pg_native_usage_identity FOR EACH ROW
             EXECUTE FUNCTION {schema}.semon_pg_native_identity_copies();
-    ")).map_err(sqlstate::error)
+    "
+        ))
+        .map_err(sqlstate::error)
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let schema = schema(tx)?;
     let functions = tx.driver.query("SELECT p.proname,p.prosrc,p.prosecdef,p.provolatile='v' AND p.prokind='f' AND p.prorettype='trigger'::regtype AND p.pronargs=0 AND l.lanname='plpgsql',p.proconfig FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.pronamespace=current_schema()::regnamespace AND p.proname IN ('semon_pg_native_identity_lock','semon_pg_native_identity_copies') ORDER BY p.proname", &[]).map_err(sqlstate::error)?;
-    if functions.len() != 2 { return Err(StorageError::ScopeChanged); }
-    for (name, body) in [("semon_pg_native_identity_lock", LOCK), ("semon_pg_native_identity_copies", COPIES)] {
-        let row = functions.iter().find(|r| r.get::<_,String>(0) == name).ok_or(StorageError::ScopeChanged)?;
-        if row.get::<_,String>(1) != body.replace("@SCHEMA@", &schema)
-            || row.get::<_,bool>(2) || !row.get::<_,bool>(3)
-            || row.get::<_,Option<Vec<String>>>(4) != Some(vec!["search_path=pg_catalog".into()]) {
+    if functions.len() != 2 {
+        return Err(StorageError::ScopeChanged);
+    }
+    for (name, body) in [
+        ("semon_pg_native_identity_lock", LOCK),
+        ("semon_pg_native_identity_copies", COPIES),
+    ] {
+        let row = functions
+            .iter()
+            .find(|r| r.get::<_, String>(0) == name)
+            .ok_or(StorageError::ScopeChanged)?;
+        if row.get::<_, String>(1) != body.replace("@SCHEMA@", &schema)
+            || row.get::<_, bool>(2)
+            || !row.get::<_, bool>(3)
+            || row.get::<_, Option<Vec<String>>>(4) != Some(vec!["search_path=pg_catalog".into()])
+        {
             return Err(StorageError::ScopeChanged);
         }
     }
-    let triggers = tx.driver.query("SELECT t.tgname,p.proname,t.tgtype::int,c.relname,t.tgenabled='O' AND NOT t.tgisinternal AND NOT t.tgdeferrable AND NOT t.tginitdeferred AND t.tgconstraint=0 AND t.tgqual IS NULL AND t.tgattr=''::int2vector AND t.tgnargs=0 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND NOT t.tgisinternal ORDER BY t.tgname", &[]).map_err(sqlstate::error)?;
-    if triggers.len() != 2 { return Err(StorageError::ScopeChanged); }
-    for (name, kind) in [("semon_pg_native_identity_lock",30), ("semon_pg_native_identity_copies",29)] {
-        let row = triggers.iter().find(|r| r.get::<_,String>(0) == name).ok_or(StorageError::ScopeChanged)?;
-        if row.get::<_,String>(1) != name || row.get::<_,i32>(2) != kind
-            || row.get::<_,String>(3) != "semon_pg_native_usage_identity" || !row.get::<_,bool>(4) {
+    let triggers = tx.driver.query("SELECT t.tgname,p.proname,t.tgtype::int,c.relname,t.tgenabled='O' AND NOT t.tgisinternal AND NOT t.tgdeferrable AND NOT t.tginitdeferred AND t.tgconstraint=0 AND t.tgqual IS NULL AND t.tgattr=''::int2vector AND t.tgnargs=0 AND p.pronamespace=current_schema()::regnamespace FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND NOT t.tgisinternal ORDER BY t.tgname", &[]).map_err(sqlstate::error)?;
+    if triggers.len() != 2 {
+        return Err(StorageError::ScopeChanged);
+    }
+    for (name, kind) in [
+        ("semon_pg_native_identity_lock", 30),
+        ("semon_pg_native_identity_copies", 29),
+    ] {
+        let row = triggers
+            .iter()
+            .find(|r| r.get::<_, String>(0) == name)
+            .ok_or(StorageError::ScopeChanged)?;
+        if row.get::<_, String>(1) != name
+            || row.get::<_, i32>(2) != kind
+            || row.get::<_, String>(3) != "semon_pg_native_usage_identity"
+            || !row.get::<_, bool>(4)
+        {
             return Err(StorageError::ScopeChanged);
         }
     }

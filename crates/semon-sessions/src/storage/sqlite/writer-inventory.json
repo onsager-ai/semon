@@ -89,6 +89,7 @@
     "selected_read.rs",
     "source_change.rs",
     "storage.rs",
+    "storage/postgres/native_usage_identity/tests.rs",
     "test_hooks.rs",
     "transcript_range.rs",
     "viewer.rs"
