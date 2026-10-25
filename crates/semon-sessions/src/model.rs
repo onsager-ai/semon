@@ -4088,7 +4088,11 @@ impl<'a> Builder<'a> {
             .filter(|(id, _)| !joined.contains(*id))
             .filter_map(|(_, found)| found.first().map(|at| (self.orphan_relay_source(*at), *at)))
             .collect();
-        orphans.extend(unkeyed.into_iter().map(|at| (self.orphan_relay_source(at), at)));
+        orphans.extend(
+            unkeyed
+                .into_iter()
+                .map(|at| (self.orphan_relay_source(at), at)),
+        );
         orphans.sort_by(|a, b| a.0.cmp(&b.0));
         for (source, at) in orphans {
             let to = self.of_file[at.0];

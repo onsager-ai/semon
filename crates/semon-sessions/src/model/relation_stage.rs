@@ -946,10 +946,12 @@ impl Context {
                         // Ordinary relays draw all orphan receipts after sends,
                         // sorted by native receipt key, never by the hashed id.
                         let path = receipt.map_or_else(
-                            || endpoint
-                                .and_then(|endpoint| endpoint.row.sources.first())
-                                .map(|source| source.path.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
+                            || {
+                                endpoint
+                                    .and_then(|endpoint| endpoint.row.sources.first())
+                                    .map(|source| source.path.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            },
                             |at| builder.orphan_relay_source(at),
                         );
                         let location = outgoing.map(|at| event(builder.files, at));
