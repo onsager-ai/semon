@@ -44,46 +44,7 @@ impl Drop for Snapshot {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Header {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    consumed_offset: Option<u64>,
-    fingerprint: [u8; 32],
-    pages_root: [u8; 32],
-    #[serde(default)]
-    resume: Option<crate::source_chunks::PrefixState>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Page {
-    version: u32,
-    index: usize,
-    hashes: Vec<[u8; 32]>,
-    sha256: String,
-}
-
-impl Page {
-    fn canonical(&self) -> rusqlite::Result<String> {
-        // The witness covers only the page payload, never its own digest.
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            version: u32,
-            index: usize,
-            hashes: &'a [[u8; 32]],
-        }
-        json(&Payload {
-            version: self.version,
-            index: self.index,
-            hashes: &self.hashes,
-        })
-    }
-}
+use crate::events::native_pages::chunks::{Header, Page};
 
 fn prefix(path: &str) -> String {
     // Fixed ASCII keys make exact namespace cleanup independent of path glob
@@ -327,7 +288,7 @@ pub(super) fn read(
             || part.index != page
             || part.hashes.len() != remaining.min(PAGE)
             || remaining == 0
-            || part.sha256 != page_witness(&part.canonical()?)
+            || part.sha256 != page_witness(&part.canonical().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?)
         {
             return Ok(None);
         }
@@ -835,107 +796,30 @@ pub(super) fn write_measured(
     let started = measurements.start();
     let mut put = transaction.prepare_cached(configured::metadata_sql(transaction, "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value", "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?)?;
     measurements.record("chunks_prepare", started, 1);
-    let mut leaves = Vec::new();
-    for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
-        let started = measurements.start();
-        let key = format!("{prefix}{index:010}");
-        let mut value = Page {
-            version: 1,
-            index,
-            hashes: hashes.to_vec(),
-            sha256: String::new(),
-        };
-        let encoded = value.canonical()?;
-        measurements.record("chunks_page_serialization", started, 1);
+    let plan = crate::events::native_pages::chunks::plan(ledger, chunks)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    for (index, encoded) in plan.pages.iter().enumerate() {
         measurements.count("chunks_page_bytes", encoded.len());
-        measurements.count("chunks_hashes", hashes.len());
-        let started = measurements.start();
-        leaves.push(<[u8; 32]>::from(Sha256::digest(encoded.as_bytes())));
-        value.sha256 = page_witness(&encoded);
-        let encoded = json(&value)?;
-        put.execute(params![key, encoded])?;
-        measurements.record("chunks_page_sql", started, 1);
+        put.execute(params![format!("{prefix}{index:010}"), encoded])?;
     }
-    let mut nodes = leaves;
-    let mut level = 0;
-    let pages_root = loop {
+    for (level, nodes) in plan.tree.iter().enumerate() {
         for (at, node) in nodes.iter().enumerate() {
-            put.execute(params![
-                format!("native_proof_tree:{prefix}:{level:03}:{at:010}"),
-                json(node)?
-            ])?;
+            put.execute(params![format!("native_proof_tree:{prefix}:{level:03}:{at:010}"), node])?;
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
-        transaction.execute(
-            configured::metadata_sql(
-                transaction,
-                "DELETE FROM meta WHERE key>=?1 AND key<?2",
-                "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-            )?,
-            params![
-                format!("{namespace}{:010}", nodes.len()),
-                format!("{namespace}~")
-            ],
-        )?;
-        if nodes.len() <= 1 {
-            break nodes
-                .first()
-                .copied()
-                .unwrap_or_else(|| Sha256::digest([]).into());
-        }
-        nodes = nodes
-            .chunks(2)
-            .map(|pair| tree_parent(&pair[0], pair.get(1).unwrap_or(&pair[0])))
-            .collect();
-        level += 1;
-    };
-    transaction.execute(
-        configured::metadata_sql(
-            transaction,
+        transaction.execute(configured::metadata_sql(transaction,
             "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?,
-        params![
-            format!("native_proof_tree:{prefix}:{:03}:", level + 1),
-            format!("native_proof_tree:{prefix}:~")
-        ],
-    )?;
-    let started = measurements.start();
-    measurements.cleanup(
-        transaction,
-        &prefix,
-        || chunks.hashes.len().div_ceil(PAGE),
-        &crate::native_timing::CHUNKS_CLEANUP,
-    )?;
-    measurements.record("chunks_cleanup_sql", started, 1);
-    let key = format!("{prefix}header");
-    let header = Header {
-        version: 1,
-        parser_version: CACHE_VERSION,
-        ledger: {
-            let started = measurements.start();
-            let value = header_ledger(ledger);
-            measurements.record("chunks_header_ledger", started, 1);
-            value
-        },
-        count: chunks.hashes.len(),
-        consumed_offset: Some(ledger.offset),
-        fingerprint: {
-            let started = measurements.start();
-            let value = chunks.fingerprint();
-            measurements.record("chunks_header_fingerprint", started, 1);
-            value
-        },
-        pages_root,
-        resume: chunks.resume.clone(),
-    };
-    let started = measurements.start();
-    let encoded = json(&header)?;
-    measurements.record("chunks_header_serialization", started, 1);
-    measurements.count("chunks_header_bytes", encoded.len());
-    let started = measurements.start();
-    put.execute(params![key, &encoded])?;
-    measurements.record("chunks_header_sql", started, 1);
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+            params![format!("{namespace}{:010}", nodes.len()), format!("{namespace}~")])?;
+    }
+    transaction.execute(configured::metadata_sql(transaction,
+        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+        params![format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()), format!("native_proof_tree:{prefix}:~")])?;
+    measurements.cleanup(transaction, &prefix, || plan.pages.len(), &crate::native_timing::CHUNKS_CLEANUP)?;
+    measurements.count("chunks_header_bytes", plan.header.len());
+    put.execute(params![format!("{prefix}header"), plan.header])?;
     Ok(())
 }
 

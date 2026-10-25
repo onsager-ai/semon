@@ -21,13 +21,13 @@ pub(super) struct PartialFile {
 struct Writer<'a, 'tx> {
     tx: &'a mut PgTxn<'tx>,
     source: i64,
+    pages: Option<super::native_pages::Prepared>,
 }
 
 #[cfg(test)]
 thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 
-impl Writer<'_, '_> {
-    fn boundary(&self) -> Result<(), StorageError> {
+pub(super) fn page_boundary(tx: &PgTxn<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
         if FAIL_AFTER.with(|point| match point.get() {
             Some(1) => {
@@ -42,7 +42,12 @@ impl Writer<'_, '_> {
         }) {
             return Err(StorageError::Unavailable);
         }
-        self.tx.check()
+        tx.check()
+}
+
+impl Writer<'_, '_> {
+    fn boundary(&self) -> Result<(), StorageError> {
+        page_boundary(self.tx)
     }
 
     fn metadata(&mut self, key: &str, value: Option<String>) -> Result<(), StorageError> {
@@ -129,6 +134,8 @@ impl Effects for Writer<'_, '_> {
                     .map_err(|_| StorageError::Unavailable)?,
             )?;
         }
+        let pages = self.pages.take().ok_or(StorageError::ScopeChanged)?;
+        super::native_pages::write(self.tx, self.source, input.path, input.ledger, pages)?;
         self.metadata(
             &format!("native_parent_marker:{}", input.path),
             native_aux::parent_marker(input.ledger, input.index.marker_index.as_ref())
@@ -200,11 +207,12 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
             return Err(StorageError::NamespaceUpgradePending);
         }
     }
-    shared::write(&mut Writer { tx, source: 0 }, input)?;
+    let pages = super::native_pages::prepare(input.ledger, input.index)?;
+    shared::write(&mut Writer { tx, source: 0, pages: Some(pages) }, input)?;
     Ok(PartialFile {
         missing: &[
-            "immutable chunk-proof generations and reader lifetimes",
-            "launch calls and EOF markers",
+            "Catalog proof references, reader leases and GC",
+            "selected proof/root qualification and worker ownership",
             "relocation qualification",
             "complete durable ingest receipt and Raw qualification",
         ],
