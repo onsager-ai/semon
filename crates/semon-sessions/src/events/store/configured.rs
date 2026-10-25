@@ -7713,7 +7713,9 @@ mod tests {
                 for (name, count) in [("worker", copies), ("absent", 0)] {
                     let selector = Selector::ClaudeName { name: name.into() };
                     let actual = cache.semantic_select(batch.epoch, &selector).unwrap();
-                    let expected = ordinary.semantic_select(reference.epoch, &selector).unwrap();
+                    let expected = ordinary
+                        .semantic_select(reference.epoch, &selector)
+                        .unwrap();
                     assert_eq!(actual.count, count);
                     assert_eq!(selector_value(actual), selector_value(expected));
                 }
@@ -7728,7 +7730,9 @@ mod tests {
             let inputs = claude_inputs(options, copies, 1);
             for (i, input) in inputs.iter().enumerate() {
                 let path = input.full_path(options);
-                let mut raw = fs::read_to_string(&path).unwrap().replace("claude-message", &format!("named-message-{i}"));
+                let mut raw = fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("claude-message", &format!("named-message-{i}"));
                 raw.push_str(&format!("{}\n", serde_json::json!({"type":"custom-title","sessionId":format!("claude72-{i}"),"customTitle":"worker"})));
                 fs::write(path, raw).unwrap();
             }
@@ -7746,25 +7750,99 @@ mod tests {
             let (other_batch, other_model) = claude_ready(&mut other, options, &inputs);
             publish(&mut other, &f, &other_batch, &other_model);
             let foreign_before = namespace_state(&f, "source-b");
-            let (first, first_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
+            let (first, first_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
             publish(&mut cache, &f, &first, &first_model);
             cache.finish_semantic_stage(first.epoch).unwrap();
             let (batch, model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             assert_eq!(batch.context.endpoints.len(), 1);
-            let selector = Selector::ClaudeName { name: "worker".into() };
-            assert_eq!(cache.semantic_select(batch.epoch, &selector).unwrap_err().to_string(), "semantic_claude_name_members_pending");
+            let selector = Selector::ClaudeName {
+                name: "worker".into(),
+            };
+            let before_fault = shared_state(&f);
+            FAIL_EFFECT.with(|p| p.set(Some("semantic_name_members_reset")));
+            assert!(cache.semantic_select(batch.epoch, &selector).is_err());
+            assert_eq!(shared_state(&f), before_fault);
+            assert_eq!(
+                cache
+                    .semantic_select(batch.epoch, &selector)
+                    .unwrap_err()
+                    .to_string(),
+                "semantic_claude_name_members_pending"
+            );
             let after_replay = shared_state(&f);
             assert!(cache.semantic_select(batch.epoch, &selector).is_err());
-            assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
             assert_eq!(shared_state(&f), after_replay);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
             drop(cache);
             let mut cache = open(&f.config);
-            let (fresh, fresh_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
-            assert_eq!(cache.semantic_select(fresh.epoch, &selector).unwrap().count, 2);
+            let (fresh, fresh_model) =
+                claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            assert_eq!(
+                cache.semantic_select(fresh.epoch, &selector).unwrap().count,
+                2
+            );
             oracle(&cache, options, &inputs, fresh_model.prepared());
             publish(&mut cache, &f, &fresh, &fresh_model);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
+        }
+
+        #[test]
+        fn configured_semantic_domain94_name_members_physical_work_is_indexed() {
+            let (f, foreign, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 2);
+            let mut cache = open(&f.config);
+            let _foreign = open(&foreign);
+            let (first, first_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
+            publish(&mut cache, &f, &first, &first_model);
+            cache.finish_semantic_stage(first.epoch).unwrap();
+            let _ = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            let db = f.db();
+            for function in ["semon_event_writer", "semon_semantic_writer"] {
+                db.create_scalar_function(function, 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).unwrap();
+            }
+            let bind = |namespace: &str| {
+                let namespace = namespace.to_owned();
+                db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, move |_| Ok(namespace.clone())).unwrap();
+            };
+            let bodies: i64 = db.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
+            let mut baseline: Option<Vec<(String, usize, usize)>> = None;
+            let mut previous = 0;
+            for count in [0, 256, 2048] {
+                db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                for namespace in ["source-a", "source-b"] {
+                    bind(namespace);
+                    for i in previous..count {
+                        db.execute("INSERT INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(?1,?2,'name:claude',?3)", params![namespace,format!("/unrelated/name-{i}"),format!("noise-{i}")]).unwrap();
+                    }
+                }
+                db.execute_batch("COMMIT").unwrap();
+                bind("source-a");
+                let before = shared_state(&f);
+                let actual = crate::storage::sqlite::semantic::name_members_vm_probe(&db, "source-a", "worker");
+                assert_eq!(actual.iter().skip(1).map(|row| row.2).collect::<Vec<_>>(), [1,1,2]);
+                if let Some(base) = &baseline {
+                    for (current, original) in actual.iter().zip(base) {
+                        assert_eq!(current.0, original.0);
+                        assert_eq!(current.2, original.2);
+                        assert!(current.1.abs_diff(original.1) <= 64, "noise={count} current={current:?} original={original:?}");
+                    }
+                } else {
+                    baseline = Some(actual.clone());
+                }
+                eprintln!("name_members_vm unrelated_same_and_foreign={count}: {actual:?}");
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(), bodies);
+                previous = count;
+            }
         }
 
         #[test]
@@ -7780,8 +7858,41 @@ mod tests {
             raw.push_str("\n");
             fs::write(&path, raw).unwrap();
             let before = shared_state(&f);
+            assert!(
+                cache
+                    .semantic_select(
+                        batch.epoch,
+                        &Selector::ClaudeName {
+                            name: "worker".into()
+                        }
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(shared_state(&f), before);
+        }
+
+        #[test]
+        fn configured_semantic_domain94_name_hints_capacity_refuses_without_truncation() {
+            use crate::model::relation_stage::Selector;
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = named_claude_inputs(options, 65);
+            let mut cache = open(&f.config);
+            for seeds in [&inputs[..32], &inputs[32..]] {
+                let (batch, model) = claude_ready_from(&mut cache, options, &inputs, seeds);
+                publish(&mut cache, &f, &batch, &model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            let (batch, _) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
+            let before = shared_state(&f);
             assert!(cache.semantic_select(batch.epoch, &Selector::ClaudeName { name: "worker".into() }).is_err());
-            assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
             assert_eq!(shared_state(&f), before);
         }
 

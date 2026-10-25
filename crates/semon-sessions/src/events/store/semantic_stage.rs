@@ -2700,7 +2700,7 @@ impl SqliteStore {
                 for path in &endpoint.paths {
                     tx.execute("INSERT OR IGNORE INTO catalog_semantic_paths(path,session_key) VALUES(?1,?2)",params![path,endpoint.row.key]).map_err(failure)?;
                 }
-                crate::model::relation_stage::native_name_hints_with(endpoint, |path, name| {
+                crate::model::relation_stage::native_name_hints_with(endpoint, || rusqlite::Error::InvalidQuery, |path, name| {
                     tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'name:claude',?2)", params![path,name])?;
                     Ok::<_, rusqlite::Error>(())
                 }).map_err(failure)?;
@@ -3024,7 +3024,8 @@ impl SqliteStore {
                 &replay,
                 || rusqlite::Error::InvalidQuery,
                 |key| queue(&tx, "members", key, ""),
-            ).map_err(failure)?;
+            )
+            .map_err(failure)?;
             frontier_page(&tx).map_err(failure)?;
             reset(&tx, &runtime).map_err(failure)?;
             tx.commit().map_err(failure)?;

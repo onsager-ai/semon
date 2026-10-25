@@ -280,9 +280,13 @@ pub(crate) fn replay_members_with<E>(
 /// family. The current Catalog membership qualifies their use at lookup time.
 pub(crate) fn native_name_hints_with<E>(
     endpoint: &Endpoint,
+    invalid: impl Fn() -> E,
     mut put: impl FnMut(&str, &str) -> Result<(), E>,
 ) -> Result<(), E> {
     if endpoint.row.harness == "claude" {
+        if endpoint.names.len().saturating_mul(endpoint.row.sources.len()) > 64 {
+            return Err(invalid());
+        }
         for source in &endpoint.row.sources {
             for name in &endpoint.names {
                 put(source.path.to_string_lossy().as_ref(), name)?;
