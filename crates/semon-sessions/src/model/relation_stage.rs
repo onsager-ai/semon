@@ -104,26 +104,43 @@ pub(crate) struct LifecycleAuthority {
 
 impl LifecycleAuthority {
     pub(crate) fn capture(options: &Options) -> io::Result<Self> {
-        let facts = options.facts.clone().ok_or_else(|| io::Error::other("semantic_affected_owner_local_authority_pending"))?;
+        let facts = options
+            .facts
+            .clone()
+            .ok_or_else(|| io::Error::other("semantic_affected_owner_local_authority_pending"))?;
         let authority = Self {
             identity: crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&facts)?)?,
             facts,
             claude_home: options.claude_home.clone(),
             runtime: crate::native_evidence::query_runtime_generation(options)?,
         };
-        if !authority.current()? { return Err(io::Error::other("semantic_affected_owner_authority_changed")); }
+        if !authority.current()? {
+            return Err(io::Error::other(
+                "semantic_affected_owner_authority_changed",
+            ));
+        }
         Ok(authority)
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
-        let identity = || crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts)?);
-        if identity()? != self.identity { return Ok(false); }
+        let identity =
+            || crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts)?);
+        if identity()? != self.identity {
+            return Ok(false);
+        }
         let facts = crate::facts::source_authority::CurrentSources::open(&self.facts)?;
-        if !facts.facts_known() { return Ok(false); }
+        if !facts.facts_known() {
+            return Ok(false);
+        }
         facts.validate()?;
         // The recorded runtime algorithm consumes Facts and Claude PID records
         // only. No EventCache path or storage engine is reconstructed here.
-        let options = Options { facts: Some(self.facts.clone()), claude_home: self.claude_home.clone(), ..Default::default() };
-        let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime && identity()? == self.identity;
+        let options = Options {
+            facts: Some(self.facts.clone()),
+            claude_home: self.claude_home.clone(),
+            ..Default::default()
+        };
+        let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime
+            && identity()? == self.identity;
         facts.validate()?;
         Ok(current)
     }

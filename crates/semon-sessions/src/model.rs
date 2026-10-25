@@ -7451,11 +7451,16 @@ pub(crate) fn prepare_semantic_batch(
     }
     if batch.phase == relation_stage::Phase::Publication {
         if !batch.context.prior_owners.is_empty() {
-            prepared.relationships.lifecycle_authority = Some(relation_stage::LifecycleAuthority::capture(options)?);
+            prepared.relationships.lifecycle_authority =
+                Some(relation_stage::LifecycleAuthority::capture(options)?);
         }
-        prepared.relationships.retired_owners = batch.context.prior_owners.values()
+        prepared.relationships.retired_owners = batch
+            .context
+            .prior_owners
+            .values()
             .filter(|old| !prepared.rows.iter().any(|row| row.key == old.key))
-            .cloned().collect();
+            .cloned()
+            .collect();
     }
     Ok(SemanticModelBatch { prepared })
 }

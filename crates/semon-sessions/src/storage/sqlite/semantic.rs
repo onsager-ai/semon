@@ -334,7 +334,9 @@ fn staged_paths(db: &Connection, ns: &str) -> Result<Vec<String>, StoreError> {
     let paths = db.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path LIMIT 65").map_err(error)?
         .query_map([ns], |r| r.get(0)).map_err(error)?
         .collect::<rusqlite::Result<Vec<String>>>().map_err(error)?;
-    if paths.len() > 64 { return Err(refuse("semantic_affected_owner_source_budget")); }
+    if paths.len() > 64 {
+        return Err(refuse("semantic_affected_owner_source_budget"));
+    }
     Ok(paths)
 }
 
@@ -346,9 +348,14 @@ fn retirement_plan(
     let ns = source.namespace();
     let paths = staged_paths(db, ns)?;
     let effects = owners::Owners { db, namespace: ns };
-    let prior = effects.affected(&paths).map_err(|e| StoreError::Data(e.to_string()))?;
+    let prior = effects
+        .affected(&paths)
+        .map_err(|e| StoreError::Data(e.to_string()))?;
     if !prior.is_empty()
-        && prepared.rows.iter().any(|row| row.query.is_some() || row.trace.is_some())
+        && prepared
+            .rows
+            .iter()
+            .any(|row| row.query.is_some() || row.trace.is_some())
         && prepared.relationships.lifecycle_authority.is_none()
     {
         return Err(refuse("semantic_affected_owner_authority_missing"));
@@ -358,19 +365,39 @@ fn retirement_plan(
     for old in prior.values() {
         // Even surviving incident owners must be rederived, never silently
         // omitted because the transition changed their native identity.
-        if old.sources.iter().any(|s| !paths.contains(&s.path.to_string_lossy().into_owned())) {
+        if old
+            .sources
+            .iter()
+            .any(|s| !paths.contains(&s.path.to_string_lossy().into_owned()))
+        {
             return Err(refuse("semantic_affected_owner_scope"));
         }
-        if prepared.rows.iter().any(|row| row.key == old.key) { continue; }
-        let withdrawn = old.sources.iter().all(|s| prepared.withdrawals.iter().any(|w| s.path == std::path::Path::new(&w.path)));
-        if !withdrawn && old.sources.iter().any(|s| !prepared.rows.iter().flat_map(|r| &r.sources).any(|new| new.path == s.path)) {
+        if prepared.rows.iter().any(|row| row.key == old.key) {
+            continue;
+        }
+        let withdrawn = old.sources.iter().all(|s| {
+            prepared
+                .withdrawals
+                .iter()
+                .any(|w| s.path == std::path::Path::new(&w.path))
+        });
+        if !withdrawn
+            && old.sources.iter().any(|s| {
+                !prepared
+                    .rows
+                    .iter()
+                    .flat_map(|r| &r.sources)
+                    .any(|new| new.path == s.path)
+            })
+        {
             return Err(refuse("semantic_affected_owner_transition_pending"));
         }
         outgoing.push(old.clone());
         plan.push((old.key.clone(), withdrawn));
     }
     if serde_json::to_string(&outgoing).map_err(|e| StoreError::Data(e.to_string()))?
-        != serde_json::to_string(&prepared.relationships.retired_owners).map_err(|e| StoreError::Data(e.to_string()))?
+        != serde_json::to_string(&prepared.relationships.retired_owners)
+            .map_err(|e| StoreError::Data(e.to_string()))?
     {
         return Err(refuse("semantic_affected_owner_witness"));
     }
@@ -884,7 +911,7 @@ impl Stage {
                 || !prepared.relationships.relations.is_empty()
                 || !prepared.pids.is_empty()
                 || !prepared.lineage_dependencies.is_empty()
-            || !prepared.relationships.retired_owners.is_empty()
+                || !prepared.relationships.retired_owners.is_empty()
             {
                 generation_metadata.push(producer_witness.clone());
             }
@@ -1467,19 +1494,31 @@ impl Stage {
         // never a fabricated negative observation or an omitted old owner.
         if self.source.owner.is_some() && !resetting {
             let seeds = staged_paths(&tx, ns)?;
-            let prior = owners::Owners { db: &tx, namespace: ns }.affected(&seeds)
-                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let prior = owners::Owners {
+                db: &tx,
+                namespace: ns,
+            }
+            .affected(&seeds)
+            .map_err(|e| StoreError::Data(e.to_string()))?;
             let mut paths = std::collections::BTreeSet::new();
             paths.extend(seeds.iter().cloned());
             for row in prior.values() {
-                paths.extend(row.sources.iter().map(|s| s.path.to_string_lossy().into_owned()));
+                paths.extend(
+                    row.sources
+                        .iter()
+                        .map(|s| s.path.to_string_lossy().into_owned()),
+                );
             }
-            if paths.len() > 64 { return Err(refuse("semantic_affected_owner_source_budget")); }
+            if paths.len() > 64 {
+                return Err(refuse("semantic_affected_owner_source_budget"));
+            }
             if phase != "indexing" && paths.iter().any(|path| !seeds.contains(path)) {
                 return Err(refuse("semantic_affected_owner_late_incident_pending"));
             }
             let paths = paths.into_iter().collect::<Vec<_>>();
-            for (path, claim) in super::source_journal::claims(&tx, Some(ns), &paths).map_err(error)? {
+            for (path, claim) in
+                super::source_journal::claims(&tx, Some(ns), &paths).map_err(error)?
+            {
                 tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
             }
             #[cfg(test)]
@@ -1556,9 +1595,12 @@ impl Stage {
             }
         }
         if result_phase == Phase::Publication && self.source.owner.is_some() {
-            context.prior_owners = owners::Owners { db: &tx, namespace: ns }
-                .affected(&staged_paths(&tx, ns)?)
-                .map_err(|e| StoreError::Data(e.to_string()))?;
+            context.prior_owners = owners::Owners {
+                db: &tx,
+                namespace: ns,
+            }
+            .affected(&staged_paths(&tx, ns)?)
+            .map_err(|e| StoreError::Data(e.to_string()))?;
         }
         let source_revision = tx
             .query_row(
