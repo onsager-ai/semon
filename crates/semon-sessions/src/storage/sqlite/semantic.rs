@@ -804,19 +804,39 @@ impl Stage {
         let projection_rows: std::collections::BTreeMap<_, _> =
             prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
         let mut projection_keys = std::collections::BTreeSet::new();
+        let mut real_projection_keys = std::collections::BTreeSet::new();
         let mut slot_bytes = 0usize;
         for projection in &prepared.transcripts {
-            let Some(row) = projection_rows.get(projection.key.as_str()) else {
-                return Err(refuse("semantic_publication_projection_owner"));
-            };
             if !projection_keys.insert(&projection.key) || projection.slots.len() > 64 {
                 return Err(refuse("semantic_publication_projection_budget"));
+            }
+            let row = projection_rows.get(projection.key.as_str());
+            if row.is_some() {
+                real_projection_keys.insert(&projection.key);
+            } else {
+                // Ordinary slot publication skips virtual trace endpoints. Keep
+                // their exact model witness, but never give them Raw membership
+                // or a Catalog/slot row. The real anchor is independently checked
+                // against this namespace's staged identity below, and the entire
+                // relation/projection payload must match the recorded witness.
+                let anchored_stub = prepared.relationships.relations.values().any(|relation| {
+                    relation.stubs.iter().any(|stub| stub.key == projection.key)
+                        && (relation.from == projection.key
+                            || relation.to.as_ref() == Some(&projection.key))
+                        && std::iter::once(&relation.from).chain(relation.to.iter()).any(|key| {
+                            projection_rows.contains_key(key.as_str())
+                                && prepared.relationships.endpoints.contains_key(key)
+                        })
+                });
+                if !anchored_stub {
+                    return Err(refuse("semantic_publication_projection_owner"));
+                }
             }
             for slot in &projection.slots {
                 if slot
                     .source_paths()
                     .iter()
-                    .any(|path| !row.sources.iter().any(|s| &s.path == *path))
+                    .any(|path| row.is_none_or(|row| !row.sources.iter().any(|s| &s.path == *path)))
                 {
                     return Err(refuse("semantic_publication_projection_source"));
                 }
@@ -830,7 +850,7 @@ impl Stage {
                 }
             }
         }
-        if !prepared.transcripts.is_empty() && projection_keys.len() != projection_rows.len() {
+        if !prepared.transcripts.is_empty() && real_projection_keys.len() != projection_rows.len() {
             return Err(refuse("semantic_publication_projection_owner"));
         }
         let projection_witness = prepared
@@ -1054,7 +1074,10 @@ impl Stage {
             }
         }
         for projection in &prepared.transcripts {
-            let row = projection_rows[projection.key.as_str()];
+            let Some(row) = projection_rows.get(projection.key.as_str()) else {
+                // Virtual stubs are witness-only, just as in publish_slot_rows.
+                continue;
+            };
             let slots = projection
                 .slots
                 .iter()
