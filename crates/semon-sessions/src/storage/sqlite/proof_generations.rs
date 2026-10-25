@@ -413,7 +413,11 @@ impl ReaderRuntime {
                 namespace: ns,
                 id: expected,
                 admission: owner.admission(),
-                stream: owner.config().expected_stream_epoch.as_deref().ok_or(StorageError::ScopeChanged)?,
+                stream: owner
+                    .config()
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or(StorageError::ScopeChanged)?,
                 proof: &proof,
             },
         )?;
