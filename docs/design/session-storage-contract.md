@@ -516,6 +516,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
