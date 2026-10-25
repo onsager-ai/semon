@@ -16,10 +16,19 @@ use crate::{
 // A connected file commit needs the complete production scan, including the
 // auxiliary headers captured outside parse(). Finish all SQLite work before PG.
 fn bundle_fixture(harness: &str) -> Fixture {
-    if harness != "copilot" { return parser_fixture(harness); }
+    if harness != "copilot" {
+        return parser_fixture(harness);
+    }
     // Tree's fixture unconditionally unwraps a Tree oracle. Copilot genuinely
     // has none: use real scan/ledger data and never pass an invented Tree input.
-    let root = std::env::temp_dir().join(format!("pg117-copilot-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = std::env::temp_dir().join(format!(
+        "pg117-copilot-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir(&root).unwrap();
     let physical = root.join("one.jsonl");
     let value = serde_json::json!({"type":"session.start","data":{"sessionId":"s🦀"}});
@@ -31,9 +40,16 @@ fn bundle_fixture(harness: &str) -> Fixture {
     drop(cache);
     let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
     let ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
-    let path = format!("{}\0🦀",physical.to_str().unwrap());
+    let path = format!("{}\0🦀", physical.to_str().unwrap());
     assert!(index.tree_summary.is_none());
-    Fixture {root,path:path.clone(),ledger:ledger.clone(),oracle:Default::default(),sources:vec![(path,ledger,(*index).clone())],rows:Vec::new()}
+    Fixture {
+        root,
+        path: path.clone(),
+        ledger: ledger.clone(),
+        oracle: Default::default(),
+        sources: vec![(path, ledger, (*index).clone())],
+        rows: Vec::new(),
+    }
 }
 
 fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
@@ -326,10 +342,11 @@ fn pg_native_bundle_every_connected_boundary_rolls_back_and_stale_cas_refuses() 
     // Measure the actual connected path, then roll it back. This includes
     // every page blob, generation reference, header and Current-pointer effect.
     BOUNDARIES.with(|count| count.set(0));
-    let probe: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        apply(tx, &data.path, ledger, index, None, None)?;
-        Err(StorageError::Busy)
-    });
+    let probe: Result<(), StorageError> =
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            apply(tx, &data.path, ledger, index, None, None)?;
+            Err(StorageError::Busy)
+        });
     assert!(matches!(probe, Err(StorageError::Busy)));
     let boundaries = BOUNDARIES.with(|count| count.get());
     assert!((11..128).contains(&boundaries));
@@ -409,20 +426,54 @@ fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
 
 fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, String)>) {
     use sha2::{Digest, Sha256};
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(&data.root.join("index.json"))).unwrap();
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(
+        &data.root.join("index.json"),
+    ))
+    .unwrap();
     let physical = data.path.strip_suffix("\0🦀").unwrap();
-    let prefix = format!("native_source_chunks:{:x}:", Sha256::digest(physical.as_bytes()));
-    let launch = format!("native_launch_calls:{:x}:", Sha256::digest(physical.as_bytes()));
-    let header = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("{prefix}header")], |r| r.get(0)).unwrap();
+    let prefix = format!(
+        "native_source_chunks:{:x}:",
+        Sha256::digest(physical.as_bytes())
+    );
+    let launch = format!(
+        "native_launch_calls:{:x}:",
+        Sha256::digest(physical.as_bytes())
+    );
+    let header = db
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("{prefix}header")],
+            |r| r.get(0),
+        )
+        .unwrap();
     use rusqlite::OptionalExtension;
-    let launch_header = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("{launch}header")], |r| r.get(0)).optional().unwrap();
+    let launch_header = db
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("{launch}header")],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap();
     let mut pages = Vec::new();
-    for (kind, prefix) in [(0i16, prefix.clone()), (1, launch), (2, format!("native_proof_tree:{prefix}:"))] {
-        let mut statement = db.prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key").unwrap();
-        let rows = statement.query_map(rusqlite::params![&prefix, format!("{prefix}~")], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?))).unwrap();
+    for (kind, prefix) in [
+        (0i16, prefix.clone()),
+        (1, launch),
+        (2, format!("native_proof_tree:{prefix}:")),
+    ] {
+        let mut statement = db
+            .prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+            .unwrap();
+        let rows = statement
+            .query_map(rusqlite::params![&prefix, format!("{prefix}~")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap();
         for row in rows {
             let (key, value) = row.unwrap();
-            if key != format!("{prefix}header") { pages.push((kind, key.strip_prefix(&prefix).unwrap().to_owned(), value)); }
+            if key != format!("{prefix}header") {
+                pages.push((kind, key.strip_prefix(&prefix).unwrap().to_owned(), value));
+            }
         }
     }
     (header, launch_header, pages)
@@ -430,7 +481,7 @@ fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, Str
 
 #[test]
 fn pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart() {
-    use crate::storage::postgres::{native_pages, PgPool, tests::limits};
+    use crate::storage::postgres::{PgPool, native_pages, tests::limits};
     let data = complete_fixture(parser_fixture("codex"), "codex");
     let oracle = page_oracle(&data);
     let next = complete_fixture(append_fixture(&data, "codex"), "codex");
@@ -440,32 +491,74 @@ fn pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart() {
     let namespace = ns("pages\0🦀");
     let control = PgCancellation::default();
     let (_, ledger, index) = &data.sources[0];
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, None, None)).unwrap();
-    let pinned = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| native_pages::current(tx, &data.path, ledger)).unwrap();
-    assert!(pinned.chunks_header == oracle.0 && pinned.launch_header == oracle.1, "SQLite header bytes");
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)
+    })
+    .unwrap();
+    let pinned = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            native_pages::current(tx, &data.path, ledger)
+        })
+        .unwrap();
+    assert!(
+        pinned.chunks_header == oracle.0 && pinned.launch_header == oracle.1,
+        "SQLite header bytes"
+    );
     let (_, new_ledger, new_index) = &next.sources[0];
     let changes = DirtyRows::between(index, new_index);
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &next.path, new_ledger, new_index, Some(ledger), Some(&changes))).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(
+            tx,
+            &next.path,
+            new_ledger,
+            new_index,
+            Some(ledger),
+            Some(&changes),
+        )
+    })
+    .unwrap();
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let current = native_pages::current(tx, &next.path, new_ledger)?;
         assert_ne!(current.id, pinned.id);
-        assert!(current.chunks_header == next_oracle.0 && current.launch_header == next_oracle.1, "append oracle bytes");
-        for (kind, key, expected) in &oracle.2 { assert!(pinned.page(tx, *kind, key)? == *expected, "retained SQLite page bytes"); }
+        assert!(
+            current.chunks_header == next_oracle.0 && current.launch_header == next_oracle.1,
+            "append oracle bytes"
+        );
+        for (kind, key, expected) in &oracle.2 {
+            assert!(
+                pinned.page(tx, *kind, key)? == *expected,
+                "retained SQLite page bytes"
+            );
+        }
         let chunks = index.source_chunks.as_ref().unwrap();
         assert_eq!(pinned.chunk_hash(tx, 0)?, chunks.hashes[0]);
         Ok(())
-    }).unwrap();
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, Some(new_ledger), None)).unwrap();
+    })
+    .unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, Some(new_ledger), None)
+    })
+    .unwrap();
     drop(pool);
     let reopened = PgPool::open(factory.clone(), limits()).unwrap();
-    reopened.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-        let retained = native_pages::open(tx, &data.path, ledger, pinned.id.clone())?;
-        for (kind, key, expected) in &oracle.2 { assert!(retained.page(tx, *kind, key)? == *expected, "restart immutable bytes"); }
-        let later = native_pages::current(tx, &data.path, ledger)?;
-        assert!(later.chunks_header == oracle.0, "replacement oracle");
-        assert!(native_pages::open(tx, &data.path, new_ledger, retained.id.clone()).is_err(), "wrong ledger refused");
-        Ok(())
-    }).unwrap();
+    reopened
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let retained = native_pages::open(tx, &data.path, ledger, pinned.id.clone())?;
+            for (kind, key, expected) in &oracle.2 {
+                assert!(
+                    retained.page(tx, *kind, key)? == *expected,
+                    "restart immutable bytes"
+                );
+            }
+            let later = native_pages::current(tx, &data.path, ledger)?;
+            assert!(later.chunks_header == oracle.0, "replacement oracle");
+            assert!(
+                native_pages::open(tx, &data.path, new_ledger, retained.id.clone()).is_err(),
+                "wrong ledger refused"
+            );
+            Ok(())
+        })
+        .unwrap();
     drop(reopened);
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
@@ -480,26 +573,59 @@ fn pg_native_pages_tamper_namespace_and_missing_generation_refuse() {
     let foreign = ns("proof-foreign\0🦀");
     let control = PgCancellation::default();
     let (_, ledger, index) = &data.sources[0];
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, None, None)).unwrap();
-    let pinned = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| native_pages::current(tx, &data.path, ledger)).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)
+    })
+    .unwrap();
+    let pinned = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            native_pages::current(tx, &data.path, ledger)
+        })
+        .unwrap();
     pool.transaction(&foreign, TxnKind::ReadSnapshot, &control, |tx| {
         assert!(pinned.chunk_hash(tx, 0).is_err());
         assert!(native_pages::open(tx, &data.path, ledger, pinned.id.clone()).is_err());
         Ok(())
-    }).unwrap();
-    let result: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        tx.driver.execute("UPDATE semon_pg_native_page_blobs SET payload=$2 WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes(), &b"tampered".as_slice()]).map_err(sqlstate::error)?;
-        assert!(pinned.chunk_hash(tx, 0).is_err(), "tampered old page refuses");
-        Err(StorageError::Busy)
-    });
+    })
+    .unwrap();
+    let result: Result<(), StorageError> =
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver
+                .execute(
+                    "UPDATE semon_pg_native_page_blobs SET payload=$2 WHERE namespace=$1",
+                    &[&tx.namespace.as_str().as_bytes(), &b"tampered".as_slice()],
+                )
+                .map_err(sqlstate::error)?;
+            assert!(
+                pinned.chunk_hash(tx, 0).is_err(),
+                "tampered old page refuses"
+            );
+            Err(StorageError::Busy)
+        });
     assert!(matches!(result, Err(StorageError::Busy)));
-    let result: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        tx.driver.execute("DELETE FROM semon_pg_native_page_generations WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
-        assert!(native_pages::open(tx, &data.path, ledger, pinned.id.clone()).is_err(), "missing authority refuses");
-        Err(StorageError::Busy)
-    });
+    let result: Result<(), StorageError> =
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver
+                .execute(
+                    "DELETE FROM semon_pg_native_page_generations WHERE namespace=$1",
+                    &[&tx.namespace.as_str().as_bytes()],
+                )
+                .map_err(sqlstate::error)?;
+            assert!(
+                native_pages::open(tx, &data.path, ledger, pinned.id.clone()).is_err(),
+                "missing authority refuses"
+            );
+            Err(StorageError::Busy)
+        });
     assert!(matches!(result, Err(StorageError::Busy)));
-    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| { assert_eq!(pinned.chunk_hash(tx, 0)?, index.source_chunks.as_ref().unwrap().hashes[0]); Ok(()) }).unwrap();
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        assert_eq!(
+            pinned.chunk_hash(tx, 0)?,
+            index.source_chunks.as_ref().unwrap().hashes[0]
+        );
+        Ok(())
+    })
+    .unwrap();
     drop(pool);
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
@@ -514,7 +640,9 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     for at in 0..258 {
         let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":format!("launch-{at}"),"name":"Bash","input":{"command":"codex exec fixture"}}]}});
         body.push_str(&value.to_string());
-        if at < 257 { body.push('\n'); }
+        if at < 257 {
+            body.push('\n');
+        }
     }
     std::fs::write(&physical, body.as_bytes()).unwrap();
     let cache_path = data.root.join("launch-index.json");
@@ -525,9 +653,20 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
     let ledger: Ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
     use sha2::{Digest, Sha256};
-    let prefix = format!("native_launch_calls:{:x}:", Sha256::digest(physical.to_str().unwrap().as_bytes()));
-    let mut statement = db.prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key").unwrap();
-    let oracle = statement.query_map(rusqlite::params![&prefix,format!("{prefix}~")], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let prefix = format!(
+        "native_launch_calls:{:x}:",
+        Sha256::digest(physical.to_str().unwrap().as_bytes())
+    );
+    let mut statement = db
+        .prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+        .unwrap();
+    let oracle = statement
+        .query_map(rusqlite::params![&prefix, format!("{prefix}~")], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
     assert!(oracle.len() >= 3, "two production launch pages and header");
     let expected = scanned.handoff_index.as_ref().unwrap().clone();
     assert_eq!(expected.complete.len(), 257);
@@ -538,7 +677,10 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     let namespace = ns("launch-pages\0🦀");
     let control = PgCancellation::default();
     let (_, old_ledger, old_index) = &data.sources[0];
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, old_ledger, old_index, None, None)).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, old_ledger, old_index, None, None)
+    })
+    .unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         let source = algorithm::begin(&mut Usage::new(tx)?, "launch\0🦀", None, &ledger, false)?;
         algorithm::write(&mut Usage::new(tx)?, "launch\0🦀", &ledger, &scanned)?;
@@ -547,12 +689,19 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
         let pinned = native_pages::open(tx, "launch\0🦀", &ledger, id)?;
         for (key, value) in &oracle {
             let suffix = key.strip_prefix(&prefix).unwrap();
-            if suffix == "header" { assert!(pinned.launch_header.as_ref() == Some(value)); }
-            else { assert!(pinned.page(tx, 1, suffix)? == *value, "production launch page bytes"); }
+            if suffix == "header" {
+                assert!(pinned.launch_header.as_ref() == Some(value));
+            } else {
+                assert!(
+                    pinned.page(tx, 1, suffix)? == *value,
+                    "production launch page bytes"
+                );
+            }
         }
         assert_eq!(pinned.launch(tx)?, expected);
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     drop(pool);
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
