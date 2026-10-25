@@ -1444,6 +1444,7 @@ mod tests {
             SLOT_SCHEMA,
             crate::events::store::catalog_schema(false),
             CATALOG_SUPPORT_SCHEMA,
+            crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA,
             metadata_schema(false),
             LEGACY_EVENT_SCHEMA,
             copied_usage_schema(false),
@@ -1508,7 +1509,7 @@ mod tests {
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
-        // Every table, index and trigger from all 21 dependencies is required,
+        // Every table, index and trigger from all 22 dependencies is required,
         // including history, overview, support, slots, search and semantic stage.
         let required_objects = objects(&reference);
         for copied in [false, true] {

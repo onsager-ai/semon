@@ -5019,8 +5019,15 @@ mod tests {
         let path = f.raw.to_string_lossy().into_owned();
         writer.begin(&path, None, &"a".repeat(64), "codex").unwrap();
         let mut observations = f.config.source_observations().unwrap();
+        let observation_payload =
+            serde_json::to_vec(&(std::slice::from_ref(&path), true)).unwrap();
+        let observation = crate::storage::source_observations::SourceOperation::capture(
+            f.config.namespace.as_str(),
+            "discover",
+            &observation_payload,
+        );
         observations
-            .discover(std::slice::from_ref(&path), true)
+            .discover(&observation, std::slice::from_ref(&path), true)
             .unwrap();
         let ledger = Ledger {
             stat: Stat::of(&f.raw).unwrap(),
