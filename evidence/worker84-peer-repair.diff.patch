@@ -1,0 +1,464 @@
+diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
+index 8bcd9ed7..0f65ad9b 100644
+--- a/crates/semon-sessions/src/events/store/configured.rs
++++ b/crates/semon-sessions/src/events/store/configured.rs
+@@ -8396,13 +8396,22 @@ mod tests {
+             let inputs = peer_inputs(options, 2, "claude72-1");
+             // Identical native IDs, messages and physical paths in both namespaces.
+             let mut foreign = open(&foreign_config);
+-            let (foreign_batch, foreign_model) = claude_ready(&mut foreign, options, &inputs);
++            let (foreign_batch, foreign_model) =
++                claude_ready_from(&mut foreign, options, &inputs, &inputs[..1]);
++            let frontier = |namespace: &str| {
++                f.db().prepare("SELECT kind,value,harness,after_key,after_edge,done FROM catalog_semantic_frontier WHERE namespace=?1 ORDER BY kind,value,harness").unwrap().query_map([namespace], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
++            };
++            let control_frontier = frontier("source-b");
+             publish(&mut foreign, &f, &foreign_batch, &foreign_model);
+             foreign.finish_semantic_stage(foreign_batch.epoch).unwrap();
+             let before = namespace_state(&f, "source-b");
+             let mut admitted = open(&f.config);
+             let (batch, model) = claude_ready_from(&mut admitted, options, &inputs, &inputs[..1]);
+-            assert!(!f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind IN ('native','dependency','nativeall'))",[],|r|r.get::<_,bool>(0)).unwrap(),"foreign Current and dependencies cannot seed local frontier tasks");
++            assert_eq!(
++                frontier("source-a"),
++                control_frontier,
++                "populated foreign Current/dependencies cannot alter the complete local frontier compared with the same Raw control"
++            );
+             oracle(&admitted, options, &inputs, model.prepared());
+             publish(&mut admitted, &f, &batch, &model);
+             admitted.finish_semantic_stage(batch.epoch).unwrap();
+@@ -8426,7 +8435,7 @@ mod tests {
+             let mut inputs = peer_inputs(options, 66, "peer81-target");
+             for (i, input) in inputs.iter_mut().enumerate().skip(1) {
+                 let old = input.full_path(options);
+-                input.path = format!("projects/sanitized/peer81-{i}/peer81-target.jsonl").into();
++                input.path = format!("projects/peer81-{i}/peer81-target.jsonl").into();
+                 let path = input.full_path(options);
+                 fs::create_dir_all(path.parent().unwrap()).unwrap();
+                 fs::rename(old, path).unwrap();
+@@ -8454,7 +8463,12 @@ mod tests {
+                         break;
+                     }
+                     Ok(Some(batch)) => {
+-                        paged |= f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
++                        let cursor = f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
++                        if cursor {
++                            assert_eq!(batch.paths.len(), 64, "the real filename frontier returns one full bounded page");
++                            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'", [], |r| r.get::<_,i64>(0)).unwrap(), 65, "seed plus exactly 64 discovered candidates precede the component refusal");
++                        }
++                        paged |= cursor;
+                         if !batch.paths.is_empty() {
+                             let selected = inputs
+                                 .iter()
+@@ -8472,7 +8486,9 @@ mod tests {
+                                     &batch,
+                                     1_790_000_000_000,
+                                 )
+-                                .unwrap();
++                                .unwrap_or_else(|error| {
++                                    panic!("paging model phase {:?}: {error}", batch.phase)
++                                });
+                         }
+                     }
+                     Ok(None) => panic!("native frontier stage disappeared"),
+@@ -8523,6 +8539,123 @@ mod tests {
+             );
+         }
+ 
++        #[test]
++        fn configured_semantic_domain84_native_frontier_vm_work_is_indexed() {
++            let (f, foreign_config, options, native_inputs) = model_sources();
++            let inputs = peer_inputs(&options[1], 2, "claude72-1");
++            let mut admitted = open(&f.config);
++            let _foreign = open(&foreign_config);
++            claude_ingest(&mut admitted, &options[1], &inputs);
++            admitted
++                .ingest(
++                    &format!("{:064x}", 8499),
++                    &native_inputs[0].full_path(&options[0]),
++                    "codex",
++                )
++                .unwrap();
++            let runtime = crate::native_evidence::query_runtime_generation(&options[1]).unwrap();
++            admitted
++                .begin_semantic_stage_with_journal(
++                    &[inputs[0]
++                        .full_path(&options[1])
++                        .to_string_lossy()
++                        .into_owned()],
++                    &runtime,
++                    true,
++                )
++                .unwrap();
++            let db = f.db();
++            for name in ["semon_event_writer", "semon_semantic_writer"] {
++                db.create_scalar_function(
++                    name,
++                    0,
++                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
++                    |_| Ok(1_i64),
++                )
++                .unwrap();
++            }
++            let bind = |namespace: &str| {
++                bind_metadata_scope(&db, namespace).unwrap();
++                let namespace = namespace.to_owned();
++                db.create_scalar_function(
++                    "semon_namespace",
++                    0,
++                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
++                    move |_| Ok(namespace.clone()),
++                )
++                .unwrap();
++            };
++            bind("source-a");
++            // Stress-only unrelated physical history, never endpoints, model
++            // witnesses or positive authority. Positive files/header above
++            // were produced by real Raw ingest through native parsers.
++            let columns = db
++                .prepare("SELECT name FROM pragma_table_info('files') ORDER BY cid")
++                .unwrap()
++                .query_map([], |r| r.get::<_, String>(0))
++                .unwrap()
++                .collect::<rusqlite::Result<Vec<_>>>()
++                .unwrap();
++            let values = columns
++                .iter()
++                .map(|name| match name.as_str() {
++                    "namespace" => "?1".to_owned(),
++                    "file_id" => "?2".to_owned(),
++                    "path" => "?3".to_owned(),
++                    _ => format!("\"{name}\""),
++                })
++                .collect::<Vec<_>>()
++                .join(",");
++            let insert = format!(
++                "INSERT INTO files SELECT {values} FROM files WHERE namespace='source-a' ORDER BY file_id LIMIT 1"
++            );
++            let mut baseline: Option<Vec<(String, usize)>> = None;
++            let mut previous = 0;
++            for count in [0, 256, 2048] {
++                db.execute_batch("BEGIN IMMEDIATE").unwrap();
++                for namespace in ["source-a", "source-b"] {
++                    bind(namespace);
++                    for i in previous..count {
++                        let path = if i % 2 == 0 {
++                            format!("/unrelated/projects/noise-{i}/noise-{i}.jsonl")
++                        } else {
++                            format!("/unrelated/session-state/noise-{i}/events.jsonl")
++                        };
++                        db.execute(&insert, params![namespace, 10000 + i, path]).unwrap();
++                        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'bounded-work-noise',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
++                        db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
++                    }
++                }
++                bind("source-a");
++                db.execute_batch("COMMIT").unwrap();
++                let measured = ["absent84", "claude72-1", "model-0"]
++                    .into_iter()
++                    .flat_map(|id| {
++                        crate::storage::sqlite::semantic::native_frontier_vm_probe(
++                            &db, "source-a", id,
++                        )
++                    })
++                    .collect::<Vec<_>>();
++                eprintln!("native_frontier_vm unrelated_same_and_foreign={count}: {measured:?}");
++                if let Some(first) = &baseline {
++                    for ((kind, steps), (_, initial)) in measured.iter().zip(first.iter()) {
++                        assert!(
++                            *steps <= *initial + 64,
++                            "{kind}: unrelated rows increased VM work from {initial} to {steps}"
++                        );
++                    }
++                } else {
++                    baseline = Some(measured.clone());
++                }
++                assert!(
++                    measured
++                        .iter()
++                        .all(|(_, steps)| *steps > 0 && *steps < 4096)
++                );
++                previous = count;
++            }
++        }
++
+         #[test]
+         fn configured_semantic_domain81_peer_changed_raw_claim_refuses_publication_zero_effects() {
+             let (f, _, options, _) = model_sources();
+diff --git a/crates/semon-sessions/src/storage/sqlite/semantic.rs b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+index cf8f0df3..21a7852a 100644
+--- a/crates/semon-sessions/src/storage/sqlite/semantic.rs
++++ b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+@@ -591,6 +591,70 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
+     }
+ }
+ 
++// Measure the actual physical adapter, not a parallel EXPLAIN-only query.
++#[cfg(test)]
++pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Vec<(String, usize)> {
++    use crate::events::store::semantic_stage::NativeFrontierPort;
++    use std::sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering},
++    };
++    let mut result = Vec::new();
++    // Each read/page starts from exactly the same source/stage state.
++    for kind in [
++        "filename",
++        "copilot",
++        "header",
++        "parent",
++        "claudeid",
++        "copilotid",
++        "headerid",
++        "headerparent",
++    ] {
++        c.execute_batch("SAVEPOINT native_vm_probe").unwrap();
++        let port = ScopedNativeFrontier { db: c, ns };
++        if !matches!(kind, "filename" | "copilot" | "header" | "parent") {
++            let value = if kind == "claudeid" {
++                format!("{id}.jsonl")
++            } else {
++                id.to_owned()
++            };
++            port.queue(kind, &value, "").unwrap();
++        }
++        let steps = Arc::new(AtomicUsize::new(0));
++        let observed = steps.clone();
++        c.progress_handler(
++            1,
++            Some(move || {
++                observed.fetch_add(1, Ordering::Relaxed);
++                false
++            }),
++        );
++        match kind {
++            "filename" => {
++                port.needed_filename(false, &format!("{id}.jsonl")).unwrap();
++            }
++            "copilot" => {
++                port.needed_filename(true, id).unwrap();
++            }
++            "header" => {
++                port.needed_header(false, false, id).unwrap();
++            }
++            "parent" => {
++                port.needed_header(true, true, id).unwrap();
++            }
++            _ => {
++                frontier_page(c, ns).unwrap();
++            }
++        }
++        c.progress_handler(0, None::<fn() -> bool>);
++        result.push((kind.to_owned(), steps.load(Ordering::Relaxed)));
++        c.execute_batch("ROLLBACK TO native_vm_probe; RELEASE native_vm_probe")
++            .unwrap();
++    }
++    result
++}
++
+ struct ScopedQualification<'a> {
+     db: &'a Connection,
+     ns: &'a str,
+@@ -2043,17 +2107,25 @@ impl Stage {
+             || head(&tx).map_err(error)? != batch.base_generation
+             || self.source.generation != batch.base_generation
+         {
++            #[cfg(test)]
++            eprintln!("semantic_record_conflict: stage_binding");
+             return Ok(Outcome::Conflict);
+         }
+         let claims = super::source_journal::claims(&tx, Some(ns), &batch.paths).map_err(error)?;
+         if claims != prepared.claims {
++            #[cfg(test)]
++            eprintln!("semantic_record_conflict: source_claims");
+             return Ok(Outcome::Conflict);
+         }
+         if batch.phase == Phase::Publication {
+             if !lifecycle_current(prepared) {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: publication_lifecycle");
+                 return Ok(Outcome::Conflict);
+             }
+             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: publication_witness");
+                 return Ok(Outcome::Conflict);
+             }
+             if (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
+@@ -2067,10 +2139,14 @@ impl Stage {
+             let mut keys = std::collections::BTreeSet::new();
+             for row in &prepared.rows {
+                 if !keys.insert(&row.key) || row.sources.is_empty() {
++                    #[cfg(test)]
++                    eprintln!("semantic_record_conflict: publication_owner_shape");
+                     return Ok(Outcome::Conflict);
+                 }
+                 let staged: Option<String> = tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
+                 let Some(staged) = staged else {
++                    #[cfg(test)]
++                    eprintln!("semantic_record_conflict: publication_staged_owner");
+                     return Ok(Outcome::Conflict);
+                 };
+                 let _ = staged;
+@@ -2086,6 +2162,8 @@ impl Stage {
+                     != serde_json::to_string(&endpoint.row)
+                         .map_err(|e| StoreError::Data(e.to_string()))?
+                 {
++                    #[cfg(test)]
++                    eprintln!("semantic_record_conflict: publication_identity");
+                     return Ok(Outcome::Conflict);
+                 }
+                 covered.extend(
+@@ -2097,6 +2175,8 @@ impl Stage {
+                     .push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
+             }
+             if covered != batch.paths.iter().cloned().collect() {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: publication_source_coverage");
+                 return Ok(Outcome::Conflict);
+             }
+             if self.source.owner.is_some() {
+@@ -2120,6 +2200,8 @@ impl Stage {
+         }
+         if batch.phase != Phase::Indexing {
+             if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: reduction_witness");
+                 return Ok(Outcome::Conflict);
+             }
+             for path in &batch.paths {
+@@ -2132,6 +2214,8 @@ impl Stage {
+                     .query_row(sql, params![ns, path], |r| r.get(0))
+                     .map_err(error)?;
+                 if !pending {
++                    #[cfg(test)]
++                    eprintln!("semantic_record_conflict: phase_pending_path");
+                     return Ok(Outcome::Conflict);
+                 }
+             }
+@@ -2163,11 +2247,15 @@ impl Stage {
+                             .map(String::as_str)
+                             .collect::<std::collections::BTreeSet<_>>()
+                     {
++                        #[cfg(test)]
++                        eprintln!("semantic_record_conflict: identity_native_membership");
+                         return Ok(Outcome::Conflict);
+                     }
+                     for source in &endpoint.row.sources {
+                         let path = source.path.to_string_lossy().into_owned();
+                         if !batch.paths.contains(&path) {
++                            #[cfg(test)]
++                            eprintln!("semantic_record_conflict: identity_batch_membership");
+                             return Ok(Outcome::Conflict);
+                         }
+                         let stored: String=tx.query_row("SELECT metadata FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2 AND harness=?3",params![ns,path,endpoint.row.harness],|r|r.get(0)).map_err(error)?;
+@@ -2179,12 +2267,16 @@ impl Stage {
+                             || (endpoint.row.harness != "claude" && key != endpoint.row.key)
+                             || !endpoint.row.native_ids.contains(&source.native_id)
+                         {
++                            #[cfg(test)]
++                            eprintln!("semantic_record_conflict: identity_source_binding");
+                             return Ok(Outcome::Conflict);
+                         }
+                         covered.insert(path);
+                     }
+                     let canonical: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND session_key=?3 AND native_id IN (SELECT json_each.value FROM json_each(?4)))",params![ns,endpoint.row.harness,endpoint.row.key,serde_json::to_string(&endpoint.row.native_ids).map_err(|e|StoreError::Data(e.to_string()))?],|r|r.get(0)).map_err(error)?;
+                     if !canonical {
++                        #[cfg(test)]
++                        eprintln!("semantic_record_conflict: identity_canonical_key");
+                         return Ok(Outcome::Conflict);
+                     }
+                     let text = serde_json::to_string(endpoint)
+@@ -2196,6 +2288,8 @@ impl Stage {
+                     encoded.push((endpoint, text));
+                 }
+                 if batch.paths.iter().any(|p| !covered.contains(p)) {
++                    #[cfg(test)]
++                    eprintln!("semantic_record_conflict: identity_source_coverage");
+                     return Ok(Outcome::Conflict);
+                 }
+                 for (endpoint, text) in encoded {
+@@ -2223,6 +2317,8 @@ impl Stage {
+                 for endpoint in prepared.relationships.endpoints.values() {
+                     let own: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,endpoint.row.key],|r|r.get(0)).map_err(error)?;
+                     if !own {
++                        #[cfg(test)]
++                        eprintln!("semantic_record_conflict: relation_staged_owner");
+                         return Ok(Outcome::Conflict);
+                     }
+                     let text = serde_json::to_string(endpoint)
+@@ -2249,6 +2345,8 @@ impl Stage {
+                         || !known(&relation.from)
+                         || relation.to.as_ref().is_some_and(|to| !known(to))
+                     {
++                        #[cfg(test)]
++                        eprintln!("semantic_record_conflict: relation_endpoint_evidence");
+                         #[cfg(test)]
+                         eprintln!("semantic_record_conflict: relation_endpoint_evidence");
+                         return Ok(Outcome::Conflict);
+@@ -2273,16 +2371,22 @@ impl Stage {
+             return Ok(Outcome::Written);
+         }
+         if prepared.indexed_sources.len() + prepared.withdrawals.len() != batch.paths.len() {
++            #[cfg(test)]
++            eprintln!("semantic_record_conflict: indexing_source_coverage");
+             return Ok(Outcome::Conflict);
+         }
+         let mut seen = std::collections::BTreeSet::new();
+         for (_, source) in &prepared.indexed_sources {
+             let path = source.path.to_string_lossy().into_owned();
+             if !batch.paths.contains(&path) || !seen.insert(path.clone()) {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: indexing_batch_membership");
+                 return Ok(Outcome::Conflict);
+             }
+             let Some((_, ledger)) = crate::events::store::ledger_row(&tx, &path).map_err(error)?
+             else {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: indexing_ledger_absent");
+                 return Ok(Outcome::Conflict);
+             };
+             let mut expected = ledger.source(&source.path, &source.native_id);
+@@ -2290,6 +2394,8 @@ impl Stage {
+             if expected != *source
+                 || crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
+             {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: indexing_ledger_changed");
+                 return Ok(Outcome::Conflict);
+             }
+             if !crate::events::store::admitted_roles_current(
+@@ -2299,10 +2405,14 @@ impl Stage {
+             )
+             .map_err(error)?
+             {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: indexing_role_changed");
+                 return Ok(Outcome::Conflict);
+             }
+             let captured: Option<Option<i64>> = tx.query_row("SELECT claim FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path], |r| r.get(0)).optional().map_err(error)?;
+             if captured != claims.iter().find(|(p, _)| p == &path).map(|(_, c)| *c) {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: indexing_claim_changed");
+                 return Ok(Outcome::Conflict);
+             }
+         }
+@@ -2314,6 +2424,8 @@ impl Stage {
+                 || !withdrawal_runtime_matches(&self.source, batch, withdrawal)?
+                 || !withdrawal.current().unwrap_or(false)
+             {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: withdrawal_evidence");
+                 return Ok(Outcome::Conflict);
+             }
+             owners::Owners {
+@@ -2325,6 +2437,8 @@ impl Stage {
+         }
+         for (path, harness, native) in &prepared.indexed_native_parents {
+             if !seen.contains(path) {
++                #[cfg(test)]
++                eprintln!("semantic_record_conflict: parent_source_membership");
+                 return Ok(Outcome::Conflict);
+             }
+             owners::Owners {
