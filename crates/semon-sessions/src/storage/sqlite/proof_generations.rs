@@ -269,7 +269,7 @@ impl ProofReaderLease for Lease {
         let db = binding.connection().map_err(std::io::Error::other)?;
         db.execute_batch("BEGIN DEFERRED").map_err(std::io::Error::other)?;
         self.validate(&db).map_err(std::io::Error::other)?;
-        let sources = crate::query_source::Sources::capture_bound_snapshot(options, &self.row.sources, db, self.owner.config())?;
+        let sources = crate::query_source::Sources::capture_bound_snapshot(options, &self.row.sources, db, &self.owner)?;
         let records = sources.reader_with(provider);
         let source = records.source_ref(path).ok_or_else(|| std::io::Error::other("selected source unavailable"))?;
         let controlled = ControlledReader { reader: &records, control };
@@ -306,7 +306,7 @@ impl ProofReaderLease for Lease {
         if start > slots.len() {
             return Err(std::io::Error::other("selected page range"));
         }
-        let sources = crate::query_source::Sources::capture_bound_snapshot(options, &self.row.sources, db, self.owner.config())?;
+        let sources = crate::query_source::Sources::capture_bound_snapshot(options, &self.row.sources, db, &self.owner)?;
         let native = sources.reader_with(provider);
         let controlled = ControlledReader { reader: &native, control };
         let mut records = Vec::new();
