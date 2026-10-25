@@ -490,36 +490,44 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    let mut digest = Sha256::new();
-    for sql in [
-        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-    ] {
-        digest.update(sql.as_bytes());
-        let scoped = match sql {
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label" => {
-                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label"
-            }
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model" => {
-                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model"
-            }
-            _ => {
-                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id"
-            }
-        };
-        let mut statement = c.prepare(self::sql(c, sql, scoped)?)?;
+    // Keep the physical SQLite query and its admission charge identical to the
+    // original witness.  `row` inspects the one encoded json_array cell before
+    // `get` allocates it; the shared writer then frames that canonical value
+    // while the cursor is still streaming.
+    let mut writer = crate::events::tree_rows::witness::Writer::new();
+    for (family, (plain, scoped)) in [
+        (
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+        ),
+        (
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+        ),
+        (
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match family {
+            0 => writer.labels(),
+            1 => writer.models(),
+            _ => writer.tools(),
+        }
+        let mut statement = c.prepare(sql(c, plain, scoped)?)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
             crate::selected_read::checkpoint("tree_witness")
                 .map_err(crate::selected_read::sql_error)?;
             let value: String = row.get(0)?;
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
+            writer.encoded(&value);
         }
     }
-    Ok(Some(format!("{:x}", digest.finalize())))
+    Ok(Some(writer.finish()))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
@@ -559,7 +567,7 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
 mod namespace_tests {
     use super::*;
     use rusqlite::functions::FunctionFlags;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn bind(db: &Connection, namespace: &str) {
         configured::bind_metadata_scope(db, namespace).unwrap();
@@ -666,5 +674,211 @@ mod namespace_tests {
         tx.rollback().unwrap();
         bind(&db, "a");
         assert!(ready(&db, path, &ledger).unwrap());
+    }
+
+    // The recipe must reproduce the SQLite json_array witness bytes exactly,
+    // including control, NUL, escape and non-BMP content.
+    #[test]
+    fn tree_witness_recipe_matches_sqlite_json_array_bytes() {
+        use crate::events::tree_rows::witness::digest;
+        use sha2::{Digest, Sha256};
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE native_tree_labels(projection_id,label,value);CREATE TABLE native_tree_models(projection_id,model);CREATE TABLE native_tree_tools(projection_id,tool_id,name,closed);").unwrap();
+        let odd = "a\0b\u{1}\u{1f}\t\n\r\u{8}\u{c}\"\\/\u{7f}\u{2028}é🦀";
+        let labels = [
+            ("branch", odd),
+            ("cwd", "/w"),
+            ("first", "🦀"),
+            ("last", ""),
+        ];
+        for (label, value) in labels {
+            c.execute(
+                "INSERT INTO native_tree_labels VALUES(7,?1,?2)",
+                [label, value],
+            )
+            .unwrap();
+        }
+        for model in ["m\0", "m🦀", "Z"] {
+            c.execute("INSERT INTO native_tree_models VALUES(7,?1)", [model])
+                .unwrap();
+        }
+        for (id, name, closed) in [
+            ("t\0", Some(odd), 0),
+            ("t🦀", Some("n"), 0),
+            ("u", Some("closed"), 1),
+            ("v", None, 0),
+        ] {
+            c.execute(
+                "INSERT INTO native_tree_tools VALUES(7,?1,?2,?3)",
+                rusqlite::params![id, name, closed],
+            )
+            .unwrap();
+        }
+        let mut oracle = Sha256::new();
+        for sql in [
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+        ] {
+            oracle.update(sql.as_bytes());
+            let mut statement = c.prepare(sql).unwrap();
+            let mut rows = statement.query([7]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                let value: String = row.get(0).unwrap();
+                oracle.update((value.len() as u64).to_be_bytes());
+                oracle.update(value.as_bytes());
+            }
+        }
+        let mut models = ["m\0", "m🦀", "Z"];
+        models.sort_unstable();
+        let actual = digest(labels, models, [("t\0", odd), ("t🦀", "n")]);
+        assert_eq!(actual, format!("{:x}", oracle.finalize()));
+    }
+
+    fn qualified_tree(summary: Summary) -> (Connection, Ledger, &'static str) {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; CREATE TABLE files (
+            namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
+            dev INTEGER NOT NULL,ino INTEGER NOT NULL,size INTEGER NOT NULL,
+            mtime_ns BLOB NOT NULL,resume_at INTEGER NOT NULL,head_sha256 BLOB NOT NULL,
+            tail_sha256 BLOB NOT NULL,ctime_ns BLOB,codex_pricing_fingerprint TEXT,
+            PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
+        )
+        .unwrap();
+        db.execute_batch(metadata_schema(true)).unwrap();
+        for ddl in native_usage::schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
+        db.execute_batch(copied_usage_schema(true)).unwrap();
+        db.execute_batch(schema(true)).unwrap();
+        bind(&db, "witness");
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 64,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset: 64,
+            prefix: [5; 32],
+            tail: [6; 32],
+        };
+        let path = "qualified/witness.jsonl";
+        let tx = db.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO files VALUES(semon_namespace(),1,?1,1,2,64,?2,64,?3,?4,?5,NULL)",
+            params![
+                path,
+                3_u128.to_be_bytes(),
+                ledger.prefix,
+                ledger.tail,
+                4_i128.to_be_bytes()
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+            1
+        );
+        write_tree_summary(&tx, path, &ledger, Some(&summary), true).unwrap();
+        tx.commit().unwrap();
+        (db, ledger, path)
+    }
+
+    fn sqlite_witness_oracle(db: &Connection, path: &str) -> (String, usize, usize) {
+        use sha2::{Digest, Sha256};
+        let projection: i64 = db
+            .query_row(
+                "SELECT projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut hash = Sha256::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for (domain, query) in [
+            (
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+            ),
+            (
+                "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+            ),
+            (
+                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            ),
+        ] {
+            hash.update(domain.as_bytes());
+            let mut statement = db.prepare(query).unwrap();
+            let mut result = statement.query([projection]).unwrap();
+            while let Some(row) = result.next().unwrap() {
+                let encoded: String = row.get(0).unwrap();
+                hash.update((encoded.len() as u64).to_be_bytes());
+                hash.update(encoded.as_bytes());
+                rows += 1;
+                bytes += 64 + encoded.len() * 8;
+            }
+        }
+        (format!("{:x}", hash.finalize()), rows, bytes)
+    }
+
+    #[test]
+    fn tree_witness_budgets_actual_qualified_json_before_decode() {
+        let escaped = "a\0b\u{1}\u{1f}\"\\\u{2028}🦀";
+        let summary = Summary {
+            cwd: Some(escaped.into()),
+            branch: Some("branch\0\\\"🦀".into()),
+            models: BTreeSet::from(["model\0\u{1}\"\\🦀".into()]),
+            tools: BTreeMap::from([("tool\0🦀".into(), escaped.into())]),
+            closed_tools: BTreeSet::from(["closed".into()]),
+            ..Summary::default()
+        };
+        let (db, ledger, path) = qualified_tree(summary);
+        let (expected, rows, bytes) = sqlite_witness_oracle(&db, path);
+
+        let too_small = crate::SelectedReadControl::default().with_limits(rows, bytes - 1);
+        {
+            let _scope = crate::selected_read::Scope::enter(&too_small);
+            assert!(witness(&db, path, &ledger).is_err());
+        }
+
+        let exact = crate::SelectedReadControl::default().with_limits(rows, bytes);
+        let actual = {
+            let _scope = crate::selected_read::Scope::enter(&exact);
+            witness(&db, path, &ledger).unwrap().unwrap()
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn tree_witness_actual_projection_cancels_while_streaming_and_recovers() {
+        let summary = Summary {
+            tools: (0..2048)
+                .map(|index| (format!("tool-{index:04}"), format!("name-{index}")))
+                .collect(),
+            ..Summary::default()
+        };
+        let (db, ledger, path) = qualified_tree(summary);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = cancelled.clone();
+        let control = crate::SelectedReadControl::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            cancelled.clone(),
+        )
+        .with_limits(4096, 64 * 1024 * 1024);
+        crate::selected_read::set_hook("tree_witness", 3, move || {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        });
+        {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            assert!(witness(&db, path, &ledger).is_err());
+        }
+        assert!(observed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(witness(&db, path, &ledger).unwrap().is_some());
     }
 }
