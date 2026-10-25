@@ -74,7 +74,8 @@ impl Effects for Writer<'_, '_, '_> {
         self.dirty_started = self.measurements.start();
     }
     fn planning_finished(&mut self) {
-        self.measurements.record("dirty_rows", self.dirty_started, 1);
+        self.measurements
+            .record("dirty_rows", self.dirty_started, 1);
     }
     fn begin(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
         let transaction = self.transaction;

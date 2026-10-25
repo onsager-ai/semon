@@ -233,7 +233,9 @@ fn pg_native_commit_relationships_precancel_and_warm_drift_before_effects() {
     .unwrap();
     factory
         .client()
-        .batch_execute("CREATE INDEX pg104_dependency_drift ON semon_pg_native_native_dependencies(harness)")
+        .batch_execute(
+            "CREATE INDEX pg104_dependency_drift ON semon_pg_native_native_dependencies(harness)",
+        )
         .unwrap();
     assert_eq!(
         pool.apply_operation(&namespace, &identity(), &control, |_| {
