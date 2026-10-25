@@ -90,18 +90,13 @@ impl Driver {
         if self.interrupted.get() {
             return Err(DriverError::Interrupted);
         }
-        if self.control.is_cancelled() || Instant::now() >= self.deadline {
-            self.tainted.set(true);
-            self.interrupted.set(true);
-            return Err(DriverError::Interrupted);
-        }
         self.handle.block_on(async {
             tokio::pin!(future);
             tokio::select! {
                 biased;
+                result = &mut future => return result.map_err(DriverError::Pg),
                 _ = tokio::time::sleep_until(self.deadline.into()) => (),
                 _ = self.control.cancelled() => (),
-                result = &mut future => return result.map_err(DriverError::Pg),
             };
             self.tainted.set(true);
             // Inline, owned cancel future: dropping timeout closes its transport.
@@ -152,7 +147,9 @@ impl Driver {
     }
     pub(super) fn rollback(&mut self) -> Result<(), DriverError> {
         // A real rollback ACK may establish noncommit. Cancel alone never does.
-        self.deadline = self.control.deadline(Instant::now() + self.limits.cancel_grace);
+        self.deadline = self
+            .control
+            .deadline(Instant::now() + self.limits.cancel_grace);
         self.control = PgCancellation::default();
         self.batch_execute("ROLLBACK")
     }
@@ -395,9 +392,9 @@ impl PgPool {
                 let connection = runtime.block_on(async {
                     tokio::select! {
                         biased;
+                        result = self.inner.factory.connect() => result,
                         _ = tokio::time::sleep_until(deadline.into()) => Err(StorageError::Busy),
                         _ = cancel.cancelled() => Err(StorageError::Busy),
-                        result = self.inner.factory.connect() => result,
                     }
                 })?;
                 lease.connection = Some(connection);
@@ -442,11 +439,9 @@ impl Lease {
             .client
             .control
             .deadline(Instant::now() + self.inner.limits.cancel_grace);
-        connection.client.context(
-            deadline,
-            &PgCancellation::default(),
-            self.inner.limits,
-        );
+        connection
+            .client
+            .context(deadline, &PgCancellation::default(), self.inner.limits);
         let row = connection
             .client
             .query_one("SELECT current_setting('semon.namespace', true)", &[])

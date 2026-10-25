@@ -85,9 +85,10 @@ pub(crate) struct Scope(Option<Rc<Budget>>);
 #[cfg(feature = "postgres")]
 pub(crate) fn io_control() -> Option<(Arc<AtomicBool>, Instant)> {
     ACTIVE.with(|active| {
-        active.borrow().as_ref().map(|budget| {
-            (budget.control.cancelled.clone(), budget.control.deadline)
-        })
+        active
+            .borrow()
+            .as_ref()
+            .map(|budget| (budget.control.cancelled.clone(), budget.control.deadline))
     })
 }
 impl Scope {
