@@ -797,7 +797,9 @@ pub(crate) fn read_page_snapshot(
         (Some(_), _) => None,
         (None, Some(binding)) => Some(crate::native_evidence::RuntimeObservations::bound(
             binding,
-            runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?,
+            runtime
+                .as_deref()
+                .ok_or_else(|| io::Error::other("runtime observation unavailable"))?,
         )?),
         (None, None) => Some(crate::native_evidence::RuntimeObservations::new(options)),
     };
@@ -813,7 +815,12 @@ pub(crate) fn read_page_snapshot(
         |saved| saved.facts_known,
     );
     let codex_selection_known = pinned.map_or_else(
-        || options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.selection_known()),
+        || {
+            options.facts.is_none()
+                || recorded
+                    .as_ref()
+                    .is_some_and(|source| source.selection_known())
+        },
         |saved| saved.selection_known,
     );
     let meta = |key: &str| transaction.publication_value(key);
@@ -993,7 +1000,9 @@ pub(crate) fn read_page_snapshot(
                     // ImmutableCatalog supplies its pinned relative inputs.
                     runtime_observations
                         .as_ref()
-                        .map(|runtime| relative_status(options, runtime, recorded.as_ref(), relative))
+                        .map(|runtime| {
+                            relative_status(options, runtime, recorded.as_ref(), relative)
+                        })
                         .unwrap_or(Value::Null)
                 })
             })
@@ -1083,7 +1092,9 @@ pub(crate) fn read_page_snapshot(
                     true,
                 ));
             }
-            let state = transaction.source_state(source).unwrap_or_else(|| source_state(source));
+            let state = transaction
+                .source_state(source)
+                .unwrap_or_else(|| source_state(source));
             states.push(state);
             let reference = SessionSourceRef {
                 root: row.harness.clone(),
@@ -1125,7 +1136,9 @@ pub(crate) fn read_page_snapshot(
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
         let runtime = pinned.map(|saved| saved.runtime.clone()).or_else(|| {
-            runtime_observations.as_ref().and_then(|runtime| runtime.expected(&row))
+            runtime_observations
+                .as_ref()
+                .and_then(|runtime| runtime.expected(&row))
         });
         let runtime_pending = current
             && facts_known

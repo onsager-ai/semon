@@ -6377,6 +6377,7 @@ mod tests {
                 .is_ok()
         );
     }
-    mod selected57 { include!("configured_selected57.rs"); }
-
+    mod selected57 {
+        include!("configured_selected57.rs");
+    }
 }
