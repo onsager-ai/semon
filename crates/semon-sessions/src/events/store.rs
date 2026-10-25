@@ -11482,6 +11482,9 @@ mod tests {
         let index = |model: &str| FileIndex {
             tree_summary: Some(crate::native_tree::Summary {
                 models: [model.to_owned()].into_iter().collect(),
+                tools: [("tree-tool".to_owned(), "Bash".to_owned())]
+                    .into_iter()
+                    .collect(),
                 ..Default::default()
             }),
             source_chunks: Some(std::sync::Arc::new(crate::source_chunks::Chunks {
@@ -11501,6 +11504,11 @@ mod tests {
                 .unwrap(),
             Outcome::Written
         );
+        let (_, mut initial) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        assert_eq!(initial.summary.tool_name("tree-tool").unwrap().as_deref(), Some("Bash"));
+        assert_eq!(initial.summary.tool_name("absent-tool").unwrap(), None);
+        initial.summary.load_shared_usage().unwrap();
+        assert!(initial.summary.usage_records.is_empty());
         let (mut writer, _) = opened(&path);
         let old_copy = old.clone();
         let new_copy = new.clone();
@@ -11520,6 +11528,11 @@ mod tests {
         assert_eq!(
             metadata.summary.models,
             ["old".to_owned()].into_iter().collect()
+        );
+        assert_eq!(
+            metadata.summary.load_shared_usage().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "the checkpoint reader retains its ledger refusal after a concurrent commit"
         );
         assert!(store.read_tree("a.jsonl", &old.stat).unwrap().is_none());
         let (observed, metadata) = store.read_tree("a.jsonl", &new.stat).unwrap().unwrap();
