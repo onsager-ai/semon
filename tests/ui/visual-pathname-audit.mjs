@@ -326,8 +326,7 @@ function withoutProposedFields(registry, changedIndexes) {
 export function createBindingProposal({ registry, registryText, result, sourceSha }) {
   const refuse = (reason) => ({ status: 'refused', reason, patch: '', updates: [] });
   if (!isSourceSha(sourceSha)) return refuse('Missing or invalid CI source SHA');
-  if (!registry || !Array.isArray(registry.acceptances))
-    return refuse('Invalid accepted registry');
+  if (!registry || !Array.isArray(registry.acceptances)) return refuse('Invalid accepted registry');
   if (!result || result.diagnosticOnly !== true || !Array.isArray(result.qualified))
     return refuse('Missing pathname audit result');
   if (!Array.isArray(result.refused) || result.refused.length)
