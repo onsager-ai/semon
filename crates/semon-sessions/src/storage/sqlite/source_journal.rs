@@ -1922,7 +1922,10 @@ mod tests {
     #[test]
     fn shared_observation_conformance_runs_on_legacy_and_configured_sqlite() {
         let legacy = LegacyFixture::new();
-        crate::storage::source_observations::conformance::shared_source_observation_conformance(|| legacy.open(), "");
+        crate::storage::source_observations::conformance::shared_source_observation_conformance(
+            || legacy.open(),
+            "",
+        );
         let configured = Fixture::new_with_namespace("configured\0source");
         configured.assign();
         crate::storage::source_observations::conformance::shared_source_observation_conformance(
