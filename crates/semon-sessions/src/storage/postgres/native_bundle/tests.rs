@@ -38,7 +38,7 @@ fn apply(
 // Every native row, including generations and auxiliary metadata, is compared
 // byte-for-byte around rollback. No giant assertion payload enters CI logs.
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageError> {
-    let tables = tx.driver.query("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND starts_with(table_name,'semon_pg_native_') ORDER BY table_name", &[]).map_err(sqlstate::error)?;
+    let tables = tx.driver.query("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND (starts_with(table_name,'semon_pg_native_') OR table_name IN ('semon_pg_operations','semon_pg_source_state','semon_pg_source_members','semon_pg_source_invalidations','semon_pg_source_receipts','semon_pg_source_intents')) ORDER BY table_name", &[]).map_err(sqlstate::error)?;
     let mut result = Vec::new();
     for table in tables {
         let table: String = table.get(0);
@@ -77,7 +77,9 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
     for harness in ["claude", "codex", "copilot"] {
         let data = parser_fixture(harness);
         let metadata = oracle_metadata(&data);
-        if harness == "codex" { assert!(!metadata.is_empty(), "nonempty independent header oracle"); }
+        if harness == "codex" {
+            assert!(!metadata.is_empty(), "nonempty independent header oracle");
+        }
         let next = (harness != "copilot").then(|| append_fixture(&data, harness));
         let (pool, factory) = fixture(|_| {});
         let namespace = ns("bundle\0🦀");
@@ -155,8 +157,13 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
             })
             .unwrap();
             let replaced = Snapshot::restore(
-                pool.clone(), namespace.clone(), &data.path, &data.ledger, control.clone(),
-            ).unwrap();
+                pool.clone(),
+                namespace.clone(),
+                &data.path,
+                &data.ledger,
+                control.clone(),
+            )
+            .unwrap();
             assert_eq!(replaced.line_count, data.oracle.line_count);
             assert_eq!(replaced.tools, data.oracle.tools);
         }
@@ -176,8 +183,11 @@ fn pg_native_bundle_namespace_retirement_and_drift_refusal() {
     let (_, ledger, index) = &data.sources[0];
     pool.transaction(&foreign, TxnKind::Write, &control, |tx| {
         apply(tx, &data.path, ledger, index, None, None)
-    }).unwrap();
-    let foreign_before = pool.transaction(&foreign, TxnKind::ReadSnapshot, &control, snapshot).unwrap();
+    })
+    .unwrap();
+    let foreign_before = pool
+        .transaction(&foreign, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let key = format!("archive_event_index:{}",data.path);
@@ -189,12 +199,27 @@ fn pg_native_bundle_namespace_retirement_and_drift_refusal() {
         tx.driver.execute("UPDATE semon_pg_native_usage_sources SET receipt=$2 WHERE namespace=$1", &[&ns,&b"drift".as_slice()]).map_err(sqlstate::error)?;
         Ok(())
     }).unwrap();
-    let before = pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap();
-    let result = pool.transaction(&namespace,TxnKind::Write,&control,|tx| apply(tx,&data.path,ledger,index,Some(ledger),None));
-    assert!(matches!(result,Err(StorageError::ScopeChanged)));
-    assert!(before == pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap());
-    assert!(foreign_before == pool.transaction(&foreign,TxnKind::ReadSnapshot,&control,snapshot).unwrap());
-    drop(pool); drop(factory);
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
+    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, Some(ledger), None)
+    });
+    assert!(matches!(result, Err(StorageError::ScopeChanged)));
+    assert!(
+        before
+            == pool
+                .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+                .unwrap()
+    );
+    assert!(
+        foreign_before
+            == pool
+                .transaction(&foreign, TxnKind::ReadSnapshot, &control, snapshot)
+                .unwrap()
+    );
+    drop(pool);
+    drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
