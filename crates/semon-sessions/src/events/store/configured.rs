@@ -7760,6 +7760,17 @@ mod tests {
                 fs::write(path, raw).unwrap();
             }
             let mut cache = open(&f.config);
+            // An append is a new native write operation. Reusing the helper's
+            // initial operation ids would correctly replay the old ACK only.
+            for (i, input) in inputs.iter().enumerate() {
+                cache
+                    .ingest(
+                        &format!("{:064x}", 8200 + i),
+                        &input.full_path(options),
+                        "claude",
+                    )
+                    .unwrap();
+            }
             let (batch, model) = claude_ready(&mut cache, options, &inputs);
             oracle(&cache, options, &inputs, model.prepared());
             publish(&mut cache, &f, &batch, &model);
