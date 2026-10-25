@@ -3248,7 +3248,9 @@ fn closed_catalog(
     Ok(true)
 }
 
+#[cfg(test)]
 const CATALOG_INSERT: &str = "INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES ";
+#[cfg(test)]
 const CATALOG_CONFLICT: &str = " ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
 
 #[derive(Clone, Copy)]
@@ -3275,7 +3277,7 @@ fn catalog_batch_bytes(
     match writer {
         CatalogWriter::Auto => {}
         #[cfg(test)]
-        CatalogWriter::OriginalPorts => {}
+        CatalogWriter::OriginalPorts => return None,
         #[cfg(test)]
         CatalogWriter::Traversal { .. } => {}
         #[cfg(test)]
@@ -3306,55 +3308,6 @@ fn catalog_batch_bytes(
     Some(bytes)
 }
 
-fn put_catalog_batch(
-    transaction: &Transaction<'_>,
-    rows: &[crate::model::summary::CatalogRow],
-    metadata: &[String],
-) -> rusqlite::Result<Vec<bool>> {
-    let values = (0..rows.len())
-        .map(|position| {
-            let first = position * 6 + 1;
-            format!(
-                "(?{first},'current',?{},?{},?{},?{},?{})",
-                first + 1,
-                first + 2,
-                first + 3,
-                first + 4,
-                first + 5
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("{CATALOG_INSERT}{values}{CATALOG_CONFLICT} RETURNING session_key");
-    let mut statement = transaction.prepare(&sql)?;
-    for (position, (row, metadata)) in rows.iter().zip(metadata).enumerate() {
-        let first = position * 6 + 1;
-        statement.raw_bind_parameter(first, &row.key)?;
-        statement.raw_bind_parameter(first + 1, row.last.unwrap_or(0))?;
-        statement.raw_bind_parameter(first + 2, &row.harness)?;
-        statement.raw_bind_parameter(first + 3, &row.repo)?;
-        statement.raw_bind_parameter(first + 4, &row.parent)?;
-        statement.raw_bind_parameter(first + 5, metadata)?;
-    }
-    let mut changed = vec![false; rows.len()];
-    {
-        let mut returned = statement.raw_query();
-        while let Some(row) = returned.next()? {
-            let rusqlite::types::ValueRef::Text(key) = row.get_ref(0)? else {
-                return Err(rusqlite::Error::InvalidQuery);
-            };
-            let Some(position) = rows.iter().position(|row| row.key.as_bytes() == key) else {
-                return Err(rusqlite::Error::InvalidQuery);
-            };
-            if std::mem::replace(&mut changed[position], true) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-        }
-    }
-    // Finalize RETURNING before source/search work or its after-DML sample.
-    statement.finalize()?;
-    Ok(changed)
-}
 
 impl SqliteStore {
     fn publish_catalog_with_generation(
@@ -3591,6 +3544,13 @@ impl SqliteStore {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
+            #[cfg(test)]
+            if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::history_projection::publish_original(&transaction, publication).map_err(failure)?;
+            } else {
+                crate::history_projection::publish(&transaction, publication).map_err(failure)?;
+            }
+            #[cfg(not(test))]
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             stage("history", &transaction);
             let mut metadata_measurements =
@@ -3643,17 +3603,22 @@ impl SqliteStore {
                     let mut member = transaction
                         .prepare("INSERT INTO catalog_members VALUES (?1)")
                         .map_err(failure)?;
+                    #[cfg(test)]
                     let single_sql = format!(
                         "{CATALOG_INSERT}(?1, 'current', ?2, ?3, ?4, ?5, ?6){CATALOG_CONFLICT}"
                     );
+                    #[cfg(test)]
                     let mut put = if batch_bytes.is_none() {
                         Some(transaction.prepare(&single_sql).map_err(failure)?)
                     } else {
                         None
                     };
+                    let current_effects = crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction);
+                    #[cfg(test)]
                     let mut remove_sources = transaction
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
+                    #[cfg(test)]
                     let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     metadata_measurements.record("statements", statements_started, 1);
                     let bulk_changed = if batch_bytes.is_some() {
@@ -3691,7 +3656,7 @@ impl SqliteStore {
                         }
                         let started = metadata_measurements.start();
                         let changed =
-                            put_catalog_batch(&transaction, rows, &metadata).map_err(failure)?;
+                            crate::storage::sqlite::publication::put_catalog_batch(&transaction, rows, &metadata).map_err(failure)?;
                         metadata_measurements.record("catalog_rows", started, rows.len());
                         if let Some(sample) = metadata_sample.as_mut() {
                             sample.stage("catalog_rows", &transaction);
@@ -3742,7 +3707,9 @@ impl SqliteStore {
                             if let Some(sample) = sample.as_mut() {
                                 sample.stage("member_insert", &transaction);
                             }
-                            let changed = put
+                            #[cfg(test)]
+                            let changed = if matches!(writer, CatalogWriter::OriginalPorts) {
+put
                                 .as_mut()
                                 .expect("row_wise writer statement")
                                 .execute(params![
@@ -3753,7 +3720,12 @@ impl SqliteStore {
                                     row.parent,
                                     metadata
                                 ])
-                                .map_err(failure)?;
+                                .map_err(failure)?
+                            } else {
+                                usize::from(crate::storage::catalog::CurrentPublicationStore::current(&current_effects, row, metadata).map_err(failure)?)
+                            };
+                            #[cfg(not(test))]
+                            let changed = usize::from(crate::storage::catalog::CurrentPublicationStore::current(&current_effects, row, metadata).map_err(failure)?);
                             if !rebuild_search
                                 && (changed > 0
                                     || initialize_search
@@ -3786,6 +3758,8 @@ impl SqliteStore {
                         }
                         if changed || previous_version.as_deref() != Some(&version) {
                             let started = metadata_measurements.start();
+                            #[cfg(test)]
+                            if matches!(writer, CatalogWriter::OriginalPorts) {
                             remove_sources.execute([&row.key]).map_err(failure)?;
                             metadata_measurements.record("source_retirement", started, 1);
                             if let Some(sample) = sample.as_mut() {
@@ -3836,6 +3810,11 @@ impl SqliteStore {
                                     .map_err(failure)?;
                                 metadata_measurements.record("catalog_sources", started, 1);
                             }
+                            } else {
+                                crate::storage::catalog::publish_current_sources(&current_effects, row).map_err(failure)?;
+                            }
+                            #[cfg(not(test))]
+                            crate::storage::catalog::publish_current_sources(&current_effects, row).map_err(failure)?;
                         } else if let Some(sample) = sample.as_mut() {
                             sample.stage("source_retirement", &transaction);
                         }
@@ -3888,6 +3867,9 @@ impl SqliteStore {
                     measured.then_some(&mut search_observation),
                 )
                 .map_err(failure)?;
+            } else if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::catalog_search::publish_current_rows_original(&transaction, &search_rows)
+                    .map_err(failure)?;
             } else {
                 crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                     .map_err(failure)?;
@@ -5025,7 +5007,7 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         reprice::file_schema(false, false)
     };
     Ok([
-        SLOT_SCHEMA,
+        if p.semantic_stage { crate::storage::sqlite::publication::SLOT_SCHEMA } else { SLOT_SCHEMA },
         catalog_schema(p.catalog),
         semantic_stage::support_schema(p.semantic_support, p.semantic_stage),
         metadata_schema(p.metadata),
@@ -5048,8 +5030,8 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         crate::overview::SCHEMA,
         crate::causal_trace::header_schema(p.trace),
         crate::causal_trace::SCHEMA,
-        crate::history_projection::SCHEMA,
-        crate::catalog_search::SCHEMA,
+        if p.semantic_stage { crate::storage::sqlite::history::SCHEMA } else { crate::history_projection::SCHEMA },
+        if p.semantic_stage { crate::storage::sqlite::search::SCHEMA } else { crate::catalog_search::SCHEMA },
         crate::storage::sqlite::changes::schema(p.metadata, p.catalog),
         reprice::queue_schema(p.pricing_queue),
         reprice::catalog_schema(p.pricing_queue, p.catalog, p.metadata),
@@ -8962,6 +8944,9 @@ mod tests {
                 Sha256::digest(format!("{a:?}").as_bytes()),
                 Sha256::digest(format!("{b:?}").as_bytes())
             );
+        }
+        for table in ["session_catalog", "session_catalog_sources", "catalog_native_dependencies", "session_search_documents", "session_search_memberships", "session_search_counts"] {
+            assert!(typed.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get::<_,i64>(0)).unwrap()>0, "the frozen oracle must exercise {table}");
         }
         assert!(
             typed

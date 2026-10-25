@@ -3,10 +3,16 @@
 //! rewrites at the same path are not silently treated as that original source.
 use crate::{
     model::summary::CatalogRow,
-    slot_projection::{Publication, SavedSlot, VERSION},
+    slot_projection::{Publication, VERSION},
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction};
+#[cfg(test)]
+use rusqlite::params;
+#[cfg(test)]
+use crate::slot_projection::SavedSlot;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const SCHEMA: &str = "
@@ -80,6 +86,15 @@ pub(crate) fn preserve_replacements(
 /// Must run inside the same source/membership/revision-CAS transaction, before
 /// current rows or recipes are overwritten. No source body is copied or read.
 pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> rusqlite::Result<()> {
+    crate::storage::catalog::publish_history_rows(
+        &crate::storage::sqlite::history::OriginalHistory::unbound(tx),
+        publication.rows,
+        publication.transcripts,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn publish_original(tx: &Transaction<'_>, publication: &Publication<'_>) -> rusqlite::Result<()> {
     let Some(projections) = publication.transcripts else {
         return Ok(());
     };
@@ -287,12 +302,15 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
     }
     Ok(())
 }
+#[cfg(test)]
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
+#[cfg(test)]
 fn encode(value: &impl serde::Serialize) -> rusqlite::Result<String> {
     serde_json::to_string(value).map_err(data)
 }
+#[cfg(test)]
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> rusqlite::Result<T> {
     serde_json::from_str(value).map_err(data)
 }
