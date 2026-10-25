@@ -55,7 +55,7 @@ impl PgPool {
         }
         let mut lease = self.acquire(control)?;
         let limits = self.inner.limits;
-        let deadline = Instant::now() + limits.txn_deadline;
+        let deadline = control.deadline(Instant::now() + limits.txn_deadline);
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
         connection.client.context(deadline, control, limits);
         let mut phase = Phase::PreBegin;
