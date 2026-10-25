@@ -338,6 +338,51 @@ pub(crate) mod conformance {
         assert!(!encoded.id.as_bytes().contains(&0));
         assert_eq!(encoded.namespace.as_bytes(), namespace.as_bytes());
 
+        // The same durable intent lifecycle runs in all three adapters.
+        let intent_paths = vec!["durable-intent".to_owned()];
+        let operation = discover_operation(namespace, &intent_paths, false);
+        let intent = SourceIntent::Discover {
+            operation: operation.clone(), paths: intent_paths.clone(), complete: false,
+        };
+        store.persist_intent(&intent).unwrap();
+        store.persist_intent(&intent).unwrap();
+        assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
+        assert_eq!(store.acknowledge_intent(&operation), Err(StorageError::Conflict));
+        assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
+        let durable_claim = store.claims(&intent_paths).unwrap();
+        drop(store);
+        let mut store = open();
+        assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
+        for _ in 0..2 {
+            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
+        }
+        assert_eq!(store.claims(&intent_paths).unwrap(), durable_claim);
+        let rebound_paths = vec!["durable-rebound".to_owned()];
+        let mut rebound_operation = discover_operation(namespace, &rebound_paths, true);
+        rebound_operation.id = operation.id.clone();
+        let rebound = SourceIntent::Discover {
+            operation: rebound_operation.clone(), paths: rebound_paths.clone(), complete: true,
+        };
+        assert_eq!(store.persist_intent(&rebound), Err(StorageError::Conflict));
+        assert_eq!(rebound.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        assert_eq!(store.acknowledge_intent(&rebound_operation), Err(StorageError::Conflict));
+        assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
+        assert_eq!(store.claims(&rebound_paths).unwrap(), vec![(rebound_paths[0].clone(), None)]);
+        store.acknowledge_intent(&operation).unwrap();
+        assert!(store.pending_intents().unwrap().is_empty());
+        let failed_expected = vec![(intent_paths[0].clone(), None)];
+        let failed = SourceIntent::Invalidate {
+            operation: invalidate_operation(namespace, &failed_expected), expected: failed_expected,
+        };
+        store.persist_intent(&failed).unwrap();
+        assert_eq!(failed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        drop(store);
+        let mut store = open();
+        assert_eq!(failed.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Conflict);
+        store.acknowledge_intent(failed.operation()).unwrap();
+        assert!(store.pending_intents().unwrap().is_empty());
+        assert_eq!(store.claims(&intent_paths).unwrap(), durable_claim);
+
         // This sequence deliberately retains pending invalidations. Neither
         // profile may manufacture a successful consumer acknowledgement here.
         let before = store.backfill_state().unwrap();

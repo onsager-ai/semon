@@ -213,3 +213,58 @@ fn pg_source_finish_generation_fixture_is_real_but_native_pg_publisher_remains_u
     assert_eq!(store.backfill_state().unwrap().as_deref(), Some("complete"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn pg_source_concurrent_claim_cas_serializes_one_winner() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "concurrent";
+    let paths = vec!["source".to_owned()];
+    discover(namespace, &paths, true).apply(&mut journal(&pool, namespace)).unwrap();
+    let expected = journal(&pool, namespace).claims(&paths).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let results = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let expected = expected.clone();
+            let barrier = barrier.clone();
+            let mut store = journal(&pool, namespace);
+            handles.push(scope.spawn(move || {
+                let intent = SourceIntent::Invalidate {
+                    operation: SourceOperation::capture(namespace, "invalidate", &serde_json::to_vec(&expected).unwrap()), expected,
+                };
+                store.persist_intent(&intent).unwrap();
+                barrier.wait();
+                let result = intent.apply(&mut store).unwrap();
+                store.acknowledge_intent(intent.operation()).unwrap();
+                result
+            }));
+        }
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|r| **r == SourceMutationReceipt::Applied).count(), 1);
+    assert_eq!(results.iter().filter(|r| **r == SourceMutationReceipt::Conflict).count(), 1);
+    let after = journal(&pool, namespace).claims(&paths).unwrap();
+    assert_eq!(after[0].1, expected[0].1.map(|revision| revision + 1));
+    assert!(journal(&pool, namespace).pending_intents().unwrap().is_empty());
+}
+
+#[test]
+fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() {
+    let (pool, factory) = fixture(|_| {});
+    factory.client().batch_execute("CREATE FUNCTION source_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source_path=convert_to('fault','UTF8') THEN RAISE EXCEPTION 'injected source fault'; END IF; RETURN NEW; END; $$; CREATE TRIGGER source_fault BEFORE INSERT ON semon_pg_source_members FOR EACH ROW EXECUTE FUNCTION source_fault();").unwrap();
+    let namespace = "rollback";
+    let intent = discover(namespace, &["first".into(), "fault".into()], true);
+    let mut store = journal(&pool, namespace);
+    store.persist_intent(&intent).unwrap();
+    assert_eq!(intent.apply(&mut store), Err(StorageError::Unavailable));
+    drop(store);
+    let mut store = journal(&pool, namespace);
+    assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
+    assert!(store.pending(256).unwrap().is_empty());
+    assert_eq!(store.claims(&["first".into(), "fault".into()]).unwrap(), vec![("first".into(), None), ("fault".into(), None)]);
+    assert_eq!(store.acknowledge_intent(intent.operation()), Err(StorageError::Conflict));
+    factory.client().batch_execute("DROP TRIGGER source_fault ON semon_pg_source_members").unwrap();
+    assert_eq!(intent.apply(&mut store).unwrap(), SourceMutationReceipt::Applied);
+    assert_eq!(store.claims(&["first".into(), "fault".into()]).unwrap(), vec![("first".into(), Some(1)), ("fault".into(), Some(2))]);
+    store.acknowledge_intent(intent.operation()).unwrap();
+}

@@ -160,9 +160,11 @@ impl SourceObservationStore for PgSourceJournal {
         })
     }
     fn discover(&mut self, operation: &SourceOperation, paths: &[String], complete: bool) -> Result<SourceMutationReceipt, StorageError> {
+        validate_paths(paths)?;
         self.apply(&SourceIntent::Discover { operation: operation.clone(), paths: paths.to_vec(), complete })
     }
     fn invalidate(&mut self, operation: &SourceOperation, expected: &[(String, Option<i64>)]) -> Result<SourceMutationReceipt, StorageError> {
+        if expected.len() > 256 { return Err(StorageError::InvalidArguments); }
         self.apply(&SourceIntent::Invalidate { operation: operation.clone(), expected: expected.to_vec() })
     }
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
@@ -185,6 +187,7 @@ impl SourceObservationStore for PgSourceJournal {
         })
     }
     fn finish_backfill(&mut self, operation: &SourceOperation, expected_generation: Option<&str>) -> Result<SourceMutationReceipt, StorageError> {
+        if expected_generation.is_some_and(|value| value.len() > 4096) { return Err(StorageError::InvalidArguments); }
         self.apply(&SourceIntent::FinishBackfill { operation: operation.clone(), expected_generation: expected_generation.map(str::to_owned) })
     }
 }
