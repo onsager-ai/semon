@@ -548,7 +548,15 @@ pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
-    install_families(tx, fixture, true)
+    install_families(tx, fixture, false)?;
+    for (path, ledger, index) in &fixture.sources {
+        let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let summary = index.tree_summary.as_ref().ok_or(StorageError::Unavailable)?;
+        if !super::super::tree_writer::publish(tx, path, ledger, None, source, summary, index.native_usage_observations.is_some())? {
+            return Err(StorageError::Unavailable);
+        }
+    }
+    Ok(())
 }
 pub(crate) fn install_without_tree(
     tx: &mut PgTxn<'_>,
@@ -664,6 +672,9 @@ fn restore(pool: &PgPool, data: &Fixture) -> Summary {
     .unwrap()
 }
 fn assert_oracle(actual: &mut Summary, expected: &Summary) {
+    assert_eq!(actual.line_count, expected.line_count);
+    assert_eq!(actual.malformed_lines, expected.malformed_lines);
+    assert_eq!(serde_json::to_value(actual.compact(false)).unwrap(), serde_json::to_value(expected.compact(false)).unwrap());
     assert_eq!(actual.first, expected.first);
     assert_eq!(actual.last, expected.last);
     assert_eq!(actual.cwd, expected.cwd);
@@ -834,11 +845,18 @@ fn pg_tree_checkpoint_cancel_deadline_closed_nullable_and_unsigned_tokens() {
         tx.driver.execute("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) SELECT namespace,projection_id,$1,NULL,true FROM semon_pg_native_tree_headers WHERE source_path=$2", &[&"null\0🦀".as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?;
         tx.driver.batch_execute("UPDATE semon_pg_native_usage SET input=18446744073709551615,total=18446744073709551615").map_err(sqlstate::error)?;Ok(())
     }).unwrap();
-    assert_eq!(
-        checkpoint.tool_name("tool\0🦀").unwrap(),
-        Some("Bash'\0🦀".into())
-    );
-    assert_eq!(checkpoint.tool_name("null\0🦀").unwrap(), None);
+    assert!(checkpoint.tool_name("tool\0🦀").is_err());
+    assert!(checkpoint.tool_name("null\0🦀").is_err());
+    assert!(summary.load_shared_usage().is_err());
+    // Repair through the real publisher before admitting this generation again.
+    pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+        let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        assert!(super::super::tree_writer::publish(tx, &data.path, &data.ledger, Some(&data.ledger), source, &data.oracle, false)?);
+        Ok(())
+    }).unwrap();
+    let mut summary = restore(&pool, &data);
+    assert_eq!(summary.tool_name("tool\0🦀").unwrap(), Some("Bash'\0🦀".into()));
+    assert_eq!(summary.tool_name("null\0🦀").unwrap(), None);
     summary.load_shared_usage().unwrap();
     assert!(
         summary

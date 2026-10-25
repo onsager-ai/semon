@@ -17,6 +17,30 @@ pub(crate) struct TreeSummaryRecord {
 }
 
 impl TreeSummaryRecord {
+    /// One current codec for both physical readers. Absence of either witness
+    /// is not permission to return a complete Current summary.
+    pub(crate) fn decode_current(
+        encoded: &[u8],
+        ledger: &str,
+        projection: Option<&str>,
+        interpretation: &str,
+    ) -> Option<Self> {
+        if encoded.len() > 1048576 {
+            return None;
+        }
+        let record: Self = serde_json::from_slice(encoded).ok()?;
+        if record.version != 3
+            || record.parser_version != super::CACHE_VERSION
+            || record.ledger != ledger
+            || projection.is_none()
+            || record.projection_witness.as_deref() != projection
+            || record.interpretation_witness.as_deref() != Some(interpretation)
+        {
+            return None;
+        }
+        Some(record)
+    }
+
     pub(crate) fn new(
         ledger: String,
         projection_witness: Option<String>,

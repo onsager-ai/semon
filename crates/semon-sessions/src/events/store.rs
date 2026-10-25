@@ -6175,25 +6175,16 @@ fn read_tree_summary(
     let Some(text) = encoded.flatten() else {
         return Ok(None);
     };
-    let Some(record) = serde_json::from_str::<TreeSummaryRecord>(&text).ok() else {
+    let projection = tree_state::witness(connection, path, ledger)?;
+    let interpretation = tree_interpretation(connection, path)?;
+    let Some(record) = TreeSummaryRecord::decode_current(
+        text.as_bytes(),
+        &header_ledger(ledger),
+        projection.as_deref(),
+        &interpretation,
+    ) else {
         return Ok(None);
     };
-    if record.version != 3
-        || record.parser_version != CACHE_VERSION
-        || record.ledger != header_ledger(ledger)
-    {
-        return Ok(None);
-    }
-    if let Some(witness) = &record.projection_witness
-        && tree_state::witness(connection, path, ledger)?.as_ref() != Some(witness)
-    {
-        return Ok(None);
-    }
-    if let Some(witness) = &record.interpretation_witness
-        && tree_interpretation(connection, path)? != *witness
-    {
-        return Ok(None);
-    }
     let mut summary = record.summary;
     if !tree_state::restore(connection, path, ledger, &mut summary)? {
         return Ok(None);
