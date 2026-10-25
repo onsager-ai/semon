@@ -8366,5 +8366,84 @@ mod tests {
             assert_eq!(old.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,Outcome::Conflict);
             assert_eq!(shared_state(&f),before);
         }
+
+        #[test]
+        fn configured_semantic_domain81_peer_foreign_collision_current_and_dependency_custody() {
+            let (f, foreign_config, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = peer_inputs(options, 2, "claude72-1");
+            // Identical native IDs, messages and physical paths in both namespaces.
+            let mut foreign = open(&foreign_config);
+            let (foreign_batch, foreign_model) = claude_ready(&mut foreign, options, &inputs);
+            publish(&mut foreign, &f, &foreign_batch, &foreign_model);
+            foreign.finish_semantic_stage(foreign_batch.epoch).unwrap();
+            let before = namespace_state(&f,"source-b");
+            let mut admitted = open(&f.config);
+            let (batch, model) = claude_ready_from(&mut admitted, options, &inputs, &inputs[..1]);
+            oracle(&admitted,options,&inputs,model.prepared());
+            publish(&mut admitted,&f,&batch,&model);
+            admitted.finish_semantic_stage(batch.epoch).unwrap();
+            assert_eq!(namespace_state(&f,"source-b"),before);
+            // Repeat through actual published Current/dependency authority.
+            let (next, next_model) = claude_ready_from(&mut admitted,options,&inputs,&inputs[..1]);
+            assert!(f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind IN ('native','dependency','nativeall') AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap());
+            oracle(&admitted,options,&inputs,next_model.prepared());
+            publish(&mut admitted,&f,&next,&next_model);
+            assert_eq!(namespace_state(&f,"source-b"),before,"all foreign table rows remain byte-identical");
+        }
+        #[test]
+        fn configured_semantic_domain81_filename_peer_pages_before_source_budget_refusal() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            let mut inputs = peer_inputs(options,66,"peer81-target");
+            for (i,input) in inputs.iter_mut().enumerate().skip(1) {
+                let old = input.full_path(options);
+                input.path = format!("projects/sanitized/peer81-{i}/peer81-target.jsonl").into();
+                let path = input.full_path(options);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::rename(old,path).unwrap();
+            }
+            let mut admitted = open(&f.config);
+            claude_ingest(&mut admitted,options,&inputs);
+            let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            admitted.begin_semantic_stage_with_journal(&[seed.clone()],&runtime,true).unwrap();
+            let mut paged = false;
+            let mut refused = false;
+            for _ in 0..128 {
+                let before = shared_state(&f);
+                match admitted.semantic_batch(64) {
+                    Err(error) => {
+                        assert_eq!(error.to_string(),"semantic_component_source_budget");
+                        assert_eq!(shared_state(&f),before,"whole-TX rollback at source capacity");
+                        refused=true; break;
+                    }
+                    Ok(Some(batch)) => {
+                        paged |= f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
+                        if !batch.paths.is_empty() {
+                            let selected = inputs.iter().filter(|i|batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                            admitted.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
+                        }
+                    }
+                    Ok(None) => panic!("native frontier stage disappeared"),
+                }
+            }
+            assert!(paged && refused,"native filename candidates persist a bounded cursor before refusal");
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            claude_ingest(&mut ordinary,options,&inputs);
+            ordinary.begin_semantic_stage_with_journal(&[seed],&runtime,true).unwrap();
+            let db = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+            let mut ordinary_paged=false;
+            for _ in 0..128 {
+                let batch = ordinary.semantic_batch(64).unwrap().unwrap();
+                if db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap() { ordinary_paged=true; break; }
+                if !batch.paths.is_empty() {
+                    let selected=inputs.iter().filter(|i|batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                    ordinary.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
+                }
+            }
+            assert!(ordinary_paged,"ordinary producer must exhibit the same unfinished filename cursor");
+        }
     }
 }
