@@ -1104,6 +1104,9 @@ pub(crate) trait IndexStore: Send {
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
+    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
+        Err(StoreError::Configured(crate::storage::StorageError::NamespaceUpgradePending))
+    }
     fn discover_catalog_sources(
         &mut self,
         paths: &[String],
@@ -1753,6 +1756,10 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .backfill_state()
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
+        self.store.as_mut().ok_or_else(||io::Error::other("native producer unavailable"))?
+            .discover_recovery_sources().map_err(|error|io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_catalog_sources(
         &mut self,

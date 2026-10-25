@@ -59,6 +59,8 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_ingest_and_stage_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_rollback_and_reopen_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_cross_namespace_capability_refused_zero_writes -- --exact --nocapture

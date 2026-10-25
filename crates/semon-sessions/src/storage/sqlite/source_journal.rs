@@ -17,6 +17,7 @@ pub(crate) fn invalidate(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
+    crate::native_timing::discovery_count(|counts|counts.statements+=3);
     if namespace.is_none() && super::namespace::is_bound(db)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -65,7 +66,7 @@ pub(crate) fn discover(
         )?;
     } else {
         db.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state',?1)",
+            "INSERT INTO meta(key,value) VALUES('catalog_backfill_state',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value<>excluded.value",
             [state],
         )?;
     }
