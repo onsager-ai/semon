@@ -6,6 +6,8 @@ pub(crate) mod catalog;
 mod conformance;
 pub mod native_events;
 pub(crate) mod navigation;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub mod source_observations;
@@ -208,7 +210,7 @@ impl StoreConfig {
     pub fn source_observations(
         &self,
     ) -> Result<Box<dyn source_observations::SourceObservationStore>, StorageError> {
-        Ok(Box::new(crate::events::EventCache::open_configured(self)?))
+        sqlite::source_journal::open(self)
     }
 
     /// Resolve configuration without creating, resetting or repairing storage.

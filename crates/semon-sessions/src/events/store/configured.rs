@@ -1344,7 +1344,7 @@ impl Writer {
 mod tests {
     use super::*;
     use crate::events::EventCache;
-    use crate::storage::{LogicalSourceNamespace, StoreBackend};
+    use crate::storage::{LogicalSourceNamespace, StoreBackend, source_observations::SourceClaims};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -2497,7 +2497,7 @@ mod tests {
         let f = semantic_fixture("reducer-a");
         let mut store = runtime_semantic(&f.config);
         let paths = [f.raw.to_string_lossy().into_owned()];
-        let claims = store.catalog_claims(&paths).unwrap();
+        let claims = source_claims(&*store, &paths);
         let generation = store.session_catalog_generation().unwrap();
         store.begin_semantic_stage(&paths, "runtime", true).unwrap();
         let indexing = store.semantic_batch(64).unwrap().unwrap();
@@ -2560,7 +2560,7 @@ mod tests {
             store.record_semantic_batch(&relations, &prepared).unwrap(),
             Outcome::Written
         );
-        assert_eq!(store.catalog_claims(&paths).unwrap(), claims);
+        assert_eq!(source_claims(&*store, &paths), claims);
         assert_eq!(store.session_catalog_generation().unwrap(), generation);
         let publication = store.semantic_batch(64).unwrap().unwrap();
         assert_eq!(publication.phase, Phase::Publication);
@@ -2622,13 +2622,21 @@ mod tests {
         let restarted = other.semantic_batch(64).unwrap().unwrap();
         assert_eq!(restarted.paths, paths);
         assert!(restarted.epoch > identity.epoch);
-        assert_eq!(other.catalog_claims(&paths).unwrap(), prepared.claims);
+        assert_eq!(source_claims(&*other, &paths), prepared.claims);
     }
 
     fn runtime_semantic(config: &StoreConfig) -> Box<dyn IndexStore> {
         let capability =
             crate::storage::sqlite::semantic::SemanticStaging::validate(config).unwrap();
         crate::storage::sqlite::configured_index::open_semantic(capability).unwrap()
+    }
+
+    fn source_claims(store: &dyn IndexStore, paths: &[String]) -> SourceClaims {
+        store
+            .source_observations()
+            .expect("configured source observation store")
+            .claims(paths)
+            .unwrap()
     }
 
     fn owned_semantic(config: &StoreConfig) -> Box<dyn IndexStore> {
@@ -3553,9 +3561,7 @@ mod tests {
             assert!(generation.is_some());
             assert_eq!(stores[i].session_catalog_generation().unwrap(), generation);
             assert!(
-                stores[i]
-                    .catalog_claims(&batch.paths)
-                    .unwrap()
+                source_claims(&*stores[i], &batch.paths)
                     .iter()
                     .all(|(_, claim)| claim.is_none())
             );
@@ -3676,10 +3682,7 @@ mod tests {
             serde_json::to_value(&next.context.endpoints).unwrap(),
             serde_json::to_value(&batch.context.endpoints).unwrap()
         );
-        assert_eq!(
-            successor.catalog_claims(&next.paths).unwrap(),
-            prepared.claims
-        );
+        assert_eq!(source_claims(&*successor, &next.paths), prepared.claims);
         assert_old_epoch_zero_writes(&a, &mut *old, &batch, &prepared);
         assert_old_epoch_zero_writes(&a, &mut *observer, &batch, &prepared);
         assert_eq!(
@@ -3949,9 +3952,7 @@ mod tests {
         expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         assert_eq!(retained, serde_json::to_string(&expected).unwrap());
         assert!(
-            store
-                .catalog_claims(&batch.paths)
-                .unwrap()
+            source_claims(&*store, &batch.paths)
                 .iter()
                 .all(|(_, revision)| revision.is_none())
         );
@@ -4057,7 +4058,7 @@ mod tests {
         for (i, path) in [&a.raw, &b_raw].into_iter().enumerate() {
             let store = &mut stores[i];
             let paths = vec![path.to_string_lossy().into_owned()];
-            let claims = store.catalog_claims(&paths).unwrap();
+            let claims = source_claims(&**store, &paths);
             assert!(claims[0].1.is_some());
             assert_eq!(store.session_catalog_generation().unwrap(), None);
             assert_eq!(
@@ -4084,7 +4085,7 @@ mod tests {
                 store.record_semantic_batch(&identity, &prepared).unwrap(),
                 Outcome::Written
             );
-            assert_eq!(store.catalog_claims(&paths).unwrap(), claims);
+            assert_eq!(source_claims(&**store, &paths), claims);
         }
         let db = a.db();
         for (ns, path, native) in [
@@ -4322,7 +4323,7 @@ mod tests {
         let f = semantic_fixture("source-a");
         let mut store = crate::storage::sqlite::open_private_semantic(&f.config).unwrap();
         let paths = vec![f.raw.to_string_lossy().into_owned()];
-        let claims = store.catalog_claims(&paths).unwrap();
+        let claims = source_claims(&*store, &paths);
         assert!(claims[0].1.is_some());
         let base = store.session_catalog_generation().unwrap();
         assert_eq!(
@@ -4341,7 +4342,7 @@ mod tests {
             Outcome::Written
         );
         assert_eq!(
-            store.catalog_claims(&paths).unwrap(),
+            source_claims(&*store, &paths),
             claims,
             "index staging must not ACK publication claims"
         );
@@ -4500,7 +4501,7 @@ mod tests {
         source.native_role = Some(serde_json::json!({"Codex":header.metadata}));
         crate::model::PreparedSources {
             base_generation: batch.base_generation.clone(),
-            claims: store.catalog_claims(&batch.paths).unwrap(),
+            claims: source_claims(store, &batch.paths),
             rows: Vec::new(),
             transcripts: Vec::new(),
             pids: Default::default(),
@@ -5020,8 +5021,14 @@ mod tests {
         let path = f.raw.to_string_lossy().into_owned();
         writer.begin(&path, None, &"a".repeat(64), "codex").unwrap();
         let mut observations = f.config.source_observations().unwrap();
+        let observation_payload = serde_json::to_vec(&(std::slice::from_ref(&path), true)).unwrap();
+        let observation = crate::storage::source_observations::SourceOperation::capture(
+            f.config.namespace.as_str(),
+            "discover",
+            &observation_payload,
+        );
         observations
-            .discover(std::slice::from_ref(&path), true)
+            .discover(&observation, std::slice::from_ref(&path), true)
             .unwrap();
         let ledger = Ledger {
             stat: Stat::of(&f.raw).unwrap(),
@@ -7387,7 +7394,7 @@ mod tests {
 
         fn selector_inputs(options: &crate::Options, duplicate: bool) -> Vec<crate::Input> {
             (0..3).map(|i| {
-                let input = crate::Input { root: crate::InputRoot::Codex, path: format!("sessions/selector-{i}.jsonl").into() };
+                let input = crate::Input { root: crate::InputRoot::Codex, path: format!("sessions/selector-{i}.jsonl") };
                 let mut meta = serde_json::json!({"id":format!("selector-{i}"),"cwd":"/sanitized"});
                 if i != 0 {
                     meta["parent_thread_id"] = serde_json::json!("selector-0");

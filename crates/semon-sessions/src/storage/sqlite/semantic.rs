@@ -156,7 +156,9 @@ impl SemanticStaging {
             owner: Some(owner),
         })
     }
-    pub(super) fn journal(&self) -> SourceJournal {
+    // EventCache owns the typed source-observation producer.  Keep this
+    // crate-visible until the active semantic work can consume the same port.
+    pub(crate) fn journal(&self) -> SourceJournal {
         self.owner
             .as_ref()
             .map(|owner| SourceJournal::owned(owner.clone()))
