@@ -504,7 +504,9 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
     let (pool, factory) = fixture(|_| {});
     let mut store = journal(&pool, "recovery-refusal");
     let operation = SourceOperation::capture(
-        "recovery-refusal", "recover", &serde_json::to_vec(&Some("")).unwrap(),
+        "recovery-refusal",
+        "recover",
+        &serde_json::to_vec(&Some("")).unwrap(),
     );
     let intent = SourceIntent::Recover {
         operation: operation.clone(),
@@ -512,8 +514,14 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
     };
     assert_eq!(store.recovery_is_current(), Err(StorageError::Unavailable));
     assert_eq!(store.recovery_cursor(), Err(StorageError::Unavailable));
-    assert_eq!(store.persist_intent(&intent), Err(StorageError::Unavailable));
-    assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Unavailable));
+    assert_eq!(
+        store.persist_intent(&intent),
+        Err(StorageError::Unavailable)
+    );
+    assert_eq!(
+        store.recover(&operation, Some("")),
+        Err(StorageError::Unavailable)
+    );
     assert_eq!(intent.apply(&mut store), Err(StorageError::Unavailable));
     assert_eq!(store.apply(&intent), Err(StorageError::Unavailable));
     let counts = factory.client().query_one(

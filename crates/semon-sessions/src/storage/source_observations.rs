@@ -108,11 +108,9 @@ impl SourceIntent {
         store: &mut dyn SourceObservationStore,
     ) -> Result<SourceMutationReceipt, StorageError> {
         match self {
-            Self::Recover { operation, cursor } => {
-                store
-                    .recover(operation, cursor.as_deref())
-                    .map(|(receipt, _)| receipt)
-            }
+            Self::Recover { operation, cursor } => store
+                .recover(operation, cursor.as_deref())
+                .map(|(receipt, _)| receipt),
             Self::Discover {
                 operation,
                 paths,

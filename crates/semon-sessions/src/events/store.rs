@@ -7785,14 +7785,16 @@ mod tests {
                 return Ok(true);
             }
             let cursor = self.recovery_cursor().map_err(StoreError::Configured)?;
-            let operation = SourceOperation::capture(
-                "", "recover", &serde_json::to_vec(&cursor).unwrap(),
-            );
+            let operation =
+                SourceOperation::capture("", "recover", &serde_json::to_vec(&cursor).unwrap());
             self.persist_intent(&SourceIntent::Recover {
-                operation: operation.clone(), cursor: cursor.clone(),
-            }).map_err(StoreError::Configured)?;
+                operation: operation.clone(),
+                cursor: cursor.clone(),
+            })
+            .map_err(StoreError::Configured)?;
             self.recover(&operation, cursor.as_deref())
-                .map(|(_, done)| done).map_err(StoreError::Configured)
+                .map(|(_, done)| done)
+                .map_err(StoreError::Configured)
         }
 
         fn discover_catalog_sources(
@@ -8519,20 +8521,31 @@ mod tests {
                 params![format!("recover-{i:03}"), format!("/recover-{i:03}.jsonl")],
             ).unwrap();
         }
-        store.connection.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after','')", [],
-        ).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after','')",
+                [],
+            )
+            .unwrap();
     }
 
     fn recovery_intent(cursor: Option<&str>) -> SourceIntent {
         SourceIntent::Recover {
-            operation: SourceOperation::capture("", "recover", &serde_json::to_vec(&cursor).unwrap()),
+            operation: SourceOperation::capture(
+                "",
+                "recover",
+                &serde_json::to_vec(&cursor).unwrap(),
+            ),
             cursor: cursor.map(str::to_owned),
         }
     }
 
     fn recovery_count(db: &Connection, table: &str) -> i64 {
-        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -8544,29 +8557,56 @@ mod tests {
         let original = recovery_intent(Some(""));
         store.persist_intent(&original).unwrap();
         LOSE_RECOVERY_ACK.with(|flag| flag.set(true));
-        assert_eq!(original.apply(&mut store), Err(StorageError::CommitUncertain));
-        assert_eq!(recovery_count(&store.connection, "catalog_backfill_sources"), 64);
-        assert_eq!(recovery_count(&store.connection, "source_observation_intents"), 0);
+        assert_eq!(
+            original.apply(&mut store),
+            Err(StorageError::CommitUncertain)
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "catalog_backfill_sources"),
+            64
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "source_observation_intents"),
+            0
+        );
         drop(store);
         let (mut store, _) = opened(&path);
         // Another worker advances the remaining page and then completes repair.
         let cursor = store.recovery_cursor().unwrap();
         let next = recovery_intent(cursor.as_deref());
         store.persist_intent(&next).unwrap();
-        assert_eq!(next.apply(&mut store).unwrap(), SourceMutationReceipt::Applied);
+        assert_eq!(
+            next.apply(&mut store).unwrap(),
+            SourceMutationReceipt::Applied
+        );
         let cursor = store.recovery_cursor().unwrap();
         let last = recovery_intent(cursor.as_deref());
         store.persist_intent(&last).unwrap();
-        assert_eq!(store.recover(last.operation(), cursor.as_deref()).unwrap(), (SourceMutationReceipt::Applied, true));
+        assert_eq!(
+            store.recover(last.operation(), cursor.as_deref()).unwrap(),
+            (SourceMutationReceipt::Applied, true)
+        );
         let before = store.connection.total_changes();
-        assert_eq!(store.recover(original.operation(), Some("")).unwrap(), (SourceMutationReceipt::AlreadyApplied, false));
+        assert_eq!(
+            store.recover(original.operation(), Some("")).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, false)
+        );
         assert_eq!(store.connection.total_changes(), before);
         // A stored true result also survives a newly requested recovery pass.
-        store.connection.execute("INSERT INTO meta VALUES('catalog_recovery_after','')", []).unwrap();
+        store
+            .connection
+            .execute("INSERT INTO meta VALUES('catalog_recovery_after','')", [])
+            .unwrap();
         let before = store.connection.total_changes();
-        assert_eq!(store.recover(last.operation(), cursor.as_deref()).unwrap(), (SourceMutationReceipt::AlreadyApplied, true));
+        assert_eq!(
+            store.recover(last.operation(), cursor.as_deref()).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, true)
+        );
         assert_eq!(store.connection.total_changes(), before);
-        assert_eq!(recovery_count(&store.connection, "catalog_backfill_sources"), 65);
+        assert_eq!(
+            recovery_count(&store.connection, "catalog_backfill_sources"),
+            65
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -8580,16 +8620,40 @@ mod tests {
         store.persist_intent(&intent).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER fail_recovery_receipt BEFORE INSERT ON source_observation_receipts BEGIN SELECT RAISE(ABORT,'recovery receipt fault'); END;").unwrap();
         assert!(intent.apply(&mut store).is_err());
-        assert_eq!(recovery_count(&store.connection, "catalog_backfill_sources"), 0);
-        assert_eq!(recovery_count(&store.connection, "session_catalog_invalidations"), 0);
-        assert_eq!(recovery_count(&store.connection, "source_observation_receipts"), 0);
+        assert_eq!(
+            recovery_count(&store.connection, "catalog_backfill_sources"),
+            0
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "session_catalog_invalidations"),
+            0
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "source_observation_receipts"),
+            0
+        );
         assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
         assert_eq!(store.recovery_cursor().unwrap().as_deref(), Some(""));
-        store.connection.execute_batch("DROP TRIGGER fail_recovery_receipt").unwrap();
-        assert_eq!(intent.apply(&mut store).unwrap(), SourceMutationReceipt::Applied);
-        assert_eq!(recovery_count(&store.connection, "catalog_backfill_sources"), 1);
-        assert_eq!(recovery_count(&store.connection, "session_catalog_invalidations"), 1);
-        assert_eq!(recovery_count(&store.connection, "source_observation_receipts"), 1);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_recovery_receipt")
+            .unwrap();
+        assert_eq!(
+            intent.apply(&mut store).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "catalog_backfill_sources"),
+            1
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "session_catalog_invalidations"),
+            1
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "source_observation_receipts"),
+            1
+        );
         assert!(store.pending_intents().unwrap().is_empty());
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -8602,15 +8666,42 @@ mod tests {
         seed_recovery(&store, 1);
         let intent = recovery_intent(Some(""));
         store.persist_intent(&intent).unwrap();
-        store.connection.execute("UPDATE meta SET value='/newer' WHERE key='catalog_recovery_after'", []).unwrap();
-        assert_eq!(store.recover(intent.operation(), Some("")).unwrap(), (SourceMutationReceipt::Conflict, false));
-        assert_eq!(recovery_count(&store.connection, "catalog_backfill_sources"), 0);
-        assert_eq!(recovery_count(&store.connection, "session_catalog_invalidations"), 0);
-        assert_eq!(recovery_count(&store.connection, "source_observation_receipts"), 1);
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value='/newer' WHERE key='catalog_recovery_after'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.recover(intent.operation(), Some("")).unwrap(),
+            (SourceMutationReceipt::Conflict, false)
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "catalog_backfill_sources"),
+            0
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "session_catalog_invalidations"),
+            0
+        );
+        assert_eq!(
+            recovery_count(&store.connection, "source_observation_receipts"),
+            1
+        );
         assert!(store.pending_intents().unwrap().is_empty());
-        store.connection.execute("UPDATE meta SET value='' WHERE key='catalog_recovery_after'", []).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value='' WHERE key='catalog_recovery_after'",
+                [],
+            )
+            .unwrap();
         let before = store.connection.total_changes();
-        assert_eq!(store.recover(intent.operation(), Some("")).unwrap(), (SourceMutationReceipt::Conflict, false));
+        assert_eq!(
+            store.recover(intent.operation(), Some("")).unwrap(),
+            (SourceMutationReceipt::Conflict, false)
+        );
         assert_eq!(store.connection.total_changes(), before);
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -8673,7 +8764,13 @@ mod tests {
         assert!(cache.pending_source_operation.is_none());
         assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
         assert_eq!(recovery_count(&peer, "source_observation_receipts"), 1);
-        let digest: String = peer.query_row("SELECT payload_digest FROM source_observation_receipts", [], |row| row.get(0)).unwrap();
+        let digest: String = peer
+            .query_row(
+                "SELECT payload_digest FROM source_observation_receipts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(digest, original.operation().payload_digest);
         assert!(!cache.discover_recovery_sources().unwrap());
         assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 65);
@@ -8723,7 +8820,15 @@ mod tests {
             ..crate::events::EventCache::default()
         };
         assert!(cache.discover_recovery_sources().is_err());
-        assert_eq!(cache.pending_source_operation.as_ref().unwrap().operation().namespace, "foreign-binding");
+        assert_eq!(
+            cache
+                .pending_source_operation
+                .as_ref()
+                .unwrap()
+                .operation()
+                .namespace,
+            "foreign-binding"
+        );
         assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 0);
         assert_eq!(recovery_count(&peer, "source_observation_receipts"), 0);
         assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
@@ -8739,12 +8844,18 @@ mod tests {
         let intent = recovery_intent(None);
         store.persist_intent(&intent).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER request_recovery_after_receipt AFTER INSERT ON source_observation_receipts BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
-        assert_eq!(store.recover(intent.operation(), None).unwrap(), (SourceMutationReceipt::Applied, true));
+        assert_eq!(
+            store.recover(intent.operation(), None).unwrap(),
+            (SourceMutationReceipt::Applied, true)
+        );
         assert!(!store.recovery_is_current().unwrap());
         assert_eq!(store.recovery_cursor().unwrap().as_deref(), Some(""));
         // Replay still reports the original Done and performs no new page.
         let before = store.connection.total_changes();
-        assert_eq!(store.recover(intent.operation(), None).unwrap(), (SourceMutationReceipt::AlreadyApplied, true));
+        assert_eq!(
+            store.recover(intent.operation(), None).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, true)
+        );
         assert_eq!(store.connection.total_changes(), before);
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -8774,10 +8885,13 @@ mod tests {
         assert!(!cache.discover_recovery_sources().unwrap());
         assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
         assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        let outcome: String = peer.query_row(
-            "SELECT outcome FROM source_observation_receipts WHERE operation_id=?1",
-            [&second.operation().id], |row| row.get(0),
-        ).unwrap();
+        let outcome: String = peer
+            .query_row(
+                "SELECT outcome FROM source_observation_receipts WHERE operation_id=?1",
+                [&second.operation().id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(outcome, "conflict");
         assert!(!cache.discover_recovery_sources().unwrap());
         assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 65);
