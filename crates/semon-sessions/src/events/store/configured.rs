@@ -5460,6 +5460,67 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_s2_proof_witness_and_physical_contract_refuse_tampering() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        let (a, b, options, inputs) = model_sources();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let binding = capability.reader_binding().unwrap();
+        let mut cache = EventCache::open_semantic(capability).unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-proof");
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        let key = &model.prepared().rows[0].key;
+        let runtime = binding.reader_runtime().unwrap();
+        let id = runtime.current_generation(key).unwrap();
+        let lease = runtime
+            .selected_generation(key, &id, &"a".repeat(64), 60_000)
+            .unwrap();
+        let db = SourceJournal::owned(NativeOwnership::admit(&a.config).unwrap())
+            .connection()
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_semantic_proof_immutable_update; DROP TRIGGER storage_semantic_proof_immutable_delete;")
+            .unwrap();
+        db.execute(
+            "UPDATE storage_semantic_publications SET proof_digest=?2 WHERE namespace=?1",
+            params![a.config.namespace.as_str(), "0".repeat(64)],
+        )
+        .unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        db.execute(
+            "DELETE FROM storage_semantic_publications WHERE namespace=?1",
+            [a.config.namespace.as_str()],
+        )
+        .unwrap();
+        assert!(runtime
+            .selected_generation(key, &id, &"b".repeat(64), 60_000)
+            .is_err());
+
+        let initialized = crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap();
+        let _ = EventCache::open_semantic(initialized).unwrap();
+        let db = SourceJournal::owned(NativeOwnership::admit(&b).unwrap())
+            .connection()
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable; CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT 1; END;")
+            .unwrap();
+        let refused = match crate::storage::sqlite::semantic::SemanticStaging::admit(&b) {
+            Err(_) => true,
+            Ok(capability) => EventCache::open_semantic(capability).is_err(),
+        };
+        assert!(refused);
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable; CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END; DROP INDEX storage_proof_lease_generation; CREATE INDEX storage_proof_lease_generation ON storage_proof_leases(namespace,id);")
+            .unwrap();
+        let refused = match crate::storage::sqlite::semantic::SemanticStaging::admit(&b) {
+            Err(_) => true,
+            Ok(capability) => EventCache::open_semantic(capability).is_err(),
+        };
+        assert!(refused);
+    }
+
+    #[test]
     fn configured_semantic_s2_equal_native_ids_are_namespace_owned_and_leases_bounded() {
         use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
         let (a, b, options, mut inputs) = model_sources();

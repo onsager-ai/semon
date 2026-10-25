@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 const TTL_MAX: u32 = 60_000;
 const LEASE_CAP: i64 = 64;
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_source_path ON storage_proof_sources(namespace,path,ledger,id);
 CREATE TABLE IF NOT EXISTS storage_proof_refs(namespace TEXT NOT NULL,session_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('current','history')),id TEXT NOT NULL,PRIMARY KEY(namespace,session_key,kind,id)) STRICT, WITHOUT ROWID;
@@ -27,23 +27,41 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON sto
 pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     db.execute_batch(SCHEMA).map_err(failed)?;
     // Compare the complete authored current physical contract, including key
-    // order, STRICT/WITHOUT ROWID and constraints. Never adopt a partial shape.
+    // order, STRICT/WITHOUT ROWID, indexes and immutable triggers. Never adopt
+    // a partial shape.
     for statement in SCHEMA.split(';') {
-        let Some(rest) = statement.trim().strip_prefix("CREATE TABLE IF NOT EXISTS ") else {
+        let statement = statement.trim();
+        let Some((kind, rest)) = ["TABLE", "INDEX", "TRIGGER"]
+            .into_iter()
+            .find_map(|kind| {
+                statement
+                    .strip_prefix(&format!("CREATE {kind} IF NOT EXISTS "))
+                    .map(|rest| (kind, rest))
+            })
+        else {
             continue;
         };
-        let name = rest.split('(').next().ok_or(StorageError::Unavailable)?;
-        let actual: String = db
+        let name = if kind == "TABLE" {
+            rest.split('(').next()
+        } else {
+            rest.split_whitespace().next()
+        }
+        .ok_or(StorageError::Unavailable)?;
+        let actual: Option<String> = db
             .query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1",
-                [name],
+                "SELECT sql FROM main.sqlite_schema WHERE type=?1 AND name=?2",
+                params![kind.to_ascii_lowercase(), name],
                 |r| r.get(0),
             )
+            .optional()
             .map_err(failed)?;
-        if actual != format!("CREATE TABLE {rest}") {
+        let expected = format!("CREATE {kind} {rest}");
+        if actual.as_deref() != Some(expected.as_str()) {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        super::catalog_namespace::guard(db, name)?;
+        if kind == "TABLE" {
+            super::catalog_namespace::guard(db, name)?;
+        }
     }
     Ok(())
 }
@@ -56,30 +74,31 @@ pub(super) fn publish(
     publication: &str,
     proof: &str,
     prepared: &crate::model::PreparedSources,
-) -> rusqlite::Result<()> {
+) -> Result<(), StorageError> {
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
-    let sql_admission = i64::try_from(admission).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     for row in &prepared.rows {
-        let metadata = serde_json::to_string(row).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
         let projection = prepared.transcripts.iter().find(|p| p.key == row.key);
         let slots = serde_json::to_string(&projection.map(|p| &p.slots))
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            .map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            .map_err(|_| StorageError::Unavailable)?;
         tx.execute(
-            "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 namespace,
                 id.0,
                 row.key,
                 publication,
+                proof,
                 sql_admission,
                 stream,
                 metadata,
                 slots,
                 prefix
             ],
-        )?;
+        ).map_err(failed)?;
         for source in &row.sources {
             let digest =
                 crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
@@ -92,37 +111,40 @@ pub(super) fn publish(
                     source.path.to_string_lossy(),
                     digest
                 ],
-            )?;
+            ).map_err(failed)?;
         }
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key])?;
+        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
         tx.execute(
             "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
             params![namespace, row.key, id.0],
-        )?;
-        let history: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![namespace, row.key], |r| r.get(0)).optional()?;
+        ).map_err(failed)?;
+        let history: Option<String> = tx.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![namespace, row.key], |r| r.get(0)).optional().map_err(failed)?;
         let mut retained = std::collections::BTreeSet::new();
         if let Some(history) = history {
+            if history.len() > 1_048_576 {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
             let history: CatalogRow =
-                serde_json::from_str(&history).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                serde_json::from_str(&history).map_err(|_| StorageError::Unavailable)?;
             if history.sources.len() > 64 {
-                return Err(rusqlite::Error::InvalidQuery);
+                return Err(StorageError::HistoryRetentionBounds);
             }
             for source in &history.sources {
                 let digest =
                     crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
-                let ids = tx.prepare("SELECT id FROM storage_proof_sources WHERE namespace=?1 AND session_key=?2 AND path=?3 AND ledger=?4 LIMIT 65")?.query_map(params![namespace, row.key, source.path.to_string_lossy(), digest], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let ids = tx.prepare("SELECT id FROM storage_proof_sources WHERE namespace=?1 AND session_key=?2 AND path=?3 AND ledger=?4 LIMIT 65").map_err(failed)?.query_map(params![namespace, row.key, source.path.to_string_lossy(), digest], |r| r.get::<_, String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
                 retained.extend(ids);
                 if retained.len() > 64 {
-                    return Err(rusqlite::Error::InvalidQuery);
+                    return Err(StorageError::HistoryRetentionBounds);
                 }
             }
         }
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'", params![namespace, row.key])?;
+        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'", params![namespace, row.key]).map_err(failed)?;
         for retained in retained {
             tx.execute(
                 "INSERT INTO storage_proof_refs VALUES(?1,?2,'history',?3)",
                 params![namespace, row.key, retained],
-            )?;
+            ).map_err(failed)?;
         }
     }
     Ok(())
@@ -139,7 +161,7 @@ pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<St
     if !present {
         return Ok(Vec::new());
     }
-    let mut statement = db.prepare("SELECT DISTINCT s.ledger FROM storage_proof_sources s WHERE s.namespace=semon_namespace() AND s.path=?1 AND (EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) OR EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=s.namespace AND l.id=s.id AND l.session_key=s.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2)) LIMIT 257")?;
+    let mut statement = db.prepare("SELECT DISTINCT s.ledger FROM storage_proof_sources s WHERE s.namespace=semon_namespace() AND s.path=?1 AND (EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) OR EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=s.namespace AND l.id=s.id AND l.session_key=s.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=g.stream AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2)) LIMIT 257")?;
     let values = statement
         .query_map(params![path, crate::model::now_ms()], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -313,7 +335,10 @@ impl ReaderRuntime {
             .map_err(failed)?;
             (expected.0.clone(), serial)
         };
-        let (publication, metadata, prefix, admission, stream): (String, String, String, i64, String) = tx.query_row("SELECT publication,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(failed)?;
+        let (publication, proof, metadata, prefix, admission, stream): (String, String, String, String, i64, String) = tx.query_row("SELECT publication,proof,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).map_err(failed)?;
+        if ProofGenerationId::derive(ns, owner.admission(), &stream, &proof) != ProofGenerationId(id.clone()) {
+            return Err(StorageError::ScopeChanged);
+        }
         let admission = u64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
         if admission != owner.admission()
             || Some(&stream) != owner.config().expected_stream_epoch.as_ref()
@@ -352,6 +377,13 @@ impl ReaderRuntime {
 impl Lease {
     fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         self.owner.validate_ready(db)?;
+        let proof: Option<String> = db.query_row("SELECT g.proof FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![self.snapshot.namespace.as_str(), self.snapshot.proof_generation.0, self.row.key], |r| r.get(0)).optional().map_err(failed)?;
+        let Some(proof) = proof else {
+            return Err(StorageError::ScopeChanged);
+        };
+        if ProofGenerationId::derive(self.snapshot.namespace.as_str(), self.snapshot.admission, &self.snapshot.stream_epoch, &proof) != self.snapshot.proof_generation {
+            return Err(StorageError::ScopeChanged);
+        }
         let metadata = serde_json::to_string(&self.row).map_err(|_| StorageError::Unavailable)?;
         let sql_admission =
             i64::try_from(self.snapshot.admission).map_err(|_| StorageError::ScopeChanged)?;

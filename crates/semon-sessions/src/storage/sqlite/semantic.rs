@@ -857,7 +857,7 @@ impl Stage {
             &proof_digest,
             prepared,
         )
-        .map_err(error)?;
+        .map_err(StoreError::Configured)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_generation_refs")
             .map_err(error)?;
