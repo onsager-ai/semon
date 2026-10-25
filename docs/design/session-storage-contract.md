@@ -1453,3 +1453,46 @@ qualifications remain 0/None; generic catalog completeness remains partial.
 Affected-owner retirement, complete History/slot/search lifetimes, native
 PID/lineage/relations/withdrawals/incidents, S2-S4, complete PG selection,
 migration/cutover/rollback, Hub #313 and the #380 merge hold remain outstanding.
+
+
+### Worker43: typed private semantic owners (unverified WIP)
+
+The admitted private stage now records real native PID, native-parent and
+lineage observations, typed endpoints and relation rows through `OwnerStore`.
+The existing model performs identity and matching; its Relations phase now uses
+the existing matching selection rather than final replay. The shared parent /
+root / family-cost reducer is unchanged. Relation comparison and physical-sender
+turn-witness merging are one shared method used by the ordinary publisher and
+configured adapter. Bounded incident pages use namespace-leading from/to indexes
+and normalize parent/root observations before the same model replays them.
+
+The existing current stage and support profiles remain distinct from singleton
+storage. Stage DDL, columns, primary keys and indexes are validated before
+admission; the dependency family additionally requires its exact composite
+columns, STRICT/WITHOUT ROWID and namespace-leading lookup index. Unsupported
+nonempty profiles refuse without adoption, reset or rewrite.
+
+The durable model witness includes native PID sets, endpoints, parent/lineage
+observations, full recorded relations, withdrawals and message selectors, as well
+as trace and slot witnesses. It joins the existing proof digest under the same
+admission, epoch, runtime, source-revision, ledger, Raw and claim transaction.
+Typed withdrawal observations reuse the native CurrentSources authority and Raw
+stat checks. Each stage validates their durable authority; final publication
+requires an exact re-observation. A fully withdrawn owner becomes retained only
+in its own Source, preserving its Catalog metadata, source provenance, slots,
+trace and retained search positions. Current search memberships retire through
+the existing typed search effects. Other affected-owner moves remain refused.
+
+Four configured CI gates cover real two-Source equal absolute Raw paths/native
+IDs, parent/relation/PID collisions, Claude continuations, independently computed
+runtime-qualified unbound parity, exact stored relation/dependency rows, stale
+publication holders, stage/publication rollback faults, unsupported nonempty
+owner profiles, and explicit withdrawal retention. Tests and formatting have not
+run; all public qualifications stay 0/None and completeness remains partial.
+
+Remaining domain work includes event incident candidate projection, cross-harness
+native keys, remaining frontier/selectors and high-degree matching/cursors,
+recovery intents and non-withdrawal ownership retirement. Full retained History
+and proof/reader/GC lifecycle remains unqualified. S2 is a separately reserved
+increment; S3/S4, injectable PG/full PG, migration/catch-up/cutover/rollback and
+Hub #313 remain outstanding. #380 completion still holds #477 main merge.

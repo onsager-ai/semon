@@ -7304,6 +7304,13 @@ impl PreparedSources {
                     )
                 })
                 .collect::<Vec<_>>(),
+            &self.pids,
+            &self.lineage_dependencies,
+            &self.indexed_native_parents,
+            &self.withdrawals,
+            &self.relationships.endpoints,
+            &self.relationships.relations,
+            &self.message_dependencies,
         ))
         .map_err(io::Error::other)
     }
@@ -7369,21 +7376,76 @@ pub(crate) fn prepare_semantic_batch(
             "semantic model inputs differ from staged batch",
         ));
     }
-    let prepared = match batch.phase {
+    let mut prepared = match batch.phase {
         relation_stage::Phase::Indexing => {
             prepare_semantic_index_sources(options, cache, inputs, now)?
         }
         relation_stage::Phase::Identity => {
             prepare_semantic_identity_sources(options, cache, inputs, &batch.context, now)?
         }
-        relation_stage::Phase::Relations | relation_stage::Phase::Publication => {
+        relation_stage::Phase::Relations => {
+            prepare_staged_sources(options, cache, inputs, &batch.context, true, now)?
+        }
+        relation_stage::Phase::Publication => {
             prepare_staged_sources(options, cache, inputs, &batch.context, false, now)?
         }
     };
+    if batch.phase != relation_stage::Phase::Indexing {
+        prepared.withdrawals = semantic_withdrawals(options, inputs)?;
+    }
     if prepared.base_generation != batch.base_generation {
         return Err(io::Error::other("semantic model generation changed"));
     }
     Ok(SemanticModelBatch { prepared })
+}
+
+fn semantic_withdrawals(options: &Options, inputs: &[crate::Input]) -> io::Result<Vec<relation_stage::Withdrawal>> {
+    let facts = MachineFacts::of(options);
+    let runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let mut withdrawals = Vec::new();
+    if let Some(facts_path) = &options.facts
+        && inputs.iter().any(|input| {
+            input.root == crate::InputRoot::Codex
+                && !facts.codex_rollout_is_current(options, &input.full_path(options))
+        })
+    {
+        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
+        let facts_identity =
+            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
+        authority.validate()?;
+        for input in inputs
+            .iter()
+            .filter(|input| input.root == crate::InputRoot::Codex)
+        {
+            if authority.codex_current(&input.path)? != Some(false) {
+                continue;
+            }
+            let path = input.full_path(options);
+            let stat = match crate::events::Stat::of(&path) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            withdrawals.push(relation_stage::Withdrawal {
+                path: path.to_string_lossy().into_owned(),
+                relative: input.path.clone(),
+                stat,
+                facts_path: facts_path.clone(),
+                facts_identity: facts_identity.clone(),
+                runtime: runtime.clone(),
+            });
+        }
+        authority.validate()?;
+    }
+    for withdrawal in &withdrawals {
+        if !withdrawal.current()? {
+            return Err(io::Error::other("native source admission withdrawal changed"));
+        }
+    }
+    if !withdrawals.is_empty() && crate::native_evidence::query_runtime_generation(options)? != runtime {
+        return Err(io::Error::other("native source admission runtime changed"));
+    }
+    Ok(withdrawals)
 }
 
 /// Primitive source observations precede owner identity closure. No partial
@@ -7423,41 +7485,7 @@ pub(crate) fn prepare_semantic_index_sources(
     let base_generation = cache.session_catalog_generation();
     let facts = MachineFacts::of(options);
     let runtime = crate::native_evidence::query_runtime_generation(options)?;
-    let mut withdrawals = Vec::new();
-    if let Some(facts_path) = &options.facts
-        && inputs.iter().any(|input| {
-            input.root == crate::InputRoot::Codex
-                && !facts.codex_rollout_is_current(options, &input.full_path(options))
-        })
-    {
-        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
-        let facts_identity =
-            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
-        authority.validate()?;
-        for input in inputs
-            .iter()
-            .filter(|input| input.root == crate::InputRoot::Codex)
-        {
-            if authority.codex_current(&input.path)? != Some(false) {
-                continue;
-            }
-            let path = input.full_path(options);
-            let stat = match crate::events::Stat::of(&path) {
-                Ok(stat) => stat,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            withdrawals.push(relation_stage::Withdrawal {
-                path: path.to_string_lossy().into_owned(),
-                relative: input.path.clone(),
-                stat,
-                facts_path: facts_path.clone(),
-                facts_identity: facts_identity.clone(),
-                runtime: runtime.clone(),
-            });
-        }
-        authority.validate()?;
-    }
+    let withdrawals = semantic_withdrawals(options, inputs)?;
     let (mut files, _, _) = scan(
         options,
         cache,

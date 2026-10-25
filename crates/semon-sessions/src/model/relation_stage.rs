@@ -258,6 +258,43 @@ pub(crate) struct Stub {
     pub(crate) last: i64,
 }
 
+/// Physical owner effects. The native model and its observations stay shared;
+/// an adapter receives typed values inside the caller's fenced transaction.
+pub(crate) trait OwnerStore {
+    type Error;
+    fn endpoint(&self, endpoint: &Endpoint) -> Result<(), Self::Error>;
+    fn relation(&self, relation: &Relation) -> Result<(), Self::Error>;
+    fn dependency(&self, path: &str, harness: &str, native: &str) -> Result<(), Self::Error>;
+    fn withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Self::Error>;
+}
+
+impl Relation {
+    /// Same exact comparison and physical-sender witness merge for every store.
+    pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
+        let witness = prior.source_turn.merge(&self.source_turn)
+            .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+        let mut before = prior.clone();
+        let mut merged = self.clone();
+        before.source_turn = OriginTurn::default();
+        merged.source_turn = OriginTurn::default();
+        let before = serde_json::to_value(before)?;
+        let after = serde_json::to_value(&merged)?;
+        if before != after {
+            let before = before.as_object().ok_or_else(|| io::Error::other("invalid relation"))?;
+            let after = after.as_object().ok_or_else(|| io::Error::other("invalid relation"))?;
+            let fields = before.keys().chain(after.keys())
+                .filter(|key| before.get(*key) != after.get(*key))
+                .map(String::as_str).collect::<BTreeSet<_>>();
+            return Err(io::Error::other(format!(
+                "conflicting staged native relationship: kind={} fields={}",
+                self.kind, fields.into_iter().collect::<Vec<_>>().join(",")
+            )));
+        }
+        merged.source_turn = witness;
+        Ok(merged)
+    }
+}
+
 fn static_state(value: &str) -> io::Result<&'static str> {
     match value {
         "new" => Ok("new"),
