@@ -76,6 +76,10 @@ pub(crate) struct Batch {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Context {
+    /// Private producer witness, carried once through record/publication. It is
+    /// not relationship protocol metadata or part of any public Catalog row.
+    #[serde(skip)]
+    pub(crate) presentation: Option<crate::storage::selected::PresentationObservations>,
     pub(crate) epoch: Option<i64>,
     pub(crate) endpoints: BTreeMap<String, Endpoint>,
     pub(crate) relations: BTreeMap<String, Relation>,

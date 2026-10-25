@@ -10,6 +10,7 @@ pub(crate) mod proof_generations;
 pub(crate) mod publication;
 pub(crate) mod query;
 pub(crate) mod search;
+pub(crate) mod selected;
 pub(crate) mod source_journal;
 pub(crate) mod trace;
 pub(crate) use configured_index::open as open_configured_index;

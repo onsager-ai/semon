@@ -734,7 +734,7 @@ impl Stage {
             .map(|p| (&p.key, &p.slots, p.repair))
             .collect::<Vec<_>>();
         let producer_witness = prepared
-            .staged_projection_witness()
+            .staged_model_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
         if producer_witness.len() > 2 * 1048576 {
             return Err(refuse("semantic_context_budget"));
@@ -816,7 +816,14 @@ impl Stage {
         let replay:Option<(String,String)>=tx.query_row("SELECT generation,proof_digest FROM storage_semantic_publications WHERE namespace=?1 AND epoch=?2",params![ns,batch.epoch],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(error)?;
         if let Some((generation, digest)) = replay {
             if previous.as_deref() == Some(generation.as_str())
-                && digest == proof_digest
+                && super::proof_generations::replayed_presentation(
+                    &tx,
+                    ns,
+                    &generation,
+                    &proof_digest,
+                    &digest,
+                )
+                .map_err(StoreError::Configured)?
                 && super::source_journal::claims(&tx, Some(ns), &batch.paths)
                     .map_err(error)?
                     .iter()
@@ -930,7 +937,7 @@ impl Stage {
             || !prepared.relationships.retired_owners.is_empty()
         {
             let witness = prepared
-                .staged_projection_witness()
+                .staged_model_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5)",params![ns,batch.epoch,metadata_text,witness,claims_text],|r|r.get(0)).map_err(error)?;
             if !exact {
@@ -1124,6 +1131,24 @@ impl Stage {
                 .map_err(error)?;
         }
         publication_phase("publication_proof");
+        let selected_observed_at = crate::model::now_ms();
+        let presentations = super::proof_generations::capture_presentations(
+            &tx,
+            ns,
+            &generation,
+            prepared,
+            selected_observed_at,
+        )
+        .map_err(StoreError::Configured)?;
+        let proof_digest = super::proof_generations::bind_presentations(
+            &tx,
+            ns,
+            &generation,
+            &proof_digest,
+            &presentations,
+            prepared,
+        )
+        .map_err(StoreError::Configured)?;
         tx.execute(
             "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
@@ -1153,7 +1178,10 @@ impl Stage {
                 .ok_or_else(|| refuse("semantic_stream_epoch"))?,
             &generation,
             &proof_digest,
-            prepared,
+            super::proof_generations::PreparedPresentations {
+                prepared,
+                rows: &presentations,
+            },
         )
         .map_err(StoreError::Configured)?;
         #[cfg(test)]
@@ -1174,7 +1202,7 @@ impl Stage {
         publication_head
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
-        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,crate::model::now_ms().to_string()]).map_err(error)?;
+        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,selected_observed_at.to_string()]).map_err(error)?;
         // Readiness is solely for the private listing cohort. No global
         // completeness claim can qualify selected/proof/search readers.
         tx.execute(
@@ -1874,7 +1902,7 @@ impl Stage {
             let metadata =
                 serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
             let projections = prepared
-                .staged_projection_witness()
+                .staged_model_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
