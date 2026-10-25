@@ -1615,3 +1615,30 @@ STORE fault hooks cover before state write, after state write and after receipt.
 This component is pending exact-head CI and independent review. Writer/backend
 qualification remains zero, and complete native bundle, read/repricing integration,
 no-SQLite proof and migration/cutover/rollback are still required.
+
+## Private published Tree scalar reader (scalar119)
+
+The private PG Tree checkpoint restores the actual version-3 `TreeSummaryRecord`
+through the same strict current-format codec as SQLite `read_tree_summary`.
+Both witnesses are mandatory. PG qualifies the exact namespace, full file ledger,
+UsageSource receipt/parser/checkpoint, complete nonpending generation and header,
+then checks persisted dimensions and current store pricing, Source recipe and File
+pricing fingerprint before decoding the admitted scalar. No missing scalar can
+be returned as a default-valued complete Current summary.
+
+Deferred tool/usage calls retain the captured PG checkpoint and host cancellation.
+Each call uses the current selected request scope and a fresh SQL snapshot to
+reauthorize the scalar digest, dimensions and interpretation before payload.
+A changed Current generation refuses explicitly; this component does not promise
+retained L1 reader leases. Scalar and variable metadata are length checked and
+charged before retrieval/decoding; dimension queries retain keyset LIMIT 1 reads.
+
+`Snapshot::restore(pool, namespace, path, ledger, host_cancellation)` keeps its
+existing private signature and now requires real `tree_writer::publish` state.
+The future native117 caller must supply the committed full ledger and request
+cancellation only after Usage/Core/Tree publication completes. No NativeBundle
+caller hook exists in this base, and none is claimed here. Checkpoint fixtures
+now publish through the production PG Tree writer instead of importing a header
+without a scalar. Public backend qualification remains zero, with complete
+IndexStore/reader/proof lifetimes, recovery, migration and Hub #313 still pending.
+The #380 predecessor completion requirement before MAIN remains unchanged.

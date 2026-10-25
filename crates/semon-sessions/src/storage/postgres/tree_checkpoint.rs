@@ -174,6 +174,9 @@ impl Snapshot {
     // SQL snapshot as its payload. Current L1 explicitly refuses after L2.
     fn scalar(&self, tx: &mut PgTxn<'_>, file: i64, projection: i64) -> Result<(Summary, [u8; 32]), StorageError> {
         tx.check()?;
+        if super::tree_writer::metadata(tx, format!("native_tree_failure:{}", self.path).as_bytes())?.is_some() {
+            return Err(StorageError::Busy);
+        }
         let encoded = super::tree_writer::metadata(tx, format!("native_tree_summary:{}", self.path).as_bytes())?
             .ok_or(StorageError::Busy)?;
         let (_, pricing) = super::store_metadata::read(tx)?;
@@ -196,6 +199,15 @@ impl Snapshot {
         Ok((record.summary, Sha256::digest(encoded.as_bytes()).into()))
     }
 
+    fn validate(&self, tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+        self.authority(tx, true)?;
+        let (_, digest) = self.scalar(tx, self.file, self.projection)?;
+        if digest != self.scalar_digest {
+            return Err(StorageError::Busy);
+        }
+        Ok(())
+    }
+
     fn with<T>(
         &self,
         read: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
@@ -208,11 +220,7 @@ impl Snapshot {
         let control = self.control.for_selected_read();
         self.pool
             .transaction(&self.namespace, TxnKind::ReadSnapshot, &control, |tx| {
-                self.authority(tx, true)?;
-                let (_, digest) = self.scalar(tx, self.file, self.projection)?;
-                if digest != self.scalar_digest {
-                    return Err(StorageError::Busy);
-                }
+                self.validate(tx)?;
                 read(tx)
             })
             .map_err(|error| {
