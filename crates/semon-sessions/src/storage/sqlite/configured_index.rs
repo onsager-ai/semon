@@ -267,38 +267,17 @@ impl IndexStore for ConfiguredIndex {
             Some("namespace_upgrade_pending")
         }
     }
-    fn publish_semantic_catalog(
-        &mut self,
-        _batch: &crate::model::relation_stage::Batch,
-        _prepared: &crate::model::PreparedSources,
-    ) -> Result<(Outcome, Option<String>), StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn publish_semantic_catalog(&mut self,batch:&crate::model::relation_stage::Batch,prepared:&crate::model::PreparedSources) -> Result<(Outcome,Option<String>),StoreError> {
+        self.semantic.as_mut().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.publish(batch,prepared)
     }
-    fn finish_semantic_stage(&mut self, _epoch: i64) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn finish_semantic_stage(&mut self,epoch:i64) -> Result<Outcome,StoreError> {
+        self.semantic.as_mut().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.finish(epoch)
     }
-    fn semantic_select(
-        &mut self,
-        _epoch: i64,
-        _selector: &crate::model::relation_stage::Selector,
-    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn semantic_select(&mut self,epoch:i64,selector:&crate::model::relation_stage::Selector) -> Result<crate::model::relation_stage::Selection,StoreError> {
+        self.semantic.as_mut().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.select(epoch,selector)
     }
-    fn semantic_replay_page(
-        &mut self,
-        _epoch: i64,
-        _owners: &[String],
-        _after: &str,
-    ) -> Result<crate::model::relation_stage::Context, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn semantic_replay_page(&mut self,epoch:i64,owners:&[String],after:&str) -> Result<crate::model::relation_stage::Context,StoreError> {
+        self.semantic.as_mut().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.replay(epoch,owners,after)
     }
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
         self.native.ledger(path).map_err(StoreError::Configured)

@@ -6,6 +6,17 @@ use crate::{
 use serde_json::Value;
 use std::io;
 
+/// One component-publication recipe, shared by the legacy and admitted writers.
+pub(crate) fn component_generation(version: &str, previous: Option<&str>, epoch: &str, metadata: &[String]) -> String {
+    use sha2::{Digest,Sha256};
+    let mut digest=Sha256::new();
+    digest.update(version.as_bytes());
+    digest.update(previous.unwrap_or("").as_bytes());
+    digest.update(epoch.as_bytes());
+    for value in metadata { digest.update((value.len() as u64).to_le_bytes()); digest.update(value.as_bytes()); }
+    format!("{:x}",digest.finalize())
+}
+
 pub(crate) struct SourceProofObservation {
     pub(crate) key: String,
     pub(crate) source: CatalogSource,
