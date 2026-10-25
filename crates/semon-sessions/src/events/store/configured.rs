@@ -7920,6 +7920,41 @@ mod tests {
             }
         }
 
+        fn ordinary_claude_ready(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> Batch {
+            assert!(!cache.explicit_store);
+            claude_ingest(cache, options, inputs);
+            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+            for _ in 0..256 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let mut selected = batch.paths.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+                if batch.phase == Phase::Relations {
+                    selected.extend(batch.context.parent_paths(&batch.paths));
+                    selected.extend(batch.context.companions.iter().cloned());
+                }
+                assert!(selected.len() <= 64);
+                let selected = selected.iter().map(|path| crate::native_evidence::catalog_input(Path::new(path), options).unwrap()).collect::<Vec<_>>();
+                let prepared = match batch.phase {
+                    Phase::Indexing => crate::model::prepare_semantic_index_sources(options, cache, &selected, 1_790_000_000_000),
+                    Phase::Identity => crate::model::prepare_semantic_identity_sources(options, cache, &selected, &batch.context, 1_790_000_000_000),
+                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(options, cache, &selected, &batch.context, batch.phase == Phase::Relations, 1_790_000_000_000),
+                }.unwrap();
+                if batch.phase == Phase::Publication {
+                    return batch;
+                }
+                assert_eq!(cache.record_semantic_batch(&batch, &prepared).unwrap(), Outcome::Written);
+            }
+            panic!("ordinary Claude producer did not finish");
+        }
+
         fn claude_ready(
             cache: &mut EventCache,
             options: &crate::Options,
@@ -8027,7 +8062,7 @@ mod tests {
                 let mut admitted = open(&f.config);
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
                 let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
-                let (reference, _) = claude_ready(&mut ordinary, options, &inputs);
+                let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let ordinary_db =
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 let actual = projection_rows(&f.db(), Some("source-a"));
@@ -8169,7 +8204,7 @@ mod tests {
             let mut admitted = open(&f.config);
             let (batch, model) = claude_ready(&mut admitted, options, &inputs);
             let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
-            let (reference, _) = claude_ready(&mut ordinary, options, &inputs);
+            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let db = f.db();
             let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
             assert_eq!(
