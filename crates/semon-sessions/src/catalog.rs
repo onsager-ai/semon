@@ -779,7 +779,11 @@ pub(crate) fn read_page_snapshot(
         ));
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
-    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
+    let runtime_binding = transaction.runtime_binding();
+    let runtime_observations = match runtime_binding.as_ref() {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(binding, runtime.as_deref().ok_or_else(|| io::Error::other("runtime observation unavailable"))?)?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     // Share the same custody capture with selected family status qualification.
     // Its existing final validation still fences the whole response.
     let recorded = options
@@ -1050,7 +1054,7 @@ pub(crate) fn read_page_snapshot(
                     true,
                 ));
             }
-            let state = source_state(source);
+            let state = transaction.source_state(source).unwrap_or_else(|| source_state(source));
             states.push(state);
             let reference = SessionSourceRef {
                 root: row.harness.clone(),

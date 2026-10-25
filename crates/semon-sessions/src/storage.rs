@@ -8,6 +8,7 @@ pub mod native_events;
 pub(crate) mod navigation;
 pub(crate) mod proof_lifetime;
 pub(crate) mod query;
+pub(crate) mod selected;
 pub mod source_observations;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
