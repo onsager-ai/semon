@@ -862,10 +862,8 @@ fn pg_tree_publish_every_effect_rollback_and_pricing_epoch_changes_interpretatio
         );
         assert!(baseline("foreign") == foreign, "foreign bytes unchanged");
     }
-    assert!(
-        count >= 10,
-        "generation dimensions scalar complete and header boundaries"
-    );
+    let dimensions:usize=data.rows.iter().filter(|(family,_)| matches!(*family,"tree_labels"|"tree_models"|"tree_tools"|"tree_usage_models")).map(|(_,rows)|rows.len()).sum();
+    assert_eq!(count, dimensions+5,"each independent oracle dimension plus generation/scalar/marker/complete/header fault");
     let before = pool
         .transaction(
             &ns("tree\0🦀"),
