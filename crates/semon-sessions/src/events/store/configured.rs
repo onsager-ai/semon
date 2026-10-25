@@ -5241,7 +5241,10 @@ mod tests {
             inputs: &[crate::Input],
             prepared: &crate::model::PreparedSources,
         ) {
-            let mut unbound = EventCache::default();
+            // Keep the reference producer independent of the admitted
+            // configured store, but give it the ordinary scoped cache that
+            // the native producer requires for its source observations.
+            let mut unbound = EventCache::open_scoped(&options.cache).unwrap();
             let mut expected =
                 crate::model::prepare_sources(options, &mut unbound, inputs, 1_790_000_000_000)
                     .unwrap();
@@ -5500,16 +5503,21 @@ mod tests {
                 options.facts.as_ref().unwrap(),
                 &crate::Facts {
                     version: 2,
-                    hostname: "domain-rebound".into(),
+                    // Replacing the facts record changes its physical
+                    // authority identity. Hostname is descriptive only.
+                    hostname: "domain".into(),
                     codex_rollouts: Some(Default::default()),
                     ..Default::default()
                 },
             )
             .unwrap();
-            assert!(
+            assert_eq!(
                 cache
                     .publish_semantic_catalog(&batch, model.prepared())
-                    .is_err()
+                    .unwrap()
+                    .0,
+                Outcome::Conflict,
+                "replaced facts authority refuses publication without writes"
             );
             assert_eq!(
                 shared_state(&f),
