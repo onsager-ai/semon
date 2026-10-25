@@ -43,7 +43,7 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageErr
     for table in tables {
         let table: String = table.get(0);
         assert!(table.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
-        let rows = tx.driver.query(&format!("SELECT row_to_json(t)::text FROM {table} t WHERE namespace=$1 ORDER BY row_to_json(t)::text"), &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
+        let rows = tx.driver.query(&format!("SELECT row_to_json(t.*)::text FROM {table} t WHERE namespace=$1 ORDER BY row_to_json(t.*)::text"), &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
         result.push((table, rows.iter().map(|r| r.get(0)).collect()));
     }
     Ok(result)

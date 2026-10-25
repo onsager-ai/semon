@@ -68,14 +68,20 @@ impl Effects for Writer<'_, '_> {
     fn planning_started(&mut self) {}
     fn planning_finished(&mut self) {}
     fn begin(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE begin");
         // Existing transaction admission owns the store-shared lock before
         // SourceState. Reject the exact core CAS before any family effects.
         native_core::qualify(self.tx, input.path, input.expected)?;
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE relocation");
         let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND new_path=$2 LIMIT 1", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
         if !pending.is_empty() {
             return Err(StorageError::NamespaceUpgradePending);
         }
         let mut usage = Usage::new(self.tx)?;
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE usage_current");
         use algorithm::Effects as _;
         let current = usage.current(input.path)?;
         match (input.expected, current) {
@@ -91,9 +97,13 @@ impl Effects for Writer<'_, '_> {
             input.ledger,
             input.changes.is_some(),
         )?;
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE begin_complete");
         self.boundary()
     }
     fn file(&mut self, input: &Input<'_>, changes: &DirtyRows) -> Result<(), StorageError> {
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE core");
         native_core::write(
             self.tx,
             input.path,
@@ -103,6 +113,8 @@ impl Effects for Writer<'_, '_> {
             input.changes.map(|_| changes),
         )?;
         self.boundary()?;
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE metadata");
         self.metadata(
             &format!("native_codex_header:{}", input.path),
             native_aux::codex_header(input.ledger, input.index.codex_header.as_ref())
@@ -124,6 +136,8 @@ impl Effects for Writer<'_, '_> {
         )
     }
     fn usage(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE usage_write");
         algorithm::write(
             &mut Usage::new(self.tx)?,
             input.path,
@@ -131,6 +145,8 @@ impl Effects for Writer<'_, '_> {
             input.index,
         )?;
         self.boundary()?;
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE tree_publish");
         if let Some(summary) = &input.index.tree_summary
             // Tree reads persisted Usage and current store pricing authority.
             && !super::tree_writer::publish(
@@ -148,6 +164,8 @@ impl Effects for Writer<'_, '_> {
         self.boundary()
     }
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
+        #[cfg(test)]
+        eprintln!("BUNDLE_STAGE relationships");
         super::native_commit::relationships(self.tx, input.path, input.index, false)?;
         self.boundary()
     }
