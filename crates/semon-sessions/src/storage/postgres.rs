@@ -7,9 +7,11 @@ mod operations;
 mod pool;
 mod schema;
 mod sqlstate;
+mod source_journal;
 mod txn;
 
 pub use cancel::PgCancellation;
+pub use source_journal::PgSourceJournal;
 pub use operations::{OperationIdentity, Reconciliation};
 pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLimits};
 

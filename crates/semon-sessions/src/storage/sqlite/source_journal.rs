@@ -5,6 +5,7 @@ use crate::storage::{
     NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
     source_observations::{
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        operation_replay, validate_intent, validate_paths,
     },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -856,47 +857,6 @@ impl SourceObservationStore for LegacySourceJournal {
     }
 }
 
-pub(crate) fn operation_replay(
-    operation: &SourceOperation,
-    namespace: Option<&str>,
-    kind: &str,
-    payload: &[u8],
-) -> Result<Option<SourceMutationReceipt>, StorageError> {
-    if operation.namespace != namespace.unwrap_or("") {
-        return Ok(Some(SourceMutationReceipt::Conflict));
-    }
-    if operation.id.is_empty()
-        || operation.id.len() > 256
-        || !operation.id.is_ascii()
-        || operation.payload_digest.len() != 64
-        || !operation
-            .payload_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(StorageError::InvalidArguments);
-    }
-    let prefix = format!(
-        "source-observation-v1:{}:",
-        SourceOperation::namespace_tag(namespace.unwrap_or(""))
-    );
-    let Some(suffix) = operation.id.strip_prefix(&prefix) else {
-        return Ok(Some(SourceMutationReceipt::Conflict));
-    };
-    let parts = suffix.split(':').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
-        return Err(StorageError::InvalidArguments);
-    }
-    if operation.payload_digest != SourceOperation::digest(kind, payload) {
-        return Ok(Some(SourceMutationReceipt::Conflict));
-    }
-    Ok(None)
-}
-
 fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error {
     #[cfg(test)]
     eprintln!(
@@ -1056,50 +1016,6 @@ fn insert_terminal_receipt(
     Ok(())
 }
 
-fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) -> Result<(), StorageError> {
-    let (kind, payload) = match intent {
-        SourceIntent::Discover {
-            paths, complete, ..
-        } => {
-            validate_paths(paths)?;
-            ("discover", serde_json::to_vec(&(paths, complete)))
-        }
-        SourceIntent::Invalidate { expected, .. } => {
-            let paths = expected
-                .iter()
-                .map(|(path, _)| path.clone())
-                .collect::<Vec<_>>();
-            validate_paths(&paths)?;
-            if paths
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != paths.len()
-            {
-                return Err(StorageError::InvalidArguments);
-            }
-            ("invalidate", serde_json::to_vec(expected))
-        }
-        SourceIntent::FinishBackfill {
-            expected_generation,
-            ..
-        } => {
-            if expected_generation
-                .as_ref()
-                .is_some_and(|value| value.len() > 4096)
-            {
-                return Err(StorageError::InvalidArguments);
-            }
-            ("finish_backfill", serde_json::to_vec(expected_generation))
-        }
-    };
-    let payload = payload.map_err(|_| StorageError::InvalidArguments)?;
-    if operation_replay(intent.operation(), namespace, kind, &payload)?.is_some() {
-        return Err(StorageError::Conflict);
-    }
-    Ok(())
-}
-
 fn persist_intent_sql(
     db: &Connection,
     namespace: Option<&str>,
@@ -1238,13 +1154,6 @@ fn finish_catalog_backfill_sql(
         tx.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';").map_err(failed)?;
     }
     Ok(true)
-}
-
-fn validate_paths(paths: &[String]) -> Result<(), StorageError> {
-    if paths.len() > MAX_PATHS || paths.iter().any(|p| p.is_empty() || p.len() > 4096) {
-        return Err(StorageError::InvalidArguments);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2010,107 +1919,13 @@ mod tests {
         assert!(store.pending_intents().unwrap().is_empty());
     }
 
-    fn shared_source_observation_conformance(
-        mut open: impl FnMut() -> Box<dyn SourceObservationStore>,
-        namespace: &str,
-    ) {
-        let paths = vec!["conformance-a".to_owned(), "conformance-b".to_owned()];
-        let discovery = discover_operation(namespace, &paths, true);
-        let mut store = open();
-        assert_eq!(
-            store.discover(&discovery, &paths, true).unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        let initial_claims = store.claims(&paths).unwrap();
-        drop(store);
-
-        // The exact same id and payload reconcile a committed operation after
-        // reopening, including the unknown-ACK retry case.
-        let mut store = open();
-        assert_eq!(
-            store.discover(&discovery, &paths, true).unwrap(),
-            SourceMutationReceipt::AlreadyApplied
-        );
-        assert_eq!(store.claims(&paths).unwrap(), initial_claims);
-
-        let partial = vec!["conformance-partial".to_owned()];
-        let partial_operation = discover_operation(namespace, &partial, false);
-        assert_eq!(
-            store.discover(&partial_operation, &partial, false).unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        let before_cas = store.claims(&partial).unwrap();
-        let accepted_cas = invalidate_operation(namespace, &before_cas);
-        assert_eq!(
-            store.invalidate(&accepted_cas, &before_cas).unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        let after_cas = store.claims(&partial).unwrap();
-        let failed_cas = invalidate_operation(namespace, &before_cas);
-        assert_eq!(
-            store.invalidate(&failed_cas, &before_cas).unwrap(),
-            SourceMutationReceipt::Conflict
-        );
-        assert_eq!(store.claims(&partial).unwrap(), after_cas);
-
-        let changed_paths = vec!["conformance-changed-payload".to_owned()];
-        let mut changed_operation = discover_operation(namespace, &changed_paths, false);
-        changed_operation.id = discovery.id.clone();
-        let before_conflict = store.claims(&changed_paths).unwrap();
-        assert_eq!(
-            store
-                .discover(&changed_operation, &changed_paths, false)
-                .unwrap(),
-            SourceMutationReceipt::Conflict
-        );
-        assert_eq!(store.claims(&changed_paths).unwrap(), before_conflict);
-
-        let foreign_paths = vec!["conformance-foreign".to_owned()];
-        let foreign_operation = discover_operation("foreign-namespace", &foreign_paths, true);
-        assert_eq!(
-            store
-                .discover(&foreign_operation, &foreign_paths, true)
-                .unwrap(),
-            SourceMutationReceipt::Conflict
-        );
-        assert_eq!(
-            store.claims(&foreign_paths).unwrap(),
-            vec![(foreign_paths[0].clone(), None)]
-        );
-
-        // Namespace bytes are hashed as length-delimited UTF-8; a NUL never
-        // enters the SQL identity or becomes a second operation boundary.
-        let encoded = SourceOperation::capture(namespace, "discover", b"nul-safe");
-        assert!(encoded.id.is_ascii());
-        assert!(!encoded.id.as_bytes().contains(&0));
-        assert_eq!(encoded.namespace.as_bytes(), namespace.as_bytes());
-
-        // This sequence deliberately retains pending invalidations. Neither
-        // profile may manufacture a successful consumer acknowledgement here.
-        let before = store.backfill_state().unwrap();
-        let finish = finish_operation(namespace, None);
-        assert_eq!(
-            store.finish_backfill(&finish, None).unwrap(),
-            SourceMutationReceipt::Conflict
-        );
-        assert_eq!(store.backfill_state().unwrap(), before);
-        let wrong_generation = finish_operation(namespace, Some("wrong-generation"));
-        assert_eq!(
-            store
-                .finish_backfill(&wrong_generation, Some("wrong-generation"))
-                .unwrap(),
-            SourceMutationReceipt::Conflict
-        );
-        assert_eq!(store.backfill_state().unwrap(), before);
-    }
-
     #[test]
     fn shared_observation_conformance_runs_on_legacy_and_configured_sqlite() {
         let legacy = LegacyFixture::new();
-        shared_source_observation_conformance(|| legacy.open(), "");
+        crate::storage::source_observations::conformance::shared_source_observation_conformance(|| legacy.open(), "");
         let configured = Fixture::new_with_namespace("configured\0source");
         configured.assign();
-        shared_source_observation_conformance(
+        crate::storage::source_observations::conformance::shared_source_observation_conformance(
             || configured.config.source_observations().unwrap(),
             "configured\0source",
         );
