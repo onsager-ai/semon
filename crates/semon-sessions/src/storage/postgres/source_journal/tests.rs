@@ -498,3 +498,28 @@ fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() 
     );
     store.acknowledge_intent(intent.operation()).unwrap();
 }
+
+#[test]
+fn pg_source_recovery_refuses_before_any_namespace_write() {
+    let (pool, factory) = fixture(|_| {});
+    let mut store = journal(&pool, "recovery-refusal");
+    let operation = SourceOperation::capture(
+        "recovery-refusal", "recover", &serde_json::to_vec(&Some("")).unwrap(),
+    );
+    let intent = SourceIntent::Recover {
+        operation: operation.clone(),
+        cursor: Some(String::new()),
+    };
+    assert_eq!(store.recovery_is_current(), Err(StorageError::Unavailable));
+    assert_eq!(store.recovery_cursor(), Err(StorageError::Unavailable));
+    assert_eq!(store.persist_intent(&intent), Err(StorageError::Unavailable));
+    assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Unavailable));
+    assert_eq!(intent.apply(&mut store), Err(StorageError::Unavailable));
+    assert_eq!(store.apply(&intent), Err(StorageError::Unavailable));
+    let counts = factory.client().query_one(
+        "SELECT (SELECT count(*) FROM semon_pg_source_state), (SELECT count(*) FROM semon_pg_source_intents), (SELECT count(*) FROM semon_pg_source_receipts)", &[],
+    ).unwrap();
+    for column in 0..3 {
+        assert_eq!(counts.get::<_, i64>(column), 0);
+    }
+}

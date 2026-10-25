@@ -74,6 +74,10 @@ pub enum SourceMutationReceipt {
 /// capture, through an uncertain acknowledgement, to restart reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SourceIntent {
+    Recover {
+        operation: SourceOperation,
+        cursor: Option<String>,
+    },
     Discover {
         operation: SourceOperation,
         paths: Vec<String>,
@@ -92,7 +96,8 @@ pub enum SourceIntent {
 impl SourceIntent {
     pub fn operation(&self) -> &SourceOperation {
         match self {
-            Self::Discover { operation, .. }
+            Self::Recover { operation, .. }
+            | Self::Discover { operation, .. }
             | Self::Invalidate { operation, .. }
             | Self::FinishBackfill { operation, .. } => operation,
         }
@@ -103,6 +108,9 @@ impl SourceIntent {
         store: &mut dyn SourceObservationStore,
     ) -> Result<SourceMutationReceipt, StorageError> {
         match self {
+            Self::Recover { operation, cursor } => {
+                store.recover(operation, cursor.as_deref()).map(|(receipt, _)| receipt)
+            }
             Self::Discover {
                 operation,
                 paths,
@@ -121,6 +129,24 @@ impl SourceIntent {
 }
 
 pub trait SourceObservationStore: Send {
+    /// A qualified owner witness proves no recovery remains, without capture.
+    /// Observation-only adapters do not own native Recovery and refuse it.
+    fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+    fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+    /// Apply at most one recovery page. Done is a durable terminal result and
+    /// must be returned unchanged on replay, independently of the current cursor.
+    fn recover(
+        &mut self,
+        _operation: &SourceOperation,
+        _cursor: Option<&str>,
+    ) -> Result<(SourceMutationReceipt, bool), StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
     /// Check an owner-connection committed witness before capturing new work.
     /// True means the same discovery is already current; no intent is needed.
     /// Backends without such a witness always take the durable mutation path.
@@ -213,6 +239,12 @@ pub(crate) fn validate_intent(
     intent: &SourceIntent,
 ) -> Result<(), StorageError> {
     let (kind, payload) = match intent {
+        SourceIntent::Recover { cursor, .. } => {
+            if cursor.as_ref().is_some_and(|value| value.len() > 4096) {
+                return Err(StorageError::InvalidArguments);
+            }
+            ("recover", serde_json::to_vec(cursor))
+        }
         SourceIntent::Discover {
             paths, complete, ..
         } => {

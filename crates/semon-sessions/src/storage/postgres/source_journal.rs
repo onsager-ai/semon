@@ -47,6 +47,9 @@ impl PgSourceJournal {
         })
     }
     fn apply(&self, intent: &SourceIntent) -> Result<SourceMutationReceipt, StorageError> {
+        if matches!(intent, SourceIntent::Recover { .. }) {
+            return Err(StorageError::Unavailable);
+        }
         // Shared validation binds the namespace, kind, payload and operation ID.
         // Foreign/rebound operations return Conflict without acquiring a writer.
         if let Err(error) = validate_intent(Some(self.namespace.as_str()), intent) {
@@ -60,6 +63,7 @@ impl PgSourceJournal {
             let operation = intent.operation();
             if let Some(receipt) = receipt(tx, operation)? { return Ok(receipt); }
             let applied = match intent {
+                SourceIntent::Recover { .. } => return Err(StorageError::Unavailable),
                 SourceIntent::Discover { paths, complete, .. } => {
                     for path in paths {
                         let inserted = tx.driver.execute("INSERT INTO semon_pg_source_members(namespace,source_path) VALUES($1,$2) ON CONFLICT(namespace_digest,source_path) DO NOTHING", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
@@ -148,6 +152,9 @@ fn invalidate(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageError> {
 
 impl SourceObservationStore for PgSourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
+        if matches!(intent, SourceIntent::Recover { .. }) {
+            return Err(StorageError::Unavailable);
+        }
         validate_intent(Some(self.namespace.as_str()), intent)?;
         let payload = serde_json::to_string(intent).map_err(|_| StorageError::InvalidArguments)?;
         if payload.len() > 2 * 1024 * 1024 {

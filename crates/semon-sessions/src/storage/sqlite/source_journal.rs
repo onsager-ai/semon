@@ -439,6 +439,9 @@ impl SourceJournal {
 
 impl SourceObservationStore for SourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
+        if matches!(intent, SourceIntent::Recover { .. }) {
+            return Err(StorageError::Unavailable);
+        }
         let mut db = self.connection()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -890,6 +893,9 @@ pub(crate) fn local_finish_backfill(
 #[cfg(test)]
 impl SourceObservationStore for LegacySourceJournal {
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
+        if matches!(intent, SourceIntent::Recover { .. }) {
+            return Err(StorageError::Unavailable);
+        }
         local_persist_intent(&mut self.connection()?, intent)
     }
 
@@ -1083,6 +1089,40 @@ pub(crate) fn stored_receipt(
             SourceMutationReceipt::Conflict
         }
     }))
+}
+
+pub(crate) fn recovery_receipt(
+    db: &Connection,
+    operation: &SourceOperation,
+) -> Result<Option<(SourceMutationReceipt, bool)>, StorageError> {
+    let Some(receipt) = stored_receipt(db, None, operation)? else {
+        return Ok(None);
+    };
+    let done: Option<Option<bool>> = db.query_row(
+        "SELECT recovery_done FROM main.source_observation_receipts WHERE namespace='' AND operation_id=?1 AND payload_digest=?2",
+        params![operation.id, operation.payload_digest], |row| row.get(0),
+    ).optional().map_err(failed)?;
+    match done {
+        Some(Some(done)) => Ok(Some((receipt, done))),
+        // A rebound key is not entitled to either the old result or its ACK.
+        None => Ok(Some((SourceMutationReceipt::Conflict, false))),
+        Some(None) => Err(StorageError::Conflict),
+    }
+}
+
+pub(crate) fn insert_recovery_receipt(
+    db: &Connection,
+    operation: &SourceOperation,
+    applied: bool,
+    done: bool,
+) -> Result<(), StorageError> {
+    // Receipt rows are control records, not discovered source rows.
+    crate::native_timing::discovery_count(|counts| counts.statements += 1);
+    db.execute(
+        "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES('',?1,?2,?3,?4)",
+        params![operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
+    ).map_err(|error| phase_failed("recovery-receipt-insert", error))?;
+    Ok(())
 }
 
 pub(crate) fn insert_receipt(
