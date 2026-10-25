@@ -1,7 +1,11 @@
 //! Existing native launch wire format, independent of the SQL engine.
 use super::Plan;
-use crate::{events::{Ledger, CACHE_VERSION}, native_handoff::{CallRef, Index}, native_record::Record};
-use serde::{Serialize, Deserialize};
+use crate::{
+    events::{CACHE_VERSION, Ledger},
+    native_handoff::{CallRef, Index},
+    native_record::Record,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 const PAGE: usize = 256;
 pub(crate) fn plan(ledger: &Ledger, index: &Index) -> serde_json::Result<Option<Plan>> {
@@ -9,9 +13,17 @@ pub(crate) fn plan(ledger: &Ledger, index: &Index) -> serde_json::Result<Option<
         return Ok(None);
     }
     let calls: Vec<_> = index.complete.iter().chain(&index.eof).cloned().collect();
-    let pages = calls.chunks(PAGE).enumerate().map(|(index, calls)| {
-        serde_json::to_string(&Page { version: 1, index, calls: calls.to_vec() })
-    }).collect::<Result<Vec<_>, _>>()?;
+    let pages = calls
+        .chunks(PAGE)
+        .enumerate()
+        .map(|(index, calls)| {
+            serde_json::to_string(&Page {
+                version: 1,
+                index,
+                calls: calls.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if pages.iter().any(|page| page.len() > 1024 * 1024) {
         return Ok(None);
     }
@@ -26,7 +38,11 @@ pub(crate) fn plan(ledger: &Ledger, index: &Index) -> serde_json::Result<Option<
         eof_bytes: index.eof_bytes,
         fingerprint: Sha256::digest(serde_json::to_string(index)?.as_bytes()).into(),
     })?;
-    Ok(Some(Plan { header, pages, tree: Vec::new() }))
+    Ok(Some(Plan {
+        header,
+        pages,
+        tree: Vec::new(),
+    }))
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,4 +65,3 @@ pub(crate) struct Page {
     pub(crate) index: usize,
     pub(crate) calls: Vec<CallRef>,
 }
-

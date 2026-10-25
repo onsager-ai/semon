@@ -288,7 +288,12 @@ pub(super) fn read(
             || part.index != page
             || part.hashes.len() != remaining.min(PAGE)
             || remaining == 0
-            || part.sha256 != page_witness(&part.canonical().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?)
+            || part.sha256
+                != page_witness(
+                    &part.canonical().map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                )
         {
             return Ok(None);
         }
@@ -805,19 +810,41 @@ pub(super) fn write_measured(
     }
     for (level, nodes) in plan.tree.iter().enumerate() {
         for (at, node) in nodes.iter().enumerate() {
-            put.execute(params![format!("native_proof_tree:{prefix}:{level:03}:{at:010}"), node])?;
+            put.execute(params![
+                format!("native_proof_tree:{prefix}:{level:03}:{at:010}"),
+                node
+            ])?;
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
-        transaction.execute(configured::metadata_sql(transaction,
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
-            params![format!("{namespace}{:010}", nodes.len()), format!("{namespace}~")])?;
+        transaction.execute(
+            configured::metadata_sql(
+                transaction,
+                "DELETE FROM meta WHERE key>=?1 AND key<?2",
+                "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+            )?,
+            params![
+                format!("{namespace}{:010}", nodes.len()),
+                format!("{namespace}~")
+            ],
+        )?;
     }
-    transaction.execute(configured::metadata_sql(transaction,
-        "DELETE FROM meta WHERE key>=?1 AND key<?2",
-        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
-        params![format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()), format!("native_proof_tree:{prefix}:~")])?;
-    measurements.cleanup(transaction, &prefix, || plan.pages.len(), &crate::native_timing::CHUNKS_CLEANUP)?;
+    transaction.execute(
+        configured::metadata_sql(
+            transaction,
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        )?,
+        params![
+            format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()),
+            format!("native_proof_tree:{prefix}:~")
+        ],
+    )?;
+    measurements.cleanup(
+        transaction,
+        &prefix,
+        || plan.pages.len(),
+        &crate::native_timing::CHUNKS_CLEANUP,
+    )?;
     measurements.count("chunks_header_bytes", plan.header.len());
     put.execute(params![format!("{prefix}header"), plan.header])?;
     Ok(())

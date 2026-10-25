@@ -161,7 +161,8 @@ pub(super) fn write_measured(
     measurements.record("launch_prepare", started, 1);
     let started = measurements.start();
     let Some(plan) = crate::events::native_pages::launch::plan(ledger, index)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))? else {
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+    else {
         return clear(transaction, path);
     };
     measurements.count("launch_calls", index.complete.len() + index.eof.len());
@@ -169,7 +170,12 @@ pub(super) fn write_measured(
         measurements.count("launch_page_bytes", encoded.len());
         put.execute(params![format!("{prefix}{page:010}"), encoded])?;
     }
-    measurements.cleanup(transaction, &prefix, || plan.pages.len(), &crate::native_timing::LAUNCH_CLEANUP)?;
+    measurements.cleanup(
+        transaction,
+        &prefix,
+        || plan.pages.len(),
+        &crate::native_timing::LAUNCH_CLEANUP,
+    )?;
     measurements.count("launch_header_bytes", plan.header.len());
     put.execute(params![format!("{prefix}header"), plan.header])?;
     Ok(())

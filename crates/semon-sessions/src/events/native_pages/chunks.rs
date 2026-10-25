@@ -1,7 +1,10 @@
 //! Existing native chunk wire format, independent of the SQL engine.
 use super::Plan;
-use crate::{events::{Ledger, CACHE_VERSION}, source_chunks::Chunks};
-use serde::{Serialize, Deserialize};
+use crate::{
+    events::{CACHE_VERSION, Ledger},
+    source_chunks::Chunks,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 const PAGE: usize = 1024;
 pub(crate) fn plan(ledger: &Ledger, chunks: &Chunks) -> serde_json::Result<Option<Plan>> {
@@ -24,16 +27,27 @@ pub(crate) fn plan(ledger: &Ledger, chunks: &Chunks) -> serde_json::Result<Optio
     }
     let mut tree = Vec::new();
     let root = loop {
-        tree.push(nodes.iter().map(serde_json::to_string).collect::<Result<Vec<_>, _>>()?);
+        tree.push(
+            nodes
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         if nodes.len() <= 1 {
-            break nodes.first().copied().unwrap_or_else(|| Sha256::digest([]).into());
+            break nodes
+                .first()
+                .copied()
+                .unwrap_or_else(|| Sha256::digest([]).into());
         }
-        nodes = nodes.chunks(2).map(|pair| {
-            let mut hash = Sha256::new();
-            hash.update(pair[0]);
-            hash.update(pair.get(1).unwrap_or(&pair[0]));
-            hash.finalize().into()
-        }).collect();
+        nodes = nodes
+            .chunks(2)
+            .map(|pair| {
+                let mut hash = Sha256::new();
+                hash.update(pair[0]);
+                hash.update(pair.get(1).unwrap_or(&pair[0]));
+                hash.finalize().into()
+            })
+            .collect();
     };
     let header = serde_json::to_string(&Header {
         version: 1,
@@ -45,7 +59,11 @@ pub(crate) fn plan(ledger: &Ledger, chunks: &Chunks) -> serde_json::Result<Optio
         pages_root: root,
         resume: chunks.resume.clone(),
     })?;
-    Ok(Some(Plan { header, pages, tree }))
+    Ok(Some(Plan {
+        header,
+        pages,
+        tree,
+    }))
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,4 +105,3 @@ impl Page {
         })
     }
 }
-
