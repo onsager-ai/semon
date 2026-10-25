@@ -45,7 +45,10 @@ pub(crate) trait ProofReaderLease {
     fn read_record(
         &self,
         options: &crate::Options,
-        provider: Option<(&dyn crate::SessionSourceReader, crate::SessionSourceReadMode)>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
         path: &std::path::Path,
         offset: u64,
     ) -> std::io::Result<Option<serde_json::Value>> {
@@ -60,7 +63,10 @@ pub(crate) trait ProofReaderLease {
     fn read_record_with_control(
         &self,
         options: &crate::Options,
-        provider: Option<(&dyn crate::SessionSourceReader, crate::SessionSourceReadMode)>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
         path: &std::path::Path,
         offset: u64,
         control: &crate::SelectedReadControl,
@@ -68,7 +74,10 @@ pub(crate) trait ProofReaderLease {
     fn transcript_records(
         &self,
         options: &crate::Options,
-        provider: Option<(&dyn crate::SessionSourceReader, crate::SessionSourceReadMode)>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
         start: usize,
         limit: usize,
         control: &crate::SelectedReadControl,

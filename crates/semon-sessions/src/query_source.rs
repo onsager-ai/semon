@@ -309,7 +309,8 @@ impl Sources {
         let mut proofs = Vec::with_capacity(sources.len());
         for source in sources {
             let proof = crate::events::store::chunk_proofs::Focused::with_db(
-                db.clone(), database,
+                db.clone(),
+                database,
                 source.path.to_str().ok_or_else(unavailable)?,
                 &crate::source_carrier::ledger(source),
             )?;
