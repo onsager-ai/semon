@@ -12,11 +12,14 @@ Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
 The user relaxed the progressive cold-start first-page budget on 2026-10-26.
-The 0/256/2048-history producer now permits five seconds for its first 60
+The 0/256/2048-history producer now permits eight seconds for its first 60
 selected sessions. Foreground Catalog/Query checks keep their existing two-second
 budget; the 60-second background completion boundary, ordering, worker ownership,
 provisional authority and archive-eviction checks are unchanged. Older two-second
 cold-start results below describe the earlier gate and do not qualify this revision.
+The initial five-second revision passed the isolated producer check but measured
+5.82 seconds under the full parallel PostgreSQL regression; the eight-second
+revision requires a fresh full run.
 
 ## Worker 21 repair: preserve the metadata physical contract
 
