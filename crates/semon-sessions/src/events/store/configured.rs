@@ -6480,6 +6480,12 @@ mod tests {
                 let before = shared_state(f);
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
                 let result = cache.publish_semantic_catalog(batch, model.prepared());
+                if let Ok((outcome, head)) = &result {
+                    eprintln!(
+                        "semantic_fault_not_reached point={point} outcome={outcome:?} head_present={}",
+                        head.is_some()
+                    );
+                }
                 assert!(result.is_err(), "{point}");
                 let reason = result
                     .as_ref()
