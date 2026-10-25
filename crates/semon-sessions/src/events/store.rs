@@ -6897,8 +6897,23 @@ fn write_index_changes_with_usage_deletes<'tx>(
                 != index.claude_sidecar.as_ref()
         });
     crate::events::native_commit::write(
-        &mut native_commit::Writer { transaction, measurements, namespace, usage_deletes, relationship_started: None, relationship_rows_before: None },
-        crate::events::native_commit::Input { path, ledger, index, changes, expected, semantic_change },
+        &mut native_commit::Writer {
+            transaction,
+            measurements,
+            namespace,
+            usage_deletes,
+            relationship_started: None,
+            relationship_rows_before: None,
+            dirty_started: None,
+        },
+        crate::events::native_commit::Input {
+            path,
+            ledger,
+            index,
+            changes,
+            expected,
+            semantic_change,
+        },
     )?;
     #[cfg(test)]
     {

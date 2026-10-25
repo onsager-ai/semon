@@ -18,6 +18,8 @@ pub(crate) struct Input<'a> {
 pub(crate) trait Effects {
     type Error;
     fn begin(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
+    fn planning_started(&mut self);
+    fn planning_finished(&mut self);
     fn file(&mut self, input: &Input<'_>, changes: &DirtyRows) -> Result<(), Self::Error>;
     fn usage(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
@@ -28,6 +30,7 @@ pub(crate) trait Effects {
 
 pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(), E::Error> {
     effects.begin(&input)?;
+    effects.planning_started();
     let full = DirtyRows {
         usage: if input.changes.is_none() {
             input.index.usage_by_id.keys().cloned().collect()
@@ -36,6 +39,7 @@ pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(),
         },
         ..DirtyRows::default()
     };
+    effects.planning_finished();
     effects.file(&input, input.changes.unwrap_or(&full))?;
     effects.usage(&input)?;
     effects.relationships(&input)?;
@@ -66,7 +70,12 @@ pub(crate) fn relationships<E: Relationships>(
     index: &FileIndex,
 ) -> Result<(), E::Error> {
     effects.clear(path, RelationshipGroup::Lineage)?;
-    for id in index.links.session_ids.iter().chain(&index.links.continued_in) {
+    for id in index
+        .links
+        .session_ids
+        .iter()
+        .chain(&index.links.continued_in)
+    {
         effects.put(path, "lineage:claude", id)?;
     }
     for id in &index.links.bridges {
@@ -79,8 +88,13 @@ pub(crate) fn relationships<E: Relationships>(
             effects.put(path, "semantic-native:codex", &id)?;
         }
         let metadata = serde_json::to_value(&header.metadata).map_err(E::metadata_error)?;
-        if metadata.get("guardian_review").and_then(serde_json::Value::as_bool) != Some(true)
-            && let Some(parent) = metadata.get("parent_thread").and_then(serde_json::Value::as_str)
+        if metadata
+            .get("guardian_review")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            && let Some(parent) = metadata
+                .get("parent_thread")
+                .and_then(serde_json::Value::as_str)
         {
             effects.put(path, "semantic-parent:codex", parent)?;
         }
