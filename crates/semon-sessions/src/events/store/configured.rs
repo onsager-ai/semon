@@ -7886,7 +7886,7 @@ mod tests {
                 );
                 assert_eq!(
                     actual.iter().skip(1).map(|row| row.2).collect::<Vec<_>>(),
-                    [1, 1, 2]
+                    [1, 1, 2, 2]
                 );
                 if let Some(base) = &baseline {
                     for (current, original) in actual.iter().zip(base) {
@@ -8137,6 +8137,27 @@ mod tests {
             drop(cache);
             let mut cache = open(&f.config);
             assert_eq!(cursors(), saved, "unfinished progress was committed before close");
+            let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            cache.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap();
+            let mut advanced = false;
+            for _ in 0..256 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                let current = cursors();
+                if current.contains(&(unfinished.0.clone(), unfinished.1.clone(), true)) {
+                    assert!(current.iter().all(|(_, after, done)| !after.is_empty() && *done));
+                    assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'", [], |r| r.get::<_, i64>(0)).unwrap(), 34);
+                    advanced = true;
+                    break;
+                }
+                assert_eq!(current, saved, "reset pages preserve the unfinished member keyset");
+                if !batch.paths.is_empty() {
+                    let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                    let model = crate::model::prepare_semantic_batch(options, &mut cache, &selected, &batch, 1_790_000_000_000).unwrap();
+                    assert_eq!(cache.record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+                }
+            }
+            assert!(advanced, "the reopened producer consumes the remaining member suffix");
             let (fresh, fresh_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let resumed = cursors();
