@@ -433,6 +433,11 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
+    // Verify the persisted scalar oracle before any PG connection exists.
+    let stored: String = sqlite.query_row("SELECT value FROM meta WHERE key=?1", [format!("native_tree_summary:{}", path.to_str().unwrap())], |r| r.get(0)).unwrap();
+    let stored: crate::events::tree_rows::TreeSummaryRecord = serde_json::from_str(&stored).unwrap();
+    assert_eq!(serde_json::to_value(&stored.summary).unwrap(), serde_json::to_value(index.tree_summary.as_ref().unwrap().compact(index.native_usage_observations.is_some())).unwrap());
+    assert!(stored.summary.line_count > 0);
     let mut rows: OracleRows = Vec::new();
     for family in [
         "files",
@@ -548,11 +553,25 @@ pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
-    install_families(tx, fixture, false)?;
+    publish_current(tx, fixture, None)
+}
+fn publish_current(tx: &mut PgTxn<'_>, fixture: &Fixture, previous: Option<&Fixture>) -> Result<(), StorageError> {
+    // Real production Core + Usage + Tree writers; SQLite is closed before PG.
+    let prior = |path: &str| previous.and_then(|f| f.sources.iter().find(|(p, _, _)| p == path).map(|(_, ledger, _)| ledger));
+    for (path, ledger, index) in &fixture.sources {
+        super::super::native_core::write(tx, path, prior(path), ledger, index, None)?;
+    }
+    {
+        let mut effects = super::super::native_usage::Usage::new(tx)?;
+        for (path, ledger, index) in &fixture.sources {
+            crate::events::store::native_usage::algorithm::begin(&mut effects, path, prior(path), ledger, false)?;
+            crate::events::store::native_usage::algorithm::write(&mut effects, path, ledger, index)?;
+        }
+    }
     for (path, ledger, index) in &fixture.sources {
         let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
         let summary = index.tree_summary.as_ref().ok_or(StorageError::Unavailable)?;
-        if !super::super::tree_writer::publish(tx, path, ledger, None, source, summary, index.native_usage_observations.is_some())? {
+        if !super::super::tree_writer::publish(tx, path, ledger, prior(path), source, summary, index.native_usage_observations.is_some())? {
             return Err(StorageError::Unavailable);
         }
     }
@@ -674,7 +693,10 @@ fn restore(pool: &PgPool, data: &Fixture) -> Summary {
 fn assert_oracle(actual: &mut Summary, expected: &Summary) {
     assert_eq!(actual.line_count, expected.line_count);
     assert_eq!(actual.malformed_lines, expected.malformed_lines);
-    assert_eq!(serde_json::to_value(actual.compact(false)).unwrap(), serde_json::to_value(expected.compact(false)).unwrap());
+    assert_eq!(
+        serde_json::to_value(actual.compact(false)).unwrap(),
+        serde_json::to_value(expected.compact(false)).unwrap()
+    );
     assert_eq!(actual.first, expected.first);
     assert_eq!(actual.last, expected.last);
     assert_eq!(actual.cwd, expected.cwd);
@@ -855,7 +877,10 @@ fn pg_tree_checkpoint_cancel_deadline_closed_nullable_and_unsigned_tokens() {
         Ok(())
     }).unwrap();
     let mut summary = restore(&pool, &data);
-    assert_eq!(summary.tool_name("tool\0🦀").unwrap(), Some("Bash'\0🦀".into()));
+    assert_eq!(
+        summary.tool_name("tool\0🦀").unwrap(),
+        Some("Bash'\0🦀".into())
+    );
     assert_eq!(summary.tool_name("null\0🦀").unwrap(), None);
     summary.load_shared_usage().unwrap();
     assert!(
@@ -955,60 +980,98 @@ fn pg_tree_checkpoint_real_copilot_has_no_tree_authority() {
 fn pg_tree_scalar119_published_record_and_authority_refuse_without_payload() {
     let (data, pool, _) = cancellation_fixture();
     let summary = restore(&pool, &data);
-    let TreeCheckpoint::Pg(snapshot) = summary.stored.as_ref().unwrap() else { panic!("PG checkpoint") };
-    pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
-        let key = format!("native_tree_summary:{}", data.path);
-        let original: Vec<u8> = tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        let base: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        let mut invalid = vec![b"{".to_vec(), vec![b' '; 1048577]];
-        for field in ["version", "parser_version", "ledger", "projection_witness", "interpretation_witness"] {
-            let mut record = base.clone();
-            record[field] = if field.ends_with("version") { serde_json::json!(0) } else { serde_json::json!("wrong") };
-            invalid.push(serde_json::to_vec(&record).unwrap());
-            let mut record = base.clone();
-            record.as_object_mut().unwrap().remove(field);
-            invalid.push(serde_json::to_vec(&record).unwrap());
-        }
-        // Even a valid replacement scalar is not the already captured scalar.
-        let mut changed = base.clone();
-        changed["summary"]["line_count"] = serde_json::json!(999);
-        invalid.push(serde_json::to_vec(&changed).unwrap());
-        for bytes in invalid {
-            tx.driver.batch_execute("SAVEPOINT scalar119").map_err(sqlstate::error)?;
-            tx.driver.execute("UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &bytes]).map_err(sqlstate::error)?;
-            assert!(snapshot.validate(tx).is_err());
-            tx.driver.batch_execute("ROLLBACK TO SAVEPOINT scalar119").map_err(sqlstate::error)?;
-        }
-        for mutation in [
-            "UPDATE semon_pg_native_files SET dev=dev+1",
-            "UPDATE semon_pg_native_files SET ino=ino+1",
-            "UPDATE semon_pg_native_files SET size=size+1",
-            "UPDATE semon_pg_native_files SET resume_at=resume_at+1",
-            "UPDATE semon_pg_native_files SET mtime_ns=decode(repeat('00',16),'hex')",
-            "UPDATE semon_pg_native_files SET ctime_ns=NULL",
-            "UPDATE semon_pg_native_files SET head_sha256=decode(repeat('00',32),'hex')",
-            "UPDATE semon_pg_native_files SET tail_sha256=decode(repeat('00',32),'hex')",
-            "UPDATE semon_pg_native_tree_headers SET ledger='wrong'::bytea",
-            "UPDATE semon_pg_native_tree_generations SET version=0",
-            "UPDATE semon_pg_native_tree_generations SET complete=false",
-            "UPDATE semon_pg_native_tree_generations SET work_pending=true",
-            "UPDATE semon_pg_native_usage_sources SET checkpoint=checkpoint+1",
-            "UPDATE semon_pg_native_usage_sources SET parser_version=0",
-            "UPDATE semon_pg_native_usage_sources SET receipt='wrong'::bytea",
-            "DELETE FROM semon_pg_native_usage_current",
-            "DELETE FROM semon_pg_native_tree_headers",
-            "DELETE FROM semon_pg_native_meta",
-            "UPDATE semon_pg_native_tree_labels SET value='drift'::bytea",
-            "UPDATE semon_pg_native_tree_models SET model='drift'::bytea",
-        ] {
-            tx.driver.batch_execute("SAVEPOINT scalar119").map_err(sqlstate::error)?;
-            tx.driver.batch_execute(mutation).map_err(sqlstate::error)?;
-            assert!(snapshot.validate(tx).is_err(), "{mutation}");
-            tx.driver.batch_execute("ROLLBACK TO SAVEPOINT scalar119").map_err(sqlstate::error)?;
-        }
-        snapshot.validate(tx)?;
-        Ok(())
-    }).unwrap();
+    let TreeCheckpoint::Pg(snapshot) = summary.stored.as_ref().unwrap() else {
+        panic!("PG checkpoint")
+    };
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            let key = format!("native_tree_summary:{}", data.path);
+            let original: Vec<u8> = tx
+                .driver
+                .query_one(
+                    "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1",
+                    &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
+            let base: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            let mut invalid = vec![b"{".to_vec(), vec![b' '; 1048577]];
+            for field in [
+                "version",
+                "parser_version",
+                "ledger",
+                "projection_witness",
+                "interpretation_witness",
+            ] {
+                let mut record = base.clone();
+                record[field] = if field.ends_with("version") {
+                    serde_json::json!(0)
+                } else {
+                    serde_json::json!("wrong")
+                };
+                invalid.push(serde_json::to_vec(&record).unwrap());
+                let mut record = base.clone();
+                record.as_object_mut().unwrap().remove(field);
+                invalid.push(serde_json::to_vec(&record).unwrap());
+            }
+            // Even a valid replacement scalar is not the already captured scalar.
+            let mut changed = base.clone();
+            changed["summary"]["line_count"] = serde_json::json!(999);
+            invalid.push(serde_json::to_vec(&changed).unwrap());
+            for bytes in invalid {
+                tx.driver
+                    .batch_execute("SAVEPOINT scalar119")
+                    .map_err(sqlstate::error)?;
+                tx.driver
+                    .execute(
+                        "UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2",
+                        &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &bytes],
+                    )
+                    .map_err(sqlstate::error)?;
+                assert!(snapshot.validate(tx).is_err());
+                tx.driver
+                    .batch_execute("ROLLBACK TO SAVEPOINT scalar119")
+                    .map_err(sqlstate::error)?;
+            }
+            for mutation in [
+                "UPDATE semon_pg_native_files SET dev=dev+1",
+                "UPDATE semon_pg_native_files SET ino=ino+1",
+                "UPDATE semon_pg_native_files SET size=size+1",
+                "UPDATE semon_pg_native_files SET resume_at=resume_at+1",
+                "UPDATE semon_pg_native_files SET mtime_ns=decode(repeat('00',16),'hex')",
+                "UPDATE semon_pg_native_files SET ctime_ns=NULL",
+                "UPDATE semon_pg_native_files SET head_sha256=decode(repeat('00',32),'hex')",
+                "UPDATE semon_pg_native_files SET tail_sha256=decode(repeat('00',32),'hex')",
+                "UPDATE semon_pg_native_tree_headers SET ledger='wrong'::bytea",
+                "UPDATE semon_pg_native_tree_generations SET version=0",
+                "UPDATE semon_pg_native_tree_generations SET complete=false",
+                "UPDATE semon_pg_native_tree_generations SET work_pending=true",
+                "UPDATE semon_pg_native_usage_sources SET checkpoint=checkpoint+1",
+                "UPDATE semon_pg_native_usage_sources SET parser_version=0",
+                "UPDATE semon_pg_native_usage_sources SET receipt='wrong'::bytea",
+                "DELETE FROM semon_pg_native_usage_current",
+                "DELETE FROM semon_pg_native_tree_headers",
+                "DELETE FROM semon_pg_native_meta",
+                "UPDATE semon_pg_native_tree_labels SET value='drift'::bytea",
+                "UPDATE semon_pg_native_tree_models SET model='drift'::bytea",
+            ] {
+                tx.driver
+                    .batch_execute("SAVEPOINT scalar119")
+                    .map_err(sqlstate::error)?;
+                tx.driver.batch_execute(mutation).map_err(sqlstate::error)?;
+                assert!(snapshot.validate(tx).is_err(), "{mutation}");
+                tx.driver
+                    .batch_execute("ROLLBACK TO SAVEPOINT scalar119")
+                    .map_err(sqlstate::error)?;
+            }
+            snapshot.validate(tx)?;
+            Ok(())
+        },
+    )
+    .unwrap();
     assert_oracle(&mut restore(&pool, &data), &data.oracle);
     std::fs::remove_dir_all(data.root).unwrap();
 }
@@ -1019,8 +1082,15 @@ fn pg_tree_scalar119_committed_interpretation_drift_refuses_deferred_payload() {
         let (data, pool, _) = cancellation_fixture();
         let mut summary = restore(&pool, &data);
         if dependency == "pricing" {
-            super::super::PgStoreMetadata::open(pool.clone(), &PgCancellation::default()).unwrap()
-                .set_pricing_target(&[119; 32], 0, Some("new-pricing"), &PgCancellation::default()).unwrap();
+            super::super::PgStoreMetadata::open(pool.clone(), &PgCancellation::default())
+                .unwrap()
+                .set_pricing_target(
+                    &[119; 32],
+                    0,
+                    Some("new-pricing"),
+                    &PgCancellation::default(),
+                )
+                .unwrap();
         } else {
             pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
                 if dependency == "fingerprint" {
@@ -1034,7 +1104,62 @@ fn pg_tree_scalar119_committed_interpretation_drift_refuses_deferred_payload() {
         }
         assert!(summary.tool_name("tool\0🦀").is_err(), "{dependency}");
         assert!(summary.load_shared_usage().is_err(), "{dependency}");
-        assert!(Snapshot::restore(pool, ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).is_err(), "{dependency}");
+        assert!(
+            Snapshot::restore(
+                pool,
+                ns("tree\0🦀"),
+                &data.path,
+                &data.ledger,
+                PgCancellation::default()
+            )
+            .is_err(),
+            "{dependency}"
+        );
         std::fs::remove_dir_all(data.root).unwrap();
+    }
+}
+
+#[test]
+fn pg_tree_scalar119_real_producers_append_replacement_restart_and_history_bounds() {
+    for harness in ["claude", "codex"] {
+        // Complete all independent SQLite production/oracle phases first.
+        let initial = parser_fixture(harness);
+        let appended = append_fixture(&initial, harness);
+        std::fs::write(initial.root.join("one.jsonl"), "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"replacement\"}}\nnot-json\n").unwrap();
+        let replacement = capture_fixture(initial.root.clone(), harness);
+        let sqlite_path = EventCache::path(&initial.root.join("index.json"));
+        std::fs::rename(&sqlite_path, initial.root.join("oracle-held")).unwrap();
+        let (mut pool, factory) = fixture(|_| {});
+        let mut previous = None;
+        let mut old = None::<Summary>;
+        for data in [&initial, &appended, &replacement] {
+            pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| publish_current(tx, data, previous)).unwrap();
+            if let Some(mut old) = old.take() {
+                assert!(old.tool_name("missing").is_err());
+                assert!(old.load_shared_usage().is_err());
+            }
+            let mut actual = restore(&pool, data);
+            assert_oracle(&mut actual, &data.oracle);
+            old = Some(actual);
+            previous = Some(data);
+            drop(pool);
+            pool = PgPool::open(factory.clone(), limits()).unwrap();
+            assert_oracle(&mut restore(&pool, data), &data.oracle);
+            assert!(!sqlite_path.exists(), "PG phase must not reopen SQLite");
+        }
+        let mut baseline = None;
+        for count in [0_i64, 256, 2048] {
+            // Nonselected dimension noise is not an oracle or a published Current.
+            pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+                tx.driver.execute("INSERT INTO semon_pg_native_tree_models(namespace,projection_id,model) SELECT $1,100000+n,convert_to('unrelated','UTF8') FROM generate_series(1,$2::bigint) n ON CONFLICT DO NOTHING", &[&tx.namespace.as_str().as_bytes(), &count]).map_err(sqlstate::error)?;
+                Ok(())
+            }).unwrap();
+            DECODED.with(|n| n.set(0));
+            assert_oracle(&mut restore(&pool, &replacement), &replacement.oracle);
+            let decoded = DECODED.with(|n| n.get());
+            assert_eq!(decoded, *baseline.get_or_insert(decoded));
+        }
+        assert!(!sqlite_path.exists());
+        std::fs::remove_dir_all(initial.root).unwrap();
     }
 }

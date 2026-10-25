@@ -320,7 +320,10 @@ pub(super) fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>,
 
 // Read only persisted rows, bytea keyset order, one admitted row at a time.
 // This is distinct from hashing the input delta: old closed/model rows survive.
-pub(super) fn persisted_witness(tx: &mut PgTxn<'_>, projection: i64) -> Result<String, StorageError> {
+pub(super) fn persisted_witness(
+    tx: &mut PgTxn<'_>,
+    projection: i64,
+) -> Result<String, StorageError> {
     let mut writer = witness::Writer::new();
     for (family, key, columns, filter) in [
         ("labels", "label", "label,value", ""),

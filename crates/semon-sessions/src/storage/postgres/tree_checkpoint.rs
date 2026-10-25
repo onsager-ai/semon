@@ -16,8 +16,8 @@ use crate::{
     selected_read,
     storage::{LogicalSourceNamespace, StorageError, StoreConfig},
 };
-use std::{collections::BTreeMap, fmt, io};
 use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fmt, io};
 
 #[cfg(test)]
 thread_local! { static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -132,7 +132,9 @@ impl Snapshot {
                                     summary.tools.insert(id, name.clone());
                                 }
                             }
-                            "true" => { summary.closed_tools.insert(id); },
+                            "true" => {
+                                summary.closed_tools.insert(id);
+                            }
                             _ => return Err(StorageError::Unavailable),
                         }
                         Ok(())
@@ -172,17 +174,33 @@ impl Snapshot {
 
     // Every lazy query reauthorizes the captured published scalar in the same
     // SQL snapshot as its payload. Current L1 explicitly refuses after L2.
-    fn scalar(&self, tx: &mut PgTxn<'_>, file: i64, projection: i64) -> Result<(Summary, [u8; 32]), StorageError> {
+    fn scalar(
+        &self,
+        tx: &mut PgTxn<'_>,
+        file: i64,
+        projection: i64,
+    ) -> Result<(Summary, [u8; 32]), StorageError> {
         tx.check()?;
-        if super::tree_writer::metadata(tx, format!("native_tree_failure:{}", self.path).as_bytes())?.is_some() {
+        if super::tree_writer::metadata(
+            tx,
+            format!("native_tree_failure:{}", self.path).as_bytes(),
+        )?
+        .is_some()
+        {
             return Err(StorageError::Busy);
         }
-        let encoded = super::tree_writer::metadata(tx, format!("native_tree_summary:{}", self.path).as_bytes())?
-            .ok_or(StorageError::Busy)?;
+        let encoded = super::tree_writer::metadata(
+            tx,
+            format!("native_tree_summary:{}", self.path).as_bytes(),
+        )?
+        .ok_or(StorageError::Busy)?;
         let (_, pricing) = super::store_metadata::read(tx)?;
         let recipe = super::tree_writer::metadata(tx, b"catalog_semantic_recipe")?;
         let lengths = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?;
-        let length = lengths.first().ok_or(StorageError::Busy)?.get::<_, Option<i64>>(0);
+        let length = lengths
+            .first()
+            .ok_or(StorageError::Busy)?
+            .get::<_, Option<i64>>(0);
         if length.is_some_and(|n| !(0..=1048576).contains(&n)) {
             return Err(StorageError::Unavailable);
         }
@@ -190,12 +208,18 @@ impl Snapshot {
         tx.check()?;
         let fingerprint: Option<Vec<u8>> = tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?.get(0);
         let fingerprint = fingerprint.map(text).transpose()?;
-        let interpretation = crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint]).map_err(|_| StorageError::Unavailable)?;
+        let interpretation =
+            crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
+                .map_err(|_| StorageError::Unavailable)?;
         let witness = super::tree_writer::persisted_witness(tx, projection)?;
         tx.check()?;
         let record = crate::events::tree_rows::TreeSummaryRecord::decode_current(
-            encoded.as_bytes(), &header_ledger(&self.ledger), Some(&witness), &interpretation,
-        ).ok_or(StorageError::Busy)?;
+            encoded.as_bytes(),
+            &header_ledger(&self.ledger),
+            Some(&witness),
+            &interpretation,
+        )
+        .ok_or(StorageError::Busy)?;
         Ok((record.summary, Sha256::digest(encoded.as_bytes()).into()))
     }
 
