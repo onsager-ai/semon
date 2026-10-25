@@ -25,17 +25,22 @@ pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageE
 }
 
 /// Crate-private capability only; the public configured factory stays closed.
-#[cfg(test)]
+#[allow(dead_code)] // Internal runtime seam; public qualification remains zero.
 pub(crate) fn open_private_semantic(
     config: &StoreConfig,
 ) -> Result<Box<dyn IndexStore>, StorageError> {
-    crate::events::store::configured::validate_semantic_schema(config)?;
+    open_semantic(super::semantic::SemanticStaging::primitive(config)?)
+}
+
+#[allow(dead_code)] // Requires an explicit validated capability, never Options.
+pub(crate) fn open_semantic(capability: super::semantic::SemanticStaging) -> Result<Box<dyn IndexStore>, StorageError> {
+    let config = capability.config();
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {
         journal,
         native: crate::events::store::configured::Writer::new(config),
-        semantic: Some(super::semantic::Stage::open(config)?),
+        semantic: Some(super::semantic::Stage::open(capability)?),
     }))
 }
 
