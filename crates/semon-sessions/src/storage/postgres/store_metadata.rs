@@ -95,10 +95,33 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         {
             return Err(StorageError::ScopeChanged);
         }
+        let checks: Vec<String> = tx.driver.query(
+            "SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=$1::text::regclass AND contype='c' AND convalidated ORDER BY 1", &[&name]
+        ).map_err(sqlstate::error)?.iter().map(|r| r.get(0)).collect();
+        let mut expected = match table {
+            "owner" => vec!["singleton", "(contract = 1)", "(epoch = 1)"],
+            "state" => vec![
+                "singleton",
+                "(revision >= 0)",
+                "(octet_length(pricing_target) <= 1048576)",
+            ],
+            _ => vec![
+                "(octet_length(operation_id) = 32)",
+                "(octet_length(request_digest) = 32)",
+                "(revision >= 0)",
+            ],
+        };
+        expected.sort_unstable();
+        let shape: bool = tx.driver.query_one(
+            "SELECT NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1::text::regclass AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=$1::text::regclass AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=$1::text::regclass AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=$1::text::regclass)", &[&name]
+        ).map_err(sqlstate::error)?.get(0);
+        if checks != expected || !shape {
+            return Err(StorageError::ScopeChanged);
+        }
         let owners = tx
             .driver
             .query(
-                "SELECT owner::text,contract,epoch FROM semon_pg_store_owner WHERE singleton",
+                "SELECT owner::text,contract,epoch FROM semon_pg_store_owner LIMIT 2",
                 &[],
             )
             .map_err(sqlstate::error)?;
@@ -143,16 +166,12 @@ pub(super) fn lock(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageErr
 }
 
 pub(super) fn lock_publication(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
-    let rows = tx
-        .driver
-        .query(
-            "SELECT revision FROM semon_pg_store_state WHERE singleton FOR SHARE",
-            &[],
-        )
-        .map_err(sqlstate::error)?;
-    if rows.len() != 1 {
-        return Err(StorageError::ScopeChanged);
-    }
+    // SELECT FOR SHARE requires UPDATE privilege in PostgreSQL. Source roles
+    // deliberately have SELECT only on STORE tables. Their shared advisory
+    // lock (acquired before this call) fences every authorized host mutation;
+    // the exclusive host path also locks the state row. No definer function
+    // or UPDATE grant is used to turn a Source into a STORE controller.
+    read(tx)?;
     tx.check()
 }
 
@@ -160,6 +179,10 @@ pub(super) fn read(tx: &mut PgTxn<'_>) -> Result<(i64, Option<String>), StorageE
     tx.check()?;
     let rows=tx.driver.query("SELECT s.revision,octet_length(s.pricing_target)::bigint,s.owner=o.owner AND o.contract=1 AND o.epoch=1 FROM semon_pg_store_state s CROSS JOIN semon_pg_store_owner o WHERE s.singleton AND o.singleton", &[]).map_err(sqlstate::error)?;
     if rows.len() != 1 || !rows[0].get::<_, bool>(2) || rows[0].get::<_, i64>(0) < 0 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let bad_operation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_store_operations p CROSS JOIN semon_pg_store_owner o CROSS JOIN semon_pg_store_state s WHERE p.owner<>o.owner OR p.revision<1 OR p.revision>s.revision)", &[]).map_err(sqlstate::error)?.get(0);
+    if bad_operation {
         return Err(StorageError::ScopeChanged);
     }
     let bytes = rows[0].get::<_, Option<i64>>(1);
@@ -220,12 +243,24 @@ impl PgStoreMetadata {
             let (revision,_) = read(tx)?;
             if revision!=expected_revision { return Err(StorageError::Conflict); }
             let next=revision.checked_add(1).ok_or(StorageError::Conflict)?;
-            if tx.driver.execute("UPDATE semon_pg_store_state SET revision=$1,pricing_target=$2 WHERE singleton AND revision=$3", &[&next,&target.map(str::as_bytes),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            mutation_boundary(1)?;
+            if tx.driver.execute("UPDATE semon_pg_store_state SET revision=$1,pricing_target=$2 WHERE singleton AND revision=$3 AND owner=CURRENT_USER", &[&next,&target.map(str::as_bytes),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            mutation_boundary(2)?;
             if tx.driver.execute("INSERT INTO semon_pg_store_operations(operation_id,owner,request_digest,revision) VALUES($1,CURRENT_USER,$2,$3)", &[&&operation[..],&digest,&next]).map_err(sqlstate::error)?!=1 { return Err(StorageError::ScopeChanged); }
+            mutation_boundary(3)?;
             tx.check()?;
             Ok(next)
         })
     }
+}
+#[cfg(test)]
+thread_local! { static FAIL_MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+fn mutation_boundary(_point: u8) -> Result<(), StorageError> {
+    #[cfg(test)]
+    if FAIL_MUTATION.with(|p| p.get() == _point) {
+        return Err(StorageError::Busy);
+    }
+    Ok(())
 }
 fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let allowed:bool=tx.driver.query_one("SELECT owner=CURRENT_USER AND has_table_privilege('semon_pg_store_state','UPDATE') AND has_table_privilege('semon_pg_store_operations','INSERT') FROM semon_pg_store_owner WHERE singleton", &[]).map_err(sqlstate::error)?.get(0);
@@ -235,6 +270,10 @@ fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     read(tx)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "store_metadata/tests.rs"]
+mod authority_tests;
 
 #[cfg(test)]
 mod tests {
@@ -319,13 +358,18 @@ mod tests {
 
     #[test]
     fn pg_store_metadata_pricing_waits_for_source_publication_lock() {
-        let (pool, _) = fixture(|_| {});
+        let (pool, factory) = fixture(|_| {});
         let control = PgCancellation::default();
         let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
+        let source_pool = PgPool::open(
+            crate::storage::postgres::tests::source_factory(&factory),
+            crate::storage::postgres::tests::limits(),
+        )
+        .unwrap();
         let (captured_tx, captured_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| {
-            let reader_pool = &pool;
+            let reader_pool = &source_pool;
             let reader_control = &control;
             let reader = scope.spawn(move || {
                 reader_pool.transaction(&ns("source"), TxnKind::Write, reader_control, |tx| {

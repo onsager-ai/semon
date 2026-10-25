@@ -94,6 +94,63 @@ pub(super) fn fixture(mut configure: impl FnMut(&mut PoolLimits)) -> (PgPool, Ar
     (pool, factory)
 }
 
+/// A separate LOGIN principal, provisioned only in the ephemeral CI service.
+/// Credentials remain inside this test factory and never enter library APIs.
+pub(super) fn admin_factory(host: &Factory) -> Arc<Factory> {
+    let dsn = std::env::var("SEMON_PG_ADMIN_TEST_DSN")
+        .expect("ephemeral CI corruption observer required");
+    Arc::new(Factory {
+        dsn,
+        schema: host.schema.clone(),
+    })
+}
+
+pub(super) fn source_factory(host: &Factory) -> Arc<Factory> {
+    let dsn = std::env::var("SEMON_PG_SOURCE_TEST_DSN")
+        .expect("distinct Source principal required in CI");
+    let source = Arc::new(Factory {
+        dsn,
+        schema: host.schema.clone(),
+    });
+    let mut client = host.client();
+    client
+        .batch_execute(&format!(
+            "GRANT USAGE ON SCHEMA {} TO semon_source",
+            host.schema
+        ))
+        .unwrap();
+    let tables = client.query("SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r'", &[]).unwrap();
+    for row in tables {
+        let name: String = row.get(0);
+        if !name.starts_with("semon_pg_") {
+            continue;
+        }
+        let privilege = if name.starts_with("semon_pg_store_") || name == "semon_pg_schema" {
+            "SELECT"
+        } else {
+            "SELECT,INSERT,UPDATE,DELETE"
+        };
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        client
+            .batch_execute(&format!(
+                "GRANT {privilege} ON TABLE {name} TO semon_source"
+            ))
+            .unwrap();
+    }
+    client
+        .batch_execute(&format!(
+            "GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {} TO semon_source",
+            host.schema
+        ))
+        .unwrap();
+    let row = source.client().query_one("SELECT current_user<>$1::name,NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user", &[&"semon_f1"]).unwrap();
+    assert!(
+        row.get::<_, bool>(0) && row.get::<_, bool>(1),
+        "distinct restricted Source role"
+    );
+    source
+}
+
 pub(super) fn ns(value: &str) -> LogicalSourceNamespace {
     LogicalSourceNamespace::new(value).unwrap()
 }
