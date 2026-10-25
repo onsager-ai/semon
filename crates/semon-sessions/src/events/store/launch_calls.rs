@@ -10,9 +10,6 @@ use crate::events::native_pages::launch::{Header, Page};
 fn prefix(path: &str) -> String {
     format!("native_launch_calls:{:x}:", Sha256::digest(path.as_bytes()))
 }
-fn fingerprint(index: &Index) -> rusqlite::Result<[u8; 32]> {
-    Ok(Sha256::digest(json(index)?.as_bytes()).into())
-}
 
 pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let text: Option<Option<String>> = connection
@@ -108,18 +105,8 @@ pub(super) fn read(
     if calls.len() != header.count {
         return Ok(None);
     }
-    let eof = calls.split_off(header.complete);
-    let index = Index {
-        complete: calls,
-        eof,
-        eof_record: header.eof_record,
-        complete_bytes: header.complete_bytes,
-        eof_bytes: header.eof_bytes,
-    };
-    if !index.valid(ledger) || fingerprint(&index)? != header.fingerprint {
-        return Ok(None);
-    }
-    Ok(Some(index))
+    crate::events::native_pages::launch::restore(header, calls, ledger)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 pub(super) fn write(
@@ -165,6 +152,7 @@ pub(super) fn write_measured(
     else {
         return clear(transaction, path);
     };
+    measurements.record("launch_page_serialization", started, plan.pages.len());
     measurements.count("launch_calls", index.complete.len() + index.eof.len());
     for (page, encoded) in plan.pages.iter().enumerate() {
         measurements.count("launch_page_bytes", encoded.len());

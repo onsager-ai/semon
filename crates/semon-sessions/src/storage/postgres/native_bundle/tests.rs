@@ -15,6 +15,27 @@ use crate::{
 // Tree's fixture reparses only the dimensions needed by its family tests.
 // A connected file commit needs the complete production scan, including the
 // auxiliary headers captured outside parse(). Finish all SQLite work before PG.
+fn bundle_fixture(harness: &str) -> Fixture {
+    if harness != "copilot" { return parser_fixture(harness); }
+    // Tree's fixture unconditionally unwraps a Tree oracle. Copilot genuinely
+    // has none: use real scan/ledger data and never pass an invented Tree input.
+    let root = std::env::temp_dir().join(format!("pg117-copilot-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&root).unwrap();
+    let physical = root.join("one.jsonl");
+    let value = serde_json::json!({"type":"session.start","data":{"sessionId":"s🦀"}});
+    std::fs::write(&physical, format!("{value}\n")).unwrap();
+    let cache_path = root.join("index.json");
+    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+    let index = crate::events::scan_file(&physical, harness, &mut cache, &mut false).unwrap();
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
+    let ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
+    let path = format!("{}\0🦀",physical.to_str().unwrap());
+    assert!(index.tree_summary.is_none());
+    Fixture {root,path:path.clone(),ledger:ledger.clone(),oracle:Default::default(),sources:vec![(path,ledger,(*index).clone())],rows:Vec::new()}
+}
+
 fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
     // Use a fresh producer store: a warm Tree-only restore intentionally omits
     // parser accumulators such as line_count and is not a fresh ingest input.
@@ -35,7 +56,14 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
             &mut false,
         )
         .unwrap();
+        // scan_file may commit and replace Tree with its warm read model
+        // (events.rs load_tree), which omits parser accumulators. The fixture
+        // already owns the actual production parse; keep that ingest input.
+        let tree = index.tree_summary.take();
+        let usage = index.native_usage_observations.take();
         *index = (*scanned).clone();
+        index.tree_summary = tree;
+        index.native_usage_observations = usage;
         if harness != "copilot" {
             assert!(index.tree_summary.is_some(), "production Tree input");
         }
@@ -114,7 +142,7 @@ fn oracle_metadata(data: &Fixture) -> Vec<(String, String)> {
 #[test]
 fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_oracle() {
     for harness in ["claude", "codex", "copilot"] {
-        let data = complete_fixture(parser_fixture(harness), harness);
+        let data = complete_fixture(bundle_fixture(harness), harness);
         let metadata = oracle_metadata(&data);
         if harness == "codex" {
             assert!(!metadata.is_empty(), "nonempty independent header oracle");
@@ -348,7 +376,7 @@ fn pg_native_bundle_every_connected_boundary_rolls_back_and_stale_cas_refuses() 
 #[test]
 fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
     let codex = complete_fixture(parser_fixture("codex"), "codex");
-    let copilot = complete_fixture(parser_fixture("copilot"), "copilot");
+    let copilot = complete_fixture(bundle_fixture("copilot"), "copilot");
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("bundle-tree-retirement\0🦀");
     let control = PgCancellation::default();
@@ -472,6 +500,58 @@ fn pg_native_pages_tamper_namespace_and_missing_generation_refuse() {
     });
     assert!(matches!(result, Err(StorageError::Busy)));
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| { assert_eq!(pinned.chunk_hash(tx, 0)?, index.source_chunks.as_ref().unwrap().hashes[0]); Ok(()) }).unwrap();
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
+    use crate::storage::postgres::native_pages;
+    let data = bundle_fixture("copilot");
+    let physical = data.root.join("launch.jsonl");
+    let mut body = String::new();
+    for at in 0..258 {
+        let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":format!("launch-{at}"),"name":"Bash","input":{"command":"codex exec fixture"}}]}});
+        body.push_str(&value.to_string());
+        if at < 257 { body.push('\n'); }
+    }
+    std::fs::write(&physical, body.as_bytes()).unwrap();
+    let cache_path = data.root.join("launch-index.json");
+    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+    let scanned = crate::events::scan_file(&physical, "claude", &mut cache, &mut false).unwrap();
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
+    let ledger: Ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
+    use sha2::{Digest, Sha256};
+    let prefix = format!("native_launch_calls:{:x}:", Sha256::digest(physical.to_str().unwrap().as_bytes()));
+    let mut statement = db.prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key").unwrap();
+    let oracle = statement.query_map(rusqlite::params![&prefix,format!("{prefix}~")], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(oracle.len() >= 3, "two production launch pages and header");
+    let expected = scanned.handoff_index.as_ref().unwrap().clone();
+    assert_eq!(expected.complete.len(), 257);
+    assert_eq!(expected.eof.len(), 1);
+    drop(statement);
+    drop(db);
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("launch-pages\0🦀");
+    let control = PgCancellation::default();
+    let (_, old_ledger, old_index) = &data.sources[0];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, old_ledger, old_index, None, None)).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let prepared = native_pages::prepare(&ledger, &scanned)?;
+        let id = native_pages::write(tx, source, "launch\0🦀", &ledger, prepared)?;
+        let pinned = native_pages::open(tx, "launch\0🦀", &ledger, id)?;
+        for (key, value) in &oracle {
+            let suffix = key.strip_prefix(&prefix).unwrap();
+            if suffix == "header" { assert!(pinned.launch_header.as_ref() == Some(value)); }
+            else { assert!(pinned.page(tx, 1, suffix)? == *value, "production launch page bytes"); }
+        }
+        assert_eq!(pinned.launch(tx)?, expected);
+        Ok(())
+    }).unwrap();
     drop(pool);
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();

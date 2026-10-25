@@ -8,6 +8,22 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 const PAGE: usize = 256;
+impl Header {
+    pub(crate) fn valid(&self, ledger: &Ledger) -> bool {
+        self.version == 1 && self.parser_version == CACHE_VERSION
+            && self.ledger == crate::events::store::header_ledger(ledger)
+            && self.complete <= crate::handoff::MAX_CALLS && self.count >= self.complete
+            && self.count - self.complete <= crate::handoff::MAX_CALLS
+    }
+}
+
+pub(crate) fn restore(header: Header, mut calls: std::collections::VecDeque<CallRef>, ledger: &Ledger) -> serde_json::Result<Option<Index>> {
+    if !header.valid(ledger) || calls.len() != header.count { return Ok(None); }
+    let eof = calls.split_off(header.complete);
+    let index = Index { complete: calls, eof, eof_record: header.eof_record, complete_bytes: header.complete_bytes, eof_bytes: header.eof_bytes };
+    if !index.valid(ledger) || <[u8;32]>::from(Sha256::digest(serde_json::to_string(&index)?.as_bytes())) != header.fingerprint { return Ok(None); }
+    Ok(Some(index))
+}
 pub(crate) fn plan(ledger: &Ledger, index: &Index) -> serde_json::Result<Option<Plan>> {
     if !index.valid(ledger) {
         return Ok(None);
