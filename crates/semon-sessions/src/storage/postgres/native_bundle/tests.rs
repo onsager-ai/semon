@@ -150,11 +150,52 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
             .unwrap();
             assert_eq!(restored.line_count, next.oracle.line_count);
             assert_eq!(restored.tools, next.oracle.tools);
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                apply(tx, &data.path, &data.ledger, old, Some(&next.ledger), None)
+            })
+            .unwrap();
+            let replaced = Snapshot::restore(
+                pool.clone(), namespace.clone(), &data.path, &data.ledger, control.clone(),
+            ).unwrap();
+            assert_eq!(replaced.line_count, data.oracle.line_count);
+            assert_eq!(replaced.tools, data.oracle.tools);
         }
         drop(pool);
         drop(factory);
         std::fs::remove_dir_all(data.root).unwrap();
     }
+}
+
+#[test]
+fn pg_native_bundle_namespace_retirement_and_drift_refusal() {
+    let data = parser_fixture("codex");
+    let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
+    let namespace = ns("bundle-owner\0🦀");
+    let foreign = ns("bundle-foreign\0🦀");
+    let control = PgCancellation::default();
+    let (_, ledger, index) = &data.sources[0];
+    pool.transaction(&foreign, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)
+    }).unwrap();
+    let foreign_before = pool.transaction(&foreign, TxnKind::ReadSnapshot, &control, snapshot).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let key = format!("archive_event_index:{}",data.path);
+        tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&key.as_bytes(),&b"prior archive".as_slice()]).map_err(sqlstate::error)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3)", &[&ns,&data.path.as_bytes(),&b"prior mutation".as_slice()]).map_err(sqlstate::error)?;
+        apply(tx,&data.path,ledger,index,None,None)?;
+        let retired: bool = tx.driver.query_one("SELECT NOT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace=$1 AND source_path=$3)", &[&ns,&key.as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        assert!(retired);
+        tx.driver.execute("UPDATE semon_pg_native_usage_sources SET receipt=$2 WHERE namespace=$1", &[&ns,&b"drift".as_slice()]).map_err(sqlstate::error)?;
+        Ok(())
+    }).unwrap();
+    let before = pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap();
+    let result = pool.transaction(&namespace,TxnKind::Write,&control,|tx| apply(tx,&data.path,ledger,index,Some(ledger),None));
+    assert!(matches!(result,Err(StorageError::ScopeChanged)));
+    assert!(before == pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,snapshot).unwrap());
+    assert!(foreign_before == pool.transaction(&foreign,TxnKind::ReadSnapshot,&control,snapshot).unwrap());
+    drop(pool); drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
 }
 
 #[test]
