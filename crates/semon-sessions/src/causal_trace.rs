@@ -444,6 +444,20 @@ pub(crate) fn selected_details(
     ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
+#[cfg(test)]
+fn selected_family(
+    tx: &Transaction<'_>,
+    key: &str,
+    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
+) -> rusqlite::Result<Value> {
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::local(tx),
+        key,
+        relative_status,
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 pub(crate) fn range_context(
     tx: &Transaction<'_>, key: &str,
     slots: &[crate::slot_projection::SavedSlot],

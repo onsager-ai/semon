@@ -38,7 +38,7 @@ pub(crate) fn selected_details(
 
 /// Indexed, body-free relatives of the selected owner. This never walks an
 /// unrelated workspace. A truncated family retains an explicit unknown total.
-fn selected_family(
+pub(crate) fn selected_family(
     lookup: &dyn ContextLookup,
     key: &str,
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
@@ -337,6 +337,53 @@ pub(crate) struct PresentationWitness {
     pub(crate) has_history: bool,
     pub(crate) catalog: BTreeMap<String, String>,
     pub(crate) context: CapturedContext,
+    pub(crate) observations: PresentationObservations,
+}
+
+/// Body-free runtime and source-selection inputs captured by the real model.
+/// They enter its staged row witness and the publication manifest together.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PresentationObservations {
+    pub(crate) runtime: String,
+    pub(crate) facts_known: bool,
+    pub(crate) selection_known: bool,
+    pub(crate) machine_label: Option<String>,
+    current_codex: Option<BTreeSet<std::path::PathBuf>>,
+}
+impl PresentationObservations {
+    pub(crate) fn capture(options: &crate::Options, binding: &crate::storage::QueryRuntimeBinding) -> io::Result<Self> {
+        let runtime = crate::native_evidence::query_runtime_generation(options)?;
+        let recorded = options.facts.as_ref().and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+        let facts_known = options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
+        let selection_known = options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.selection_known());
+        let machine_label = match &options.facts {
+            None => Some(crate::facts::MachineFacts::Local.hostname(options)),
+            Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
+        };
+        let current_codex = if options.facts.is_some() && selection_known {
+            let bytes = crate::read_regular_at_most(options.facts.as_ref().expect("recorded facts"), 8 * 1048576)?;
+            let facts: crate::Facts = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            Some(facts.codex_rollouts.iter().chain(&facts.codex_provisional_rollouts).flatten().map(|path| options.codex_home.join(path)).collect())
+        } else { None };
+        if let Some(recorded) = recorded { recorded.validate()?; }
+        if crate::native_evidence::query_runtime_generation(options)? != runtime {
+            return Err(io::Error::other("selected presentation observations changed"));
+        }
+        Ok(Self { runtime: binding.witness(&runtime)?, facts_known, selection_known, machine_label, current_codex })
+    }
+    pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
+        self.current_codex.as_ref().is_some_and(|paths| !paths.contains(&source.path))
+    }
+    fn relative_status(&self, row: &crate::model::summary::CatalogRow) -> Value {
+        if row.sources.is_empty() || row.sources.len() > 64 ||
+            (row.lifecycle == crate::model::summary::CatalogLifecycle::Current &&
+                (!self.facts_known || (row.harness == "codex" && !self.selection_known))) {
+            return json!({"state":null,"observation":"unavailable"});
+        }
+        crate::catalog::recorded_status(row, Some(&self.runtime), true, self.facts_known,
+            row.harness == "codex" && row.sources.iter().any(|source| self.retired(source)))
+            .unwrap_or_else(|_| json!({"state":null,"observation":"unavailable"}))
+    }
 }
 
 /// Constructed explicitly by the host alongside its authorized source mapping.
@@ -366,6 +413,7 @@ pub(crate) struct ImmutableCatalog<'a> {
     pub(crate) snapshot: &'a crate::storage::proof_lifetime::ReaderSnapshot,
 }
 impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
+    fn presentation_observations(&self) -> Option<&PresentationObservations> { Some(&self.witness.observations) }
     // The publication validated these consumed ledgers. Physical liveness is
     // requalified by Records, never used to rewrite the pinned presentation.
     fn source_state(&self, source: &crate::model::summary::CatalogSource) -> Option<&'static str> {
@@ -377,20 +425,22 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
     fn require_current(&self) -> io::Result<()> { Ok(()) }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> { Ok(self.witness.catalog.get(key).cloned()) }
     fn rows(&self, request: &crate::catalog::Request) -> io::Result<Vec<crate::model::summary::CatalogRow>> {
-        if request.scope != crate::CatalogReadScope::Current || request.sid.as_deref() != Some(self.row.key.as_str()) {
+        if request.sid.as_deref() != Some(self.row.key.as_str()) {
             return Err(io::Error::other("immutable selected scope"));
         }
         Ok(vec![self.row.clone()])
     }
     fn search(&self, _: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { Err(io::Error::other("selected snapshot has no search authority")) }
     fn has_history(&self, key: &str) -> io::Result<bool> { Ok(key == self.row.key && self.witness.has_history) }
-    fn history_catalog(&self, _: &str) -> io::Result<Option<String>> { Err(io::Error::other("retained selection pending")) }
-    fn history_qualified(&self, _: &crate::model::summary::CatalogRow) -> io::Result<bool> { Ok(false) }
-    fn selected_details(&self, key: &str, sources: &[crate::model::summary::CatalogSource], status: &mut dyn FnMut(&crate::model::summary::CatalogRow) -> Value) -> io::Result<Option<Value>> {
-        selected_details(&self.witness.context, key, sources, &mut |row| status(row))
+    // The leased generation already owns its original row and recipes. Never
+    // replace it with today's composite History Catalog or live facts.
+    fn history_catalog(&self, _: &str) -> io::Result<Option<String>> { Ok(None) }
+    fn history_qualified(&self, row: &crate::model::summary::CatalogRow) -> io::Result<bool> { Ok(row.key == self.row.key) }
+    fn selected_details(&self, key: &str, sources: &[crate::model::summary::CatalogSource], _status: &mut dyn FnMut(&crate::model::summary::CatalogRow) -> Value) -> io::Result<Option<Value>> {
+        selected_details(&self.witness.context, key, sources, &mut |row| self.witness.observations.relative_status(row))
     }
-    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<Value>> {
-        if key != self.row.key || history || self.witness.catalog.get("slot_projection_catalog_generation").map(String::as_str) != Some(generation) { return Ok(None); }
+    fn transcript_observation(&self, key: &str, generation: &str, _history: bool) -> io::Result<Option<Value>> {
+        if key != self.row.key || self.witness.catalog.get("slot_projection_catalog_generation").map(String::as_str) != Some(generation) { return Ok(None); }
         Ok(Some(json!({"generation":crate::transcript_range::entry_generation(&self.witness.header_generation),"total":self.witness.total})))
     }
 }

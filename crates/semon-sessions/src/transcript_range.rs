@@ -445,6 +445,7 @@ pub(crate) fn observation(
 }
 
 struct Selection {
+    render_time: Option<i64>,
     proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
     session: Value,
@@ -554,11 +555,11 @@ fn read_inner(
         ));
     }
     if let Some((lease, host, control)) = bound {
-        if history { return Ok(unavailable()); }
         let selected = lease.open_selected(options, host, control)?;
         if selected.row.key != key { return Ok(unavailable()); }
         let catalog = crate::storage::selected::ImmutableCatalog { row: &selected.row, witness: &selected.witness, snapshot:&selected.snapshot };
-        let Some((identity, session)) = catalog::catalog_selection_in_snapshot(options, source_key, &key, crate::CatalogReadScope::Current, &catalog)
+        let scope = if history { crate::CatalogReadScope::RetainedHistory } else { crate::CatalogReadScope::Current };
+        let Some((identity, session)) = catalog::catalog_selection_in_snapshot(options, source_key, &key, scope, &catalog)
             .map_err(|_| invalid())? else { return Ok(unavailable()); };
         let generation = entry_generation(&selected.witness.header_generation);
         if argument("generation").is_some_and(|expected| expected != generation) { return Ok(stale(ProjectionFence::ProjectionGeneration)); }
@@ -571,7 +572,8 @@ fn read_inner(
         let slots = selected.slots[start..end.saturating_add(1).min(total)].to_vec();
         let context = crate::storage::selected::range_context(&selected.witness.context,&key,&slots[first-start..end-start],&selected.row.sources)?;
         let sources = selected.row.sources.iter().map(|source|(source.path.clone(),source.clone())).collect();
-        let selection = Selection { proof_db:None, identity,session,generation,total,first,end,start,slots,sources,history_incomplete:false,context };
+        let render_time = identity.observed_at;
+        let selection = Selection { render_time, proof_db:None, identity,session,generation,total,first,end,start,slots,sources,history_incomplete:false,context };
         let records = selected.sources.reader_with_mode(provider,mode);
         let controlled = crate::storage::selected::Controlled { reader:&records,control };
         let result = present(options,selection,query,None,mode,Some(&controlled));
@@ -746,6 +748,7 @@ fn read_inner(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
+        render_time: None,
         proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(connection)),
         identity,
         session,
@@ -1727,7 +1730,7 @@ fn render_with_reader(
                 &slots,
                 slot,
                 index,
-                crate::model::now_ms(),
+                selection.render_time.unwrap_or_else(crate::model::now_ms),
             )
             .unwrap_or_else(|| json!({"k":"end"}))
         };
