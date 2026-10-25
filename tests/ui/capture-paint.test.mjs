@@ -58,6 +58,10 @@ test('PNG and evidence share a repeatable phase without masking content or retai
 });
 
 test('independent visual browsers retain exact rounded-edge and text pixels', async () => {
+  assert.match(
+    readFileSync(new URL('./lib.mjs', import.meta.url), 'utf8'),
+    /chromium\.launch\(\s*launchOptions\(\{\s*baselineRaster\s*\}\)\s*\)/,
+  );
   const harnessMark = readFileSync(
     new URL('../../assets/harnesses/claude-code.svg', import.meta.url),
   );
