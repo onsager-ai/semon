@@ -133,6 +133,9 @@ fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows
     let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
     let selected = lease.open_selected(options, &host, &crate::SelectedReadControl::default()).unwrap();
+    assert_eq!(selected.witness.observations.runtime.as_deref(), model.prepared().rows[0].query.as_ref().unwrap()["runtime"].as_str());
+    let stored: String = db.query_row("SELECT metadata FROM storage_proof_presentations WHERE namespace='source-a' AND id=?1 AND session_key=?2", params![id.0, key], |row| row.get(0)).unwrap();
+    assert!(serde_json::from_str::<Value>(&stored).unwrap().get("observations").is_none(), "shared observations must be stored once per publication");
     for name in ["catalog_generation", "catalog_completeness", "catalog_observed_at"] {
         let committed: String = db.query_row(
             "SELECT value FROM main.meta WHERE namespace='source-a' AND key=?1",
@@ -178,21 +181,27 @@ fn configured_semantic_selected65_witness_and_manifest_tamper_refuse_before_raw(
         [key], |row| row.get(0),
     ).unwrap();
     let mut altered: Value = serde_json::from_str(&saved).unwrap();
-    altered["observations"]["machine_label"] = json!("tampered-witness");
+    altered["catalog"]["catalog_observed_at"] = json!("1");
     db.execute_batch("DROP TRIGGER storage_proof_presentation_immutable").unwrap();
     db.execute("UPDATE storage_proof_presentations SET metadata=?1 WHERE namespace='source-a' AND session_key=?2", params![serde_json::to_string(&altered).unwrap(), key]).unwrap();
+    db.execute_batch("CREATE TRIGGER storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;").unwrap();
     let provider = Count(std::sync::atomic::AtomicUsize::new(0));
     let refuse = || {
         assert!(read_bound(&lease, options, &host, &query, Some(&provider), SessionSourceReadMode::ProviderOnly, &crate::SelectedReadControl::default()).is_err());
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     };
     refuse();
+    db.execute_batch("DROP TRIGGER storage_proof_presentation_immutable").unwrap();
     db.execute("UPDATE storage_proof_presentations SET metadata=?1 WHERE namespace='source-a' AND session_key=?2", params![saved, key]).unwrap();
     db.execute_batch("CREATE TRIGGER storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;").unwrap();
     let manifest: String = db.query_row("SELECT manifest FROM storage_proof_presentation_roots WHERE namespace='source-a' AND publication=?1", [&lease.snapshot().publication_generation], |row| row.get(0)).unwrap();
     db.execute_batch("DROP TRIGGER storage_proof_presentation_root_immutable").unwrap();
-    db.execute("UPDATE storage_proof_presentation_roots SET manifest='[]' WHERE namespace='source-a' AND publication=?1", [&lease.snapshot().publication_generation]).unwrap();
+    let mut altered_manifest: Value = serde_json::from_str(&manifest).unwrap();
+    altered_manifest["observations"]["machine_label"] = json!("tampered-shared-observation");
+    db.execute("UPDATE storage_proof_presentation_roots SET manifest=?1 WHERE namespace='source-a' AND publication=?2", params![serde_json::to_string(&altered_manifest).unwrap(), lease.snapshot().publication_generation]).unwrap();
+    db.execute_batch("CREATE TRIGGER storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;").unwrap();
     refuse();
+    db.execute_batch("DROP TRIGGER storage_proof_presentation_root_immutable").unwrap();
     db.execute("UPDATE storage_proof_presentation_roots SET manifest=?1 WHERE namespace='source-a' AND publication=?2", params![manifest, lease.snapshot().publication_generation]).unwrap();
     db.execute_batch("CREATE TRIGGER storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;").unwrap();
     assert!(!read(&lease, options, &host, &query)["entries"].as_array().unwrap().is_empty());
@@ -244,6 +253,25 @@ fn configured_semantic_selected65_gc_requires_both_history_and_lease_to_be_gone(
     assert_eq!(count(&db), 0, "unreferenced A is collected");
     assert!(runtime.selected_generation(key, &id, &"8".repeat(64), 60_000).is_err());
     assert!(path.exists());
+}
+
+#[test]
+fn configured_semantic_selected65_capture_unavailable_facts_is_per_row_unavailable() {
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
+    let (_, model) = model_ready(&f, &mut cache, options, input, "selected65-unavailable");
+    let path = options.facts.as_ref().unwrap();
+    fs::rename(path, path.with_extension("unavailable")).unwrap();
+    let mut observations = crate::storage::selected::PresentationObservations::capture(options, None, model.prepared().rows.iter());
+    assert!(!observations.facts_known);
+    assert!(!observations.selection_known);
+    assert!(observations.runtime.is_none());
+    assert!(observations.machine_label.is_none());
+    assert_eq!(observations.capture_relative_status(&model.prepared().rows[0]), json!({"state":null,"observation":"unavailable"}));
 }
 
 #[test]
