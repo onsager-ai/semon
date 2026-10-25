@@ -8541,54 +8541,115 @@ mod tests {
             let mut admitted = open(&f.config);
             let _foreign = open(&foreign_config);
             claude_ingest(&mut admitted, &options[1], &inputs);
-            admitted.ingest(&format!("{:064x}", 8499), &native_inputs[0].full_path(&options[0]), "codex").unwrap();
+            admitted
+                .ingest(
+                    &format!("{:064x}", 8499),
+                    &native_inputs[0].full_path(&options[0]),
+                    "codex",
+                )
+                .unwrap();
             let runtime = crate::native_evidence::query_runtime_generation(&options[1]).unwrap();
-            admitted.begin_semantic_stage_with_journal(&[inputs[0].full_path(&options[1]).to_string_lossy().into_owned()], &runtime, true).unwrap();
+            admitted
+                .begin_semantic_stage_with_journal(
+                    &[inputs[0]
+                        .full_path(&options[1])
+                        .to_string_lossy()
+                        .into_owned()],
+                    &runtime,
+                    true,
+                )
+                .unwrap();
             let db = f.db();
             for name in ["semon_event_writer", "semon_semantic_writer"] {
-                db.create_scalar_function(name, 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).unwrap();
+                db.create_scalar_function(
+                    name,
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    |_| Ok(1_i64),
+                )
+                .unwrap();
             }
             let bind = |namespace: &str| {
                 bind_metadata_scope(&db, namespace).unwrap();
                 let namespace = namespace.to_owned();
-                db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, move |_| Ok(namespace.clone())).unwrap();
+                db.create_scalar_function(
+                    "semon_namespace",
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    move |_| Ok(namespace.clone()),
+                )
+                .unwrap();
             };
             bind("source-a");
             // Stress-only unrelated physical history, never endpoints, model
             // witnesses or positive authority. Positive files/header above
             // were produced by real Raw ingest through native parsers.
-            let columns = db.prepare("SELECT name FROM pragma_table_info('files') ORDER BY cid").unwrap().query_map([], |r| r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            let values = columns.iter().map(|name| match name.as_str() {
-                "namespace" => "?1".to_owned(),
-                "file_id" => "?2".to_owned(),
-                "path" => "?3".to_owned(),
-                _ => format!("\"{name}\""),
-            }).collect::<Vec<_>>().join(",");
-            let insert = format!("INSERT INTO files SELECT {values} FROM files WHERE namespace='source-a' ORDER BY file_id LIMIT 1");
-            let mut baseline = None;
+            let columns = db
+                .prepare("SELECT name FROM pragma_table_info('files') ORDER BY cid")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let values = columns
+                .iter()
+                .map(|name| match name.as_str() {
+                    "namespace" => "?1".to_owned(),
+                    "file_id" => "?2".to_owned(),
+                    "path" => "?3".to_owned(),
+                    _ => format!("\"{name}\""),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let insert = format!(
+                "INSERT INTO files SELECT {values} FROM files WHERE namespace='source-a' ORDER BY file_id LIMIT 1"
+            );
+            let mut baseline: Option<Vec<(String, usize)>> = None;
             let mut previous = 0;
             for count in [0, 256, 2048] {
                 db.execute_batch("BEGIN IMMEDIATE").unwrap();
                 for namespace in ["source-a", "source-b"] {
                     bind(namespace);
                     for i in previous..count {
-                        db.execute(&insert, params![namespace,10000+i,format!("/unrelated/projects/noise-{i}/noise-{i}.jsonl")]).unwrap();
+                        db.execute(
+                            &insert,
+                            params![
+                                namespace,
+                                10000 + i,
+                                format!("/unrelated/projects/noise-{i}/noise-{i}.jsonl")
+                            ],
+                        )
+                        .unwrap();
                         db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'bounded-work-noise',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
                         db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
                     }
                 }
                 bind("source-a");
                 db.execute_batch("COMMIT").unwrap();
-                let measured = ["absent84", "claude72-1", "model-0"].into_iter().flat_map(|id| crate::storage::sqlite::semantic::native_frontier_vm_probe(&db,"source-a",id)).collect::<Vec<_>>();
+                let measured = ["absent84", "claude72-1", "model-0"]
+                    .into_iter()
+                    .flat_map(|id| {
+                        crate::storage::sqlite::semantic::native_frontier_vm_probe(
+                            &db, "source-a", id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 eprintln!("native_frontier_vm unrelated_same_and_foreign={count}: {measured:?}");
                 if let Some(first) = &baseline {
-                    for ((kind, steps), (_, initial)) in measured.iter().zip(first) {
-                        assert!(*steps <= initial + 64, "{kind}: unrelated rows increased VM work from {initial} to {steps}");
+                    for ((kind, steps), (_, initial)) in measured.iter().zip(first.iter()) {
+                        assert!(
+                            *steps <= *initial + 64,
+                            "{kind}: unrelated rows increased VM work from {initial} to {steps}"
+                        );
                     }
                 } else {
                     baseline = Some(measured.clone());
                 }
-                assert!(measured.iter().all(|(_, steps)| *steps > 0 && *steps < 4096));
+                assert!(
+                    measured
+                        .iter()
+                        .all(|(_, steps)| *steps > 0 && *steps < 4096)
+                );
                 previous = count;
             }
         }
