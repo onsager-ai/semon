@@ -178,12 +178,11 @@ fn assert_rows(tx: &mut PgTxn<'_>, phase: &Phase) -> Result<(), StorageError> {
                         } else {
                             b"true".to_vec()
                         };
-                    } else if t == "numeric" {
-                        if let Ok(vs) = String::from_utf8(v.clone()) {
-                            if let Ok(i) = vs.parse::<i64>() {
-                                *v = (i as u64).to_string().into_bytes();
-                            }
-                        }
+                    } else if t == "numeric"
+                        && let Ok(vs) = String::from_utf8(v.clone())
+                        && let Ok(i) = vs.parse::<i64>()
+                    {
+                        *v = (i as u64).to_string().into_bytes();
                     }
                 }
             }
@@ -374,10 +373,28 @@ fn pg_native_core_every_effect_rollback_and_original_family_ack() {
 }
 
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageError> {
-    FAMILIES.iter().map(|family| {
-        let rows=tx.driver.query(&format!("SELECT row_to_json(t)::text FROM semon_pg_native_{family} t WHERE namespace=$1 ORDER BY row_to_json(t)::text"),&[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
-        Ok((family.to_string(),rows.into_iter().map(|r|r.get(0)).collect()))
-    }).collect()
+    FAMILIES
+        .iter()
+        .map(|family| {
+            let rows = tx
+                .driver
+                .query(
+                    &format!("SELECT row_to_json(t)::text FROM semon_pg_native_{family} t WHERE namespace=$1 ORDER BY row_to_json(t)::text"),
+                    &[&tx.namespace.as_str().as_bytes()],
+                )
+                .map_err(|error| {
+                    let code = match &error {
+                        super::super::pool::DriverError::Pg(error) => {
+                            error.code().map_or("none", |code| code.code())
+                        }
+                        super::super::pool::DriverError::Interrupted => "interrupted",
+                    };
+                    eprintln!("core_snapshot family={family} sqlstate={code}");
+                    sqlstate::error(error)
+                })?;
+            Ok((family.to_string(), rows.into_iter().map(|r| r.get(0)).collect()))
+        })
+        .collect()
 }
 #[test]
 fn pg_native_core_replacement_every_boundary_preserves_existing_bytes() {
