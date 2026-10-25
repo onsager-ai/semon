@@ -130,12 +130,58 @@ pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
 /// Select an authored statement for the physical family shape, never rewrite
 /// SQL or retry errors against another schema. Singleton stores still support
 /// read-only admission/assignment; configured writes require validate_core.
+thread_local! {
+    static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<crate::native_timing::Measurements>> = const { std::cell::RefCell::new(None) };
+}
+
+// Observation only. In particular, this guard caches no shape result: every
+// existing selector still executes its complete qualification query.
+pub(super) struct WriterShapeProbe(Option<crate::native_timing::Measurements>);
+
+impl WriterShapeProbe {
+    pub(super) fn new(enabled: bool) -> Self {
+        Self(WRITER_SHAPE_MEASUREMENTS.with(|cell| {
+            cell.replace(enabled.then(|| crate::native_timing::Measurements::new(true)))
+        }))
+    }
+
+    fn start(label: &'static str) -> Option<std::time::Instant> {
+        WRITER_SHAPE_MEASUREMENTS.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let measurements = cell.as_mut()?;
+            measurements.count(label, 1);
+            measurements.start()
+        })
+    }
+
+    fn finish(label: &'static str, started: Option<std::time::Instant>) {
+        WRITER_SHAPE_MEASUREMENTS.with(|cell| {
+            if let Some(measurements) = cell.borrow_mut().as_mut() {
+                measurements.record(label, started, 1);
+            }
+        });
+    }
+}
+
+impl Drop for WriterShapeProbe {
+    fn drop(&mut self) {
+        if let Some(measurements) =
+            WRITER_SHAPE_MEASUREMENTS.with(|cell| cell.replace(self.0.take()))
+        {
+            measurements.emit("index_writer", "writer_shape");
+        }
+    }
+}
+
 pub(super) fn sql<'a>(
     db: &Connection,
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    let started = WriterShapeProbe::start("core_shape_calls");
+    let composite = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get::<_, bool>(0));
+    WriterShapeProbe::finish("core_shape_query", started);
+    let composite = composite?;
     Ok(if composite { scoped } else { legacy })
 }
 
@@ -151,13 +197,16 @@ pub(crate) fn metadata_sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
+    let started = WriterShapeProbe::start("meta_shape_calls");
     crate::native_timing::discovery_count(|counts| {
         counts.schema_probes += 1;
         counts.statements += 1;
     });
-    let (columns, namespace, key, values): (i64, i64, i64, i64) = db.prepare_cached(
+    let shape = db.prepare_cached(
         "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
-    )?.query_row([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    )?.query_row([], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)));
+    WriterShapeProbe::finish("meta_shape_query", started);
+    let (columns, namespace, key, values) = shape?;
     let composite = match (columns, namespace, key, values) {
         (2, 0, 1, 1) => false,
         (3, 1, 2, 1) => true,

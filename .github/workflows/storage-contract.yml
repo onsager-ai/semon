@@ -58,6 +58,7 @@ jobs:
       - name: SQLite adapter and reusable metadata conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
