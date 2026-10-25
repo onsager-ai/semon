@@ -9,14 +9,17 @@ use std::{collections::BTreeSet, io, sync::Arc};
 pub(super) struct ConfiguredIndex {
     native: crate::events::store::configured::Writer,
     semantic: Option<super::semantic::Stage>,
+    journal: super::source_journal::SourceJournal,
 }
 
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
     crate::events::store::configured::validate_semantic_schema(config)?;
-    super::source_journal::SourceJournal(config.clone()).prepare()?;
+    let journal = super::source_journal::SourceJournal(config.clone());
+    journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {
         native: crate::events::store::configured::Writer::new(config),
         semantic: None,
+        journal,
     }))
 }
 
@@ -32,15 +35,29 @@ pub(crate) fn open_private_semantic(
 pub(crate) fn open_semantic(
     capability: super::semantic::SemanticStaging,
 ) -> Result<Box<dyn IndexStore>, StorageError> {
-    capability.journal().prepare()?;
+    let journal = capability.journal();
+    journal.prepare()?;
     let native = capability.writer();
     Ok(Box::new(ConfiguredIndex {
         native,
         semantic: Some(super::semantic::Stage::open(capability)?),
+        journal,
     }))
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&self.journal)
+    }
+
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&mut self.journal)
+    }
+
     fn query_runtime_binding(
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
