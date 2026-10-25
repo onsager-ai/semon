@@ -9,6 +9,7 @@ pub(crate) mod navigation;
 pub(crate) mod proof_generations;
 pub(crate) mod publication;
 pub(crate) mod query;
+pub(crate) mod selected;
 pub(crate) mod search;
 pub(crate) mod source_journal;
 pub(crate) mod trace;

@@ -417,6 +417,8 @@ pub(crate) trait CatalogPublicationHead {
 }
 
 pub(crate) trait CatalogSnapshot {
+    fn source_state(&self, _source: &CatalogSource) -> Option<&'static str> { None }
+    fn runtime_binding(&self) -> Option<super::QueryRuntimeBinding> { None }
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>>;
