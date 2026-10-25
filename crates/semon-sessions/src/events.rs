@@ -29,6 +29,7 @@ use crate::{Tokens, attachments, field, sealed::LogFile};
 
 pub(crate) mod file_rows;
 pub(crate) mod native_aux;
+pub(crate) mod native_pages;
 pub(crate) mod native_commit;
 pub(crate) mod native_rows;
 pub(crate) mod store;

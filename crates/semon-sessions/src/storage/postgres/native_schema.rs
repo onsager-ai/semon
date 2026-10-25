@@ -13,6 +13,26 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "page_blobs",
+        columns: "digest bytea,payload bytea",
+        key: "digest",
+    },
+    Table {
+        name: "page_generations",
+        columns: "generation bytea,source_id bigint,source_path bytea,ledger bytea,chunks_header bytea,launch_header bytea?",
+        key: "generation",
+    },
+    Table {
+        name: "page_refs",
+        columns: "generation bytea,kind smallint,page_key bytea,digest bytea",
+        key: "generation,kind,page_key",
+    },
+    Table {
+        name: "page_current",
+        columns: "path_digest bytea,source_path bytea,generation bytea",
+        key: "path_digest",
+    },
+    Table {
         name: "source_mutations",
         columns: "source_path bytea,evidence bytea",
         key: "source_path",
@@ -230,7 +250,7 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v3");
+    hash.update(b"semon-private-native-v5");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());
