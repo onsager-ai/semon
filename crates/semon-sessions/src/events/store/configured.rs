@@ -5123,6 +5123,7 @@ mod tests {
                     .unwrap(),
                 Outcome::Written
             );
+            let mut fault_hits = BTreeMap::<&str, usize>::new();
             for _ in 0..128 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
                 if batch.paths.is_empty() {
@@ -5161,6 +5162,7 @@ mod tests {
                 let failed = cache.record_semantic_batch(&batch, model.prepared());
                 assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "fault not reached: {point}, phase {:?}, result {failed:?}", batch.phase);
                 assert!(failed.is_err(), "{point} must fail after being hit");
+                *fault_hits.entry(point).or_default() += 1;
                 FAIL_EFFECT.with(|p| p.set(None));
                 assert_eq!(
                     shared_state(f),
@@ -5174,6 +5176,7 @@ mod tests {
                     Outcome::Written
                 );
                 if batch.phase == Phase::Publication {
+                    eprintln!("domain44_fault_hits={fault_hits:?}");
                     return (batch, model);
                 }
             }
@@ -5531,4 +5534,156 @@ mod tests {
             assert_eq!(namespace_state(&f, "source-b"), foreign);
         }
     }
+
+    // Worker44 stored-corruption refusals use real Raw-derived producer output.
+    mod domain44 {
+        use super::*;
+        use crate::model::relation_stage::{Batch, Phase};
+        use crate::storage::native_events::NativeEventStore;
+
+        fn fixture() -> (Fixture, EventCache, crate::Options, Vec<crate::Input>) {
+            let (f, foreign_config, options, _) = model_sources();
+            let options = options[0].clone();
+            let inputs = ["parent", "child"].into_iter().map(|name| crate::Input {
+                root: crate::InputRoot::Codex,
+                path: format!("sessions/{name}.jsonl"),
+            }).collect::<Vec<_>>();
+            for (i, input) in inputs.iter().enumerate() {
+                let payload = if i == 0 {
+                    serde_json::json!({"id":"parent","cwd":"/sanitized"})
+                } else {
+                    serde_json::json!({"id":"child","cwd":"/sanitized","parent_thread_id":"parent","thread_source":"subagent"})
+                };
+                fs::write(input.full_path(&options), format!("{}\n{}\n",
+                    serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"domain44 stored integrity"}]}})
+                )).unwrap();
+            }
+            // Populate Source-b with the same paths/native identities before
+            // every negative gate. shared_state must preserve these real rows.
+            let mut foreign = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&foreign_config).unwrap()
+            ).unwrap();
+            for (i, input) in inputs.iter().enumerate() {
+                foreign.ingest(&format!("{:064x}", i + 4400), &input.full_path(&options), "codex").unwrap();
+            }
+            drop(foreign);
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap()
+            ).unwrap();
+            for (i, input) in inputs.iter().enumerate() {
+                cache.ingest(&format!("{:064x}", i + 4400), &input.full_path(&options), "codex").unwrap();
+            }
+            let paths = inputs.iter().map(|input| input.full_path(&options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+            assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+            (f, cache, options, inputs)
+        }
+
+        fn phase(cache: &mut EventCache, options: &crate::Options, inputs: &[crate::Input], phase: Phase) -> (Batch, crate::model::SemanticModelBatch) {
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() { continue; }
+                let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                let model = crate::model::prepare_semantic_batch(options, cache, &selected, &batch, 1_790_000_000_000).unwrap();
+                if batch.phase == phase { return (batch, model); }
+                assert_eq!(cache.record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+            }
+            panic!("producer phase not reached");
+        }
+
+        // Deliberate stored-corruption injection; production admission and
+        // transaction guards remain installed, including Source predicates.
+        fn corrupt_db(f: &Fixture) -> Connection {
+            let db = f.db();
+            db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok("source-a".to_owned())).unwrap();
+            for name in ["semon_semantic_writer", "semon_semantic_publisher", "semon_event_writer"] {
+                db.create_scalar_function(name, 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).unwrap();
+            }
+            db
+        }
+
+        #[test]
+        fn configured_semantic_domain44_input_order_preserves_exact_claim_witness() {
+            let (f, mut cache, options, inputs) = fixture();
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(batch.phase, Phase::Indexing);
+            let before = shared_state(&f);
+            let model = crate::model::prepare_semantic_batch(&options, &mut cache, &inputs, &batch, 1_790_000_000_000).unwrap();
+            let reversed = inputs.iter().rev().cloned().collect::<Vec<_>>();
+            let other = crate::model::prepare_semantic_batch(&options, &mut cache, &reversed, &batch, 1_790_000_000_000).unwrap();
+            assert_eq!(model.prepared().claims, other.prepared().claims);
+            assert_eq!(model.prepared().claims.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(), batch.paths);
+            let duplicate = vec![inputs[0].clone(), inputs[1].clone(), inputs[0].clone()];
+            assert!(crate::model::prepare_semantic_batch(&options, &mut cache, &duplicate, &batch, 1_790_000_000_000).is_err());
+            assert_eq!(shared_state(&f), before, "canonical preparation and duplicate refusal make zero DB writes");
+            assert_eq!(cache.record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+        }
+
+        #[test]
+        fn configured_semantic_domain44_oversized_relation_prior_refuses_and_rolls_back() {
+            let (f, mut cache, options, inputs) = fixture();
+            let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Relations);
+            let relation = model.prepared().relationships.relations.values().next().expect("real parent relation");
+            let text = format!("{}{}", " ".repeat(1048577), serde_json::to_string(relation).unwrap());
+            let db = corrupt_db(&f);
+            db.execute("INSERT INTO catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES('source-a',?1,?2,?3,?4)", params![relation.id,relation.from,relation.to,text]).unwrap();
+            let before = shared_state(&f);
+            assert!(cache.record_semantic_batch(&batch, model.prepared()).is_err());
+            assert_eq!(shared_state(&f), before, "D1 rolls back endpoint effects before oversized prior refusal");
+            let kept: String = db.query_row("SELECT metadata FROM catalog_semantic_relations WHERE namespace='source-a' AND relation_id=?1", [&relation.id], |r| r.get(0)).unwrap();
+            assert_eq!(kept, text);
+        }
+
+        #[test]
+        fn configured_semantic_domain44_endpoint_identity_mismatch_refuses_and_rolls_back() {
+            for corruption in ["physical harness", "metadata harness", "metadata key"] {
+                let (f, mut cache, options, inputs) = fixture();
+                let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Identity);
+                let endpoint = model.prepared().relationships.endpoints.values().next().unwrap();
+                let mut stored = endpoint.clone();
+                if corruption == "metadata harness" { stored.row.harness = "claude".into(); }
+                if corruption == "metadata key" { stored.row.key = "wrong-owner".into(); }
+                let harness = if corruption == "physical harness" { "claude" } else { endpoint.row.harness.as_str() };
+                let text = serde_json::to_string(&stored).unwrap();
+                let db = corrupt_db(&f);
+                db.execute("INSERT INTO catalog_semantic_endpoints(namespace,session_key,harness,metadata) VALUES('source-a',?1,?2,?3)",params![endpoint.row.key,harness,text]).unwrap();
+                let before = shared_state(&f);
+                assert!(cache.record_semantic_batch(&batch, model.prepared()).is_err(), "{corruption}");
+                assert_eq!(shared_state(&f), before, "D2 keeps every stored family on {corruption}");
+                let kept: (String,String) = db.query_row("SELECT harness,metadata FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [&endpoint.row.key], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+                assert_eq!(kept, (harness.to_owned(),text));
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain44_missing_root_refuses_and_rolls_back() {
+            let (f, mut cache, options, inputs) = fixture();
+            let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Publication);
+            let db = corrupt_db(&f);
+            assert_eq!(db.execute("UPDATE catalog_semantic_endpoints SET root_key='missing-root' WHERE namespace='source-a' AND session_key='child'", []).unwrap(), 1);
+            let before = shared_state(&f);
+            assert!(cache.record_semantic_batch(&batch, model.prepared()).is_err());
+            assert_eq!(shared_state(&f), before, "D5 missing root cannot manufacture inactive authority");
+            assert_eq!(db.query_row("SELECT root_key FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key='child'", [], |r|r.get::<_,String>(0)).unwrap(), "missing-root");
+        }
+
+        #[test]
+        fn configured_semantic_domain44_missing_replay_owner_refuses_without_writes() {
+            for missing in ["parent", "child"] {
+                let (f, mut cache, options, inputs) = fixture();
+                let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Publication);
+                assert_eq!(cache.record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+                let db = corrupt_db(&f);
+                assert_eq!(db.execute("DELETE FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [missing]).unwrap(), 1);
+                let before = shared_state(&f);
+                // Missing parent exercises the requested-owner case. Missing
+                // child exercises a relation target with a valid staged parent.
+                assert!(cache.semantic_replay_page(batch.epoch, &["parent".into()], "").is_err());
+                assert_eq!(shared_state(&f), before, "D6 completed {missing} identity is missing, not unpublished");
+                assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [missing], |r|r.get::<_,i64>(0)).unwrap(), 0);
+            }
+        }
+    }
+
 }
