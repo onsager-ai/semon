@@ -155,24 +155,32 @@ pub(crate) struct Snapshot {
 #[derive(Clone, Debug)]
 pub(crate) enum TreeCheckpoint {
     Sqlite(Snapshot),
+    #[cfg(feature = "postgres")]
+    Pg(crate::storage::postgres::tree_checkpoint::Snapshot),
 }
 
 impl TreeCheckpoint {
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
         match self {
             Self::Sqlite(snapshot) => snapshot.tool_name(id),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.tool_name(id),
         }
     }
 
     pub(crate) fn shared_usage(&self) -> io::Result<SharedUsage> {
         match self {
             Self::Sqlite(snapshot) => snapshot.shared_usage(),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.shared_usage(),
         }
     }
 
     pub(crate) fn bind_configured(&mut self, config: crate::storage::StoreConfig) {
         match self {
             Self::Sqlite(snapshot) => snapshot.bind_configured(config),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.bind_configured(config),
         }
     }
 }
@@ -181,7 +189,7 @@ impl fmt::Debug for Snapshot {
         f.write_str("TreeSnapshot")
     }
 }
-type SharedUsage = (
+pub(crate) type SharedUsage = (
     crate::claude_usage::Records,
     BTreeMap<String, Tokens>,
     BTreeMap<String, String>,
