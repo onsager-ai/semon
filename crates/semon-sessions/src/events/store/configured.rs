@@ -6954,7 +6954,16 @@ mod tests {
                 prior,
                 "staging preserves prior publication"
             );
-            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
             assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get::<_,i64>(0)).unwrap(),0);
             let before = shared_state(&f);
             let error = cache.semantic_batch(64).unwrap_err();
