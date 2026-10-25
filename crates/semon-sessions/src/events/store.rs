@@ -1260,6 +1260,8 @@ pub(crate) fn prioritize_projection_sources(
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
+    let _probe=crate::native_timing::DiscoveryProbe::new(&super::EventCache::path(&options.cache),"recovery");
+    crate::native_timing::discovery_count(|counts|counts.factory_opens+=1);
     let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
@@ -1277,6 +1279,7 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
         return Ok(true);
     };
     let paths=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?.query_map([after],|row|row.get::<_,String>(0)).map_err(io::Error::other)?.collect::<Result<Vec<_>,_>>().map_err(io::Error::other)?;
+    crate::native_timing::discovery_count(|counts| { counts.statements+=1; counts.rows+=paths.len(); });
     for path in &paths {
         let _ = archived_index(&tx, path).map_err(io::Error::other)?;
     }
@@ -2493,6 +2496,8 @@ impl IndexStore for SqliteStore {
         paths: &[String],
         complete: bool,
     ) -> Result<(), StoreError> {
+        let _probe=crate::native_timing::DiscoveryProbe::new(&self.path,"publication");
+        let before=self.connection.total_changes();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2500,6 +2505,7 @@ impl IndexStore for SqliteStore {
         crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
             .map_err(failure)?;
         tx.commit().map_err(failure)
+            .map(|()|crate::native_timing::discovery_count(|counts|counts.committed_changes+=self.connection.total_changes()-before))
     }
     fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError> {
         let tx = self

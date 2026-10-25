@@ -38,10 +38,12 @@ pub(crate) fn discover(
     paths: &[String],
     complete: bool,
 ) -> rusqlite::Result<()> {
+    crate::native_timing::discovery_count(|counts| { counts.statements+=1; counts.rows+=paths.len(); });
     if namespace.is_none() && super::namespace::is_bound(db)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for path in paths {
+        crate::native_timing::discovery_count(|counts|counts.statements+=1);
         let inserted = if let Some(namespace) = namespace {
             db.execute("INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(?1,?2)", params![namespace,path])?
         } else {
@@ -55,6 +57,7 @@ pub(crate) fn discover(
         }
     }
     let state = if complete { "draining" } else { "discovering" };
+    crate::native_timing::discovery_count(|counts|counts.statements+=1);
     if let Some(namespace) = namespace {
         db.execute(
             "UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1",
