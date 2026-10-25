@@ -103,7 +103,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             return Err(StorageError::ScopeChanged);
         }
     }
-    let triggers = tx.driver.query("SELECT t.tgname,p.proname,t.tgtype::int,c.relname,t.tgenabled='O' AND NOT t.tgisinternal AND NOT t.tgdeferrable AND NOT t.tginitdeferred AND t.tgconstraint=0 AND t.tgqual IS NULL AND t.tgattr=''::int2vector AND t.tgnargs=0 AND p.pronamespace=current_schema()::regnamespace FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND NOT t.tgisinternal ORDER BY t.tgname", &[]).map_err(sqlstate::error)?;
+    let triggers = tx.driver.query("SELECT t.tgname,p.proname,t.tgtype::int,c.relname,t.tgenabled='O' AND NOT t.tgisinternal AND NOT t.tgdeferrable AND NOT t.tginitdeferred AND t.tgconstraint=0 AND t.tgqual IS NULL AND t.tgattr=''::int2vector AND t.tgnargs=0 AND p.pronamespace=current_schema()::regnamespace FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid WHERE c.relnamespace=current_schema()::regnamespace AND c.relname='semon_pg_native_usage_identity' AND NOT t.tgisinternal ORDER BY t.tgname", &[]).map_err(sqlstate::error)?;
     if triggers.len() != 2 {
         return Err(StorageError::ScopeChanged);
     }
