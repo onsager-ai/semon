@@ -92,6 +92,7 @@ impl Writer<'_, '_> {
 /// Stage real dimensions in the existing transaction. A staged family remains
 /// unreadable until the connected publication below has qualified its scalar.
 
+#[cfg(test)]
 pub(super) fn stage(
     tx: &mut PgTxn<'_>,
     path: &str,
@@ -99,6 +100,18 @@ pub(super) fn stage(
     expected_header: Option<&Ledger>,
     expected_source: i64,
     summary: &Summary,
+) -> Result<(i64, String), StorageError> {
+    stage_inner(tx,path,ledger,expected_header,expected_source,summary,false)
+}
+
+fn stage_inner(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    ledger: &Ledger,
+    expected_header: Option<&Ledger>,
+    expected_source: i64,
+    summary: &Summary,
+    repair: bool,
 ) -> Result<(i64, String), StorageError> {
     let _scope = selected_read::Scope::ensure();
     tx.check()?;
@@ -116,22 +129,27 @@ pub(super) fn stage(
     let receipt = header_ledger(ledger);
     // Only fixed-size physical IDs cross this query. Match the complete file
     // ledger and current usage generation/readiness in SQL before any effect.
-    let files = tx.driver.query("SELECT f.file_id FROM semon_pg_native_files f JOIN semon_pg_native_usage_current c ON c.namespace=f.namespace AND c.source_path=f.path JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE f.namespace=$1 AND f.path=$2 AND c.source_id=$3 AND s.parser_version=$4 AND s.receipt=$5 AND s.usage_ready AND s.checkpoint=$6::text::numeric AND f.resume_at=$6::text::numeric AND f.dev=$7::text::numeric AND f.ino=$8::text::numeric AND f.size=$9::text::numeric AND f.mtime_ns=$10 AND f.ctime_ns IS NOT DISTINCT FROM $11 AND f.head_sha256=$12 AND f.tail_sha256=$13", &[&ns,&path.as_bytes(),&expected_source,&i64::from(CACHE_VERSION),&receipt.as_bytes(),&ledger.offset.to_string(),&ledger.stat.dev.to_string(),&ledger.stat.ino.to_string(),&ledger.stat.size.to_string(),&ledger.stat.modified_ns.to_be_bytes().as_slice(),&ledger.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&ledger.prefix.as_slice(),&ledger.tail.as_slice()]).map_err(sqlstate::error)?;
+    let files = tx.driver.query("SELECT f.file_id FROM semon_pg_native_files f JOIN semon_pg_native_usage_current c ON c.namespace=f.namespace AND c.source_path=f.path JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE f.namespace=$1 AND f.path=$2 AND c.source_id=$3 AND s.parser_version=$4 AND s.receipt=$5 AND ((s.usage_ready AND s.checkpoint=$6::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.resume_at=$6::text::numeric AND f.dev=$7::text::numeric AND f.ino=$8::text::numeric AND f.size=$9::text::numeric AND f.mtime_ns=$10 AND f.ctime_ns IS NOT DISTINCT FROM $11 AND f.head_sha256=$12 AND f.tail_sha256=$13", &[&ns,&path.as_bytes(),&expected_source,&i64::from(CACHE_VERSION),&receipt.as_bytes(),&ledger.offset.to_string(),&ledger.stat.dev.to_string(),&ledger.stat.ino.to_string(),&ledger.stat.size.to_string(),&ledger.stat.modified_ns.to_be_bytes().as_slice(),&ledger.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&ledger.prefix.as_slice(),&ledger.tail.as_slice()]).map_err(sqlstate::error)?;
     if files.len() != 1 {
         return Err(StorageError::Conflict);
     }
     // An earlier unacknowledged staged family must be reconciled through its
     // exact operation identity, never replayed as another generation. This
     // check is serialized by the same namespace lock as the first writer.
-    let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_generations WHERE namespace=$1 AND source_id=$2 AND NOT complete)", &[&ns,&expected_source]).map_err(sqlstate::error)?.get(0);
-    if pending {
-        return Err(StorageError::Conflict);
-    }
+    let pending=tx.driver.query("SELECT projection_id FROM semon_pg_native_tree_generations WHERE namespace=$1 AND source_id=$2 AND NOT complete", &[&ns,&expected_source]).map_err(sqlstate::error)?;
+    let repair_projection = if pending.is_empty() { None } else {
+        let marker=metadata(tx,format!("native_tree_failure:{path}").as_bytes())?;
+        if !repair || pending.len()!=1 || marker.as_deref()!=Some(receipt.as_str()) { return Err(StorageError::Conflict); }
+        let id:i64=pending[0].get(0);
+        let valid:bool=tx.driver.query_one("SELECT receipt=$3 AND version=3 AND work_pending FROM semon_pg_native_tree_generations WHERE namespace=$1 AND projection_id=$2", &[&ns,&id,&receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        if !valid { return Err(StorageError::Conflict); }
+        Some(id)
+    };
     let file: i64 = files[0].get(0);
     let previous_receipt = expected_header.map(header_ledger);
     // An existing header must match the explicitly captured previous ledger.
     // An incomplete or noncurrent generation is not silently made current.
-    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.file_id=$3 AND h.ledger=$4 AND g.receipt=h.ledger AND g.version=3 AND g.complete AND NOT g.work_pending", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes())]).map_err(sqlstate::error)?;
+    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
     let exists: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace=$1 AND source_path=$2)", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if (exists && headers.len() != 1) || (!exists && expected_header.is_some()) {
         return Err(StorageError::Conflict);
@@ -139,11 +157,11 @@ pub(super) fn stage(
     let reuse = headers
         .first()
         .filter(|r| r.get::<_, i64>(1) == expected_source)
-        .map(|r| r.get::<_, i64>(0));
+        .map(|r| r.get::<_, i64>(0)).or(repair_projection);
     let mut writer = Writer { tx };
     let projection = match reuse {
         Some(id) => {
-            writer.effect("UPDATE semon_pg_native_tree_generations SET receipt=$4,complete=false,work_pending=true WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND version=3 AND complete AND NOT work_pending", &[&ns,&id,&expected_source,&receipt.as_bytes()])?;
+            writer.effect("UPDATE semon_pg_native_tree_generations SET receipt=$4,complete=false,work_pending=true WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND version=3 AND ((complete AND NOT work_pending) OR (projection_id=$5 AND NOT complete AND work_pending))", &[&ns,&id,&expected_source,&receipt.as_bytes(),&repair_projection])?;
             id
         }
         None => {
@@ -179,6 +197,8 @@ pub(super) fn publish(
     let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     if locked.len()!=1 { return Err(StorageError::ScopeChanged); }
     let recipe = metadata(tx, b"catalog_semantic_recipe")?;
+    let authority = tx.driver.query("SELECT s.usage_ready FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace=$1 AND c.source_path=$2 AND s.source_id=$3", &[&ns,&path.as_bytes(),&expected_source]).map_err(sqlstate::error)?;
+    if authority.len()!=1 || authority[0].get::<_,bool>(0)!=normalized_usage { return Err(StorageError::Conflict); }
     let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     if fingerprint_rows.len() != 1 {
         return Err(StorageError::Conflict);
@@ -195,7 +215,7 @@ pub(super) fn publish(
         .map_err(|_| StorageError::ScopeChanged)?;
     let interpretation = crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
         .map_err(|_| StorageError::Unavailable)?;
-    let (projection, digest) = stage(tx, path, ledger, expected_header, expected_source, summary)?;
+    let (projection, digest) = stage_inner(tx, path, ledger, expected_header, expected_source, summary, true)?;
     // The persisted witness is reverified after staging. This covers retained
     // rows and never substitutes a digest of the input Summary.
     if persisted_witness(tx, projection)? != digest {

@@ -778,3 +778,39 @@ fn pg_tree_publish_every_effect_rollback_and_pricing_epoch_changes_interpretatio
     }).unwrap();
     std::fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_tree_publish_real_append_and_replacement_complete_without_seeded_headers() {
+    for harness in ["claude","codex"] {
+        let initial=parser_fixture(harness);
+        let (pool,_) =fixture(|_|{});
+        interpretation_inputs(&pool,&initial);
+        let first=pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+            install_without_tree(tx,&initial)?;assert!(publish_fixture(tx,&initial,None)?);
+            Ok(tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&initial.path.as_bytes()]).unwrap().get::<_,i64>(0))
+        }).unwrap();
+        let appended=append_fixture(&initial,harness);
+        let expected=oracle_record(&appended);
+        pool.transaction(&ns("tree\0🦀"),TxnKind::Write,&PgCancellation::default(),|tx| {
+            let index=&appended.sources.iter().find(|(p,_,_)|p==&appended.path).unwrap().2;
+            let mut usage=crate::storage::postgres::native_usage::Usage::new(tx)?;
+            crate::events::store::native_usage::algorithm::begin(&mut usage,&appended.path,Some(&initial.ledger),&appended.ledger,true)?;
+            crate::events::store::native_usage::algorithm::write(&mut usage,&appended.path,&appended.ledger,index)?;
+            let l=&appended.ledger;
+            tx.driver.execute("UPDATE semon_pg_native_files SET dev=$2::text::numeric,ino=$3::text::numeric,size=$4::text::numeric,mtime_ns=$5,ctime_ns=$6,resume_at=$7::text::numeric,head_sha256=$8,tail_sha256=$9 WHERE path=$1",&[&appended.path.as_bytes(),&l.stat.dev.to_string(),&l.stat.ino.to_string(),&l.stat.size.to_string(),&l.stat.modified_ns.to_be_bytes().as_slice(),&l.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&l.offset.to_string(),&l.prefix.as_slice(),&l.tail.as_slice()]).map_err(sqlstate::error)?;
+            assert!(publish_fixture(tx,&appended,Some(&initial.ledger))?);
+            assert!(scalar(tx,&appended)==expected,"appended scalar equals SQLite oracle");
+            let id:i64=tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&appended.path.as_bytes()]).unwrap().get(0);
+            assert_eq!(first,id);assert_dimensions(tx,&appended,id);
+            let mut usage=crate::storage::postgres::native_usage::Usage::new(tx)?;
+            crate::events::store::native_usage::algorithm::begin(&mut usage,&appended.path,None,&appended.ledger,false)?;
+            crate::events::store::native_usage::algorithm::write(&mut usage,&appended.path,&appended.ledger,index)?;
+            assert!(publish_fixture(tx,&appended,Some(&appended.ledger))?);
+            let replacement:i64=tx.driver.query_one("SELECT projection_id FROM semon_pg_native_tree_headers WHERE source_path=$1",&[&appended.path.as_bytes()]).unwrap().get(0);
+            assert_ne!(replacement,first);
+            assert_dimensions(tx,&appended,replacement);
+            Ok(())
+        }).unwrap();
+        std::fs::remove_dir_all(initial.root).unwrap();
+    }
+}
