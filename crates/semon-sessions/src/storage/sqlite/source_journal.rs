@@ -14,6 +14,7 @@ const PENDING_SQL: &str = "SELECT source_path FROM main.session_catalog_invalida
 #[derive(Debug, Default, PartialEq, Eq)]
 struct JournalWork {
     prepares: usize,
+    prepare_us: u128,
     executions: usize,
     namespace_probes: usize,
     membership_rows: usize,
@@ -49,7 +50,7 @@ fn invalidate_prepared<'a>(
     namespace: Option<&str>,
     path: &str,
     reason: &str,
-    now: i64,
+    now: &mut impl FnMut() -> i64,
     statements: &mut Option<InvalidationStatements<'a>>,
     work: &mut JournalWork,
 ) -> rusqlite::Result<()> {
@@ -67,10 +68,12 @@ fn invalidate_prepared<'a>(
                 "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3) ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,reason=excluded.reason,observed_at=excluded.observed_at",
             )
         };
+        let started = crate::native_timing::enabled().then(std::time::Instant::now);
         work.prepares += 1;
         let revision = db.prepare(revision)?;
         work.prepares += 1;
         let claim = db.prepare(claim)?;
+        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
         *statements = Some(InvalidationStatements { revision, claim });
     }
     let statements = statements.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
@@ -82,11 +85,11 @@ fn invalidate_prepared<'a>(
             return Err(rusqlite::Error::InvalidQuery);
         }
         work.executions += 1;
-        work.claim_rows += statements.claim.execute(params![namespace, path, reason, now])?;
+        work.claim_rows += statements.claim.execute(params![namespace, path, reason, now()])?;
     } else {
         work.revision_rows += statements.revision.execute([])?;
         work.executions += 1;
-        work.claim_rows += statements.claim.execute(params![path, reason, now])?;
+        work.claim_rows += statements.claim.execute(params![path, reason, now()])?;
     }
     Ok(())
 }
@@ -103,7 +106,7 @@ pub(crate) fn invalidate(
         namespace,
         path,
         reason,
-        crate::model::now_ms(),
+        &mut crate::model::now_ms,
         &mut None,
         &mut JournalWork::default(),
     )
@@ -117,11 +120,18 @@ pub(crate) fn discover(
 ) -> rusqlite::Result<()> {
     let started = crate::native_timing::enabled().then(std::time::Instant::now);
     let mut work = JournalWork::default();
-    let result = discover_prepared(db, namespace, paths, complete, crate::model::now_ms, &mut work);
+    let result = discover_prepared(
+        db,
+        namespace,
+        paths,
+        complete,
+        crate::model::now_ms,
+        &mut work,
+    );
     if let Some(started) = started {
         eprintln!(
-            "semon sessions native: source_journal_batch elapsed_us={} prepares={} executions={} namespace_probes={} membership_rows={} revision_rows={} claim_rows={} state_rows={} success={}",
-            started.elapsed().as_micros(), work.prepares, work.executions,
+            "semon sessions native: source_journal_batch elapsed_us={} authored_write_prepares={} prepare_us={} write_executions={} namespace_probes={} membership_rows={} revision_rows={} claim_rows={} state_rows={} success={}",
+            started.elapsed().as_micros(), work.prepares, work.prepare_us, work.executions,
             work.namespace_probes, work.membership_rows, work.revision_rows,
             work.claim_rows, work.state_rows, result.is_ok()
         );
@@ -148,12 +158,15 @@ fn discover_prepared(
     let mut membership = if paths.is_empty() {
         None
     } else {
+        let started = crate::native_timing::enabled().then(std::time::Instant::now);
         work.prepares += 1;
-        Some(db.prepare(if namespace.is_some() {
+        let statement = db.prepare(if namespace.is_some() {
             "INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(?1,?2)"
         } else {
             "INSERT OR IGNORE INTO catalog_backfill_sources VALUES(?1)"
-        })?)
+        })?;
+        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
+        Some(statement)
     };
     for path in paths {
         crate::native_timing::discovery_count(|counts| counts.statements += 1);
@@ -167,21 +180,32 @@ fn discover_prepared(
         work.membership_rows += inserted;
         if inserted > 0 {
             crate::native_timing::discovery_count(|counts| counts.statements += 3);
-            invalidate_prepared(db, namespace, path, "changed", now(), &mut invalidations, work)?;
+            invalidate_prepared(
+                db,
+                namespace,
+                path,
+                "changed",
+                &mut now,
+                &mut invalidations,
+                work,
+            )?;
         }
     }
     let state = if complete { "draining" } else { "discovering" };
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
     work.prepares += 1;
     work.executions += 1;
+    let started = crate::native_timing::enabled().then(std::time::Instant::now);
     if let Some(namespace) = namespace {
-        work.state_rows += db
-            .prepare("UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1")?
-            .execute(params![namespace, state])?;
+        let mut statement = db
+            .prepare("UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1")?;
+        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
+        work.state_rows += statement.execute(params![namespace, state])?;
     } else {
-        work.state_rows += db
-            .prepare("INSERT INTO meta(key,value) VALUES('catalog_backfill_state',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value<>excluded.value")?
-            .execute([state])?;
+        let mut statement = db
+            .prepare("INSERT INTO meta(key,value) VALUES('catalog_backfill_state',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value<>excluded.value")?;
+        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
+        work.state_rows += statement.execute([state])?;
     }
     Ok(())
 }
@@ -476,31 +500,60 @@ mod tests {
             let namespace = scoped.then_some("A");
             let paths: Vec<String> = (0..64).map(|i| format!("source-{i:02}")).collect();
             let mut work = JournalWork::default();
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             discover_prepared(&tx, namespace, &paths, true, || 42, &mut work).unwrap();
             tx.commit().unwrap();
             assert_eq!(work.prepares, 4);
             assert_eq!(work.executions, 193);
             assert_eq!(work.namespace_probes, if scoped { 0 } else { 65 });
-            assert_eq!((work.membership_rows, work.revision_rows, work.claim_rows), (64, 64, 64));
-            let tx = reference.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            assert_eq!(
+                (work.membership_rows, work.revision_rows, work.claim_rows),
+                (64, 64, 64)
+            );
+            let tx = reference
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             let mut rowwise = JournalWork::default();
             for path in &paths {
-                discover_prepared(&tx, namespace, std::slice::from_ref(path), true, || 42, &mut rowwise).unwrap();
+                discover_prepared(
+                    &tx,
+                    namespace,
+                    std::slice::from_ref(path),
+                    true,
+                    || 42,
+                    &mut rowwise,
+                )
+                .unwrap();
             }
             tx.commit().unwrap();
             assert_eq!(rowwise.prepares, 256);
-            let expected: Vec<_> = paths.iter().enumerate().map(|(i, path)| (path.clone(), i as i64 + 1, "changed".to_owned(), 42)).collect();
+            let expected: Vec<_> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| (path.clone(), i as i64 + 1, "changed".to_owned(), 42))
+                .collect();
             assert_eq!(batch_rows(&db, scoped), expected);
             assert_eq!(batch_rows(&db, scoped), batch_rows(&reference, scoped));
-            assert_eq!(claims(&db, namespace, &paths).unwrap(), claims(&reference, namespace, &paths).unwrap());
+            assert_eq!(
+                claims(&db, namespace, &paths).unwrap(),
+                claims(&reference, namespace, &paths).unwrap()
+            );
             // Duplicate discovery neither advances claims nor prepares the two
             // invalidation statements. Membership and state still run.
             let before = batch_rows(&db, scoped);
             let mut repeated = JournalWork::default();
             discover_prepared(&db, namespace, &paths, true, || 77, &mut repeated).unwrap();
             assert_eq!(repeated.prepares, 2);
-            assert_eq!((repeated.membership_rows, repeated.revision_rows, repeated.claim_rows), (0, 0, 0));
+            assert_eq!(
+                (
+                    repeated.membership_rows,
+                    repeated.revision_rows,
+                    repeated.claim_rows
+                ),
+                (0, 0, 0)
+            );
             assert_eq!(batch_rows(&db, scoped), before);
             if scoped {
                 let foreign: (i64, String, i64) = db.query_row("SELECT revision,reason,observed_at FROM session_catalog_invalidations WHERE namespace='B'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
@@ -517,28 +570,93 @@ mod tests {
         discover_prepared(&db, None, &[], true, || 42, &mut work).unwrap();
         assert_eq!(db.total_changes(), before);
         assert_eq!((work.prepares, work.executions), (1, 1));
-        assert_eq!((work.membership_rows, work.revision_rows, work.claim_rows, work.state_rows), (0, 0, 0, 0));
+        assert_eq!(
+            (
+                work.membership_rows,
+                work.revision_rows,
+                work.claim_rows,
+                work.state_rows
+            ),
+            (0, 0, 0, 0)
+        );
         // Caller-owned rollback retires all prepared statements with the call.
         db.execute_batch("CREATE TRIGGER batch_fault BEFORE INSERT ON catalog_backfill_sources WHEN NEW.source_path='fault' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        assert!(discover_prepared(&tx, None, &["first".into(), "fault".into()], true, || 42, &mut JournalWork::default()).is_err());
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(
+            discover_prepared(
+                &tx,
+                None,
+                &["first".into(), "fault".into()],
+                true,
+                || 42,
+                &mut JournalWork::default()
+            )
+            .is_err()
+        );
         tx.rollback().unwrap();
         assert!(batch_rows(&db, false).is_empty());
-        let membership: i64 = db.query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get(0)).unwrap();
+        let membership: i64 = db
+            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(membership, 0);
         let revision: Option<String> = db.query_row("SELECT value FROM meta WHERE key='catalog_source_revision'", [], |r| r.get(0)).optional().unwrap();
         assert_eq!(revision, None);
         // A rolled-back binding DDL must not poison a subsequent unbound call.
         db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE storage_namespaces(namespace TEXT); ROLLBACK;").unwrap();
-        discover_prepared(&db, None, &["after-aba".into()], true, || 42, &mut JournalWork::default()).unwrap();
-        db.execute_batch("CREATE TABLE storage_namespaces(namespace TEXT)").unwrap();
+        discover_prepared(
+            &db,
+            None,
+            &["after-aba".into()],
+            true,
+            || 42,
+            &mut JournalWork::default(),
+        )
+        .unwrap();
+        db.execute_batch("CREATE TABLE storage_namespaces(namespace TEXT)")
+            .unwrap();
         let before = db.total_changes();
         let mut refused = JournalWork::default();
-        assert!(matches!(discover_prepared(&db, None, &["refused".into()], true, || 42, &mut refused), Err(rusqlite::Error::InvalidQuery)));
+        assert!(matches!(
+            discover_prepared(&db, None, &["refused".into()], true, || 42, &mut refused),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
         assert_eq!(refused.prepares, 0);
         assert_eq!(db.total_changes(), before);
-        assert!(matches!(invalidate(&db, None, "refused", "changed"), Err(rusqlite::Error::InvalidQuery)));
+        assert!(matches!(
+            invalidate(&db, None, "refused", "changed"),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
         assert_eq!(db.total_changes(), before);
+    }
+
+    #[test]
+    fn discovery_batch_revision_overflow_rolls_back_membership() {
+        let mut db = batch_db(true);
+        db.execute("UPDATE storage_source_journal SET revision=9223372036854775807 WHERE namespace='A'", []).unwrap();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(matches!(
+            discover_prepared(
+                &tx,
+                Some("A"),
+                &["overflow".into()],
+                true,
+                || 42,
+                &mut JournalWork::default()
+            ),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
+        tx.rollback().unwrap();
+        assert!(batch_rows(&db, true).is_empty());
+        let membership: i64 = db
+            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(membership, 0);
+        let revision: i64 = db.query_row("SELECT revision FROM storage_source_journal WHERE namespace='A'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revision, i64::MAX);
     }
 
     struct Fixture {
