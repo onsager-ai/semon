@@ -42,12 +42,20 @@ fn wait_for_blocked_sql(factory: &Factory, blocker: i32) {
     let mut observer = admin_factory(factory).client();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let waiting: bool = observer.query_one(
-            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
-            &[&blocker],
-        ).unwrap().get(0);
-        if waiting { return; }
-        assert!(std::time::Instant::now() < deadline, "actual SQL lock wait observed");
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+                &[&blocker],
+            )
+            .unwrap()
+            .get(0);
+        if waiting {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "actual SQL lock wait observed"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -83,7 +91,10 @@ fn pg_store_metadata_distinct_source_principal_journal_cold_warm_cannot_control(
             tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&tx.namespace.as_str().as_bytes(), &b"pricing_recompute_target".as_slice(), &b"forged".as_slice()]).map_err(sqlstate::error)?;
             Ok(())
         });
-        assert!(pricing_in_source.is_err(), "STORE key is illegal in Source metadata");
+        assert!(
+            pricing_in_source.is_err(),
+            "STORE key is illegal in Source metadata"
+        );
         let operation_id = "1f".repeat(32);
         let source_operation = crate::storage::postgres::OperationIdentity {
             operation_id: &operation_id,
@@ -292,7 +303,10 @@ fn pg_store_metadata_held_lock_cancel_and_deadline_release_single_pool_slot() {
     let before = snapshot(&factory);
     let mut blocker = factory.client();
     blocker.batch_execute("BEGIN; SELECT pg_advisory_xact_lock_shared(current_schema()::regnamespace::oid::int,477110)").unwrap();
-    let blocker_pid: i32 = blocker.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    let blocker_pid: i32 = blocker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .unwrap()
+        .get(0);
     let cancelled = PgCancellation::default();
     std::thread::scope(|scope| {
         let cancel = &cancelled;
@@ -333,7 +347,10 @@ fn pg_store_metadata_held_row_lock_sql_cancel_rolls_back_and_reuses_pool() {
     let before = full_snapshot(&factory);
     let mut blocker = factory.client();
     blocker.batch_execute("BEGIN; SELECT revision FROM semon_pg_store_state WHERE singleton FOR UPDATE").unwrap();
-    let blocker_pid: i32 = blocker.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    let blocker_pid: i32 = blocker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .unwrap()
+        .get(0);
     let cancelled = PgCancellation::default();
     std::thread::scope(|scope| {
         let cancel = &cancelled;
