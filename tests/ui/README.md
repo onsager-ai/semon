@@ -97,6 +97,15 @@ its completion witness is the native-publication success message in the CI log.
 - CI run 40116009494 and artifact 12568905474 support six two-machine transport
   fingerprint updates. The exact adopted patch changes only candidate runtime
   fingerprints; all 36 image/DOM digests and reference pins remain unchanged.
+- CI run 40220439629, artifacts 12610005146 and 12609162727, supplies the exact
+  integration binding patches for 155 visual and six transport records. Independent
+  qualification confirmed runtime `6443c43f72ab4f833ba406e0355089ebca27accffb50a44ec837317b96c8299a`
+  and all six artifact digests for each of the 161 existing accepted records.
+  Only candidate fingerprints change; all review provenance, pins and artifact
+  digests are retained. Representative existing CI images were inspected again.
+  The captured merge `2c85811c1c3ed917cfa866c752a9acda350490ff` has the same tree as
+  candidate `2dcdd4567755d7244f3d8eabc16cd577bf430337`. The resulting commit still
+  requires CI, and any later binary fingerprint change needs fresh qualification.
   This is binding maintenance only and creates no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
