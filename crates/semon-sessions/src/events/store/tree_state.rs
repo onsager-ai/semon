@@ -146,6 +146,36 @@ pub(crate) struct Snapshot {
     projection_id: i64,
     configured: Option<crate::storage::StoreConfig>,
 }
+
+/// The backend which owns the Tree checkpoint used for deferred tree facts.
+///
+/// A `Summary` is returned through the shared producer path.  Keeping its
+/// reader typed here makes the physical SQLite dependency explicit rather than
+/// allowing a future non-SQLite `FileIndex` to reopen this database.
+#[derive(Clone, Debug)]
+pub(crate) enum TreeCheckpoint {
+    Sqlite(Snapshot),
+}
+
+impl TreeCheckpoint {
+    pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
+        match self {
+            Self::Sqlite(snapshot) => snapshot.tool_name(id),
+        }
+    }
+
+    pub(crate) fn shared_usage(&self) -> io::Result<SharedUsage> {
+        match self {
+            Self::Sqlite(snapshot) => snapshot.shared_usage(),
+        }
+    }
+
+    pub(crate) fn bind_configured(&mut self, config: crate::storage::StoreConfig) {
+        match self {
+            Self::Sqlite(snapshot) => snapshot.bind_configured(config),
+        }
+    }
+}
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TreeSnapshot")
@@ -423,14 +453,14 @@ pub(super) fn restore(
         |r| r.get(0),
     )?;
     if !db.is_empty() {
-        summary.stored = Some(Snapshot {
+        summary.stored = Some(TreeCheckpoint::Sqlite(Snapshot {
             db: db.into(),
             path: path.into(),
             ledger: ledger.clone(),
             file_id: id,
             projection_id,
             configured: None,
-        });
+        }));
     }
     Ok(true)
 }
