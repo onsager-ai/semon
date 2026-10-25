@@ -129,7 +129,9 @@ fn validate_prior(tx: &mut PgTxn<'_>, rows: &[ReportedRow]) -> Result<(), Storag
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let mut budget = Budget { rows: 0, bytes: 0 };
     let stamps = tx.driver.query("SELECT singleton,octet_length(stamp)::bigint FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 2", &[&ns]).map_err(sqlstate::error)?;
-    if stamps.len()>1 || stamps.first().is_some_and(|row|!row.get::<_,bool>(0)) { return Err(StorageError::Unavailable); }
+    if stamps.len() > 1 || stamps.first().is_some_and(|row| !row.get::<_, bool>(0)) {
+        return Err(StorageError::Unavailable);
+    }
     if let Some(size) = stamps.first() {
         budget.charge(size.get(1))?;
         tx.check()?;
@@ -149,9 +151,15 @@ fn validate_prior(tx: &mut PgTxn<'_>, rows: &[ReportedRow]) -> Result<(), Storag
             let row = tx.driver.query_one("SELECT session_id,record FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_digest=sha256($2::bytea) AND start=$3", &[&ns,&id,&start]).map_err(sqlstate::error)?;
             tx.check()?;
             let stored: Vec<u8> = row.get(0);
-            if stored!=id { return Err(StorageError::ScopeChanged); }
-            let prior = ReportedRow::decode(&row.get::<_,Vec<u8>>(1)).map_err(|_|StorageError::Unavailable)?.run;
-            if prior.last_session_id.as_bytes()!=id || prior.last_start_time!=start { return Err(StorageError::Unavailable); }
+            if stored != id {
+                return Err(StorageError::ScopeChanged);
+            }
+            let prior = ReportedRow::decode(&row.get::<_, Vec<u8>>(1))
+                .map_err(|_| StorageError::Unavailable)?
+                .run;
+            if prior.last_session_id.as_bytes() != id || prior.last_start_time != start {
+                return Err(StorageError::Unavailable);
+            }
         }
     }
     Ok(())
