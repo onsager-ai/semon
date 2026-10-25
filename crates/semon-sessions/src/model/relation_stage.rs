@@ -86,6 +86,104 @@ pub(crate) struct Context {
     pub(crate) matching_locations: Option<Vec<Location>>,
     /// Final replay reads incident relationships in bounded, read-only pages.
     pub(crate) replay_owners: Vec<String>,
+    /// Captured Current owners, not authority inferred from SQL absence.
+    pub(crate) prior_owners: BTreeMap<String, summary::CatalogRow>,
+    /// Exact outgoing observations included in the durable model witness.
+    pub(crate) retired_owners: Vec<summary::CatalogRow>,
+    pub(crate) lifecycle_authority: Option<LifecycleAuthority>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LifecycleAuthority {
+    pub(crate) facts: PathBuf,
+    pub(crate) identity: crate::facts::source_authority::Identity,
+    pub(crate) claude_home: PathBuf,
+    pub(crate) runtime: String,
+}
+
+impl LifecycleAuthority {
+    pub(crate) fn capture(options: &Options) -> io::Result<Self> {
+        let facts = options
+            .facts
+            .clone()
+            .ok_or_else(|| io::Error::other("semantic_affected_owner_local_authority_pending"))?;
+        let authority = Self {
+            identity: crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&facts)?)?,
+            facts,
+            claude_home: options.claude_home.clone(),
+            runtime: crate::native_evidence::query_runtime_generation(options)?,
+        };
+        if !authority.current()? {
+            return Err(io::Error::other(
+                "semantic_affected_owner_authority_changed",
+            ));
+        }
+        Ok(authority)
+    }
+    pub(crate) fn current(&self) -> io::Result<bool> {
+        let identity =
+            || crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts)?);
+        if identity()? != self.identity {
+            return Ok(false);
+        }
+        let facts = crate::facts::source_authority::CurrentSources::open(&self.facts)?;
+        if !facts.facts_known() {
+            return Ok(false);
+        }
+        facts.validate()?;
+        // The recorded runtime algorithm consumes Facts and Claude PID records
+        // only. No EventCache path or storage engine is reconstructed here.
+        let options = Options {
+            facts: Some(self.facts.clone()),
+            claude_home: self.claude_home.clone(),
+            ..Default::default()
+        };
+        let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime
+            && identity()? == self.identity;
+        facts.validate()?;
+        Ok(current)
+    }
+}
+
+/// Physical lookup port for a bounded affected-owner closure. This traverses
+/// recorded ownership only; native identity and relationships are still reduced
+/// by the existing parser/matcher over the resulting complete Raw cohort.
+pub(crate) trait LifecycleStore {
+    fn path_owners(&self, path: &str) -> io::Result<Vec<String>>;
+    fn owner(&self, key: &str) -> io::Result<summary::CatalogRow>;
+    fn neighbors(&self, key: &str) -> io::Result<Vec<String>>;
+}
+
+pub(crate) fn affected_owners(
+    store: &impl LifecycleStore,
+    paths: &[String],
+) -> io::Result<BTreeMap<String, summary::CatalogRow>> {
+    let mut pending = BTreeSet::new();
+    for path in paths {
+        pending.extend(store.path_owners(path)?);
+    }
+    let mut owners = BTreeMap::new();
+    let mut bytes = 0usize;
+    while let Some(key) = pending.pop_first() {
+        if owners.contains_key(&key) {
+            continue;
+        }
+        if owners.len() == 64 {
+            return Err(io::Error::other("semantic_affected_owner_budget"));
+        }
+        let row = store.owner(&key)?;
+        if row.key != key || row.sources.is_empty() || row.sources.len() > 64 {
+            return Err(io::Error::other("semantic_affected_owner_invalid"));
+        }
+        bytes = bytes.saturating_add(serde_json::to_vec(&row)?.len());
+        if bytes > 1048576 {
+            return Err(io::Error::other("semantic_affected_owner_bytes"));
+        }
+        pending.extend(store.neighbors(&key)?);
+        owners.insert(key, row);
+    }
+    Ok(owners)
 }
 
 pub(crate) struct RelationOrigin {
@@ -256,6 +354,54 @@ pub(crate) struct Stub {
     pub(crate) harness: String,
     pub(crate) start: i64,
     pub(crate) last: i64,
+}
+
+/// Physical owner effects. The native model and its observations stay shared;
+/// an adapter receives typed values inside the caller's fenced transaction.
+pub(crate) trait OwnerStore {
+    type Error;
+    fn endpoint(&self, endpoint: &Endpoint) -> Result<(), Self::Error>;
+    fn relation(&self, relation: &Relation) -> Result<(), Self::Error>;
+    fn dependency(&self, path: &str, harness: &str, native: &str) -> Result<(), Self::Error>;
+    fn withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Self::Error>;
+    fn retire(&self, key: &str, withdrawal: bool) -> Result<(), Self::Error>;
+}
+
+impl Relation {
+    /// Same exact comparison and physical-sender witness merge for every store.
+    pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
+        let witness = prior
+            .source_turn
+            .merge(&self.source_turn)
+            .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+        let mut before = prior.clone();
+        let mut merged = self.clone();
+        before.source_turn = OriginTurn::default();
+        merged.source_turn = OriginTurn::default();
+        let before = serde_json::to_value(before)?;
+        let after = serde_json::to_value(&merged)?;
+        if before != after {
+            let before = before
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let after = after
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let fields = before
+                .keys()
+                .chain(after.keys())
+                .filter(|key| before.get(*key) != after.get(*key))
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            return Err(io::Error::other(format!(
+                "conflicting staged native relationship: kind={} fields={}",
+                self.kind,
+                fields.into_iter().collect::<Vec<_>>().join(",")
+            )));
+        }
+        merged.source_turn = witness;
+        Ok(merged)
+    }
 }
 
 fn static_state(value: &str) -> io::Result<&'static str> {

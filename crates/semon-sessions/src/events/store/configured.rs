@@ -522,6 +522,7 @@ impl NativeOwnership {
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
         crate::storage::sqlite::trace::validate(db)?;
+        crate::storage::sqlite::semantic::validate_owners(db)?;
         if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
             || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
                 != "composite"
@@ -5100,5 +5101,1886 @@ mod tests {
             Outcome::Written
         );
         assert_eq!(committed, f.state());
+    }
+
+    // Worker43 domain gates. Kept separate from S2's appended test reservation.
+    mod domain43 {
+        use super::*;
+        use crate::model::relation_stage::Phase;
+        use crate::storage::native_events::NativeEventStore;
+
+        fn ready(
+            cache: &mut EventCache,
+            f: &Fixture,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> (
+            crate::model::relation_stage::Batch,
+            crate::model::SemanticModelBatch,
+        ) {
+            let paths = inputs
+                .iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            let mut fault_hits = BTreeMap::<&str, usize>::new();
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|input| {
+                        batch
+                            .paths
+                            .contains(&input.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    selected.len(),
+                    batch.paths.len(),
+                    "all discovered Raw inputs must be supplied"
+                );
+                let model = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                let point = match batch.phase {
+                    Phase::Indexing => "semantic_record_owners",
+                    Phase::Identity => "semantic_record",
+                    Phase::Relations => "semantic_record_relations",
+                    Phase::Publication => "semantic_model_record",
+                };
+                let before = shared_state(f);
+                FAIL_EFFECT.with(|p| p.set(Some(point)));
+                let failed = cache.record_semantic_batch(&batch, model.prepared());
+                assert_eq!(
+                    FAIL_EFFECT.with(|p| p.get()),
+                    None,
+                    "fault not reached: {point}, phase {:?}, result {failed:?}",
+                    batch.phase
+                );
+                assert!(failed.is_err(), "{point} must fail after being hit");
+                *fault_hits.entry(point).or_default() += 1;
+                FAIL_EFFECT.with(|p| p.set(None));
+                assert_eq!(
+                    shared_state(f),
+                    before,
+                    "new owner effects roll back with their stage"
+                );
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
+                if batch.phase == Phase::Publication {
+                    eprintln!("domain44_fault_hits={fault_hits:?}");
+                    return (batch, model);
+                }
+            }
+            panic!("domain producer did not reach publication");
+        }
+
+        fn publish(
+            cache: &mut EventCache,
+            f: &Fixture,
+            batch: &crate::model::relation_stage::Batch,
+            model: &crate::model::SemanticModelBatch,
+        ) {
+            for point in [
+                "semantic_publish_history",
+                "semantic_publish_slots",
+                "semantic_publish_rows",
+                "semantic_publish_owners",
+                "semantic_publish_retirement",
+                "semantic_publish_trace",
+                "semantic_publish_search",
+                "semantic_publish_proof",
+                "semantic_publish_ack",
+                "semantic_publish_head",
+            ] {
+                let before = shared_state(f);
+                FAIL_EFFECT.with(|p| p.set(Some(point)));
+                assert!(
+                    cache
+                        .publish_semantic_catalog(batch, model.prepared())
+                        .is_err(),
+                    "{point}"
+                );
+                assert_eq!(
+                    FAIL_EFFECT.with(|p| p.get()),
+                    None,
+                    "publication fault not reached: {point}"
+                );
+                FAIL_EFFECT.with(|p| p.set(None));
+                assert_eq!(
+                    shared_state(f),
+                    before,
+                    "{point} must roll back every family"
+                );
+            }
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+        }
+
+        fn oracle(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+            prepared: &crate::model::PreparedSources,
+        ) {
+            // Keep the reference producer independent of the admitted
+            // configured store, but give it the ordinary scoped cache that
+            // the native producer requires for its source observations.
+            let mut unbound = EventCache::open_scoped(&options.cache).unwrap();
+            let mut expected =
+                crate::model::prepare_sources(options, &mut unbound, inputs, 1_790_000_000_000)
+                    .unwrap();
+            let binding = cache.query_runtime_binding().unwrap().unwrap();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            use sha2::{Digest, Sha256};
+            let witness = format!(
+                "source-runtime-v1:{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&(
+                        "semon-source-runtime-v1",
+                        binding.namespace.as_str(),
+                        binding.admission,
+                        binding.stream_epoch.as_str(),
+                        runtime
+                    ))
+                    .unwrap()
+                )
+            );
+            for row in &mut expected.rows {
+                assert_eq!(
+                    prepared
+                        .rows
+                        .iter()
+                        .find(|r| r.key == row.key)
+                        .unwrap()
+                        .query
+                        .as_ref()
+                        .unwrap()["runtime"],
+                    witness
+                );
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(witness);
+            }
+            assert_eq!(
+                serde_json::to_value(&prepared.rows).unwrap(),
+                serde_json::to_value(&expected.rows).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&prepared.relationships.relations).unwrap(),
+                serde_json::to_value(&expected.relationships.relations).unwrap(),
+                "every relation field, including turn witnesses and placements"
+            );
+            assert_eq!(
+                prepared.staged_projection_witness().unwrap(),
+                expected.staged_projection_witness().unwrap()
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain_parent_relations_and_pid_collisions_are_source_owned() {
+            let (f, b, options, _) = model_sources();
+            let options = &options[0]; // Deliberate identical absolute Raw paths across Sources.
+            let inputs = [
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/parent.jsonl".into(),
+                },
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/child.jsonl".into(),
+                },
+            ];
+            for (i, input) in inputs.iter().enumerate() {
+                let payload = if i == 0 {
+                    serde_json::json!({"id":"parent","cwd":"/sanitized"})
+                } else {
+                    serde_json::json!({"id":"child","cwd":"/sanitized","parent_thread_id":"parent","thread_source":"subagent","agent_path":"root/child","agent_nickname":"child"})
+                };
+                fs::write(input.full_path(options),format!("{}\n{}\n",serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized domain work"}]}}))).unwrap();
+            }
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain".into(),
+                    codex_locks: std::collections::BTreeMap::from([
+                        ("parent".into(), 77),
+                        ("child".into(), 88),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for (config, foreign) in [(&f.config, "source-b"), (&b, "source-a")] {
+                let mut cache = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap();
+                for (i, input) in inputs.iter().enumerate() {
+                    cache
+                        .ingest(
+                            &format!("{:064x}", i + 900),
+                            &input.full_path(options),
+                            "codex",
+                        )
+                        .unwrap();
+                }
+                let before = namespace_state(&f, foreign);
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                assert!(
+                    !model.prepared().relationships.relations.is_empty(),
+                    "actual parent-derived relation"
+                );
+                oracle(&mut cache, options, &inputs, model.prepared());
+                let mut next = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap();
+                let (next_batch, next_model) = ready(&mut next, &f, options, &inputs);
+                let before_stale = shared_state(&f);
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Conflict
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before_stale,
+                    "foreign epoch holder makes zero writes across the new families"
+                );
+                cache = next;
+                let (batch, model) = (next_batch, next_model);
+                publish(&mut cache, &f, &batch, &model);
+                let db = f.db();
+                let parent:(String,String,String) = db.query_row("SELECT parent_native,parent_key,root_key FROM catalog_semantic_endpoints WHERE namespace=?1 AND session_key='child'",[config.namespace.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+                assert_eq!(parent, ("parent".into(), "parent".into(), "parent".into()));
+                for relation in model.prepared().relationships.relations.values() {
+                    let stored:String = db.query_row("SELECT metadata FROM catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![config.namespace.as_str(),relation.id],|r|r.get(0)).unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+                        serde_json::to_value(relation).unwrap()
+                    );
+                }
+                let pid:String = db.query_row("SELECT native_id FROM catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness='runtime:pid'",params![config.namespace.as_str(),inputs[0].full_path(options).to_string_lossy()],|r|r.get(0)).unwrap();
+                assert_eq!(pid, "77");
+                assert_eq!(namespace_state(&f, foreign), before);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain_claude_pid_and_continuation_are_source_owned() {
+            let (f, b, options, _) = model_sources();
+            let options = &options[1];
+            let inputs = [
+                crate::Input {
+                    root: crate::InputRoot::Claude,
+                    path: "projects/sanitized/old.jsonl".into(),
+                },
+                crate::Input {
+                    root: crate::InputRoot::Claude,
+                    path: "projects/sanitized/new.jsonl".into(),
+                },
+            ];
+            fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
+            fs::write(
+                options.claude_home.join("sessions/123.json"),
+                r#"{"sessionId":"new","status":"idle"}"#,
+            )
+            .unwrap();
+            for (i, input) in inputs.iter().enumerate() {
+                let id = if i == 0 { "old" } else { "new" };
+                let mut raw = format!(
+                    "{}\n",
+                    serde_json::json!({"type":"user","sessionId":id,"uuid":format!("user-{id}"),"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":"native continuation"}})
+                );
+                if i == 0 {
+                    raw.push_str(&format!("{}\n",serde_json::json!({"type":"continued-in","sessionId":"old","continuedInSessionId":"new","timestamp":"2026-10-01T00:01:00Z"})));
+                }
+                fs::write(input.full_path(options), raw).unwrap();
+            }
+            for (config, foreign) in [(&f.config, "source-b"), (&b, "source-a")] {
+                let mut cache = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap();
+                for (i, input) in inputs.iter().enumerate() {
+                    cache
+                        .ingest(
+                            &format!("{:064x}", i + 1000),
+                            &input.full_path(options),
+                            "claude",
+                        )
+                        .unwrap();
+                }
+                let before = namespace_state(&f, foreign);
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                assert!(model.prepared().pids.contains(&123));
+                assert!(!model.prepared().lineage_dependencies.is_empty());
+                oracle(&mut cache, options, &inputs, model.prepared());
+                publish(&mut cache, &f, &batch, &model);
+                let db = f.db();
+                let links:i64=db.query_row("SELECT count(*) FROM catalog_native_dependencies WHERE namespace=?1 AND harness='lineage:claude' AND native_id IN ('old','new')",[config.namespace.as_str()],|r|r.get(0)).unwrap();
+                assert!(links > 0);
+                let pid:i64=db.query_row("SELECT count(*) FROM catalog_native_dependencies WHERE namespace=?1 AND harness='runtime:pid' AND native_id='123'",[config.namespace.as_str()],|r|r.get(0)).unwrap();
+                assert!(pid > 0);
+                assert_eq!(namespace_state(&f, foreign), before);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain_unsupported_owner_profile_refuses_before_enrollment() {
+            let (f, _, _, _) = model_sources();
+            f.db().execute_batch("ALTER TABLE catalog_native_dependencies RENAME TO kept_dependencies; CREATE TABLE catalog_native_dependencies(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id INTEGER NOT NULL,PRIMARY KEY(namespace,source_path,harness,native_id)) STRICT, WITHOUT ROWID; INSERT INTO catalog_native_dependencies VALUES('unattributable','/kept','runtime:pid',123);").unwrap();
+            let before = shared_state(&f);
+            assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).is_err());
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "nonempty unsupported facts are never adopted, rewritten or reset"
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain_withdrawal_retires_only_owned_current_and_keeps_recipes() {
+            let (f, b, options, inputs) = model_sources();
+            let options = &options[0];
+            let input = &inputs[0];
+            for config in [&f.config, &b] {
+                let mut cache = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+                )
+                .unwrap();
+                cache
+                    .ingest(&"b".repeat(64), &input.full_path(options), "codex")
+                    .unwrap();
+                let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+                publish(&mut cache, &f, &batch, &model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            let foreign = namespace_state(&f, "source-b");
+            let slots:Vec<String>=f.db().prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert!(!slots.is_empty());
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain".into(),
+                    codex_rollouts: Some(Default::default()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            assert!(model.prepared().rows.is_empty());
+            assert_eq!(model.prepared().withdrawals.len(), 1);
+            let before_rebind = shared_state(&f);
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    // Replacing the facts record changes its physical
+                    // authority identity. Hostname is descriptive only.
+                    hostname: "domain".into(),
+                    codex_rollouts: Some(Default::default()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict,
+                "replaced facts authority refuses publication without writes"
+            );
+            assert_eq!(
+                shared_state(&f),
+                before_rebind,
+                "changed withdrawal authority makes zero publication writes"
+            );
+            drop(cache);
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            publish(&mut cache, &f, &batch, &model);
+            let db = f.db();
+            assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
+            let retained:String=db.query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get(0)).unwrap();
+            let retained: crate::model::summary::CatalogRow =
+                serde_json::from_str(&retained).unwrap();
+            assert_eq!(
+                retained.lifecycle,
+                crate::model::summary::CatalogLifecycle::Retained
+            );
+            assert!(!retained.sources.is_empty());
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND lifecycle='retained'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_trace_headers WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            let after:Vec<String>=db.prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert_eq!(after, slots);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='retained_history'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
+            assert_eq!(namespace_state(&f, "source-b"), foreign);
+        }
+    }
+
+    // Worker44 stored-corruption refusals use real Raw-derived producer output.
+    mod domain44 {
+        use super::*;
+        use crate::model::relation_stage::{Batch, Phase};
+        use crate::storage::native_events::NativeEventStore;
+
+        fn fixture() -> (Fixture, EventCache, crate::Options, Vec<crate::Input>) {
+            let (f, foreign_config, options, _) = model_sources();
+            let options = options[0].clone();
+            let inputs = ["parent", "child"]
+                .into_iter()
+                .map(|name| crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: format!("sessions/{name}.jsonl"),
+                })
+                .collect::<Vec<_>>();
+            for (i, input) in inputs.iter().enumerate() {
+                let payload = if i == 0 {
+                    serde_json::json!({"id":"parent","cwd":"/sanitized"})
+                } else {
+                    serde_json::json!({"id":"child","cwd":"/sanitized","parent_thread_id":"parent","thread_source":"subagent"})
+                };
+                fs::write(input.full_path(&options), format!("{}\n{}\n",
+                    serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"domain44 stored integrity"}]}})
+                )).unwrap();
+            }
+            // Populate Source-b with the same paths/native identities before
+            // every negative gate. shared_state must preserve these real rows.
+            let mut foreign = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&foreign_config).unwrap(),
+            )
+            .unwrap();
+            for (i, input) in inputs.iter().enumerate() {
+                foreign
+                    .ingest(
+                        &format!("{:064x}", i + 4400),
+                        &input.full_path(&options),
+                        "codex",
+                    )
+                    .unwrap();
+            }
+            drop(foreign);
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            for (i, input) in inputs.iter().enumerate() {
+                cache
+                    .ingest(
+                        &format!("{:064x}", i + 4400),
+                        &input.full_path(&options),
+                        "codex",
+                    )
+                    .unwrap();
+            }
+            let paths = inputs
+                .iter()
+                .map(|input| input.full_path(&options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            (f, cache, options, inputs)
+        }
+
+        fn phase(
+            cache: &mut EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+            phase: Phase,
+        ) -> (Batch, crate::model::SemanticModelBatch) {
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|input| {
+                        batch
+                            .paths
+                            .contains(&input.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let model = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                if batch.phase == phase {
+                    return (batch, model);
+                }
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
+            }
+            panic!("producer phase not reached");
+        }
+
+        // Deliberate stored-corruption injection; production admission and
+        // transaction guards remain installed, including Source predicates.
+        fn corrupt_db(f: &Fixture) -> Connection {
+            let db = f.db();
+            db.create_scalar_function(
+                "semon_namespace",
+                0,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok("source-a".to_owned()),
+            )
+            .unwrap();
+            for name in [
+                "semon_semantic_writer",
+                "semon_semantic_publisher",
+                "semon_event_writer",
+            ] {
+                db.create_scalar_function(
+                    name,
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    |_| Ok(1_i64),
+                )
+                .unwrap();
+            }
+            db
+        }
+
+        #[test]
+        fn configured_semantic_domain44_input_order_preserves_exact_claim_witness() {
+            let (f, mut cache, options, inputs) = fixture();
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(batch.phase, Phase::Indexing);
+            let before = shared_state(&f);
+            let model = crate::model::prepare_semantic_batch(
+                &options,
+                &mut cache,
+                &inputs,
+                &batch,
+                1_790_000_000_000,
+            )
+            .unwrap();
+            let reversed = inputs.iter().rev().cloned().collect::<Vec<_>>();
+            let other = crate::model::prepare_semantic_batch(
+                &options,
+                &mut cache,
+                &reversed,
+                &batch,
+                1_790_000_000_000,
+            )
+            .unwrap();
+            assert_eq!(model.prepared().claims, other.prepared().claims);
+            assert_eq!(
+                model
+                    .prepared()
+                    .claims
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>(),
+                batch.paths
+            );
+            let duplicate = vec![inputs[0].clone(), inputs[1].clone(), inputs[0].clone()];
+            assert!(
+                crate::model::prepare_semantic_batch(
+                    &options,
+                    &mut cache,
+                    &duplicate,
+                    &batch,
+                    1_790_000_000_000
+                )
+                .is_err()
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "canonical preparation and duplicate refusal make zero DB writes"
+            );
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
+                Outcome::Written
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain44_oversized_relation_prior_refuses_and_rolls_back() {
+            let (f, mut cache, options, inputs) = fixture();
+            let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Relations);
+            let relation = model
+                .prepared()
+                .relationships
+                .relations
+                .values()
+                .next()
+                .expect("real parent relation");
+            let text = format!(
+                "{}{}",
+                " ".repeat(1048577),
+                serde_json::to_string(relation).unwrap()
+            );
+            let db = corrupt_db(&f);
+            db.execute("INSERT INTO catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES('source-a',?1,?2,?3,?4)", params![relation.id,relation.from,relation.to,text]).unwrap();
+            let before = shared_state(&f);
+            assert!(
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .is_err()
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "D1 rolls back endpoint effects before oversized prior refusal"
+            );
+            let kept: String = db.query_row("SELECT metadata FROM catalog_semantic_relations WHERE namespace='source-a' AND relation_id=?1", [&relation.id], |r| r.get(0)).unwrap();
+            assert_eq!(kept, text);
+        }
+
+        #[test]
+        fn configured_semantic_domain44_endpoint_identity_mismatch_refuses_and_rolls_back() {
+            for corruption in ["physical harness", "metadata harness", "metadata key"] {
+                let (f, mut cache, options, inputs) = fixture();
+                let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Identity);
+                let endpoint = model
+                    .prepared()
+                    .relationships
+                    .endpoints
+                    .values()
+                    .next()
+                    .unwrap();
+                let mut stored = endpoint.clone();
+                if corruption == "metadata harness" {
+                    stored.row.harness = "claude".into();
+                }
+                if corruption == "metadata key" {
+                    stored.row.key = "wrong-owner".into();
+                }
+                let harness = if corruption == "physical harness" {
+                    "claude"
+                } else {
+                    endpoint.row.harness.as_str()
+                };
+                let text = serde_json::to_string(&stored).unwrap();
+                let db = corrupt_db(&f);
+                db.execute("INSERT INTO catalog_semantic_endpoints(namespace,session_key,harness,metadata) VALUES('source-a',?1,?2,?3)",params![endpoint.row.key,harness,text]).unwrap();
+                let before = shared_state(&f);
+                assert!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .is_err(),
+                    "{corruption}"
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "D2 keeps every stored family on {corruption}"
+                );
+                let kept: (String,String) = db.query_row("SELECT harness,metadata FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [&endpoint.row.key], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+                assert_eq!(kept, (harness.to_owned(), text));
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain44_missing_root_refuses_and_rolls_back() {
+            let (f, mut cache, options, inputs) = fixture();
+            let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Publication);
+            let db = corrupt_db(&f);
+            assert_eq!(db.execute("UPDATE catalog_semantic_endpoints SET root_key='missing-root' WHERE namespace='source-a' AND session_key='child'", []).unwrap(), 1);
+            let before = shared_state(&f);
+            assert!(
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .is_err()
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "D5 missing root cannot manufacture inactive authority"
+            );
+            assert_eq!(db.query_row("SELECT root_key FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key='child'", [], |r|r.get::<_,String>(0)).unwrap(), "missing-root");
+        }
+
+        #[test]
+        fn configured_semantic_domain44_missing_replay_owner_refuses_without_writes() {
+            for missing in ["parent", "child"] {
+                let (f, mut cache, options, inputs) = fixture();
+                let (batch, model) = phase(&mut cache, &options, &inputs, Phase::Publication);
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
+                let db = corrupt_db(&f);
+                assert_eq!(db.execute("DELETE FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [missing]).unwrap(), 1);
+                let before = shared_state(&f);
+                // Missing parent exercises the requested-owner case. Missing
+                // child exercises a relation target with a valid staged parent.
+                assert!(
+                    cache
+                        .semantic_replay_page(batch.epoch, &["parent".into()], "")
+                        .is_err()
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "D6 completed {missing} identity is missing, not unpublished"
+                );
+                assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1", [missing], |r|r.get::<_,i64>(0)).unwrap(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn configured_semantic_s2_real_l1_pin_survives_append_publication_gc_and_reopen() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        use std::io::Write;
+        let (a, b, options, inputs) = model_sources();
+        for (i, config) in [&a.config, &b].into_iter().enumerate() {
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+            let binding = capability.reader_binding().unwrap();
+            let mut cache = EventCache::open_semantic(capability).unwrap();
+            let path = inputs[i].full_path(&options[i]);
+            cache
+                .ingest(&"a".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let (batch, model) = model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
+            let (outcome, publication) = cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
+            assert_eq!(outcome, Outcome::Written);
+            let key = model.prepared().rows[0].key.clone();
+            let runtime = binding.reader_runtime().unwrap();
+            let id = runtime.current_generation(&key).unwrap();
+            let token = "b".repeat(64);
+            let mut lease = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
+            assert_eq!(
+                lease.snapshot().publication_generation,
+                publication.unwrap()
+            );
+            let first = lease.read_record(&options[i], None, &path, 0).unwrap();
+            assert!(first.is_some());
+            let first_page = lease
+                .transcript_records(
+                    &options[i],
+                    None,
+                    0,
+                    8,
+                    &crate::SelectedReadControl::default(),
+                )
+                .unwrap();
+            assert_eq!(first_page.snapshot.proof_generation, id);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            let extra = if i == 0 {
+                "{\"timestamp\":\"2026-10-01T00:02:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"S2 appended\"}]}}\n"
+            } else {
+                "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"s2-next\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{\"role\":\"user\",\"content\":\"S2 appended\"}}\n"
+            };
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(extra.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"c".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let (next, next_model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&next, next_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            let second_id = runtime.current_generation(&key).unwrap();
+            assert_ne!(second_id, id);
+            let mut second = runtime
+                .selected_generation(&key, &second_id, &"9".repeat(64), 60_000)
+                .unwrap();
+            let second_page = lease
+                .transcript_records(
+                    &options[i],
+                    None,
+                    0,
+                    8,
+                    &crate::SelectedReadControl::default(),
+                )
+                .unwrap();
+            assert_eq!(second_page.snapshot.proof_generation, id);
+            assert_eq!(
+                serde_json::to_value(&second_page.records).unwrap(),
+                serde_json::to_value(&first_page.records).unwrap()
+            );
+            cache.finish_semantic_stage(next.epoch).unwrap();
+            let third_extra = extra
+                .replace("S2 appended", "S2 third")
+                .replace("s2-next", "s2-third");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(third_extra.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"8".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let (third, third_model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-real");
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&third, third_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            assert_eq!(
+                lease.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
+            // No long-lived connection exists in Lease: reopen resolves the
+            // durable token and exact old generation, independently of WAL.
+            let reopened = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
+            assert_eq!(reopened.snapshot().proof_generation, id);
+            assert_eq!(
+                reopened.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
+            let owner = NativeOwnership::admit(config).unwrap();
+            let mut db = SourceJournal::owned(owner).connection().unwrap();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(
+                crate::storage::sqlite::proof_generations::collect(
+                    &tx,
+                    config.namespace.as_str(),
+                    1
+                )
+                .unwrap(),
+                0
+            );
+            tx.commit().unwrap();
+            lease.renew(60_000).unwrap();
+            lease.release().unwrap();
+            assert!(reopened.read_record(&options[i], None, &path, 0).is_err());
+            // L1 is retained History. L2 is kept solely by its active reader.
+            assert!(
+                runtime
+                    .selected_generation(&key, &id, &token, 60_000)
+                    .is_ok()
+            );
+            if i == 0 {
+                second.release().unwrap();
+            } else {
+                db.execute(
+                    "UPDATE storage_proof_leases SET expires=0 WHERE namespace=?1 AND token=?2",
+                    params![config.namespace.as_str(), "9".repeat(64)],
+                )
+                .unwrap();
+                assert!(second.renew(60_000).is_err());
+            }
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(
+                crate::storage::sqlite::proof_generations::collect(
+                    &tx,
+                    config.namespace.as_str(),
+                    1
+                )
+                .unwrap(),
+                1
+            );
+            tx.commit().unwrap();
+            assert!(
+                runtime
+                    .selected_generation(&key, &second_id, &"9".repeat(64), 60_000)
+                    .is_err()
+            );
+            // The next actual Index mutation must collect L2's retained chunk
+            // namespace, while original History L1 remains readable.
+            let old_prefix = format!(
+                "native_published_chunks:{}:{}:",
+                crate::source_carrier::source_hash(path.to_str().unwrap()),
+                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
+                    &second.row().sources[0]
+                ))
+            );
+            let fourth = extra
+                .replace("S2 appended", "S2 fourth")
+                .replace("s2-next", "s2-fourth");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(fourth.as_bytes())
+                .unwrap();
+            cache
+                .ingest(&"7".repeat(64), &path, inputs[i].root.as_str())
+                .unwrap();
+            let remaining: i64 = db
+                .query_row(
+                    "SELECT count(*) FROM main.meta WHERE namespace=?1 AND key>=?2 AND key<?3",
+                    params![
+                        config.namespace.as_str(),
+                        old_prefix,
+                        format!("{old_prefix}~")
+                    ],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 0);
+            let history = runtime
+                .selected_generation(&key, &id, &token, 60_000)
+                .unwrap();
+            assert_eq!(
+                history.read_record(&options[i], None, &path, 0).unwrap(),
+                first
+            );
+            assert!(path.exists(), "metadata GC cannot delete Raw");
+            assert!(
+                !EventCache::path(&options[i].cache).exists(),
+                "owned selected reads cannot open Options.cache"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_semantic_s2_real_raw_tamper_missing_roots_and_runtime_fence_refuse() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        let (a, _, options, inputs) = model_sources();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let binding = capability.reader_binding().unwrap();
+        let mut cache = EventCache::open_semantic(capability).unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-refuse");
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        let key = &model.prepared().rows[0].key;
+        let runtime = binding.reader_runtime().unwrap();
+        let id = runtime.current_generation(key).unwrap();
+        let token = "d".repeat(64);
+        let mut lease = runtime
+            .selected_generation(key, &id, &token, 60_000)
+            .unwrap();
+        assert!(
+            runtime
+                .selected_generation(key, &id, &"e".repeat(64), 60_001)
+                .is_err()
+        );
+        struct Denied;
+        impl crate::SessionSourceReader for Denied {
+            fn read_range(
+                &self,
+                _: &crate::SessionSourceRef,
+                _: Option<&str>,
+                _: u64,
+                _: usize,
+            ) -> std::io::Result<crate::SessionSourceRange> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture revoked",
+                ))
+            }
+        }
+        assert!(
+            lease
+                .read_record(
+                    &options[0],
+                    Some((&Denied, crate::SessionSourceReadMode::ProviderOnly)),
+                    &path,
+                    0
+                )
+                .is_err()
+        );
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let control = crate::SelectedReadControl::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(20),
+            cancelled,
+        );
+        assert!(
+            lease
+                .read_record_with_control(&options[0], None, &path, 0, &control)
+                .is_err()
+        );
+        let original = fs::read(&path).unwrap();
+        let mut tampered = original.clone();
+        tampered[20] ^= 1;
+        fs::write(&path, tampered).unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        fs::write(&path, &original[..original.len() / 2]).unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        fs::write(&path, &original).unwrap();
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, &original).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        let mut rebound = options[0].clone();
+        rebound.codex_home = a.root.join("foreign-root");
+        assert!(lease.read_record(&rebound, None, &path, 0).is_err());
+        let successor = binding.reader_runtime().unwrap();
+        assert!(runtime.current_generation(key).is_err());
+        assert!(lease.renew(60_000).is_err());
+        assert!(
+            successor
+                .selected_generation(key, &id, &token, 60_000)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn configured_semantic_s2_generation_ref_failure_rolls_back_and_replays_durably() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        let (a, _, options, inputs) = model_sources();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
+        )
+        .unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-fault");
+        let before = shared_state(&a);
+        FAIL_EFFECT.with(|point| point.set(Some("semantic_publish_generation_refs")));
+        assert!(
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .is_err()
+        );
+        FAIL_EFFECT.with(|point| point.set(None));
+        assert_eq!(shared_state(&a), before);
+        let (outcome, head) = cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        assert_eq!(outcome, Outcome::Written);
+        let committed = shared_state(&a);
+        // Simulate a caller that lost the ACK: durable publication identity
+        // reconciles exactly rather than depending on any lease expiry.
+        assert_eq!(
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap(),
+            (Outcome::Written, head.clone())
+        );
+        assert_eq!(shared_state(&a), committed);
+        drop(cache);
+        let binding = crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config)
+            .unwrap()
+            .reader_binding()
+            .unwrap();
+        let runtime = binding.reader_runtime().unwrap();
+        let key = &model.prepared().rows[0].key;
+        let id = runtime.current_generation(key).unwrap();
+        let lease = runtime
+            .selected_generation(key, &id, &"f".repeat(64), 60_000)
+            .unwrap();
+        assert_eq!(Some(lease.snapshot().publication_generation.clone()), head);
+        assert!(
+            lease
+                .read_record(&options[0], None, &path, 0)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn configured_semantic_s2_proof_witness_and_physical_contract_refuse_tampering() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        let (a, b, options, inputs) = model_sources();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap();
+        let binding = capability.reader_binding().unwrap();
+        let mut cache = EventCache::open_semantic(capability).unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[0], &inputs[0], "s2-proof");
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        let key = &model.prepared().rows[0].key;
+        let runtime = binding.reader_runtime().unwrap();
+        let id = runtime.current_generation(key).unwrap();
+        let lease = runtime
+            .selected_generation(key, &id, &"a".repeat(64), 60_000)
+            .unwrap();
+        let db = SourceJournal::owned(NativeOwnership::admit(&a.config).unwrap())
+            .connection()
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_semantic_proof_immutable_update; DROP TRIGGER storage_semantic_proof_immutable_delete;")
+            .unwrap();
+        db.execute(
+            "UPDATE storage_semantic_publications SET proof_digest=?2 WHERE namespace=?1",
+            params![a.config.namespace.as_str(), "0".repeat(64)],
+        )
+        .unwrap();
+        assert!(lease.read_record(&options[0], None, &path, 0).is_err());
+        db.execute(
+            "DELETE FROM storage_semantic_publications WHERE namespace=?1",
+            [a.config.namespace.as_str()],
+        )
+        .unwrap();
+        assert!(
+            runtime
+                .selected_generation(key, &id, &"b".repeat(64), 60_000)
+                .is_err()
+        );
+
+        let initialized = crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap();
+        let _ = EventCache::open_semantic(initialized).unwrap();
+        let db = SourceJournal::owned(NativeOwnership::admit(&b).unwrap())
+            .connection()
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable; CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT 1; END;")
+            .unwrap();
+        let refused = match crate::storage::sqlite::semantic::SemanticStaging::admit(&b) {
+            Err(_) => true,
+            Ok(capability) => EventCache::open_semantic(capability).is_err(),
+        };
+        assert!(refused);
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable; CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END; DROP INDEX storage_proof_lease_generation; CREATE INDEX storage_proof_lease_generation ON storage_proof_leases(namespace,id);")
+            .unwrap();
+        let refused = match crate::storage::sqlite::semantic::SemanticStaging::admit(&b) {
+            Err(_) => true,
+            Ok(capability) => EventCache::open_semantic(capability).is_err(),
+        };
+        assert!(refused);
+    }
+
+    #[test]
+    fn configured_semantic_s2_equal_native_ids_are_namespace_owned_and_leases_bounded() {
+        use crate::storage::{native_events::NativeEventStore, proof_lifetime::ProofReaderLease};
+        let (a, b, options, mut inputs) = model_sources();
+        inputs[1] = inputs[0].clone();
+        fs::copy(
+            inputs[0].full_path(&options[0]),
+            inputs[1].full_path(&options[1]),
+        )
+        .unwrap();
+        let mut runtimes = Vec::new();
+        let mut ids = Vec::new();
+        let mut keys = Vec::new();
+        for (i, config) in [&a.config, &b].into_iter().enumerate() {
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+            let binding = capability.reader_binding().unwrap();
+            let mut cache = EventCache::open_semantic(capability).unwrap();
+            cache
+                .ingest(&"a".repeat(64), &inputs[i].full_path(&options[i]), "codex")
+                .unwrap();
+            let (batch, model) =
+                model_ready(&a, &mut cache, &options[i], &inputs[i], "s2-isolation");
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
+            let runtime = binding.reader_runtime().unwrap();
+            let key = model.prepared().rows[0].key.clone();
+            ids.push(runtime.current_generation(&key).unwrap());
+            keys.push(key);
+            runtimes.push(runtime);
+        }
+        assert_eq!(keys[0], keys[1]);
+        assert_ne!(ids[0], ids[1]);
+        let foreign = namespace_state(&a, "source-a");
+        assert!(
+            runtimes[1]
+                .selected_generation(&keys[1], &ids[0], &"b".repeat(64), 60_000)
+                .is_err()
+        );
+        assert_eq!(namespace_state(&a, "source-a"), foreign);
+        let mut leases = Vec::new();
+        for i in 0..64 {
+            leases.push(
+                runtimes[0]
+                    .selected_generation(&keys[0], &ids[0], &format!("{i:064x}"), 60_000)
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            runtimes[0].selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000),
+            Err(StorageError::Busy)
+        ));
+        // The same token in another namespace neither conflicts nor grants a
+        // foreign source. Capacity remains source-local as well.
+        let other = runtimes[1]
+            .selected_generation(&keys[1], &ids[1], &format!("{:064x}", 0), 60_000)
+            .unwrap();
+        assert!(
+            other
+                .read_record(&options[0], None, &inputs[1].full_path(&options[1]), 0)
+                .is_err()
+        );
+        assert!(
+            other
+                .read_record(&options[1], None, &inputs[1].full_path(&options[1]), 0)
+                .unwrap()
+                .is_some()
+        );
+        leases[0].release().unwrap();
+        assert!(
+            runtimes[0]
+                .selected_generation(&keys[0], &ids[0], &"f".repeat(64), 60_000)
+                .is_ok()
+        );
+    }
+    mod domain52 {
+        use super::*;
+        use crate::model::relation_stage::{Batch, Phase};
+        use crate::storage::native_events::NativeEventStore;
+
+        fn write(options: &crate::Options, input: &crate::Input, id: &str, parent: Option<&str>) {
+            let mut payload = serde_json::json!({"id":id,"cwd":"/sanitized"});
+            if let Some(parent) = parent {
+                payload["parent_thread_id"] = serde_json::json!(parent);
+                payload["thread_source"] = serde_json::json!("subagent");
+            }
+            fs::write(input.full_path(options), format!("{}\n{}\n",
+                serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),
+                serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"domain52 lifecycle"}]}})
+            )).unwrap();
+        }
+        fn open(config: &StoreConfig) -> EventCache {
+            EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+            )
+            .unwrap()
+        }
+        fn ready(
+            cache: &mut EventCache,
+            f: &Fixture,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> (Batch, crate::model::SemanticModelBatch) {
+            let paths = inputs
+                .iter()
+                .map(|i| i.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            let before = shared_state(f);
+            FAIL_EFFECT.with(|p| p.set(Some("semantic_lifecycle_enroll")));
+            assert!(cache.semantic_batch(64).is_err());
+            assert_eq!(
+                FAIL_EFFECT.with(|p| p.get()),
+                None,
+                "enrollment effect must be hit"
+            );
+            assert_eq!(
+                shared_state(f),
+                before,
+                "closure enrollment rolls back every family"
+            );
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|i| {
+                        batch
+                            .paths
+                            .contains(&i.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    selected.len(),
+                    batch.paths.len(),
+                    "no discovered owner may be omitted"
+                );
+                let model = cache
+                    .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
+                    .unwrap();
+                if batch.phase == Phase::Publication {
+                    return (batch, model);
+                }
+            }
+            panic!("lifecycle producer failed to reach publication")
+        }
+        fn publish(
+            cache: &mut EventCache,
+            f: &Fixture,
+            batch: &Batch,
+            model: &crate::model::SemanticModelBatch,
+        ) {
+            for point in [
+                "semantic_publish_owners",
+                "semantic_publish_retirement",
+                "semantic_publish_search",
+                "semantic_publish_generation_refs",
+                "semantic_publish_ack",
+            ] {
+                let before = shared_state(f);
+                FAIL_EFFECT.with(|p| p.set(Some(point)));
+                assert!(
+                    cache
+                        .publish_semantic_catalog(batch, model.prepared())
+                        .is_err(),
+                    "{point}"
+                );
+                assert_eq!(
+                    FAIL_EFFECT.with(|p| p.get()),
+                    None,
+                    "unconsumed fault {point}"
+                );
+                assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
+            }
+            let first = cache
+                .publish_semantic_catalog(batch, model.prepared())
+                .unwrap();
+            assert_eq!(first.0, Outcome::Written);
+            let before = shared_state(f);
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(batch, model.prepared())
+                    .unwrap(),
+                first
+            );
+            assert_eq!(shared_state(f), before, "same ACK is byte-identical");
+        }
+        fn oracle(
+            cache: &EventCache,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+            prepared: &crate::model::PreparedSources,
+        ) {
+            let mut reference = EventCache::open_scoped(&options.cache).unwrap();
+            let mut expected =
+                crate::model::prepare_sources(options, &mut reference, inputs, 1_790_000_000_000)
+                    .unwrap();
+            let binding = cache.query_runtime_binding().unwrap().unwrap();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            use sha2::{Digest, Sha256};
+            let runtime = format!(
+                "source-runtime-v1:{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&(
+                        "semon-source-runtime-v1",
+                        binding.namespace.as_str(),
+                        binding.admission,
+                        binding.stream_epoch.as_str(),
+                        runtime
+                    ))
+                    .unwrap()
+                )
+            );
+            for row in &mut expected.rows {
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(runtime);
+            }
+            assert_eq!(
+                serde_json::to_value(&prepared.rows).unwrap(),
+                serde_json::to_value(&expected.rows).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&prepared.relationships.relations).unwrap(),
+                serde_json::to_value(&expected.relationships.relations).unwrap(),
+                "every relation field"
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    prepared
+                        .transcripts
+                        .iter()
+                        .map(|p| (&p.key, &p.slots, p.repair))
+                        .collect::<Vec<_>>()
+                )
+                .unwrap(),
+                serde_json::to_value(
+                    expected
+                        .transcripts
+                        .iter()
+                        .map(|p| (&p.key, &p.slots, p.repair))
+                        .collect::<Vec<_>>()
+                )
+                .unwrap()
+            );
+            assert_eq!(prepared.pids, expected.pids);
+            assert_eq!(prepared.lineage_dependencies, expected.lineage_dependencies);
+            // Ordinary production has no configured epoch, prior Current
+            // snapshot or lifecycle authority. Those witnesses are checked
+            // independently below, not normalized into invented reference data.
+        }
+        fn rows(f: &Fixture, table: &str, key: &str) -> Vec<Vec<rusqlite::types::Value>> {
+            let db = f.db();
+            let mut q = db.prepare(&format!("SELECT * FROM {table} WHERE namespace='source-a' AND session_key=?1 ORDER BY 1,2,3")).unwrap();
+            let n = q.column_count();
+            q.query_map([key], |r| (0..n).map(|i| r.get(i)).collect())
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        #[test]
+        fn configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody() {
+            let (f, foreign_config, options, _) = model_sources();
+            let options = &options[0];
+            let inputs = [
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/parent.jsonl".into(),
+                },
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/child.jsonl".into(),
+                },
+            ];
+            write(options, &inputs[0], "parent", None);
+            write(options, &inputs[1], "child", Some("parent"));
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain52".into(),
+                    codex_locks: BTreeMap::from([("parent".into(), 77), ("child".into(), 88)]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for config in [&f.config, &foreign_config] {
+                let mut cache = open(config);
+                for (i, input) in inputs.iter().enumerate() {
+                    cache
+                        .ingest(
+                            &format!("{:064x}", 5200 + i),
+                            &input.full_path(options),
+                            "codex",
+                        )
+                        .unwrap();
+                }
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                publish(&mut cache, &f, &batch, &model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            use crate::storage::proof_lifetime::ProofReaderLease;
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+            let reader = capability
+                .reader_binding()
+                .unwrap()
+                .reader_runtime()
+                .unwrap();
+            let old_id = reader.current_generation("parent").unwrap();
+            let lease = reader
+                .selected_generation("parent", &old_id, &"6".repeat(64), 60_000)
+                .unwrap();
+            assert!(
+                lease
+                    .read_record(options, None, &inputs[0].full_path(options), 0)
+                    .unwrap()
+                    .is_some()
+            );
+            let foreign = namespace_state(&f, "source-b");
+            let retained = [
+                "session_history_catalog",
+                "session_history_projections",
+                "session_history_slots",
+                "session_slot_projections",
+                "session_slots",
+                "session_trace_headers",
+                "session_trace_edges",
+            ]
+            .map(|table| (table, rows(&f, table, "parent")));
+            let old: String = f.db().query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get(0)).unwrap();
+            write(options, &inputs[0], "successor", None);
+            write(options, &inputs[1], "child", Some("successor"));
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain52".into(),
+                    codex_locks: BTreeMap::from([("successor".into(), 99), ("child".into(), 88)]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut cache = open(&f.config);
+            for (i, input) in inputs.iter().enumerate() {
+                cache
+                    .ingest(
+                        &format!("{:064x}", 5300 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
+            }
+            let (batch, model) = ready(&mut cache, &f, options, &inputs);
+            oracle(&cache, options, &inputs, model.prepared());
+            assert_eq!(model.prepared().relationships.retired_owners.len(), 1);
+            assert_eq!(
+                serde_json::to_string(&model.prepared().relationships.retired_owners[0]).unwrap(),
+                old
+            );
+            assert!(
+                model
+                    .prepared()
+                    .relationships
+                    .relations
+                    .values()
+                    .any(|r| r.from == "successor" && r.to.as_deref() == Some("child"))
+            );
+            publish(&mut cache, &f, &batch, &model);
+            let db = f.db();
+            assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
+            assert_eq!(db.query_row("SELECT parent_key FROM session_catalog WHERE namespace='source-a' AND session_key='child'",[],|r|r.get::<_,String>(0)).unwrap(),"successor");
+            for (table, before) in retained {
+                assert_eq!(rows(&f, table, "parent"), before, "custody {table}");
+            }
+            assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND session_key='parent' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND session_key='parent' AND read_scope='retained_history'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
+            assert_eq!(db.query_row("SELECT native_id FROM catalog_native_dependencies WHERE namespace='source-a' AND source_path=?1 AND harness='runtime:pid'",[inputs[0].full_path(options).to_string_lossy()],|r|r.get::<_,String>(0)).unwrap(),"99");
+            assert_eq!(namespace_state(&f, "source-b"), foreign);
+            assert!(
+                lease
+                    .read_record(options, None, &inputs[0].full_path(options), 0)
+                    .is_err(),
+                "replaced Raw cannot serve the old identity"
+            );
+            let reopened = reader
+                .selected_generation("parent", &old_id, &"6".repeat(64), 60_000)
+                .unwrap();
+            assert!(
+                reopened
+                    .read_record(options, None, &inputs[0].full_path(options), 0)
+                    .is_err(),
+                "reopen preserves old proof and refuses changed bytes"
+            );
+            let before = shared_state(&f);
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain52".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "stale ACK authority has zero effects"
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain52_path_move_and_l1_lease_keep_original_prefix() {
+            use crate::storage::proof_lifetime::ProofReaderLease;
+            let (f, _, options, inputs) = model_sources();
+            let options = &options[0];
+            let old = &inputs[0];
+            let moved = crate::Input {
+                root: crate::InputRoot::Codex,
+                path: "sessions/moved.jsonl".into(),
+            };
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+            let binding = capability.reader_binding().unwrap();
+            let mut cache = EventCache::open_semantic(capability).unwrap();
+            cache
+                .ingest(&"1".repeat(64), &old.full_path(options), "codex")
+                .unwrap();
+            let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(old));
+            publish(&mut cache, &f, &batch, &model);
+            let runtime = binding.reader_runtime().unwrap();
+            let id = runtime.current_generation("model-0").unwrap();
+            let mut lease = runtime
+                .selected_generation("model-0", &id, &"2".repeat(64), 60_000)
+                .unwrap();
+            let prefix = lease
+                .read_record(options, None, &old.full_path(options), 0)
+                .unwrap();
+            assert!(prefix.is_some());
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            // Keep the independently verifiable old Raw carrier. If it were
+            // absent, the old lease must refuse before returning any bytes.
+            fs::copy(old.full_path(options), moved.full_path(options)).unwrap();
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "machine-0".into(),
+                    codex_rollouts: Some(std::collections::BTreeSet::from([moved.path.clone()])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            cache
+                .ingest(&"3".repeat(64), &moved.full_path(options), "codex")
+                .unwrap();
+            let cohort = [old.clone(), moved.clone()];
+            let (next, model) = ready(&mut cache, &f, options, &cohort);
+            assert_eq!(model.prepared().rows[0].sources.len(), 1);
+            assert_eq!(
+                model.prepared().rows[0].sources[0].path,
+                moved.full_path(options)
+            );
+            publish(&mut cache, &f, &next, &model);
+            assert_eq!(f.db().query_row("SELECT lifecycle FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND source_path=?1",[old.full_path(options).to_string_lossy()],|r|r.get::<_,String>(0)).unwrap(),"retained");
+            let owner = NativeOwnership::admit(&f.config).unwrap();
+            let mut db = SourceJournal::owned(owner).connection().unwrap();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            crate::storage::sqlite::proof_generations::collect(&tx, "source-a", 64).unwrap();
+            tx.commit().unwrap();
+            let before = lease.read_record(options, None, &old.full_path(options), 0);
+            match before {
+                Ok(bytes) => assert_eq!(bytes, prefix),
+                Err(error) => assert!(!error.to_string().is_empty(), "precise pre-byte refusal"),
+            }
+            let reopened = runtime
+                .selected_generation("model-0", &id, &"2".repeat(64), 60_000)
+                .unwrap();
+            match reopened.read_record(options, None, &old.full_path(options), 0) {
+                Ok(bytes) => assert_eq!(bytes, prefix),
+                Err(error) => assert!(!error.to_string().is_empty(), "precise pre-byte refusal"),
+            }
+            lease.release().unwrap();
+        }
+        #[test]
+        fn configured_semantic_domain52_foreign_epoch_and_changed_authority_zero_effects() {
+            let (f, _, options, inputs) = model_sources();
+            let options = &options[0];
+            let input = &inputs[0];
+            let mut original = open(&f.config);
+            original
+                .ingest(&"4".repeat(64), &input.full_path(options), "codex")
+                .unwrap();
+            let (batch, model) = ready(&mut original, &f, options, std::slice::from_ref(input));
+            publish(&mut original, &f, &batch, &model);
+            original.finish_semantic_stage(batch.epoch).unwrap();
+            write(options, input, "replacement", None);
+            original
+                .ingest(&"5".repeat(64), &input.full_path(options), "codex")
+                .unwrap();
+            let (old_batch, old_model) =
+                ready(&mut original, &f, options, std::slice::from_ref(input));
+            let mut successor = open(&f.config);
+            let (batch, model) = ready(&mut successor, &f, options, std::slice::from_ref(input));
+            let before = shared_state(&f);
+            assert_eq!(
+                original
+                    .publish_semantic_catalog(&old_batch, old_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "old holder cannot publish lifecycle changes"
+            );
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "machine-0".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                successor
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "same content with replaced Facts identity is stale"
+            );
+        }
+
+        #[test]
+        fn configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication()
+         {
+            fn published_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+                namespace_state(f, "source-a")
+                    .into_iter()
+                    .filter(|(table, _)| {
+                        (table.starts_with("session_") && table != "session_catalog_invalidations")
+                            || table.starts_with("storage_proof_")
+                            || table == "storage_semantic_publications"
+                    })
+                    .collect()
+            }
+
+            let (f, foreign_config, options, foreign_inputs) = model_sources();
+            // Give the foreign namespace real published state to preserve.
+            {
+                let mut foreign = open(&foreign_config);
+                let input = &foreign_inputs[1];
+                foreign
+                    .ingest(&"7".repeat(64), &input.full_path(&options[1]), "claude")
+                    .unwrap();
+                let (batch, model) =
+                    ready(&mut foreign, &f, &options[1], std::slice::from_ref(input));
+                publish(&mut foreign, &f, &batch, &model);
+                assert_eq!(
+                    foreign.finish_semantic_stage(batch.epoch).unwrap(),
+                    Outcome::Written
+                );
+            }
+            let options = &options[0];
+            let mut cache = open(&f.config);
+            let inputs = (0..65)
+                .map(|i| crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: format!("sessions/budget-{i:02}.jsonl"),
+                })
+                .collect::<Vec<_>>();
+            // First publish a complete, legally admitted 64-owner family.
+            // Do not create the 65th Raw child until this publication finishes.
+            for (i, input) in inputs[..64].iter().enumerate() {
+                let id = format!("budget-{i:02}");
+                write(
+                    options,
+                    input,
+                    &id,
+                    if i == 0 { None } else { Some("budget-00") },
+                );
+                cache
+                    .ingest(
+                        &format!("{:064x}", 5400 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
+            }
+            let (batch, model) = ready(&mut cache, &f, options, &inputs[..64]);
+            assert_eq!(model.prepared().rows.len(), 64);
+            publish(&mut cache, &f, &batch, &model);
+            assert_eq!(
+                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),64);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='budget-00' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),63);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),64);
+            let prior = published_state(&f);
+            let foreign = namespace_state(&f, "source-b");
+
+            write(options, &inputs[64], "budget-64", Some("budget-00"));
+            cache
+                .ingest(
+                    &format!("{:064x}", 5464),
+                    &inputs[64].full_path(options),
+                    "codex",
+                )
+                .unwrap();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            // Two legal seeds enroll the 64 prior Current owners plus the new
+            // child. This is the typed closure source bound, not admission.
+            let paths = [&inputs[0], &inputs[64]]
+                .iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(
+                published_state(&f),
+                prior,
+                "staging preserves prior publication"
+            );
+            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let before = shared_state(&f);
+            let error = cache.semantic_batch(64).unwrap_err();
+            assert!(
+                error.to_string().contains("budget"),
+                "explicit bounded refusal: {error}"
+            );
+            assert_eq!(error.to_string(), "semantic_affected_owner_source_budget");
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "refused closure transaction has zero effects"
+            );
+            assert_eq!(
+                published_state(&f),
+                prior,
+                "complete prior Current, History, slots and proofs survive"
+            );
+            assert_eq!(namespace_state(&f, "source-b"), foreign);
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND session_key='budget-64'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
     }
 }
