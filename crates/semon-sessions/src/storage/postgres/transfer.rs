@@ -1,6 +1,7 @@
 //! RLS-bound transfer inbox. Uses the ordinary admission/publication lock order.
 mod native;
 mod pages;
+mod rows;
 use super::{
     PgCancellation, PgPool, model_cache, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -234,6 +235,7 @@ pub(crate) fn apply(
                 transfer::TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                     tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&value.as_bytes()]).map_err(sqlstate::error)?;
                 }
+                transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
                 transfer::TransferRecord::NativeSource(_) | transfer::TransferRecord::NativePage { .. } | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx,record)?,
                 transfer::TransferRecord::NativeFile { .. }
                 | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,

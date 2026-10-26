@@ -17,6 +17,7 @@ fn metadata(tx:&Inbox<'_>,key:&str)->Result<Option<String>,StorageError> {
 }
 
 pub(super) fn capture(tx:&mut Inbox<'_>,state:&mut CaptureState)->Result<transfer::CaptureProgress,StorageError> {
+    if state.native_family>=8 { return super::rows::capture(tx,state); }
     let path=state.native_path.clone().ok_or(StorageError::ScopeChanged)?;
     if state.native_family==3 {
         let (generation,receipt,checkpoint,parser_version,usage_ready):(i64,String,i64,u32,bool)=tx.0.query_row("SELECT s.source_id,s.receipt,s.checkpoint,s.parser_version,s.usage_ready FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=?1 AND c.source_path=?2",params![tx.1,path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(failed)?;
@@ -41,7 +42,7 @@ pub(super) fn capture(tx:&mut Inbox<'_>,state:&mut CaptureState)->Result<transfe
             if state.native_key.as_ref().is_some_and(|old|key<=*old) {continue;}
             if let Some(value)=metadata(tx,&key)? {records.push(TransferRecord::NativeMetadata{path:path.clone(),key,value});}
         }
-        if records.is_empty(){state.native_family=0;state.native_key=None;}
+        if records.is_empty(){state.native_family=8;state.native_key=None;}
         else {native_pages::append(tx,state,Category::NativeHeaders,records)?;}
     }
     transfer::reported::save_capture(tx,state)?;Ok(state.progress())

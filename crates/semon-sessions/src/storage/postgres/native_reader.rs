@@ -14,9 +14,9 @@ pub(super) const LEDGER: &str =
     "file_id,dev:u,ino:u,size:u,mtime_ns:x,resume_at:u,head_sha256:x,tail_sha256:x,ctime_ns:x";
 pub(super) const FILE: &str = "file_id,path,dev:u,ino:u,size:u,mtime_ns:x,resume_at:u,head_sha256:x,tail_sha256:x,entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch,pending,tool_ids,yields,busy,links,codex_tokens,codex_tokens_by_model,rate_limits,codex_native_usage,copilot,ctime_ns:x";
 pub(super) const EVENT: &str = "extra,seq,k,o:u,b:u,t,id,n,code_mode,code_mode_open,parent,script,y,poll,reply,reply_o:u,reply_b:u,reply_t,reply_e,reply_f,reply_m,item,peer,peer_sock,peer_pid,peer_start,u";
-const SIGNAL: &str = "seq,k,o:u,t,at:u,n,v";
-const USAGE: &str = "message_id,model,input:u,cached_input:u,output:u,reasoning_output:u,total:u,model_input:u,model_output:u,model_cache_write:u,model_cache_read:u,billing_input:u,billing_output:u,billing_cache_read:u,billing_cache_write_5m:u,billing_cache_write_1h:u,billing_web_search_requests:u,billing_speed,billing_service_tier,billing_prompt_size:u,billing_timestamp,billing_split_unknown,record_ids";
-const CODEX: &str = "seq,model,input:u,output:u,cache_write:u,cache_read:u,t";
+pub(super) const SIGNAL: &str = "seq,k,o:u,t,at:u,n,v";
+pub(super) const USAGE: &str = "message_id,model,input:u,cached_input:u,output:u,reasoning_output:u,total:u,model_input:u,model_output:u,model_cache_write:u,model_cache_read:u,billing_input:u,billing_output:u,billing_cache_read:u,billing_cache_write_5m:u,billing_cache_write_1h:u,billing_web_search_requests:u,billing_speed,billing_service_tier,billing_prompt_size:u,billing_timestamp,billing_split_unknown,record_ids";
+pub(super) const CODEX: &str = "seq,model,input:u,output:u,cache_write:u,cache_read:u,t";
 
 fn bad(_: decode::DecodeError) -> StorageError {
     StorageError::ScopeChanged
@@ -81,6 +81,9 @@ fn read_rows(
         "files" => &["file_id"],
         "events" | "signals" | "codex_usage" => &["seq"],
         "usage" => &["message_id"],
+        "usage_identity" => &["message_id", "record_uuid"],
+        "usage_facts" => &["native_offset"],
+        "usage_identities" => &["scope", "identity"],
         "usage_dimensions" => &["kind", "dimension"],
         _ => return Err(StorageError::InvalidArguments),
     };
@@ -140,6 +143,7 @@ fn read_rows(
         let last = raw.last().ok_or(StorageError::ScopeChanged)?;
         let mut next: Vec<Box<dyn ToSql + Sync>> = Vec::new();
         for key in keys {
+            if one_page { break; }
             let at = names
                 .iter()
                 .position(|name| name.split(':').next() == Some(*key))
