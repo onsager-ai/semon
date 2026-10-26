@@ -366,9 +366,7 @@ impl SourceJournal {
         qualify_backfill_metadata(&tx)?;
         let old: Option<String> = tx
             .query_row(
-                crate::events::store::configured::metadata_sql(&tx,
-                    "SELECT value FROM meta WHERE key='catalog_source_revision'",
-                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_source_revision'").map_err(failed)?,
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_source_revision'",
                 [],
                 |r| r.get(0),
             )
@@ -388,9 +386,7 @@ impl SourceJournal {
         }
         let state: Option<String> = tx
             .query_row(
-                crate::events::store::configured::metadata_sql(&tx,
-                    "SELECT value FROM meta WHERE key='catalog_backfill_state'",
-                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state'").map_err(failed)?,
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state'",
                 [],
                 |r| r.get(0),
             )
@@ -693,11 +689,7 @@ impl SourceObservationStore for SourceJournal {
         }
         let generation: Option<String> = tx
             .query_row(
-                crate::events::store::configured::metadata_sql(
-                    &tx,
-                    "SELECT value FROM meta WHERE key='catalog_generation'",
-                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
-                ).map_err(failed)?,
+                "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -716,11 +708,7 @@ impl SourceObservationStore for SourceJournal {
             return Ok(SourceMutationReceipt::Conflict);
         }
         register_backfill_writer(&tx, true)?;
-        tx.execute_batch(crate::events::store::configured::metadata_sql(
-            &tx,
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';",
-            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';",
-        ).map_err(failed)?).map_err(failed)?;
+        tx.execute_batch("INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';").map_err(failed)?;
         let updated = tx
             .execute(
                 "UPDATE storage_source_journal SET backfill_state='complete' WHERE namespace=?1",
@@ -1084,8 +1072,7 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
     if fences.len() != 3 {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let composite = crate::events::store::configured::metadata_sql(db, "", "namespace")
-        .map_err(failed)?
+    let composite = "namespace"
         == "namespace";
     for name in fences {
         let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
@@ -1358,11 +1345,7 @@ pub(crate) fn finish_catalog_backfill_sql(
         return Ok(false);
     }
     if let Some(namespace) = namespace {
-        let sql = crate::events::store::configured::metadata_sql(
-            tx,
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';",
-            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';",
-        ).map_err(failed)?;
+        let sql = "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';";
         tx.execute_batch(sql).map_err(failed)?;
         let updated = tx
             .execute(

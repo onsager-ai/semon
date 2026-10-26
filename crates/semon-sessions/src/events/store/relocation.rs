@@ -103,7 +103,7 @@ fn catalog_evidence(
     connection: &Connection,
     old: &str,
 ) -> rusqlite::Result<Option<CatalogRelocation>> {
-    let value: Option<Option<String>> = connection.query_row(configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1", "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1")?,[catalog_key(old)],|row|row.get(0)).optional()?;
+    let value: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1",[catalog_key(old)],|row|row.get(0)).optional()?;
     Ok(value
         .flatten()
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -160,7 +160,7 @@ pub(super) fn advance(
         .map_err(|_| rusqlite::Error::InvalidQuery)?
         {
             connection.execute(
-                configured::metadata_sql(connection, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)")?,
+                "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
                 params![catalog_key(&old), encoded],
             )?;
         } else {
@@ -389,12 +389,7 @@ pub(super) fn reuse(
     )
     .map_err(failure)?;
     tx.execute(
-        configured::metadata_sql(
-            &tx,
-            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
-        )
-        .map_err(failure)?,
+        "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
         params![
             catalog_key(old),
             json(&CatalogRelocation {
