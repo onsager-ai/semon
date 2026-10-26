@@ -40,6 +40,7 @@ pub(crate) struct Part {
 pub(crate) trait QueryCatalogStore {
     fn selected_body(
         &self,
+        _namespace: &LogicalSourceNamespace,
         _key: &str,
         _args: &Value,
         _now: i64,

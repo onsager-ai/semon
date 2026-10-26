@@ -418,9 +418,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     struct DeniedHost;
     impl crate::SessionSourceReader for DeniedHost {
-        fn read_range(&self,_:&crate::SessionSourceRef,_:Option<&str>,_:u64,_:usize)->std::io::Result<crate::SessionSourceRange> {Err(std::io::Error::other("host denied"))}
+        fn read_range(
+            &self,
+            _: &crate::SessionSourceRef,
+            _: Option<&str>,
+            _: u64,
+            _: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            Err(std::io::Error::other("host denied"))
+        }
     }
-    assert!(query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":prepared.rows[0].key}),1790812802000,&query_store,&DeniedHost).is_err(),"Catalog metadata must not grant Raw or return blank success");
+    assert!(
+        query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":prepared.rows[0].key}),
+                1790812802000,
+                &query_store,
+                &DeniedHost
+            )
+            .is_err(),
+        "Catalog metadata must not grant Raw or return blank success"
+    );
 
     // Only the request-owned host can grant fixture bytes. The PG reader adds
     // persisted native proof verification to the ordinary scalar-field parser.

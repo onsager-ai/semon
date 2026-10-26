@@ -279,7 +279,14 @@ impl Query {
         }
         let mut selected_args = args.clone();
         selected_args["_session"] = serde_json::Value::Bool(tool == "get_session");
+        let source_key = &self.sources.machines[0].0;
+        let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
+            "local".to_owned()
+        } else {
+            source_key.clone()
+        }).map_err(|_| unavailable("Invalid selected Source namespace"))?;
         store.selected_body(
+            &namespace,
             args["id"].as_str().expect("validated selected id"),
             &selected_args,
             now,

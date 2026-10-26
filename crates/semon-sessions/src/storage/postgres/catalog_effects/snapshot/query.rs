@@ -20,12 +20,13 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
 impl QueryCatalogStore for QueryCatalog {
     fn selected_body(
         &self,
+        namespace: &LogicalSourceNamespace,
         key: &str,
         args: &serde_json::Value,
         now: i64,
         host: &dyn crate::SessionSourceReader,
     ) -> Result<serde_json::Value, QueryError> {
-        if !self.options.all {
+        if namespace != &self.namespace || !self.options.all {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
         with_admitted_snapshot(
