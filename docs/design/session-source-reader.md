@@ -147,6 +147,25 @@ Native `EventReceipt` is returned only by the ordinary native-ingest transaction
 which commits its rows, ledger and immutable byte proof atomically. Catalog's
 separate publication acknowledgement remains generation and claim fenced.
 
+An embedding host binds its existing `Options.source` with
+`HostSource::with_store(StoreConfig) -> Result<HostSource, StorageError>`.
+The supplied namespace and expected stream epoch must equal that Source's
+host-owned identity. Physical placement is not serialized into `source.json`.
+The bound Options are shared by `SessionSourceWrite::begin`,
+`SessionFactsWrite::begin`, `SessionSourceRelocation::begin`,
+`SessionCatalogObserver::{new,with_pool}`, and `SessionSources::with_machines`.
+`SessionSources::with_configured_machines` applies this same binding rather than
+creating a separate reader-only placement. A backend error is returned without
+opening a different engine. Hosts supply their existing authorized PG pool;
+construction grants no Raw custody or reader authorization.
+
+PG Catalog rendering borrows the Facts header/member authority from its leased
+snapshot, so it neither opens `.sources.sqlite` nor acquires another pool slot.
+Generic PG Query body calls without a host reader refuse. Hosts read bodies
+through `call_catalog` with their `CatalogReaderFactory`, or `call_selected`
+with the authorized Source reader. This wiring remains under qualification;
+it does not establish complete backend, migration or rollback readiness.
+
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
 
 `write_one_dirty` commits Index ledger, native rows and `chunk_proofs::write` together in one SQLite `BEGIN IMMEDIATE` transaction. The same database file also contains Catalog, recipes and proof metadata: `EventCache::path(options.cache)`. `invalidate_catalog_source` only advances the durable revision journal. Catalog publication is a later `BEGIN IMMEDIATE` transaction in `publish_catalog_with_writer`, with collection-generation, source-ledger, claim and closure checks. Catalog identity, recipes and source context advance atomically; failed claims remain pending on restart. Index can therefore lead the published Catalog. This is a reachable interleaving, not a missing Index/Catalog CAS.

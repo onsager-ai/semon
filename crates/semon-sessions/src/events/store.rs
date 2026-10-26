@@ -917,7 +917,7 @@ pub(crate) fn verify_relocation_prefix(
         let store = source_write_store(options)?;
         if let Some(ledger) = store
             .ledger(&path.to_string_lossy())
-            .map_err(io::Error::other)?
+            .map_err(|error| io::Error::other(error.to_string()))?
             && ledger.stat == *stat
             && ledger.offset == length
         {
