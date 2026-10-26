@@ -325,17 +325,41 @@ impl IndexStore for NativeIndex {
     fn remove_files(&mut self, _: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
         pending()
     }
-    fn session_description(&self, key: &str, version: u32, inputs: &str) -> Result<Option<String>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| super::model_cache::description(tx, key, version, inputs)).map_err(err)
+    fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::model_cache::description(tx, key, version, inputs),
+            )
+            .map_err(err)
     }
     fn save_session_descriptions(
         &mut self,
         descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::model_cache::save_descriptions(tx, descriptions)).map(|_| Outcome::Written).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::model_cache::save_descriptions(tx, descriptions)
+            })
+            .map(|_| Outcome::Written)
+            .map_err(err)
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, super::model_cache::generation).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                super::model_cache::generation,
+            )
+            .map_err(err)
     }
     fn session_slots(
         &self,
@@ -391,7 +415,14 @@ impl IndexStore for NativeIndex {
         &self,
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| super::model_cache::append_evidence(tx, path)).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::model_cache::append_evidence(tx, path),
+            )
+            .map_err(err)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         pending()
@@ -407,7 +438,15 @@ impl IndexStore for NativeIndex {
     fn query_runtime_binding(
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, super::model_cache::binding).map(Some).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                super::model_cache::binding,
+            )
+            .map(Some)
+            .map_err(err)
     }
 }
 

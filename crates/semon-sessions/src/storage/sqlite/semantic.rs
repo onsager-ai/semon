@@ -2140,7 +2140,9 @@ impl Stage {
             Observed {
                 epoch: actual_epoch,
                 runtime: existing.as_ref().map(|(runtime, _)| runtime.as_str()),
-                generation: existing.as_ref().and_then(|(_, generation)| generation.as_deref()),
+                generation: existing
+                    .as_ref()
+                    .and_then(|(_, generation)| generation.as_deref()),
                 invalid_withdrawal: invalid_authority,
             },
             self.epoch,

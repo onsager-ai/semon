@@ -25,8 +25,7 @@ pub(crate) fn bound_runtime(
     if runtime.len() > 65536 {
         return Err(StorageError::InvalidArguments);
     }
-    serde_json::to_string(&(namespace, admission, runtime))
-        .map_err(|_| StorageError::Unavailable)
+    serde_json::to_string(&(namespace, admission, runtime)).map_err(|_| StorageError::Unavailable)
 }
 
 pub(crate) fn begin(
@@ -69,11 +68,32 @@ fn catalog138_owner_transition_fences_successors_and_resumes_exact_runtime() {
         generation: Some("head"),
         invalid_withdrawal: false,
     };
-    assert_eq!(begin(state(), Some(3), true, Some("head"), "runtime", true), Err(StorageError::Conflict));
-    assert_eq!(begin(state(), None, false, Some("head"), "runtime", true), Ok(Begin::Resume));
-    assert_eq!(begin(state(), Some(4), true, Some("head"), "runtime", true), Ok(Begin::Continue));
-    assert_eq!(begin(state(), Some(4), true, Some("other"), "runtime", true), Err(StorageError::Conflict));
-    assert_eq!(begin(state(), Some(4), true, Some("head"), "new", false), Err(StorageError::NamespaceUpgradePending));
-    assert_eq!(begin(state(), Some(4), true, Some("head"), "new", true), Ok(Begin::Reset));
-    assert_ne!(bound_runtime("a", &1u64, "r").unwrap(), bound_runtime("a", &2u64, "r").unwrap());
+    assert_eq!(
+        begin(state(), Some(3), true, Some("head"), "runtime", true),
+        Err(StorageError::Conflict)
+    );
+    assert_eq!(
+        begin(state(), None, false, Some("head"), "runtime", true),
+        Ok(Begin::Resume)
+    );
+    assert_eq!(
+        begin(state(), Some(4), true, Some("head"), "runtime", true),
+        Ok(Begin::Continue)
+    );
+    assert_eq!(
+        begin(state(), Some(4), true, Some("other"), "runtime", true),
+        Err(StorageError::Conflict)
+    );
+    assert_eq!(
+        begin(state(), Some(4), true, Some("head"), "new", false),
+        Err(StorageError::NamespaceUpgradePending)
+    );
+    assert_eq!(
+        begin(state(), Some(4), true, Some("head"), "new", true),
+        Ok(Begin::Reset)
+    );
+    assert_ne!(
+        bound_runtime("a", &1u64, "r").unwrap(),
+        bound_runtime("a", &2u64, "r").unwrap()
+    );
 }
