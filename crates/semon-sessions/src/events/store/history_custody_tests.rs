@@ -1,6 +1,6 @@
 mod current_history_custody {
     use super::*;
-    use crate::history_projection::{admitted_catalog as catalog, qualified};
+    use crate::history_projection::{catalog, qualified};
     use crate::slot_projection::Publication;
     use crate::storage::sqlite::semantic::AdmittedSource;
 
@@ -61,7 +61,7 @@ mod current_history_custody {
                     break;
                 }
                 assert!(catalog(&db, &old.key).unwrap().is_none());
-                assert!(!qualified(&db, &old, true).unwrap());
+                assert!(!qualified(&db, &old).unwrap());
                 assert_eq!(
                     db.query_row(
                         "SELECT count(*) FROM session_history_projections",
@@ -162,7 +162,7 @@ mod current_history_custody {
             .unwrap(),
             header
         );
-        assert!(!qualified(&db, &current, true).unwrap());
+        assert!(!qualified(&db, &current).unwrap());
     }
     #[test]
     fn custody_preserves_unsupported_original_slot_addresses() {

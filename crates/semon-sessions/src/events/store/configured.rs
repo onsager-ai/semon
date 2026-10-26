@@ -1122,7 +1122,7 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        super::relocation::reuse(&mut store, path, stat, id, file, measurements, Some(self))
+        super::relocation::reuse(&mut store, path, stat, id, file, measurements, self)
     }
 
     pub(crate) fn advance_tree_repair(
