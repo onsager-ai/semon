@@ -177,10 +177,10 @@ fn publish_operation(
         .ok_or(StorageError::ScopeChanged)?;
     let generation = format!("{:x}", Sha256::digest(operation));
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
-    if let Some(previous) = expected {
-        if !history::preserve(tx, &generation, previous, publication)? {
-            return Err(StorageError::Busy);
-        }
+    if let Some(previous) = expected
+        && !history::preserve(tx, &generation, previous, publication)?
+    {
+        return Err(StorageError::Busy);
     }
     for reference in refs {
         tx.check()?;
@@ -192,8 +192,10 @@ fn publish_operation(
         return Err(StorageError::Conflict);
     }
     for (path, revision) in claims {
-        if let Some(revision) = revision {
-            if tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns, &path.as_bytes(), revision]).map_err(sqlstate::error)? != 1 { return Err(StorageError::Conflict); }
+        if let Some(revision) = revision
+            && tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns, &path.as_bytes(), revision]).map_err(sqlstate::error)? != 1
+        {
+            return Err(StorageError::Conflict);
         }
     }
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_stage(namespace,singleton,stage_epoch,runtime,generation) VALUES($1,true,$2,$3,$4) ON CONFLICT(namespace_digest,singleton) DO UPDATE SET stage_epoch=excluded.stage_epoch,runtime=excluded.runtime,generation=excluded.generation WHERE semon_pg_native_catalog_stage.namespace=excluded.namespace AND semon_pg_native_catalog_stage.stage_epoch=$5", &[&ns, &epoch, &bound.as_bytes(), &generation.as_bytes(), &old_epoch.unwrap_or(0)]).map_err(sqlstate::error)?;
