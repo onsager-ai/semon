@@ -387,9 +387,9 @@ impl StoreConfig {
         Ok(Box::new(sqlite::SqliteMetadataStore::new(self)))
     }
 
-    /// Explicitly bind a supported current single-source store. This stages
-    /// admission and fences native writes until their namespace port completes;
-    /// it is not a finished row migration or permission to admit another source.
+    /// Explicitly bind a supported current source. PostgreSQL revocation fences
+    /// source capabilities; re-admission requires a new host-chosen epoch and
+    /// advances the admission. This never copies or discards native rows.
     pub fn admit_namespace(&self) -> Result<NamespaceAdmission, StorageError> {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::namespace::admit(self),
@@ -400,9 +400,8 @@ impl StoreConfig {
         }
     }
 
-    /// Undo the read-only admission stage for its exact first-source witness.
-    /// Refuses once a qualified row migration has started; this is not general
-    /// migration rollback and never discards native rows or accepted writes.
+    /// Revoke the exact admission witness. Refuses an active qualified transfer;
+    /// this is not migration rollback and never discards native rows or writes.
     pub fn unenroll_namespace(&self, admission: &NamespaceAdmission) -> Result<(), StorageError> {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::namespace::unenroll(self, admission),
