@@ -132,7 +132,9 @@ pub(crate) fn navigation_store(
     #[cfg(feature = "postgres")]
     if let StoreBackend::Postgres { pool, control } = &binding.config().backend {
         return Box::new(postgres::navigation::Navigation {
-            config: binding.config().clone(), pool: pool.clone(), control: control.clone(),
+            config: binding.config().clone(),
+            pool: pool.clone(),
+            control: control.clone(),
         });
     }
     Box::new(sqlite::navigation::SqliteNavigation(binding))
@@ -164,7 +166,14 @@ impl NativeReaderBinding {
     ) -> Result<Option<crate::CatalogSessionIdentity>, CatalogIdentityError> {
         #[cfg(feature = "postgres")]
         if let StoreBackend::Postgres { pool, control } = &self.config().backend {
-            return postgres::navigation::bookmark_identity(self.config(), pool, control, options, source, key);
+            return postgres::navigation::bookmark_identity(
+                self.config(),
+                pool,
+                control,
+                options,
+                source,
+                key,
+            );
         }
         sqlite::catalog::history_identity(self, options, source, key)
     }

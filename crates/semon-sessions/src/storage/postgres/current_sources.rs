@@ -26,6 +26,8 @@ struct Head {
     selection_known: bool,
     admission: u64,
     stream_epoch: String,
+    runtime: String,
+    activity: String,
 }
 fn identity(path: &Path) -> Result<Identity, StorageError> {
     Identity::of(&fs::symlink_metadata(path).map_err(|_| StorageError::ScopeChanged)?)
@@ -63,15 +65,17 @@ pub(super) fn prepare(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
     control: &PgCancellation,
-    path: &Path,
+    options: &crate::Options,
 ) -> Result<(), StorageError> {
+    let path = options.facts.as_ref().ok_or(StorageError::InvalidArguments)?;
+    let activity = crate::native_evidence::recorded_activity_generation(options).map_err(|_| StorageError::Unavailable)?;
     let source = identity(path)?;
     let (prior, binding) = pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
         Ok((load(tx)?, model_cache::binding(tx)?))
     })?;
     if prior
         .as_ref()
-        .is_some_and(|head| head.path == path && head.source == source)
+        .is_some_and(|head| head.path == *path && head.source == source && head.activity == activity)
     {
         return Ok(());
     }
@@ -83,6 +87,8 @@ pub(super) fn prepare(
         return Err(StorageError::Conflict);
     }
     let stamp = serde_json::to_vec(&source).map_err(|_| StorageError::Unavailable)?;
+    let runtime = crate::native_evidence::recorded_runtime_fingerprint(options, &facts).map_err(|_| StorageError::Unavailable)?;
+    if crate::native_evidence::recorded_activity_generation(options).map_err(|_| StorageError::Unavailable)? != activity { return Err(StorageError::Conflict); }
     let members = facts
         .codex_rollouts
         .iter()
@@ -114,7 +120,7 @@ pub(super) fn prepare(
         if current.admission != binding.admission || current.stream_epoch != binding.stream_epoch { return Err(StorageError::Conflict); }
         let head = Head { path: path.to_owned(), source: source.clone(), facts_version: facts.version,
             hostname: (facts.hostname.len() <= 4096).then(|| facts.hostname.clone()),
-            selection_known: facts.codex_rollouts.is_some(), admission: binding.admission, stream_epoch: binding.stream_epoch };
+            selection_known: facts.codex_rollouts.is_some(), admission: binding.admission, stream_epoch: binding.stream_epoch, runtime, activity };
         let encoded = serde_json::to_vec(&head).map_err(|_| StorageError::Unavailable)?;
         if encoded.len() > MAX { return Err(StorageError::Busy); }
         native_keys::put_meta(tx, HEAD, &encoded)?;
@@ -236,4 +242,25 @@ pub(super) fn withdrawal_current(
         && before == withdrawal.stat
         && after == before
         && identity(&head.path)? == head.source)
+}
+
+/// One request's recorded runtime witness. Rechecks inside a leased read use
+/// only the exact canonical identity and independent runtime-file stamps.
+pub(super) struct Runtime(Option<CurrentSources>);
+impl Runtime {
+    pub(super) fn open(pool: &PgPool, namespace: &LogicalSourceNamespace, control: &PgCancellation, options: &crate::Options) -> Result<Self, StorageError> {
+        options.facts.as_ref().map(|path| CurrentSources::open(pool.clone(), namespace.clone(), control.clone(), path)).transpose().map(Self)
+    }
+    pub(super) fn generation(&self, options: &crate::Options) -> io::Result<String> {
+        match &self.0 {
+            None => crate::native_evidence::query_runtime_generation(options),
+            Some(source) => {
+                if identity(&source.head.path).map_err(io::Error::other)? != source.head.source
+                    || crate::native_evidence::recorded_activity_generation(options)? != source.head.activity {
+                    return Err(io::Error::other("Recorded runtime authority changed"));
+                }
+                Ok(source.head.runtime.clone())
+            }
+        }
+    }
 }
