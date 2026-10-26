@@ -1363,8 +1363,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         tail_sha256: source.tail_sha256,
                     };
                     let proof = captured_config
-                        .captured_source_proof_at(&options, &generation, &row.key, &reference)
-                        .unwrap();
+                        .captured_source_proof_at(&options, &generation, &row.key, &reference);
+                    if row.harness == "copilot" && !source.path.exists() {
+                        // This fixture's host independently retained the bytes
+                        // outside the input roots. It can authorize the body,
+                        // but Source cannot certify a vanished local carrier.
+                        assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
+                        continue;
+                    }
+                    let proof = proof.unwrap();
                     assert_eq!(proof.source, reference);
                     let physical_path = if source.path.exists() {
                         source.path.clone()
@@ -1835,6 +1842,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies,
         "old authorized body must survive successor publication"
+    );
+    assert_eq!(
+        captured_bodies(&pool),
+        expected_bodies,
+        "the exact captured prefix has a current physical covering witness after append"
     );
     assert_ne!(continued_generation, generation);
     assert_eq!(
