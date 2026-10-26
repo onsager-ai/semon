@@ -483,8 +483,11 @@ mod tests {
                 .clone()
         }
         fn db(&self) -> rusqlite::Connection {
-            rusqlite::Connection::open(crate::events::EventCache::path(&self.options.cache))
-                .unwrap()
+            crate::storage::sqlite::source_journal::SourceJournal(
+                self.options.source.config(&self.options.cache).unwrap(),
+            )
+            .connection()
+            .unwrap()
         }
     }
     impl Drop for Home {
@@ -567,7 +570,7 @@ mod tests {
         let expected = home.query()["turn_lifecycle"].clone();
         let db = home.db();
         db.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{}", home.path.display())],
         )
         .unwrap();

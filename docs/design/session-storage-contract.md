@@ -42,6 +42,12 @@ oracles restore the selected index from the formal backend. Unavailable,
 damaged and unsupported stores are refused without replacement or memory
 fallback. Broad fixture qualification remains subject to exact-revision CI.
 
+Ordinary host scans reconcile a ledger CAS conflict within the existing three
+attempt limit, loading the winner's committed rows before parsing again. Each
+attempt has an immutable operation identity; explicit ingest retains its caller's
+exact replay identity. A rejected append continuation requires full prefix
+verification before the existing ledger can be used again.
+
 Current SQLite remains a supported alternative backend. External Claude/Codex Raw
 formats and their existing event parsers remain supported independently of the
 removed database schema/runtime compatibility.
