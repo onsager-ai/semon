@@ -342,7 +342,7 @@ fn current_transfer225_usage_multi_page_absent_raw_exact_native_reader() {
         let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
         let store=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
         let (ledger,index)=store.load_file(path.to_str().unwrap()).unwrap().unwrap();
-        serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras,"usage":index.usage(),"signals":index.signals,"chunks":index.source_chunks.as_ref().unwrap().hashes,"launch":index.handoff_index})
+        serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras,"usage":index.usage(),"signals":index.signals.iter().map(|s|(&s.k,s.o,s.t,s.at,&s.n,s.v)).collect::<Vec<_>>(),"chunks":index.source_chunks.as_ref().unwrap().hashes,"launch":index.handoff_index})
     };
     let expected=load(&source);assert_eq!(expected["usage"].as_object().unwrap().len(),130);
     let manifest=stage(&source,&target,&[99;32]);
