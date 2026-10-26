@@ -263,14 +263,20 @@ pub(crate) fn prepare_apply(
                 || (category.rows != 0
                     && !matches!(
                         category.category,
-                        Category::ReportedFacts | Category::Metadata | Category::Ledgers | Category::Events
+                        Category::ReportedFacts
+                            | Category::Metadata
+                            | Category::Ledgers
+                            | Category::Events
                     ))
         })
     {
         return Err(StorageError::Conflict);
     }
     let id = manifest.identity();
-    if tx.get(FREEZE, MAX_MANIFEST_BYTES)?.is_some_and(|bytes| !bytes.is_empty()) {
+    if tx
+        .get(FREEZE, MAX_MANIFEST_BYTES)?
+        .is_some_and(|bytes| !bytes.is_empty())
+    {
         return Err(StorageError::Conflict);
     }
     if sequence == 0 {
@@ -278,7 +284,10 @@ pub(crate) fn prepare_apply(
             return Err(StorageError::Conflict);
         }
         let expected = encode_bounded(&id, MAX_MANIFEST_BYTES)?;
-        if tx.get(INCOMING, MAX_MANIFEST_BYTES)?.is_some_and(|bytes| !bytes.is_empty() && bytes != expected) {
+        if tx
+            .get(INCOMING, MAX_MANIFEST_BYTES)?
+            .is_some_and(|bytes| !bytes.is_empty() && bytes != expected)
+        {
             return Err(StorageError::Conflict);
         }
         let receipt = tx.get(&key(&id, "applied:0"), MAX_MANIFEST_BYTES)?;
@@ -345,7 +354,9 @@ pub(crate) fn prepare_apply(
                 crate::events::reported_rows::decode_stamp(value.as_bytes())
                     .map_err(|_| StorageError::ScopeChanged)?;
             }
-            TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => record.validate_native()?,
+            TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
+                record.validate_native()?
+            }
             _ => return Err(StorageError::Conflict),
         }
     }

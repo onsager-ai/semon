@@ -1,6 +1,5 @@
 //! RLS-bound transfer inbox. Uses the ordinary admission/publication lock order.
 mod native;
-use native::{capture_native, apply_native};
 use super::{
     PgCancellation, PgPool, model_cache, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -9,6 +8,7 @@ use crate::storage::{
     StorageError, StoreConfig,
     transfer::{self, InboxTransaction, SnapshotManifest, TransferCheckpoint, TransferPage},
 };
+use native::{apply_native, capture_native};
 
 struct Inbox<'a, 'b>(&'a mut PgTxn<'b>);
 
@@ -137,7 +137,9 @@ pub(crate) fn capture(
         {
             return Err(StorageError::ScopeChanged);
         }
-        if state.native && !state.done { return capture_native(tx, &mut state); }
+        if state.native && !state.done {
+            return capture_native(tx, &mut state);
+        }
         if state.done {
             return Ok(state.progress());
         }
@@ -231,7 +233,8 @@ pub(crate) fn apply(
                 transfer::TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                     tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&value.as_bytes()]).map_err(sqlstate::error)?;
                 }
-                transfer::TransferRecord::NativeFile { .. } | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
+                transfer::TransferRecord::NativeFile { .. }
+                | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
             }
         }
@@ -246,6 +249,56 @@ mod tests {
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
 
     #[test]
+    fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
+        use transfer::reported::tests::{apply, root, seed_native, sqlite, sqlite_core, stage};
+        let root = root();
+        let source = sqlite(&root,"native-source");
+        let reverse = sqlite(&root,"native-reverse");
+        let path = root.join("old.jsonl");
+        seed_native(&source,&path,130,'2');
+        let expected = sqlite_core(&source,&path);
+        let (pool, _) = super::super::tests::fixture(|_| {});
+        let control = PgCancellation::default();
+        let config = StoreConfig { backend: StoreBackend::Postgres { pool:pool.clone(), control:control.clone() }, namespace:source.namespace.clone(),expected_stream_epoch:source.expected_stream_epoch.clone() };
+        config.create_native_store().unwrap();
+        let manifest = stage(&source,&config,&[97;32]);
+        let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+        apply(&config,&manifest);
+        // Compare every normalized native row against authoritative SQL through
+        // the existing native decoder, rather than trusting the transfer inbox.
+        for sequence in 1..=pages {
+            let page = source.transfer_inbox().staged_page(&manifest,sequence).unwrap();
+            for record in page.records {
+                pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
+                    use super::super::native_reader::{transfer_rows,FILE,EVENT};
+                    let ns=tx.namespace.as_str().as_bytes().to_vec();
+                    match &record {
+                        transfer::TransferRecord::NativeFile{path,values}=>{
+                            let rows=transfer_rows(tx,"files",FILE,"namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND path=$2",&[&ns,&path.as_bytes()])?;
+                            assert_eq!(rows.len(),1);assert_eq!(&rows[0].0[2..],values);
+                        }
+                        transfer::TransferRecord::NativeEvent{path,values}=>{
+                            let extra=values[0].as_bool().unwrap();let seq=values[1].as_i64().unwrap();
+                            let rows=transfer_rows(tx,"events",EVENT,"namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=(SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND path=$2) AND extra=$3 AND seq=$4",&[&ns,&path.as_bytes(),&extra,&seq])?;
+                            assert_eq!(rows.len(),1);assert_eq!(&rows[0].0,values);
+                        }
+                        _=>{}
+                    }
+                    Ok(())
+                }).unwrap();
+            }
+        }
+        let new_path=root.join("new.jsonl");
+        seed_native(&config,&new_path,3,'3');
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&new_path).unwrap();
+        let manifest=stage(&config,&reverse,&[98;32]);apply(&reverse,&manifest);
+        assert_eq!(sqlite_core(&reverse,&path),expected);
+        assert_eq!(sqlite_core(&reverse,&new_path)["events"].as_array().unwrap().len(),3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn pg_current_transfer225_empty_authority_and_store_lifecycle_fence() {
         use transfer::reported::tests::{apply, read, root, sqlite, stage};
         let root = root();
@@ -253,7 +306,10 @@ mod tests {
         let (pool, _) = super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig {
-            backend: StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
+            backend: StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            },
             namespace: source.namespace.clone(),
             expected_stream_epoch: source.expected_stream_epoch.clone(),
         };
@@ -261,10 +317,29 @@ mod tests {
         let manifest = stage(&source, &config, &[92; 32]);
         apply(&config, &manifest);
         assert!(read(&config).is_empty());
-        pool.transaction(&config.namespace, TxnKind::StoreWrite, &control, |_| Ok(())).unwrap();
+        pool.transaction(&config.namespace, TxnKind::StoreWrite, &control, |_| Ok(()))
+            .unwrap();
         config.transfer_inbox().capture(&[93; 32]).unwrap();
-        assert!(matches!(pool.transaction(&config.namespace, TxnKind::StoreWrite, &control, |_| -> Result<(), StorageError> { panic!("frozen lifecycle callback must not run") }), Err(StorageError::ScopeChanged)));
-        assert!(matches!(pool.transaction(&config.namespace, TxnKind::Write, &control, |_| -> Result<(), StorageError> { panic!("frozen writer callback must not run") }), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            pool.transaction(
+                &config.namespace,
+                TxnKind::StoreWrite,
+                &control,
+                |_| -> Result<(), StorageError> {
+                    panic!("frozen lifecycle callback must not run")
+                }
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
+        assert!(matches!(
+            pool.transaction(
+                &config.namespace,
+                TxnKind::Write,
+                &control,
+                |_| -> Result<(), StorageError> { panic!("frozen writer callback must not run") }
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
         assert!(config.transfer_inbox().apply_page(&manifest, 0).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
