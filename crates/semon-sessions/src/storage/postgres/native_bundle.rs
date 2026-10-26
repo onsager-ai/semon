@@ -1,5 +1,5 @@
 //! Connected private file-family increment. This never issues an ingest ACK.
-//! Chunk-proof generations, launch calls and relocation qualification remain
+//! Catalog proof ownership, Tree retirement and relocation qualification remain
 //! prerequisites of the complete file commit; public qualification stays zero.
 use super::{native_core, native_usage::Usage, sqlstate, txn::PgTxn};
 use crate::{
@@ -285,7 +285,7 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
         missing: &[
             "Catalog proof references, reader leases and GC",
             "selected proof/root qualification and worker ownership",
-            "relocation qualification",
+            "Raw/Catalog relocation qualification and Tree retirement",
             "complete durable ingest receipt and Raw qualification",
         ],
     })
