@@ -1121,6 +1121,53 @@ pub(crate) trait EventProjectionPort {
     fn done(&self) -> rusqlite::Result<bool>;
 }
 
+pub(crate) fn project_native_event(native: crate::model::relation_stage::NativeEvent, seq: usize) -> rusqlite::Result<ProjectedEvent> {
+    let encoded = json(&native)?;
+    if encoded.len() > MAX_CONTEXT { return Err(rusqlite::Error::InvalidQuery); }
+            let kind = if native.event.k == super::super::Kind::Xsm {
+                "xsm"
+            } else if native.event.n.as_deref() == Some("SendMessage") {
+                if native
+                    .event
+                    .r
+                    .as_ref()
+                    .is_some_and(|reply| reply.f & super::super::PIN == 0)
+                {
+                    "send"
+                } else {
+                    "other"
+                }
+            } else if native.event.k == super::super::Kind::Tool {
+                "call"
+            } else {
+                "other"
+            };
+            let msg = if kind == "xsm" {
+                native.event.id.clone()
+            } else if kind == "send" {
+                native.event.r.as_ref().and_then(|r| r.m.clone())
+            } else {
+                None
+            };
+            let name = (kind == "xsm")
+                .then(|| native.event.n.as_deref().map(crate::model::plain_name))
+                .flatten();
+            Ok(ProjectedEvent {
+                key: location_key(&native.at)?,
+                native,
+                kind,
+                msg,
+                name,
+                encoded,
+                seq: i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            })
+
+}
+pub(crate) fn projects_event(event: &Event) -> bool {
+    matches!(event.k, super::super::Kind::Xsm | super::super::Kind::Agm | super::super::Kind::Tn)
+        || event.k == super::super::Kind::Tool && matches!(event.n.as_deref(), Some("SendMessage" | "Task" | "Agent"))
+}
+
 pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Result<bool> {
     let mut budget = 64usize;
     let mut bytes = 0usize;
@@ -1155,51 +1202,11 @@ pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Resu
                 },
                 event,
             };
-            let encoded = json(&native)?;
-            if encoded.len() > MAX_CONTEXT {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            if bytes + encoded.len() > MAX_CONTEXT {
+            let row = project_native_event(native, seq)?;
+            if bytes + row.encoded.len() > MAX_CONTEXT {
                 stopped = true;
                 return Ok(false);
             }
-            let kind = if native.event.k == super::super::Kind::Xsm {
-                "xsm"
-            } else if native.event.n.as_deref() == Some("SendMessage") {
-                if native
-                    .event
-                    .r
-                    .as_ref()
-                    .is_some_and(|reply| reply.f & super::super::PIN == 0)
-                {
-                    "send"
-                } else {
-                    "other"
-                }
-            } else if native.event.k == super::super::Kind::Tool {
-                "call"
-            } else {
-                "other"
-            };
-            let msg = if kind == "xsm" {
-                native.event.id.clone()
-            } else if kind == "send" {
-                native.event.r.as_ref().and_then(|r| r.m.clone())
-            } else {
-                None
-            };
-            let name = (kind == "xsm")
-                .then(|| native.event.n.as_deref().map(crate::model::plain_name))
-                .flatten();
-            let row = ProjectedEvent {
-                key: location_key(&native.at)?,
-                native,
-                kind,
-                msg,
-                name,
-                encoded,
-                seq: i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?,
-            };
             port.put(&row)?;
             if let Some(msg) = &row.msg {
                 port.enqueue("receipt", msg)?;
