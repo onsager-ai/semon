@@ -9,6 +9,7 @@ on:
       - task/479-pg-facts-20261026
       - task/479-pg-native-ingest-20261026
       - task/479-pg-catalog-20261026
+      - task/477-pg-vertical-20261026
 
 permissions:
   contents: read
@@ -106,6 +107,9 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Ordinary PG model producer without SQLite fallback
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture
       - name: Catalog native proof binding before physical effects
         shell: bash
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog135 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog135.log"
