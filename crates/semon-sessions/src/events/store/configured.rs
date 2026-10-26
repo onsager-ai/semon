@@ -457,6 +457,16 @@ fn failed(error: rusqlite::Error) -> StorageError {
             "missing_function"
         } else if message.contains("has no column named") {
             "insert_column"
+        } else if message.contains("function") {
+            "function_contract"
+        } else if message.contains("unknown function") {
+            "unregistered_function"
+        } else if message.contains("no query solution") {
+            "query_plan"
+        } else if message.contains("integer overflow") {
+            "integer_overflow"
+        } else if message.contains("foreign key mismatch") {
+            "foreign_key_contract"
         } else if message.contains("ambiguous column") {
             "ambiguous_column"
         } else if message.contains("syntax error") {
@@ -482,9 +492,6 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
-    // Generated native-tree addresses are evaluated on every physical writer,
-    // including a reopened connection updating an existing projection.
-    tree_state::register(&db).map_err(failed)?;
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(
