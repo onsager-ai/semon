@@ -67,16 +67,32 @@ impl Effects for Usage<'_, '_> {
             &path.as_bytes(),
             &i64::from(CACHE_VERSION),
         ];
-        let lengths = self.tx.driver.query(
-            &CURRENT_SQL.replace("s.source_id,s.receipt", "s.source_id,octet_length(s.receipt)::bigint"),
-            parameters,
-        ).map_err(sqlstate::error)?;
-        let Some(length) = lengths.first() else { return Ok(None); };
-        let bytes = usize::try_from(length.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
-        if bytes > 1024 * 1024 { return Err(StorageError::ScopeChanged); }
+        let lengths = self
+            .tx
+            .driver
+            .query(
+                &CURRENT_SQL.replace(
+                    "s.source_id,s.receipt",
+                    "s.source_id,octet_length(s.receipt)::bigint",
+                ),
+                parameters,
+            )
+            .map_err(sqlstate::error)?;
+        let Some(length) = lengths.first() else {
+            return Ok(None);
+        };
+        let bytes =
+            usize::try_from(length.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
+        if bytes > 1024 * 1024 {
+            return Err(StorageError::ScopeChanged);
+        }
         crate::selected_read::charge(2, bytes + 16).map_err(|_| StorageError::Busy)?;
         self.tx.check()?;
-        let rows = self.tx.driver.query(CURRENT_SQL, parameters).map_err(sqlstate::error)?;
+        let rows = self
+            .tx
+            .driver
+            .query(CURRENT_SQL, parameters)
+            .map_err(sqlstate::error)?;
         self.tx.check()?;
         rows.first()
             .map(|r| Ok((r.get(0), text(r.get(1))?)))

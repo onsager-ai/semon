@@ -92,7 +92,8 @@ fn pg_native_keys128_dependencies_real_sqlite_long_opaque_identity() {
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
             assert_eq!(read(tx, &path)?, expected);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }
 
