@@ -86,7 +86,7 @@ fn grams(fields: &[String]) -> BTreeSet<String> {
     result
 }
 
-fn fields(row: &CatalogRow) -> Vec<String> {
+pub(crate) fn fields(row: &CatalogRow) -> Vec<String> {
     [
         Some(row.name.as_str()),
         Some(row.key.as_str()),
