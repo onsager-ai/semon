@@ -792,24 +792,49 @@ fn pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite() {
     let expected_witness = oracle_witness(&data);
     assert!(expected_witness.starts_with("tree4:"));
     assert!(data.oracle.models.iter().any(|key| key.len() > 2704));
-    assert!(data.oracle.tools.iter().any(|(key, name)| key.len() > 2704 && name.len() > 2704));
-    let expected_tools = data.oracle.tools.keys().map(|id| (id.clone(), data.oracle.tool_name(id).unwrap())).collect::<Vec<_>>();
+    assert!(
+        data.oracle
+            .tools
+            .iter()
+            .any(|(key, name)| key.len() > 2704 && name.len() > 2704)
+    );
+    let expected_tools = data
+        .oracle
+        .tools
+        .keys()
+        .map(|id| (id.clone(), data.oracle.tool_name(id).unwrap()))
+        .collect::<Vec<_>>();
     let interpretation = interpretation_values(&data);
     use std::sync::atomic::{AtomicUsize, Ordering};
     static OPENS: AtomicUsize = AtomicUsize::new(0);
-    unsafe extern "C" fn deny(_: *mut rusqlite::ffi::sqlite3, _: *mut *mut std::ffi::c_char, _: *const rusqlite::ffi::sqlite3_api_routines) -> std::ffi::c_int {
+    unsafe extern "C" fn deny(
+        _: *mut rusqlite::ffi::sqlite3,
+        _: *mut *mut std::ffi::c_char,
+        _: *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::ffi::c_int {
         OPENS.fetch_add(1, Ordering::SeqCst);
         rusqlite::ffi::SQLITE_AUTH
     }
     struct NoSqlite;
     impl Drop for NoSqlite {
         fn drop(&mut self) {
-            unsafe { rusqlite::ffi::sqlite3_cancel_auto_extension(Some(deny)); }
-            assert_eq!(OPENS.load(Ordering::SeqCst), 0, "PG attempted SQLite access");
+            unsafe {
+                rusqlite::ffi::sqlite3_cancel_auto_extension(Some(deny));
+            }
+            assert_eq!(
+                OPENS.load(Ordering::SeqCst),
+                0,
+                "PG attempted SQLite access"
+            );
         }
     }
-    assert_eq!(unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(deny)) }, rusqlite::ffi::SQLITE_OK);
-    std::thread::spawn(|| assert!(rusqlite::Connection::open_in_memory().is_err())).join().unwrap();
+    assert_eq!(
+        unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(deny)) },
+        rusqlite::ffi::SQLITE_OK
+    );
+    std::thread::spawn(|| assert!(rusqlite::Connection::open_in_memory().is_err()))
+        .join()
+        .unwrap();
     assert_eq!(OPENS.swap(0, Ordering::SeqCst), 1);
     let guard = NoSqlite;
     let (pool, factory) = fixture(|_| {});
@@ -823,13 +848,19 @@ fn pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite() {
         assert_eq!(persisted_witness(tx, projection)?, expected_witness);
         Ok(projection)
     }).unwrap();
-    pool.transaction(&ns("foreign\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
-        install_without_tree(tx, &data)?;
-        let (projection, actual) = stage_fixture(tx, &data)?;
-        assert_eq!(actual, expected_witness);
-        assert_dimensions(tx, &data, projection);
-        Ok(())
-    }).unwrap();
+    pool.transaction(
+        &ns("foreign\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            install_without_tree(tx, &data)?;
+            let (projection, actual) = stage_fixture(tx, &data)?;
+            assert_eq!(actual, expected_witness);
+            assert_dimensions(tx, &data, projection);
+            Ok(())
+        },
+    )
+    .unwrap();
     // Simulate a forced physical address collision after admission. The real
     // writer must compare heap keys, and the complete transaction rolls back.
     assert!(pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
@@ -837,17 +868,35 @@ fn pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite() {
         tx.driver.execute("UPDATE semon_pg_native_tree_tools SET tool_id=$1 WHERE projection_id=$2 AND octet_length(tool_id)>2704", &[&b"wrong-heap-key".as_slice(), &projection]).map_err(sqlstate::error)?;
         Writer { tx }.values(projection, input(&data))
     }).is_err());
-    pool.transaction(&ns("tree\0🦀"), TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
-        assert_eq!(persisted_witness(tx, projection)?, expected_witness);
-        Ok(())
-    }).unwrap();
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            assert_eq!(persisted_witness(tx, projection)?, expected_witness);
+            Ok(())
+        },
+    )
+    .unwrap();
     drop(pool);
     let reopened = PgPool::open(factory, limits()).unwrap();
-    let mut summary = Snapshot::restore(reopened, ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).unwrap();
+    let mut summary = Snapshot::restore(
+        reopened,
+        ns("tree\0🦀"),
+        &data.path,
+        &data.ledger,
+        PgCancellation::default(),
+    )
+    .unwrap();
     summary.load_shared_usage().unwrap();
     assert_eq!(summary.models, data.oracle.models);
-    assert_eq!(serde_json::to_value(&summary.usage_by_id).unwrap(), serde_json::to_value(&data.oracle.usage_by_id).unwrap());
-    for (id, name) in expected_tools { assert_eq!(summary.tool_name(&id).unwrap(), name); }
+    assert_eq!(
+        serde_json::to_value(&summary.usage_by_id).unwrap(),
+        serde_json::to_value(&data.oracle.usage_by_id).unwrap()
+    );
+    for (id, name) in expected_tools {
+        assert_eq!(summary.tool_name(&id).unwrap(), name);
+    }
     drop(guard);
     std::fs::remove_dir_all(data.root).unwrap();
 }
@@ -855,14 +904,21 @@ fn pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite() {
 #[test]
 fn pg_native_keys134_tool_selected_physical_rows_and_bytes_ignore_unrelated_history() {
     let data = super::super::tree_checkpoint::tests::parser_fixture_keys("claude", false, true);
-    let (tool, name) = data.oracle.tools.iter().find(|(key, _)| key.len() > 2704).unwrap();
+    let (tool, name) = data
+        .oracle
+        .tools
+        .iter()
+        .find(|(key, _)| key.len() > 2704)
+        .unwrap();
     let (pool, _) = fixture(|_| {});
     let namespace = ns("tree\0🦀");
     let control = PgCancellation::default();
-    let projection = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        install_without_tree(tx, &data)?;
-        Ok(stage_fixture(tx, &data)?.0)
-    }).unwrap();
+    let projection = pool
+        .transaction(&namespace, TxnKind::Write, &control, |tx| {
+            install_without_tree(tx, &data)?;
+            Ok(stage_fixture(tx, &data)?.0)
+        })
+        .unwrap();
     let mut previous = 0_i64;
     for noise in [0_i64, 256, 2048] {
         let (visited, bytes) = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -883,7 +939,10 @@ fn pg_native_keys134_tool_selected_physical_rows_and_bytes_ignore_unrelated_hist
             let bytes: i64 = tx.driver.query_one(query, args).map_err(sqlstate::error)?.get(0);
             Ok((physical_rows(&plan[0]["Plan"]), bytes))
         }).unwrap();
-        assert!(visited <= 4, "noise={noise} actual selected SQL rows={visited}");
+        assert!(
+            visited <= 4,
+            "noise={noise} actual selected SQL rows={visited}"
+        );
         assert_eq!(bytes as usize, name.len());
         eprintln!("keys134_tool noise={noise} sql_rows={visited} heap_name_bytes={bytes}");
         previous = noise;
@@ -900,17 +959,31 @@ fn pg_native_keys134_tree_warm_generated_and_index_drift_refuses_before_effects(
         "DROP INDEX semon_pg_native_tree_open_tools",
     ] {
         let (pool, factory) = fixture(|_| {});
-        pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
-            install_without_tree(tx, &data)?;
-            stage_fixture(tx, &data)?;
-            Ok(())
-        }).unwrap();
+        pool.transaction(
+            &ns("tree\0🦀"),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| {
+                install_without_tree(tx, &data)?;
+                stage_fixture(tx, &data)?;
+                Ok(())
+            },
+        )
+        .unwrap();
         factory.client().batch_execute(alteration).unwrap();
         let mut entered = false;
-        assert!(pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |_| {
-            entered = true;
-            Ok(())
-        }).is_err());
+        assert!(
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |_| {
+                    entered = true;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
         assert!(!entered, "drift reached payload callback");
     }
     std::fs::remove_dir_all(data.root).unwrap();
