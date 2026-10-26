@@ -114,9 +114,6 @@ fn oracle() -> Input {
                 &crate::storage::sqlite::trace::TraceWriter::unbound(&db),
                 row,
                 trace,
-        search,
-        original,
-        original_slots,
             )
             .unwrap();
         }
@@ -161,6 +158,9 @@ fn oracle() -> Input {
         metadata,
         slots,
         trace,
+        search,
+        original,
+        original_slots,
     }
 }
 

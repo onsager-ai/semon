@@ -310,15 +310,26 @@ pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublic
         phase("start", rows.len());
         store.begin(rows)?;
         phase("members", rows.len());
-        for row in rows { store.validate(&row.key)?; }
-        for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+        for row in rows {
+            store.validate(&row.key)?;
+        }
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
             store.remove(scope)?;
         }
         phase("removal", 2);
-        let prepared = rows.iter().map(|row| prepared_fields_port(row).map_err(P::data)).collect::<Result<Vec<_>, _>>()?;
+        let prepared = rows
+            .iter()
+            .map(|row| prepared_fields_port(row).map_err(P::data))
+            .collect::<Result<Vec<_>, _>>()?;
         phase("normalization", rows.len());
         for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
-            for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+            for scope in [
+                crate::CatalogReadScope::Current,
+                crate::CatalogReadScope::RetainedHistory,
+            ] {
                 store.document(scope, row, encoded, *complete)?;
             }
         }
@@ -327,7 +338,10 @@ pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublic
         phase("posting_preparation", postings.len());
         store.postings(&postings)?;
         phase("postings", postings.len());
-        for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
             store.counts(scope)?;
         }
         phase("counts", 2);
@@ -344,34 +358,55 @@ fn publish_current_rows_effects<
     owners: usize,
     #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
 ) -> rusqlite::Result<()> {
-    let producer = crate::native_timing::enabled().then(|| transaction.path().map(std::path::Path::new).map(crate::native_timing::id)).flatten();
+    let producer = crate::native_timing::enabled()
+        .then(|| {
+            transaction
+                .path()
+                .map(std::path::Path::new)
+                .map(crate::native_timing::id)
+        })
+        .flatten();
     let mut measurements = crate::native_timing::Measurements::new(producer.is_some());
     let mut started = measurements.start();
     #[cfg(test)]
     let (mut search_before, mut postings_before, mut postings_after) = (None, None, None);
     #[cfg(test)]
-    let (mut preparation_started, mut preparation_us, mut physical_rows, mut cohort) = (None, 0, 0, 0);
+    let (mut preparation_started, mut preparation_us, mut physical_rows, mut cohort) =
+        (None, 0, 0, 0);
     publish_current_rows_port(store, rows, owners, |name, units| {
         #[cfg(test)]
         if probe.is_some() {
             match name {
-                "start" => { search_before = Some(crate::native_timing::ProbeSample::read(transaction)); cohort = units; }
+                "start" => {
+                    search_before = Some(crate::native_timing::ProbeSample::read(transaction));
+                    cohort = units;
+                }
                 "documents" => preparation_started = Some(std::time::Instant::now()),
                 "posting_preparation" => {
-                    preparation_us = preparation_started.map(|at| at.elapsed().as_micros()).unwrap_or(0);
+                    preparation_us = preparation_started
+                        .map(|at| at.elapsed().as_micros())
+                        .unwrap_or(0);
                     postings_before = Some(crate::native_timing::ProbeSample::read(transaction));
                     physical_rows = units;
                 }
-                "postings" => postings_after = Some(crate::native_timing::ProbeSample::read(transaction)),
+                "postings" => {
+                    postings_after = Some(crate::native_timing::ProbeSample::read(transaction))
+                }
                 "counts" => {
                     let counts_after = crate::native_timing::ProbeSample::read(transaction);
                     if let Some(probe) = probe.as_deref_mut() {
                         *probe = Some(crate::native_timing::SearchTraversalProbe {
                             search: search_before.as_ref().unwrap().interval(&counts_after),
-                            postings: postings_before.as_ref().unwrap().interval(postings_after.as_ref().unwrap()),
+                            postings: postings_before
+                                .as_ref()
+                                .unwrap()
+                                .interval(postings_after.as_ref().unwrap()),
                             counts: postings_after.as_ref().unwrap().interval(&counts_after),
                             preparation_us,
-                            sampling_us: search_before.as_ref().unwrap().sampling_us() + postings_before.as_ref().unwrap().sampling_us() + postings_after.as_ref().unwrap().sampling_us() + counts_after.sampling_us(),
+                            sampling_us: search_before.as_ref().unwrap().sampling_us()
+                                + postings_before.as_ref().unwrap().sampling_us()
+                                + postings_after.as_ref().unwrap().sampling_us()
+                                + counts_after.sampling_us(),
                             owners: cohort,
                             physical_rows,
                             logical_positions: physical_rows * 2,
@@ -382,12 +417,20 @@ fn publish_current_rows_effects<
             }
         }
         if name != "start" {
-            measurements.record(name, started, if name == "postings" { units * 2 } else { units });
-            if name == "postings" { measurements.count("posting_rows", units); }
+            measurements.record(
+                name,
+                started,
+                if name == "postings" { units * 2 } else { units },
+            );
+            if name == "postings" {
+                measurements.count("posting_rows", units);
+            }
         }
         started = measurements.start();
     })?;
-    if let Some(producer) = producer { measurements.emit(&producer, "search_rows"); }
+    if let Some(producer) = producer {
+        measurements.emit(&producer, "search_rows");
+    }
     Ok(())
 }
 
@@ -605,7 +648,9 @@ fn insert_row(
 fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<String>, bool)> {
     prepared_fields_port(row).map_err(|_| rusqlite::Error::InvalidQuery)
 }
-fn prepared_fields_port(row: &CatalogRow) -> Result<(String, BTreeSet<String>, bool), serde_json::Error> {
+fn prepared_fields_port(
+    row: &CatalogRow,
+) -> Result<(String, BTreeSet<String>, bool), serde_json::Error> {
     let fields = fields(row);
     let complete = fields.iter().map(String::len).sum::<usize>() <= MAX_DOCUMENT_BYTES;
     let grams = if complete {
