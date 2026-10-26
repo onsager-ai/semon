@@ -431,6 +431,7 @@ fn finish_catalog(
                 "sanitized transfer description",
             );
             cache.publish_session_descriptions();
+            cache.finish_semantic_stage(batch.epoch).unwrap();
             assert_eq!(
                 cache
                     .session_description(key, 1, "transfer-inputs")
