@@ -156,8 +156,12 @@ mod tests {
                     let row = CatalogRow {
                         overview:None,trace:None,query:None,lifecycle:Default::default(),
                         key:key.into(),name:format!("Écho {name}"),harness:"claude".into(),kind:"session".into(),presentation_kind:None,
-                        native_ids:vec![],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
-                        start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![],
+                        native_ids:vec![key.into()],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
+                        start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![crate::model::summary::CatalogSource {
+                            path: options.claude_home.join(format!("projects/workspace/{key}.jsonl")),
+                            native_id: key.into(), dev: 0, ino: 0, size: 0, modified_ns: 0,
+                            changed_ns: None, offset: 0, prefix_sha256: [0;32], tail_sha256: [0;32], native_role: None,
+                        }],
                     };
                     let metadata = serde_json::to_vec(&row).unwrap();
                     tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude',$7,$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes(),&repo.as_bytes()]).map_err(sqlstate::error)?;
