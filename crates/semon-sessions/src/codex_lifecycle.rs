@@ -456,7 +456,8 @@ mod tests {
             } else {
                 facts.offline_since = Some(NOW);
             }
-            crate::facts::write_facts(&self.facts, &facts, &crate::Options::default().source).unwrap();
+            crate::facts::write_facts(&self.facts, &facts, &crate::Options::default().source)
+                .unwrap();
         }
         fn append(&self, record: Value) {
             writeln!(

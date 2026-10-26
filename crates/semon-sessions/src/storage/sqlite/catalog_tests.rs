@@ -158,7 +158,12 @@ fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
             facts.codex_locks.remove("unrelated-running-thread");
         }
         let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         intent.complete().unwrap();
         if evidence
             .refresh_catalog(&mut work, crate::model::now_ms())
@@ -194,7 +199,12 @@ fn catalog_runtime_change_revalidates_unpublished_staged_owners() {
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
         let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         intent.complete().unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
         let mut work = crate::viewer::lock(&evidence.work);
@@ -231,7 +241,12 @@ fn catalog_runtime_change_revalidates_unpublished_staged_owners() {
             facts.proc_starts.insert(42, 7);
         }
         let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         intent.complete().unwrap();
         let dirty: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s JOIN session_catalog_invalidations i USING(source_path) WHERE i.revision IS NOT s.claim)", [], |r| r.get(0)).unwrap();
         assert!(
@@ -293,7 +308,12 @@ fn catalog_runtime_unjournaled_observations_keep_the_epoch_fence() {
         .unwrap();
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_locks.insert("unobserved-thread".into(), 42);
-    crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     evidence
         .refresh_catalog(&mut work, crate::model::now_ms())
         .unwrap();
@@ -341,7 +361,12 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
         drop(file);
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
 
         // Persist, release every Index, and reopen before unchanged repair.
         {
@@ -1282,7 +1307,12 @@ fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
         facts.codex_locks.insert("child".into(), 42);
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         fixture.publish_existing();
         let range = crate::transcript_range::read(
             &fixture.options,
@@ -2160,7 +2190,12 @@ fn exact_source_proof_work_stays_fixed_as_unrelated_native_manifest_grows() {
                 .map(|index| format!("sessions/{index:08}.jsonl"))
                 .collect(),
         );
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         SQL_STEPS.with(|value| value.set(0));
         let proof = session_source_proof(
             &fixture.options,
@@ -4071,7 +4106,12 @@ fn local_only_codex_fixture() -> (Fixture, PathBuf) {
     drop(file);
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
-    crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     let mut cache =
         EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
@@ -4611,7 +4651,12 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
             drop(file);
             let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
             facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
-            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+            crate::write_facts(
+                fixture.options.facts.as_ref().unwrap(),
+                &facts,
+                &crate::Options::default().source,
+            )
+            .unwrap();
             // Match a provisional selected owner while complete discovery
             // is still pending, with real source-qualified paged recipes.
             {
@@ -5173,7 +5218,12 @@ fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualificat
     let facts_path = fixture.options.facts.as_ref().unwrap();
     let mut initial_facts = crate::read_facts(facts_path).unwrap();
     initial_facts.proc_starts.insert(77, 777);
-    crate::write_facts(facts_path, &initial_facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        facts_path,
+        &initial_facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     fixture.publish(2);
     native_refresh(&fixture);
     let db = fixture.db();
@@ -6238,7 +6288,12 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
             freshness: "fresh".into(),
         });
         let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         write.complete().unwrap();
         fixture.publish_existing();
         let db = fixture.db();
@@ -6277,7 +6332,12 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
                 }
             }
             let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+            crate::write_facts(
+                fixture.options.facts.as_ref().unwrap(),
+                &facts,
+                &crate::Options::default().source,
+            )
+            .unwrap();
             write.complete().unwrap();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             let parsed = crate::events::PARSED.with(std::cell::Cell::get);
@@ -6313,7 +6373,12 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
         facts.mirror_observation_id = Some("heartbeat".into());
         facts.native_names[0].observed_at = 2;
         let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
-        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+        crate::write_facts(
+            fixture.options.facts.as_ref().unwrap(),
+            &facts,
+            &crate::Options::default().source,
+        )
+        .unwrap();
         write.complete().unwrap();
         let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
         fixture.publish_existing();
@@ -6734,7 +6799,12 @@ fn cold_codex_parent_context_survives_separate_unrelated_batches() {
     }
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([child, parent]));
-    crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     fixture.publish_existing();
     let db = fixture.db();
     assert_eq!(db.query_row("SELECT parent_key FROM session_catalog WHERE session_key='family-child' AND lifecycle='current'", [], |row| row.get::<_, Option<String>>(0)).unwrap().as_deref(), Some("family-parent"));
@@ -6757,7 +6827,12 @@ fn cold_codex_family_crossing_batches_preserves_every_native_parent() {
     paths.insert(fixture.codex_source("family-parent", None, 2));
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(paths);
-    crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
     let mut complete = false;
@@ -7166,7 +7241,12 @@ fn resumable_catalog_keeps_current_old_family_outside_viewer_scan_window() {
     paths.insert(parent.clone());
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(paths.clone());
-    crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     fixture.options.all = false;
     fixture.options.scan_window = true;
     fixture.options.since = Duration::from_secs(1);
