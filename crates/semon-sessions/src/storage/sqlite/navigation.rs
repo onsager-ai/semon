@@ -290,7 +290,13 @@ mod tests {
         r.read_scope = CatalogReadScope::RetainedHistory;
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Provisional);
-        let plan: String = db.query_row(&format!("EXPLAIN QUERY PLAN {CURRENT_NATIVE_SQL}"), ("codex", "native"), |row| row.get(3)).unwrap();
+        let plan: String = db
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {CURRENT_NATIVE_SQL}"),
+                ("codex", "native"),
+                |row| row.get(3),
+            )
+            .unwrap();
         assert!(plan.contains("COVERING INDEX"), "{plan}");
     }
 }
