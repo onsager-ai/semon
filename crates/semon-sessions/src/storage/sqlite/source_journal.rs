@@ -37,24 +37,10 @@ struct InvalidationStatements<'a> {
     claim: rusqlite::Statement<'a>,
 }
 
-fn refuse_bound(
-    db: &Connection,
-    namespace: Option<&str>,
-    work: &mut JournalWork,
-) -> rusqlite::Result<()> {
-    if namespace.is_none() {
-        work.namespace_probes += 1;
-        if super::namespace::is_bound(db)? {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn invalidate_prepared<'a>(
     db: &'a Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     path: &str,
     reason: &str,
     now: &mut impl FnMut() -> i64,
@@ -62,19 +48,9 @@ fn invalidate_prepared<'a>(
     work: &mut JournalWork,
 ) -> rusqlite::Result<()> {
     // Preserve the per-invalidation guard, including after a membership write.
-    refuse_bound(db, namespace, work)?;
     if statements.is_none() {
-        let (revision, claim) = if namespace.is_some() {
-            (
-                "UPDATE storage_source_journal SET revision=revision+1 WHERE namespace=?1 AND revision<9223372036854775807",
-                "INSERT INTO main.session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,(SELECT revision FROM storage_source_journal WHERE namespace=?1),?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET revision=excluded.revision,reason=excluded.reason,observed_at=excluded.observed_at",
-            )
-        } else {
-            (
-                "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-                "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3) ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,reason=excluded.reason,observed_at=excluded.observed_at",
-            )
-        };
+        let revision = "UPDATE main.storage_source_journal SET revision=revision+1 WHERE namespace=?1 AND revision<9223372036854775807";
+        let claim = "INSERT INTO main.session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,(SELECT revision FROM main.storage_source_journal WHERE namespace=?1),?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET revision=excluded.revision,reason=excluded.reason,observed_at=excluded.observed_at";
         let started = crate::native_timing::enabled().then(std::time::Instant::now);
         work.prepares += 1;
         let revision = db.prepare(revision)?;
@@ -85,30 +61,20 @@ fn invalidate_prepared<'a>(
     }
     let statements = statements.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
     work.executions += 1;
-    if let Some(namespace) = namespace {
-        let rows = statements
-            .revision
-            .execute([namespace])
-            .map_err(|error| diagnose_sql("revision-write", error))?;
-        work.revision_rows += rows;
-        if rows != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        work.executions += 1;
-        work.claim_rows += statements
-            .claim
-            .execute(params![namespace, path, reason, now()])?;
-    } else {
-        work.revision_rows += statements.revision.execute([])?;
-        work.executions += 1;
-        work.claim_rows += statements.claim.execute(params![path, reason, now()])?;
+    let rows = statements.revision.execute([namespace])
+        .map_err(|error| diagnose_sql("revision-write", error))?;
+    work.revision_rows += rows;
+    if rows != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
     }
+    work.executions += 1;
+    work.claim_rows += statements.claim.execute(params![namespace, path, reason, now()])?;
     Ok(())
 }
 
 pub(crate) fn invalidate(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
@@ -126,7 +92,7 @@ pub(crate) fn invalidate(
 
 pub(crate) fn discover(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     paths: &[String],
     complete: bool,
 ) -> rusqlite::Result<()> {
@@ -160,7 +126,7 @@ pub(crate) fn discover(
 
 fn discover_prepared(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     paths: &[String],
     complete: bool,
     mut now: impl FnMut() -> i64,
@@ -170,7 +136,6 @@ fn discover_prepared(
         counts.statements += 1;
         counts.rows += paths.len();
     });
-    refuse_bound(db, namespace, work)?;
     let mut invalidations = None;
     // Empty discovery still publishes its state, as before, but does not
     // prepare any membership or invalidation statements.
@@ -179,11 +144,7 @@ fn discover_prepared(
     } else {
         let started = crate::native_timing::enabled().then(std::time::Instant::now);
         work.prepares += 1;
-        let statement = db.prepare(if namespace.is_some() {
-            "INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(?1,?2)"
-        } else {
-            "INSERT OR IGNORE INTO catalog_backfill_sources VALUES(?1)"
-        })?;
+        let statement = db.prepare("INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(?1,?2)")?;
         work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
         Some(statement)
     };
@@ -191,13 +152,8 @@ fn discover_prepared(
         crate::native_timing::discovery_count(|counts| counts.statements += 1);
         let membership = membership.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
         work.executions += 1;
-        let inserted = if let Some(namespace) = namespace {
-            membership
-                .execute(params![namespace, path])
-                .map_err(|error| diagnose_sql("membership-write", error))?
-        } else {
-            membership.execute([path])?
-        };
+        let inserted = membership.execute(params![namespace, path])
+            .map_err(|error| diagnose_sql("membership-write", error))?;
         work.membership_rows += inserted;
         if inserted > 0 {
             crate::native_timing::discovery_count(|counts| counts.statements += 3);
@@ -217,44 +173,23 @@ fn discover_prepared(
     work.prepares += 1;
     work.executions += 1;
     let started = crate::native_timing::enabled().then(std::time::Instant::now);
-    if let Some(namespace) = namespace {
-        let mut statement =
-            db.prepare("UPDATE storage_source_journal SET backfill_state=?2 WHERE namespace=?1")?;
-        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
-        work.state_rows += statement.execute(params![namespace, state])?;
-    } else {
-        let mut statement = db
-            .prepare("INSERT INTO meta(key,value) VALUES('catalog_backfill_state',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value<>excluded.value")?;
-        work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
-        work.state_rows += statement.execute([state])?;
-    }
+    let mut statement = db.prepare("UPDATE main.storage_source_journal SET backfill_state=?2 WHERE namespace=?1 AND backfill_state IS NOT ?2")?;
+    work.prepare_us += started.map_or(0, |started| started.elapsed().as_micros());
+    work.state_rows += statement.execute(params![namespace, state])?;
     Ok(())
 }
 
 pub(crate) fn claims(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     paths: &[String],
 ) -> rusqlite::Result<crate::storage::source_observations::SourceClaims> {
-    if namespace.is_none() && super::namespace::is_bound(db)? {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let sql = if namespace.is_some() {
-        "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=?2 AND source_path=?1"
-    } else {
-        "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1"
-    };
+    let sql = "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=?2 AND source_path=?1";
     let mut statement = db.prepare(sql)?;
     paths
         .iter()
         .map(|path| {
-            let revision = if let Some(namespace) = namespace {
-                statement
-                    .query_row(params![path, namespace], |r| r.get(0))
-                    .optional()?
-            } else {
-                statement.query_row([path], |r| r.get(0)).optional()?
-            };
+            let revision = statement.query_row(params![path, namespace], |r| r.get(0)).optional()?;
             Ok((path.clone(), revision))
         })
         .collect()
@@ -576,7 +511,7 @@ impl SourceObservationStore for SourceJournal {
         if let Some(receipt) = stored_receipt(&tx, Some(expected_namespace), operation)? {
             return Ok(receipt);
         }
-        discover(&tx, Some(expected_namespace), paths, complete)
+        discover(&tx, expected_namespace, paths, complete)
             .map_err(|error| phase_failed("discover-effect", error))?;
         insert_receipt(&tx, Some(expected_namespace), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -616,13 +551,13 @@ impl SourceObservationStore for SourceJournal {
         if let Some(receipt) = stored_receipt(&tx, Some(expected_namespace), operation)? {
             return Ok(receipt);
         }
-        if claims(&tx, Some(expected_namespace), &paths).map_err(failed)? != expected {
+        if claims(&tx, expected_namespace, &paths).map_err(failed)? != expected {
             insert_terminal_receipt(&tx, Some(expected_namespace), operation, "conflict")?;
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             return Ok(SourceMutationReceipt::Conflict);
         }
         for path in paths {
-            invalidate(&tx, Some(expected_namespace), &path, "changed").map_err(failed)?;
+            invalidate(&tx, expected_namespace, &path, "changed").map_err(failed)?;
         }
         insert_receipt(&tx, Some(expected_namespace), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -635,7 +570,7 @@ impl SourceObservationStore for SourceJournal {
     ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
         validate_paths(paths)?;
         let db = self.snapshot()?;
-        claims(&db, Some(self.config.namespace.as_str()), paths).map_err(failed)
+        claims(&db, self.config.namespace.as_str(), paths).map_err(failed)
     }
 
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
@@ -1032,31 +967,22 @@ mod tests {
         SourceOperation::capture(namespace, "finish_backfill", &payload)
     }
 
-    fn batch_db(scoped: bool) -> Connection {
+    fn batch_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('catalog_backfill_state','draining');").unwrap();
-        if scoped {
-            db.execute_batch("CREATE TABLE catalog_backfill_sources(namespace TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,source_path)); CREATE TABLE session_catalog_invalidations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,revision INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(namespace,source_path)); CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL,backfill_state TEXT); INSERT INTO storage_source_journal VALUES('A',0,'draining'),('B',99,'complete'); INSERT INTO session_catalog_invalidations VALUES('B','foreign',99,'retained',11);").unwrap();
-        } else {
-            db.execute_batch("CREATE TABLE catalog_backfill_sources(source_path TEXT PRIMARY KEY); CREATE TABLE session_catalog_invalidations(source_path TEXT PRIMARY KEY,revision INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL);").unwrap();
-        }
+        db.execute_batch("CREATE TABLE catalog_backfill_sources(namespace TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,source_path)); CREATE TABLE session_catalog_invalidations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,revision INTEGER NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(namespace,source_path)); CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL,backfill_state TEXT); INSERT INTO storage_source_journal VALUES('A',0,'draining'),('B',99,'complete'); INSERT INTO session_catalog_invalidations VALUES('B','foreign',99,'retained',11);").unwrap();
         db
     }
 
-    fn batch_rows(db: &Connection, scoped: bool) -> Vec<(String, i64, String, i64)> {
-        db.prepare(if scoped {
-            "SELECT source_path,revision,reason,observed_at FROM session_catalog_invalidations WHERE namespace='A' ORDER BY source_path"
-        } else {
-            "SELECT source_path,revision,reason,observed_at FROM session_catalog_invalidations ORDER BY source_path"
-        }).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    fn batch_rows(db: &Connection) -> Vec<(String, i64, String, i64)> {
+        db.prepare("SELECT source_path,revision,reason,observed_at FROM session_catalog_invalidations WHERE namespace='A' ORDER BY source_path").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
     }
 
     #[test]
     fn discovery_batch_prepares_are_constant_and_claims_match_rowwise() {
-        for scoped in [false, true] {
-            let mut db = batch_db(scoped);
-            let mut reference = batch_db(scoped);
-            let namespace = scoped.then_some("A");
+        {
+            let mut db = batch_db();
+            let mut reference = batch_db();
+            let namespace = "A";
             let paths: Vec<String> = (0..64).map(|i| format!("source-{i:02}")).collect();
             let mut work = JournalWork::default();
             let tx = db
@@ -1066,7 +992,7 @@ mod tests {
             tx.commit().unwrap();
             assert_eq!(work.prepares, 4);
             assert_eq!(work.executions, 193);
-            assert_eq!(work.namespace_probes, if scoped { 0 } else { 65 });
+            assert_eq!(work.namespace_probes, 0);
             assert_eq!(
                 (work.membership_rows, work.revision_rows, work.claim_rows),
                 (64, 64, 64)
@@ -1093,15 +1019,15 @@ mod tests {
                 .enumerate()
                 .map(|(i, path)| (path.clone(), i as i64 + 1, "changed".to_owned(), 42))
                 .collect();
-            assert_eq!(batch_rows(&db, scoped), expected);
-            assert_eq!(batch_rows(&db, scoped), batch_rows(&reference, scoped));
+            assert_eq!(batch_rows(&db), expected);
+            assert_eq!(batch_rows(&db), batch_rows(&reference));
             assert_eq!(
                 claims(&db, namespace, &paths).unwrap(),
                 claims(&reference, namespace, &paths).unwrap()
             );
             // Duplicate discovery neither advances claims nor prepares the two
             // invalidation statements. Membership and state still run.
-            let before = batch_rows(&db, scoped);
+            let before = batch_rows(&db);
             let mut repeated = JournalWork::default();
             discover_prepared(&db, namespace, &paths, true, || 77, &mut repeated).unwrap();
             assert_eq!(repeated.prepares, 2);
@@ -1113,8 +1039,8 @@ mod tests {
                 ),
                 (0, 0, 0)
             );
-            assert_eq!(batch_rows(&db, scoped), before);
-            if scoped {
+            assert_eq!(batch_rows(&db), before);
+            {
                 let foreign: (i64, String, i64) = db.query_row("SELECT revision,reason,observed_at FROM session_catalog_invalidations WHERE namespace='B'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
                 assert_eq!(foreign, (99, "retained".into(), 11));
             }
@@ -1123,10 +1049,10 @@ mod tests {
 
     #[test]
     fn discovery_batch_empty_refusal_rollback_and_schema_aba() {
-        let mut db = batch_db(false);
+        let mut db = batch_db();
         let mut work = JournalWork::default();
         let before = db.total_changes();
-        discover_prepared(&db, None, &[], true, || 42, &mut work).unwrap();
+        discover_prepared(&db, "A", &[], true, || 42, &mut work).unwrap();
         assert_eq!(db.total_changes(), before);
         assert_eq!((work.prepares, work.executions), (1, 1));
         assert_eq!(
@@ -1146,7 +1072,7 @@ mod tests {
         assert!(
             discover_prepared(
                 &tx,
-                None,
+                "A",
                 &["first".into(), "fault".into()],
                 true,
                 || 42,
@@ -1155,56 +1081,24 @@ mod tests {
             .is_err()
         );
         tx.rollback().unwrap();
-        assert!(batch_rows(&db, false).is_empty());
+        assert!(batch_rows(&db).is_empty());
         let membership: i64 = db
-            .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| {
+            .query_row("SELECT count(*) FROM catalog_backfill_sources WHERE namespace='A'", [], |r| {
                 r.get(0)
             })
             .unwrap();
         assert_eq!(membership, 0);
-        let revision: Option<String> = db
-            .query_row(
-                "SELECT value FROM meta WHERE key='catalog_source_revision'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .unwrap();
-        assert_eq!(revision, None);
-        // A rolled-back binding DDL must not poison a subsequent unbound call.
-        db.execute_batch(
-            "BEGIN IMMEDIATE; CREATE TABLE storage_namespaces(namespace TEXT); ROLLBACK;",
-        )
-        .unwrap();
-        discover_prepared(
-            &db,
-            None,
-            &["after-aba".into()],
-            true,
-            || 42,
-            &mut JournalWork::default(),
-        )
-        .unwrap();
-        db.execute_batch("CREATE TABLE storage_namespaces(namespace TEXT)")
-            .unwrap();
-        let before = db.total_changes();
-        let mut refused = JournalWork::default();
-        assert!(matches!(
-            discover_prepared(&db, None, &["refused".into()], true, || 42, &mut refused),
-            Err(rusqlite::Error::InvalidQuery)
-        ));
-        assert_eq!(refused.prepares, 0);
-        assert_eq!(db.total_changes(), before);
-        assert!(matches!(
-            invalidate(&db, None, "refused", "changed"),
-            Err(rusqlite::Error::InvalidQuery)
-        ));
-        assert_eq!(db.total_changes(), before);
+        let revision: i64 = db.query_row("SELECT revision FROM storage_source_journal WHERE namespace='A'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revision, 0);
+        // Rolled-back DDL cannot retain prepared statements across a call.
+        db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE rolled_back_probe(value TEXT); ROLLBACK;").unwrap();
+        discover_prepared(&db, "A", &["after-aba".into()], true, || 42, &mut JournalWork::default()).unwrap();
+        assert_eq!(batch_rows(&db), [("after-aba".into(), 1, "changed".into(), 42)]);
     }
 
     #[test]
     fn discovery_batch_revision_overflow_rolls_back_membership() {
-        let mut db = batch_db(true);
+        let mut db = batch_db();
         db.execute(
             "UPDATE storage_source_journal SET revision=9223372036854775807 WHERE namespace='A'",
             [],
@@ -1216,7 +1110,7 @@ mod tests {
         assert!(matches!(
             discover_prepared(
                 &tx,
-                Some("A"),
+                "A",
                 &["overflow".into()],
                 true,
                 || 42,
@@ -1225,7 +1119,7 @@ mod tests {
             Err(rusqlite::Error::InvalidQuery)
         ));
         tx.rollback().unwrap();
-        assert!(batch_rows(&db, true).is_empty());
+        assert!(batch_rows(&db).is_empty());
         let membership: i64 = db
             .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| {
                 r.get(0)
