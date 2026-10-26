@@ -22,6 +22,8 @@ pub(crate) trait Effects {
     fn planning_finished(&mut self);
     fn file(&mut self, input: &Input<'_>, changes: &DirtyRows) -> Result<(), Self::Error>;
     fn usage(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
+    fn tree(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
+    fn auxiliary(&mut self, input: &Input<'_>, stage: Auxiliary) -> Result<(), Self::Error>;
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
     fn archive(&mut self, path: &str) -> Result<(), Self::Error>;
     fn invalidate(&mut self, path: &str, changed: bool) -> Result<(), Self::Error>;
@@ -39,10 +41,62 @@ pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(),
     effects.planning_finished();
     effects.file(&input, input.changes.unwrap_or(&full))?;
     effects.usage(&input)?;
-    effects.relationships(&input)?;
-    effects.archive(input.path)?;
+    effects.tree(&input)?;
+    for stage in AUXILIARY_ORDER {
+        effects.auxiliary(&input, stage)?;
+    }
     effects.invalidate(input.path, input.semantic_change)?;
-    effects.retire_mutation(input.path)
+    effects.retire_mutation(input.path)?;
+    effects.relationships(&input)?;
+    effects.archive(input.path)
+}
+
+/// Physical families have one order in both adapters. Their effects remain
+/// private to the caller's transaction; none publishes a complete ingest.
+#[derive(Clone, Copy)]
+pub(crate) enum Auxiliary {
+    Header,
+    Sidecar,
+    Chunks,
+    Parent,
+    Launch,
+}
+
+pub(crate) const AUXILIARY_ORDER: [Auxiliary; 5] = [
+    Auxiliary::Header,
+    Auxiliary::Sidecar,
+    Auxiliary::Chunks,
+    Auxiliary::Parent,
+    Auxiliary::Launch,
+];
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatalogRelocation {
+    pub(crate) version: u32,
+    pub(crate) new_path: String,
+    pub(crate) native_id: String,
+    pub(crate) prior: Ledger,
+    pub(crate) catalog_before: Option<Ledger>,
+    pub(crate) after: Ledger,
+}
+
+/// Advance only evidence already qualified by the relocation producer. This
+/// does not qualify a move, read Raw, or infer identity from a path/inode.
+pub(crate) fn advance_relocation(
+    encoded: Option<&str>,
+    expected: Option<&Ledger>,
+    next: &Ledger,
+    append: bool,
+) -> serde_json::Result<Option<String>> {
+    let proof = encoded.and_then(|value| serde_json::from_str::<CatalogRelocation>(value).ok());
+    let Some(mut proof) =
+        proof.filter(|proof| proof.version == 1 && append && Some(&proof.after) == expected)
+    else {
+        return Ok(None);
+    };
+    proof.after = next.clone();
+    serde_json::to_string(&proof).map(Some)
 }
 
 #[derive(Clone, Copy)]

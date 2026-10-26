@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[path = "native_schema.rs"]
 mod native;
 
-pub(super) const VERSION: i32 = 5;
+pub(super) const VERSION: i32 = 6;
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx
@@ -47,7 +47,7 @@ impl PgPool {
                     .batch_execute(
                         "
                 CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY);
-                INSERT INTO semon_pg_schema VALUES (5);
+                INSERT INTO semon_pg_schema VALUES (6);
                 CREATE TABLE semon_pg_operations(
                     namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
                     namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,

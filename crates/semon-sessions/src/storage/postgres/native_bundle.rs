@@ -1,5 +1,5 @@
 //! Connected private file-family increment. This never issues an ingest ACK.
-//! Chunk-proof generations, launch calls and relocation qualification remain
+//! Catalog proof ownership, Tree retirement and relocation qualification remain
 //! prerequisites of the complete file commit; public qualification stays zero.
 use super::{native_core, native_usage::Usage, sqlstate, txn::PgTxn};
 use crate::{
@@ -22,6 +22,7 @@ struct Writer<'a, 'tx> {
     tx: &'a mut PgTxn<'tx>,
     source: i64,
     pages: Option<super::native_pages::Prepared>,
+    pending: Option<super::native_pages::Pending>,
 }
 
 #[cfg(test)]
@@ -57,12 +58,15 @@ impl Writer<'_, '_> {
         self.tx.check()?;
         let ns = self.tx.namespace.as_str().as_bytes();
         if let Some(value) = value {
-            self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+            let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+            if changed != 1 {
+                return Err(StorageError::ScopeChanged);
+            }
         } else {
             self.tx
                 .driver
                 .execute(
-                    "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+                    "DELETE FROM semon_pg_native_meta WHERE namespace_digest=sha256($1) AND namespace=$1 AND key=$2",
                     &[&ns, &key.as_bytes()],
                 )
                 .map_err(sqlstate::error)?;
@@ -83,9 +87,32 @@ impl Effects for Writer<'_, '_> {
         native_core::qualify(self.tx, input.path, input.expected)?;
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE relocation");
-        let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND new_path=$2 LIMIT 1", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
-        if !pending.is_empty() {
-            return Err(StorageError::NamespaceUpgradePending);
+        let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1) AND namespace=$1 AND new_path=$2 LIMIT 65", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
+        if pending.len() > 64 {
+            return Err(StorageError::ScopeChanged);
+        }
+        // Qualification/reuse still belongs to the unported Raw+Catalog
+        // producer. Only advance or retire its existing evidence here, using
+        // the same algorithm as SQLite, within this borrowed transaction.
+        let mut relocations = Vec::with_capacity(pending.len());
+        for row in pending {
+            let old = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
+            let key = format!("native_catalog_relocation:{old}");
+            let value = self.tx.driver.query("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace_digest=sha256($1) AND namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
+            let encoded = value
+                .first()
+                .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
+                .map(String::from_utf8)
+                .transpose()
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let advanced = shared::advance_relocation(
+                encoded.as_deref(),
+                input.expected,
+                input.ledger,
+                input.changes.is_some(),
+            )
+            .map_err(|_| StorageError::Unavailable)?;
+            relocations.push((key, advanced));
         }
         let mut usage = Usage::new(self.tx)?;
         #[cfg(test)]
@@ -105,6 +132,9 @@ impl Effects for Writer<'_, '_> {
             input.ledger,
             input.changes.is_some(),
         )?;
+        for (key, advanced) in relocations {
+            self.metadata(&key, advanced)?;
+        }
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE begin_complete");
         self.boundary()
@@ -121,29 +151,57 @@ impl Effects for Writer<'_, '_> {
             input.changes.map(|_| changes),
         )?;
         self.boundary()?;
-        #[cfg(test)]
-        eprintln!("BUNDLE_STAGE metadata");
-        self.metadata(
-            &format!("native_codex_header:{}", input.path),
-            native_aux::codex_header(input.ledger, input.index.codex_header.as_ref())
-                .map_err(|_| StorageError::Unavailable)?,
-        )?;
-        if input.index.claude_sidecar.is_some()
-            || crate::native_sidecar::agent_path(std::path::Path::new(input.path))
-        {
-            self.metadata(
-                &format!("native_claude_sidecar:{}", input.path),
-                native_aux::claude_sidecar(input.ledger, input.index.claude_sidecar.as_ref())
+        Ok(())
+    }
+    fn auxiliary(
+        &mut self,
+        input: &Input<'_>,
+        stage: shared::Auxiliary,
+    ) -> Result<(), StorageError> {
+        use shared::Auxiliary;
+        match stage {
+            Auxiliary::Header => self.metadata(
+                &format!("native_codex_header:{}", input.path),
+                native_aux::codex_header(input.ledger, input.index.codex_header.as_ref())
                     .map_err(|_| StorageError::Unavailable)?,
-            )?;
+            ),
+            Auxiliary::Sidecar => {
+                if input.index.claude_sidecar.is_some()
+                    || crate::native_sidecar::agent_path(std::path::Path::new(input.path))
+                {
+                    self.metadata(
+                        &format!("native_claude_sidecar:{}", input.path),
+                        native_aux::claude_sidecar(
+                            input.ledger,
+                            input.index.claude_sidecar.as_ref(),
+                        )
+                        .map_err(|_| StorageError::Unavailable)?,
+                    )?;
+                }
+                Ok(())
+            }
+            Auxiliary::Chunks => {
+                let pages = self.pages.take().ok_or(StorageError::ScopeChanged)?;
+                self.pending = Some(super::native_pages::write_chunks(
+                    self.tx,
+                    self.source,
+                    input.path,
+                    input.ledger,
+                    pages,
+                )?);
+                Ok(())
+            }
+            Auxiliary::Parent => self.metadata(
+                &format!("native_parent_marker:{}", input.path),
+                native_aux::parent_marker(input.ledger, input.index.marker_index.as_ref())
+                    .map_err(|_| StorageError::Unavailable)?,
+            ),
+            Auxiliary::Launch => {
+                let pending = self.pending.take().ok_or(StorageError::ScopeChanged)?;
+                super::native_pages::write_launch(self.tx, pending)?;
+                Ok(())
+            }
         }
-        let pages = self.pages.take().ok_or(StorageError::ScopeChanged)?;
-        super::native_pages::write(self.tx, self.source, input.path, input.ledger, pages)?;
-        self.metadata(
-            &format!("native_parent_marker:{}", input.path),
-            native_aux::parent_marker(input.ledger, input.index.marker_index.as_ref())
-                .map_err(|_| StorageError::Unavailable)?,
-        )
     }
     fn usage(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
@@ -155,6 +213,9 @@ impl Effects for Writer<'_, '_> {
             input.index,
         )?;
         self.boundary()?;
+        Ok(())
+    }
+    fn tree(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE tree_publish");
         if let Some(summary) = &input.index.tree_summary
@@ -216,6 +277,7 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
             tx,
             source: 0,
             pages: Some(pages),
+            pending: None,
         },
         input,
     )?;
@@ -223,7 +285,7 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
         missing: &[
             "Catalog proof references, reader leases and GC",
             "selected proof/root qualification and worker ownership",
-            "relocation qualification",
+            "Raw/Catalog relocation qualification and Tree retirement",
             "complete durable ingest receipt and Raw qualification",
         ],
     })

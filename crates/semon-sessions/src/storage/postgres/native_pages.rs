@@ -78,13 +78,13 @@ fn put(
     effect(tx)
 }
 
-pub(super) fn write(
+pub(super) fn write_chunks(
     tx: &mut PgTxn<'_>,
     source: i64,
     path: &str,
     ledger: &Ledger,
     prepared: Prepared,
-) -> Result<ProofGenerationId, StorageError> {
+) -> Result<Pending, StorageError> {
     tx.check()?;
     let admission = u64::try_from(source).map_err(|_| StorageError::ScopeChanged)?;
     if admission == 0 {
@@ -117,27 +117,58 @@ pub(super) fn write(
         }
     }
     effect(tx)?;
-    for (kind, plan) in [
-        (0i16, Some(&prepared.chunks)),
-        (1, prepared.launch.as_ref()),
-    ] {
-        let Some(plan) = plan else {
-            continue;
-        };
-        for (at, payload) in plan.pages.iter().enumerate() {
-            put(tx, id.0.as_bytes(), kind, &format!("{at:010}"), payload)?;
+    write_plan(tx, &id, 0, &prepared.chunks)?;
+    Ok(Pending {
+        id,
+        launch: prepared.launch,
+        path: path.to_owned(),
+        namespace: tx.namespace.as_str().to_owned(),
+    })
+}
+
+pub(super) struct Pending {
+    id: ProofGenerationId,
+    launch: Option<Plan>,
+    path: String,
+    namespace: String,
+}
+
+fn write_plan(
+    tx: &mut PgTxn<'_>,
+    id: &ProofGenerationId,
+    kind: i16,
+    plan: &Plan,
+) -> Result<(), StorageError> {
+    for (at, payload) in plan.pages.iter().enumerate() {
+        put(tx, id.0.as_bytes(), kind, &format!("{at:010}"), payload)?;
+    }
+    for (level, nodes) in plan.tree.iter().enumerate() {
+        for (at, node) in nodes.iter().enumerate() {
+            put(
+                tx,
+                id.0.as_bytes(),
+                2,
+                &format!("{level:03}:{at:010}"),
+                node,
+            )?;
         }
-        for (level, nodes) in plan.tree.iter().enumerate() {
-            for (at, node) in nodes.iter().enumerate() {
-                put(
-                    tx,
-                    id.0.as_bytes(),
-                    2,
-                    &format!("{level:03}:{at:010}"),
-                    node,
-                )?;
-            }
-        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_launch(
+    tx: &mut PgTxn<'_>,
+    pending: Pending,
+) -> Result<ProofGenerationId, StorageError> {
+    tx.check()?;
+    if pending.namespace != tx.namespace.as_str() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let Pending {
+        id, launch, path, ..
+    } = pending;
+    if let Some(plan) = launch {
+        write_plan(tx, &id, 1, &plan)?;
     }
     let ns = tx.namespace.as_str().as_bytes();
     let path_digest: Vec<u8> = Sha256::digest(path.as_bytes()).to_vec();
@@ -147,6 +178,17 @@ pub(super) fn write(
     }
     effect(tx)?;
     Ok(id)
+}
+
+pub(super) fn write(
+    tx: &mut PgTxn<'_>,
+    source: i64,
+    path: &str,
+    ledger: &Ledger,
+    prepared: Prepared,
+) -> Result<ProofGenerationId, StorageError> {
+    let pending = write_chunks(tx, source, path, ledger, prepared)?;
+    write_launch(tx, pending)
 }
 
 /// Namespace-bound exact immutable generation lookup. This is metadata only;
