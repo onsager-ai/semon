@@ -10,6 +10,7 @@ on:
       - task/479-pg-native-ingest-20261026
       - task/479-pg-catalog-20261026
       - task/477-pg-vertical-20261026
+      - task/477-current-transfer-20261027
 
 permissions:
   contents: read
@@ -107,6 +108,9 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Current transfer inbox durable page and exact OpID qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls current_transfer225 -- --nocapture
       - name: Ordinary PG model producer without SQLite fallback
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash

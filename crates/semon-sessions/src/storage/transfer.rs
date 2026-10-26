@@ -279,3 +279,128 @@ pub(crate) fn key(snapshot: &[u8; 32], suffix: &str) -> String {
     let id = snapshot.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     format!("native_transfer_v1:{id}:{suffix}")
 }
+
+pub(crate) trait InboxTransaction {
+    fn get(&mut self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, StorageError>;
+    fn put(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
+}
+
+pub(crate) fn begin_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    let manifest_key = key(&manifest.digest, "manifest");
+    let checkpoint_key = key(&manifest.digest, "checkpoint");
+    let bytes = encode_bounded(manifest, MAX_MANIFEST_BYTES)?;
+    if let Some(stored) = tx.get(&manifest_key, MAX_MANIFEST_BYTES)? {
+        if stored != bytes { return Err(StorageError::Conflict); }
+        let checkpoint = tx.get(&checkpoint_key, MAX_MANIFEST_BYTES)?.ok_or(StorageError::ScopeChanged)?;
+        return decode_checkpoint(&checkpoint, manifest);
+    }
+    let checkpoint = TransferCheckpoint::initial(manifest);
+    tx.put(&manifest_key, &bytes)?;
+    tx.put(&checkpoint_key, &encode_bounded(&checkpoint, MAX_MANIFEST_BYTES)?)?;
+    Ok(checkpoint)
+}
+
+fn decode_checkpoint(bytes: &[u8], manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    let value: TransferCheckpoint = serde_json::from_slice(bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if value.snapshot != manifest.digest || value.rows.len() != Category::ALL.len()
+        || value.rows.iter().zip(&manifest.categories).any(|(rows, category)| *rows > category.rows)
+    { return Err(StorageError::ScopeChanged); }
+    Ok(value)
+}
+
+pub(crate) fn stage_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManifest, page: &TransferPage, bytes: &[u8]) -> Result<TransferCheckpoint, StorageError> {
+    let checkpoint = begin_tx(tx, manifest)?;
+    let operation_key = key(&manifest.digest, &key(&page.operation, "operation"));
+    let page_key = key(&manifest.digest, &format!("page:{}", page.sequence));
+    if let Some(receipt) = tx.get(&operation_key, MAX_MANIFEST_BYTES)? {
+        let committed = decode_checkpoint(&receipt, manifest)?;
+        if committed.sequence != page.sequence || committed.digest != page.digest
+            || tx.get(&page_key, MAX_PAGE_BYTES)?.as_deref() != Some(bytes)
+        { return Err(StorageError::Conflict); }
+        return Ok(committed);
+    }
+    let next = checkpoint.advance(manifest, page)?;
+    if tx.get(&page_key, MAX_PAGE_BYTES)?.is_some() { return Err(StorageError::Conflict); }
+    let encoded = encode_bounded(&next, MAX_MANIFEST_BYTES)?;
+    tx.put(&page_key, bytes)?;
+    tx.put(&operation_key, &encoded)?;
+    tx.put(&key(&manifest.digest, "checkpoint"), &encoded)?;
+    Ok(next)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn manifest() -> SnapshotManifest {
+        let mut manifest = SnapshotManifest {
+            version: FORMAT_VERSION, namespace: "transfer225".into(), stream_epoch: "a".repeat(64),
+            binding_epoch: 1, revision: 7,
+            categories: Category::ALL.iter().map(|category| CategoryManifest {
+                category: *category, rows: if *category == Category::Metadata { 2 } else { 0 }, digest: [0; 32],
+            }).collect(), digest: [0; 32],
+        };
+        manifest.seal().unwrap();
+        manifest
+    }
+
+    pub(crate) fn page(manifest: &SnapshotManifest, sequence: u64, previous: [u8; 32]) -> TransferPage {
+        let mut page = TransferPage { snapshot: manifest.digest, sequence, previous,
+            operation: [sequence as u8; 32], category: Category::Metadata,
+            records: vec![TransferRecord::Metadata { key: format!("native_header:{sequence}"), value: "retained-proof".into() }], digest: [0; 32] };
+        page.seal().unwrap();
+        page
+    }
+
+    pub(crate) fn exercise(config: &StoreConfig) {
+        let manifest = manifest();
+        let inbox = config.transfer_inbox();
+        let initial = inbox.begin(&manifest).unwrap();
+        assert_eq!(initial.sequence, 0);
+        let first = page(&manifest, 1, [0; 32]);
+        let after_first = inbox.stage_page(&manifest, &first).unwrap();
+        assert_eq!(after_first.sequence, 1);
+        assert_eq!(inbox.stage_page(&manifest, &first).unwrap(), after_first);
+        // A restarted handle resumes the durable cursor, and the original page
+        // receipt remains exact even after a later page has been committed.
+        let restarted = config.transfer_inbox();
+        assert_eq!(restarted.checkpoint(&manifest).unwrap(), after_first);
+        let second = page(&manifest, 2, first.digest);
+        let after_second = restarted.stage_page(&manifest, &second).unwrap();
+        assert_eq!(after_second.sequence, 2);
+        assert_eq!(restarted.stage_page(&manifest, &first).unwrap(), after_first);
+        let mut altered = first.clone();
+        altered.records = vec![TransferRecord::Metadata { key: "native_header:changed".into(), value: "changed".into() }];
+        altered.seal().unwrap();
+        assert!(matches!(restarted.stage_page(&manifest, &altered), Err(StorageError::Conflict)));
+        let third = page(&manifest, 3, second.digest);
+        assert!(matches!(restarted.stage_page(&manifest, &third), Err(StorageError::Conflict)));
+        let mut corrupt = manifest.clone();
+        corrupt.revision += 1;
+        assert!(restarted.begin(&corrupt).is_err());
+        assert_eq!(restarted.checkpoint(&manifest).unwrap(), after_second);
+        let mut foreign = manifest.clone();
+        foreign.namespace = "foreign".into();
+        foreign.seal().unwrap();
+        assert!(matches!(restarted.begin(&foreign), Err(StorageError::NamespaceMismatch)));
+        let mut old = manifest.clone();
+        old.version = 0;
+        assert!(old.seal().is_err());
+        let mut oversized = first.clone();
+        oversized.records = vec![TransferRecord::Metadata { key: "native_header:large".into(), value: "x".repeat(MAX_PAGE_BYTES) }];
+        assert!(oversized.seal().is_err());
+        assert_eq!(restarted.checkpoint(&manifest).unwrap(), after_second);
+    }
+
+    #[test]
+    fn current_transfer225_sqlite_inbox_restart_exact_replay_and_bounds() {
+        let root = std::env::temp_dir().join(format!("semon-transfer225-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = StoreConfig { backend: StoreBackend::Sqlite { database: root.join("current.sqlite3") },
+            namespace: super::super::LogicalSourceNamespace::new("transfer225").unwrap(), expected_stream_epoch: Some("a".repeat(64)) };
+        config.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        exercise(&config);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
