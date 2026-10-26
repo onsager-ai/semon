@@ -43,6 +43,8 @@ struct Input {
     search: Vec<Vec<u8>>,
     original: Vec<Vec<u8>>,
     original_slots: Vec<Vec<u8>>,
+    composite: Vec<Vec<u8>>,
+    composite_slots: Vec<Vec<u8>>,
 }
 impl Input {
     fn publication(&self) -> crate::slot_projection::Publication<'_> {
@@ -101,7 +103,8 @@ fn oracle() -> Input {
     assert!(!prepared.rows.is_empty());
     assert!(!prepared.transcripts.is_empty());
     drop(cache);
-    let mut connection = rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+    let mut connection =
+        rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
     let db = connection.transaction().unwrap();
     let writer = CurrentWriter::unbound(&db);
     for row in &prepared.rows {
@@ -124,7 +127,8 @@ fn oracle() -> Input {
         &prepared.transcripts,
     )
     .unwrap();
-    crate::catalog_search::publish_current_rows(&db, &prepared.rows.iter().collect::<Vec<_>>()).unwrap();
+    crate::catalog_search::publish_current_rows(&db, &prepared.rows.iter().collect::<Vec<_>>())
+        .unwrap();
     let read = |sql: &str| {
         db.prepare(sql)
             .unwrap()
@@ -135,7 +139,9 @@ fn oracle() -> Input {
     };
     let metadata = read("SELECT metadata FROM session_catalog ORDER BY session_key");
     let slots = read("SELECT metadata FROM session_slots ORDER BY session_key,slot");
-    let search = read("SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents ORDER BY read_scope,session_key");
+    let search = read(
+        "SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents ORDER BY read_scope,session_key",
+    );
     let trace = [
         "SELECT metadata FROM session_trace_headers ORDER BY session_key",
         "SELECT metadata FROM session_trace_turns ORDER BY session_key,turn_id",
@@ -144,10 +150,21 @@ fn oracle() -> Input {
     .iter()
     .map(|sql| read(sql))
     .collect();
+    db.execute_batch("SAVEPOINT composite_oracle").unwrap();
+    let mut missing = prepared.rows.clone();
+    for row in &mut missing { row.sources.clear(); }
+    let missing_recipes = missing.iter().map(|row| crate::slot_projection::Projection { key: row.key.clone(), slots: vec![], repair: false }).collect::<Vec<_>>();
     let history = crate::storage::sqlite::history::OriginalHistory::unbound(&db);
-    for row in &prepared.rows { assert!(catalog::preserve_original(&history, row).unwrap()); }
+    catalog::publish_history_rows(&history, &missing, Some(&missing_recipes)).unwrap();
+    let composite = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
+    let composite_slots = read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
+    db.execute_batch("ROLLBACK TO composite_oracle; RELEASE composite_oracle").unwrap();
+    for row in &prepared.rows {
+        assert!(catalog::preserve_original(&history, row).unwrap());
+    }
     let original = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
-    let original_slots = read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
+    let original_slots =
+        read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
     assert!(!slots.is_empty());
     drop(db);
     drop(connection);
@@ -161,6 +178,8 @@ fn oracle() -> Input {
         search,
         original,
         original_slots,
+        composite,
+        composite_slots,
     }
 }
 
@@ -171,32 +190,108 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
 }
 
 #[test]
+fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
+    let data = oracle();
+    let (pool, _) = fixture(|_| {});
+    let mut missing = data.rows.clone();
+    for row in &mut missing { row.sources.clear(); }
+    let recipes = missing.iter().map(|row| crate::slot_projection::Projection { key: row.key.clone(), slots: vec![], repair: false }).collect::<Vec<_>>();
+    for name in ["history127-a", "history127-b"] {
+        let namespace = ns(name);
+        pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
+        pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
+            assert!(history::preserve(tx, L2, L1, &crate::slot_projection::Publication { rows: &missing, transcripts: Some(&recipes) })?);
+            Ok(())
+        }).unwrap();
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+            let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
+            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.composite);
+            let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
+            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.composite_slots);
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
 fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() {
     let data = oracle();
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog127-original");
-    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
+    pool.transaction(
+        &namespace,
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| stage(tx, L1, &data.publication()),
+    )
+    .unwrap();
     let preserve = |tx: &mut PgTxn<'_>| {
-        let store = history::History { effects: Effects { tx: RefCell::new(tx), generation: L2 }, previous: L1 };
-        for row in &data.rows { assert!(catalog::preserve_original(&store, row)?); }
+        let store = history::History {
+            effects: Effects {
+                tx: RefCell::new(tx),
+                generation: L2,
+            },
+            previous: L1,
+        };
+        for row in &data.rows {
+            assert!(catalog::preserve_original(&store, row)?);
+        }
         Ok(())
     };
-    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    let before = pool
+        .transaction(
+            &namespace,
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            snapshot,
+        )
+        .unwrap();
     BOUNDARIES.with(|count| count.set(0));
-    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
-        preserve(tx)?;
-        Err::<(), _>(StorageError::Unavailable)
-    }).unwrap_err();
+    pool.transaction(
+        &namespace,
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            preserve(tx)?;
+            Err::<(), _>(StorageError::Unavailable)
+        },
+    )
+    .unwrap_err();
     let boundaries = BOUNDARIES.with(|count| count.get());
     assert!(boundaries > 0);
     for point in 1..=boundaries {
         FAIL_AFTER.with(|fail| fail.set(Some(point)));
-        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), preserve).is_err());
+        assert!(
+            pool.transaction(
+                &namespace,
+                TxnKind::Write,
+                &PgCancellation::default(),
+                preserve
+            )
+            .is_err()
+        );
         FAIL_AFTER.with(|fail| fail.set(None));
-        assert_eq!(pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap(), before);
+        assert_eq!(
+            pool.transaction(
+                &namespace,
+                TxnKind::ReadSnapshot,
+                &PgCancellation::default(),
+                snapshot
+            )
+            .unwrap(),
+            before
+        );
     }
-    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), preserve).unwrap();
-    let reopened = crate::storage::postgres::PgPool::open(factory, crate::storage::postgres::tests::limits()).unwrap();
+    pool.transaction(
+        &namespace,
+        TxnKind::Write,
+        &PgCancellation::default(),
+        preserve,
+    )
+    .unwrap();
+    let reopened =
+        crate::storage::postgres::PgPool::open(factory, crate::storage::postgres::tests::limits())
+            .unwrap();
     reopened.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
         assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.original);
@@ -211,16 +306,62 @@ fn pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects() {
     let data = oracle();
     let (pool, _) = fixture(|_| {});
     let namespace = ns("catalog127-history-refuse");
-    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
-    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    pool.transaction(
+        &namespace,
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| stage(tx, L1, &data.publication()),
+    )
+    .unwrap();
+    let before = pool
+        .transaction(
+            &namespace,
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            snapshot,
+        )
+        .unwrap();
     for mode in 0..2 {
-        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
-            let store = history::History { effects: Effects { tx: RefCell::new(tx), generation: L2 }, previous: L1 };
-            use catalog::{CompositeHistoryStore, OriginalHistoryStore};
-            if mode == 0 { store.reset_transfer(&data.rows[0].key) }
-            else { store.composed(&data.rows[0].key, L1, L1, "{}", &["x".repeat(MAX + 1)], false) }
-        }).is_err());
-        assert_eq!(pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap(), before);
+        assert!(
+            pool.transaction(
+                &namespace,
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| {
+                    let store = history::History {
+                        effects: Effects {
+                            tx: RefCell::new(tx),
+                            generation: L2,
+                        },
+                        previous: L1,
+                    };
+                    use catalog::{CompositeHistoryStore, OriginalHistoryStore};
+                    if mode == 0 {
+                        store.reset_transfer(&data.rows[0].key)
+                    } else {
+                        store.composed(
+                            &data.rows[0].key,
+                            L1,
+                            L1,
+                            "{}",
+                            &["x".repeat(MAX + 1)],
+                            false,
+                        )
+                    }
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            pool.transaction(
+                &namespace,
+                TxnKind::ReadSnapshot,
+                &PgCancellation::default(),
+                snapshot
+            )
+            .unwrap(),
+            before
+        );
     }
 }
 
@@ -298,7 +439,10 @@ fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() 
             TxnKind::ReadSnapshot,
             &PgCancellation::default(),
             |tx| {
-                for table in TABLES.iter().filter(|table| !table.starts_with("catalog_history_")) {
+                for table in TABLES
+                    .iter()
+                    .filter(|table| !table.starts_with("catalog_history_"))
+                {
                     let count: i64 = tx
                         .driver
                         .query_one(
