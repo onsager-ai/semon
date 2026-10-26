@@ -72,9 +72,14 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         );
     }
     drop(sqlite);
+    let config = options.source.config(&options.cache).unwrap();
+    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap(),
+    );
     let mut db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
     let tx = db.transaction().unwrap();
-    let writer = crate::storage::sqlite::publication::CurrentWriter::unbound(&tx);
+    let writer = crate::storage::sqlite::publication::CurrentWriter::admitted(&tx, &admission)
+        .unwrap();
     use crate::storage::catalog::CurrentPublicationStore;
     for row in &prepared_rows {
         writer
