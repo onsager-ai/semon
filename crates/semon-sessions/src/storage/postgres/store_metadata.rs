@@ -348,10 +348,13 @@ mod tests {
             "ALTER TABLE semon_pg_store_state ADD COLUMN extra boolean",
             "DROP POLICY write_store ON semon_pg_store_state",
         ] {
-            let (pool, factory) = fixture(|b| b.max_connections = 1);
+            let (pool, _factory) = fixture(|b| b.max_connections = 1);
             let control = PgCancellation::default();
             assert!(PgStoreMetadata::open(pool.clone(), &control).is_ok());
-            factory.client().batch_execute(corrupt).unwrap();
+            pool.controlled_schema_change(&control, |tx| {
+                tx.driver.batch_execute(corrupt).map_err(sqlstate::error)
+            })
+            .unwrap();
             let mut entered = false;
             assert!(
                 pool.transaction(&ns("source"), TxnKind::Write, &control, |_| {

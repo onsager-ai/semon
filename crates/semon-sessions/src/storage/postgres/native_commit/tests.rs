@@ -271,12 +271,14 @@ fn pg_native_commit_relationships_precancel_and_warm_drift_before_effects() {
         relationships(tx, path, &index, true)
     })
     .unwrap();
-    factory
-        .client()
-        .batch_execute(
-            "CREATE INDEX pg104_dependency_drift ON semon_pg_native_native_dependencies(harness)",
-        )
-        .unwrap();
+    pool.controlled_schema_change(&control, |tx| {
+        tx.driver
+            .batch_execute(
+                "CREATE INDEX pg104_dependency_drift ON semon_pg_native_native_dependencies(harness)",
+            )
+            .map_err(sqlstate::error)
+    })
+    .unwrap();
     assert_eq!(
         pool.apply_operation(&namespace, &identity(), &control, |_| {
             panic!("warm schema drift cannot enter native effects")

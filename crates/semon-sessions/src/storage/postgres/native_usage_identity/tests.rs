@@ -195,7 +195,10 @@ fn pg_native_copied_identity_trigger_and_function_drift_refuses_before_effects()
             |_| Ok(()),
         )
         .unwrap();
-        factory.client().batch_execute(ddl).unwrap();
+        pool.controlled_schema_change(&PgCancellation::default(), |tx| {
+            tx.driver.batch_execute(ddl).map_err(sqlstate::error)
+        })
+        .unwrap();
         assert_eq!(
             pool.apply_operation(
                 &ns("warm"),

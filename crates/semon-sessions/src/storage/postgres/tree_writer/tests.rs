@@ -456,7 +456,7 @@ fn pg_tree_writer_real_append_reuses_generation_matches_sqlite_closed_history() 
 #[test]
 fn pg_tree_writer_warm_schema_drift_refuses_before_family_callback() {
     let data = parser_fixture("claude");
-    let (pool, factory) = fixture(|b| b.max_connections = 1);
+    let (pool, _factory) = fixture(|b| b.max_connections = 1);
     pool.transaction(
         &ns("tree\0🦀"),
         TxnKind::Write,
@@ -464,10 +464,12 @@ fn pg_tree_writer_warm_schema_drift_refuses_before_family_callback() {
         |tx| install_without_tree(tx, &data),
     )
     .unwrap();
-    factory
-        .client()
-        .batch_execute("ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY")
-        .unwrap();
+    pool.controlled_schema_change(&PgCancellation::default(), |tx| {
+        tx.driver
+            .batch_execute("ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY")
+            .map_err(sqlstate::error)
+    })
+    .unwrap();
     let mut entered = false;
     assert!(
         pool.transaction(
@@ -958,7 +960,7 @@ fn pg_native_keys134_tree_warm_generated_and_index_drift_refuses_before_effects(
         "ALTER TABLE semon_pg_native_tree_tools ALTER COLUMN tool_id_digest DROP EXPRESSION",
         "DROP INDEX semon_pg_native_tree_open_tools",
     ] {
-        let (pool, factory) = fixture(|_| {});
+        let (pool, _factory) = fixture(|_| {});
         pool.transaction(
             &ns("tree\0🦀"),
             TxnKind::Write,
@@ -970,7 +972,10 @@ fn pg_native_keys134_tree_warm_generated_and_index_drift_refuses_before_effects(
             },
         )
         .unwrap();
-        factory.client().batch_execute(alteration).unwrap();
+        pool.controlled_schema_change(&PgCancellation::default(), |tx| {
+            tx.driver.batch_execute(alteration).map_err(sqlstate::error)
+        })
+        .unwrap();
         let mut entered = false;
         assert!(
             pool.transaction(
