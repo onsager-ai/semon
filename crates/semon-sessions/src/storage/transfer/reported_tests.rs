@@ -522,7 +522,7 @@ fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledge
 }
 
 #[test]
-fn current_transfer246_occupied_description_refused_before_native_pages_commit() {
+fn current_transfer225_occupied_description_refused_before_native_pages_commit() {
     let root = root();
     let source = sqlite(&root, "occupied-source");
     let target = sqlite(&root, "occupied-target");
