@@ -475,9 +475,13 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 // ordinary policy remains the sole authority for every mutation and Raw table.
 const WORKSPACE_POLICY: &str = "(encode(namespace, 'hex'::text) = ANY (string_to_array(current_setting('semon.read_scope'::text, true), ','::text)))";
 const WORKSPACE_TABLES: &[&str] = &[
-    "semon_pg_native_catalog_rows", "semon_pg_native_catalog_history_owners",
-    "semon_pg_native_catalog_history_headers", "semon_pg_native_semantic_runtime",
-    "semon_pg_native_meta", "semon_pg_native_catalog_operations", "semon_pg_source_state",
+    "semon_pg_native_catalog_rows",
+    "semon_pg_native_catalog_history_owners",
+    "semon_pg_native_catalog_history_headers",
+    "semon_pg_native_semantic_runtime",
+    "semon_pg_native_meta",
+    "semon_pg_native_catalog_operations",
+    "semon_pg_source_state",
 ];
 
 fn contract_hash() -> Vec<u8> {
@@ -495,7 +499,9 @@ fn contract_hash() -> Vec<u8> {
     }
     hash.update(POLICY);
     hash.update(WORKSPACE_POLICY);
-    for table in WORKSPACE_TABLES { hash.update(table); }
+    for table in WORKSPACE_TABLES {
+        hash.update(table);
+    }
     hash.update(native_keys::MATCH_BODY);
     hash.update(native_keys::DIGEST_BODY);
     for body in super::super::native_usage_identity::contract() {
@@ -540,7 +546,9 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ddl.push_str(&format!("PRIMARY KEY(namespace_digest,{})); ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; ALTER TABLE {name} FORCE ROW LEVEL SECURITY; CREATE POLICY native_namespace ON {name} USING ({POLICY}) WITH CHECK ({POLICY});", table.key));
     }
     for table in WORKSPACE_TABLES {
-        ddl.push_str(&format!("CREATE POLICY workspace_catalog ON {table} FOR SELECT USING ({WORKSPACE_POLICY});"));
+        ddl.push_str(&format!(
+            "CREATE POLICY workspace_catalog ON {table} FOR SELECT USING ({WORKSPACE_POLICY});"
+        ));
     }
     for (name, table, columns, unique) in INDEXES {
         let unique = if *unique { "UNIQUE" } else { "" };
@@ -649,7 +657,9 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         let policy = format!("{policy_name}:*:true:{{0}}:{POLICY}:{check}");
         let mut policies = vec![policy];
         if WORKSPACE_TABLES.contains(&name.as_str()) {
-            policies.push(format!("workspace_catalog:r:true:{{0}}:{WORKSPACE_POLICY}:"));
+            policies.push(format!(
+                "workspace_catalog:r:true:{{0}}:{WORKSPACE_POLICY}:"
+            ));
         }
         let mut indexes = vec![format!("{name}_pkey:true:true:true:{keys}:")];
         for (index, target, keys, unique) in INDEXES {

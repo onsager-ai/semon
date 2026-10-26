@@ -22,9 +22,9 @@ pub(crate) fn read(
     };
     let mut bindings = Vec::new();
     let mut generations = Vec::new();
-    for (source, config) in sources.iter().zip(&configs) {
+    for config in &configs {
         let StoreBackend::Postgres { pool: other, control: source_control } = &config.backend else { return Err(StorageError::MultiSourceUnqualified); };
-        if !Arc::ptr_eq(&pool.inner, &other.inner) || source.key != config.namespace.as_str() {
+        if !Arc::ptr_eq(&pool.inner, &other.inner) {
             return Err(StorageError::MultiSourceUnqualified);
         }
         let bound = other.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), source_control)?;
@@ -32,6 +32,7 @@ pub(crate) fn read(
         generations.push(super::configured_generation(config, other, source_control)?);
     }
     let names = configs.iter().map(|config| config.namespace.as_str().as_bytes().to_vec()).collect::<Vec<_>>();
+    let machines = sources.iter().map(|source| source.key.as_bytes().to_vec()).collect::<Vec<_>>();
     let scope = configs.iter().map(|config| super::namespace_context(&config.namespace)).collect::<Vec<_>>().join(",");
     let rows = pool.transaction(&configs[0].namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
         tx.driver.query_one("SELECT set_config('semon.read_scope',$1,true)", &[&scope]).map_err(sqlstate::error)?;
@@ -50,14 +51,17 @@ pub(crate) fn read(
         let source = after.map(|value| value.2.as_bytes());
         let history = request.scope == crate::CatalogReadScope::RetainedHistory;
         let limit = if request.q.is_some() { crate::catalog_search::MAX_CANDIDATES } else { request.limit + 1 } as i64;
-        let rows = tx.driver.query("WITH authorized AS (SELECT * FROM unnest($1::bytea[],$2::bytea[]) AS a(namespace,generation)), visible AS (
-            SELECT r.namespace,r.session_key,r.last_ms,r.harness,r.repo,r.model,r.metadata FROM authorized a JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=sha256(a.namespace) AND r.namespace=a.namespace AND r.generation=a.generation WHERE NOT $10 OR NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=r.namespace_digest AND o.namespace=r.namespace AND o.generation=r.generation AND o.key_digest=r.key_digest AND o.session_key=r.session_key)
-            UNION ALL SELECT o.namespace,o.session_key,o.last_ms,o.harness,o.repo,o.model,h.metadata FROM authorized a JOIN semon_pg_native_catalog_history_owners o ON o.namespace_digest=sha256(a.namespace) AND o.namespace=a.namespace AND o.generation=a.generation JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE $10
-        ), page AS MATERIALIZED (SELECT * FROM visible WHERE ($3::bytea IS NULL OR harness=$3) AND ($4::bytea IS NULL OR repo=$4) AND ($5::bytea IS NULL OR model=$5) AND ($6::bigint IS NULL OR last_ms<$6 OR (last_ms=$6 AND (session_key>$7 OR (session_key=$7 AND namespace>$8)))) ORDER BY last_ms DESC,session_key,namespace LIMIT $9)
-        SELECT namespace,session_key,last_ms,harness,repo,model,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END FROM page ORDER BY last_ms DESC,session_key,namespace", &[&names,&epochs,&harness,&repo,&model,&last,&key,&source,&limit,&history]).map_err(sqlstate::error)?;
+        // Public Machine keys order the workspace; namespaces alone authorize storage.
+        // Request::parse represents no_repo=1 as the exact empty-repo filter.
+        let rows = tx.driver.query("WITH authorized AS (SELECT * FROM unnest($1::bytea[],$2::bytea[],$11::bytea[]) AS a(namespace,generation,machine)), visible AS (
+            SELECT r.namespace,r.session_key,r.last_ms,r.harness,r.repo,r.model,r.metadata,a.machine FROM authorized a JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=sha256(a.namespace) AND r.namespace=a.namespace AND r.generation=a.generation WHERE NOT $10 OR NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=r.namespace_digest AND o.namespace=r.namespace AND o.generation=r.generation AND o.key_digest=r.key_digest AND o.session_key=r.session_key)
+            UNION ALL SELECT o.namespace,o.session_key,o.last_ms,o.harness,o.repo,o.model,h.metadata,a.machine FROM authorized a JOIN semon_pg_native_catalog_history_owners o ON o.namespace_digest=sha256(a.namespace) AND o.namespace=a.namespace AND o.generation=a.generation JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE $10
+        ), page AS MATERIALIZED (SELECT * FROM visible WHERE ($3::bytea IS NULL OR harness=$3) AND ($4::bytea IS NULL OR repo=$4) AND ($5::bytea IS NULL OR model=$5) AND ($6::bigint IS NULL OR last_ms<$6 OR (last_ms=$6 AND (session_key>$7 OR (session_key=$7 AND machine>$8)))) ORDER BY last_ms DESC,session_key,machine LIMIT $9)
+        SELECT namespace,session_key,last_ms,harness,repo,model,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,machine FROM page ORDER BY last_ms DESC,session_key,machine", &[&names,&epochs,&harness,&repo,&model,&last,&key,&source,&limit,&history,&machines]).map_err(sqlstate::error)?;
         rows.into_iter().map(|row| {
             let namespace: Vec<u8> = row.get(0);
-            let index = names.iter().position(|name| name == &namespace).ok_or(StorageError::NamespaceMismatch)?;
+            let machine: Vec<u8> = row.get(7);
+            let index = names.iter().zip(&machines).position(|(name, key)| name == &namespace && key == &machine).ok_or(StorageError::NamespaceMismatch)?;
             let bytes = row.get::<_, Option<Vec<u8>>>(6).ok_or(StorageError::Busy)?;
             crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
             let value: CatalogRow = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
@@ -82,7 +86,7 @@ mod tests {
         let generation = "a".repeat(64);
         let mut sources = Vec::new();
         let mut configs = Vec::new();
-        for name in ["workspace-a", "workspace-b", "workspace-hidden"] {
+        for (name, machine) in [("workspace-a", "machine-z"), ("workspace-b", "machine-a"), ("workspace-hidden", "machine-hidden")] {
             let namespace = LogicalSourceNamespace::new(name.to_owned()).unwrap();
             let source = HostSource::new(namespace.clone(), "e".repeat(64)).unwrap();
             let config = source.store_config(StoreBackend::Postgres { pool: pool.clone(), control: control.clone() }).unwrap();
@@ -93,29 +97,32 @@ mod tests {
                 let ns = namespace.as_str().as_bytes();
                 tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace=$1", &[&ns,&generation]).map_err(sqlstate::error)?;
                 tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,'op','payload',$2,1)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-                for (key,last,model) in [("tie",100,"m"),("older",90,"other")] {
+                for (key,last,model,repo) in [("tie",100,"m","repo"),("older",90,"other","")] {
                     let row = CatalogRow {
                         overview:None,trace:None,query:None,lifecycle:Default::default(),
                         key:key.into(),name:format!("Écho {name}"),harness:"claude".into(),kind:"session".into(),presentation_kind:None,
-                        native_ids:vec![],parent:None,parent_source:None,repo:Some("repo".into()),branch:None,model:model.into(),effort:None,
+                        native_ids:vec![],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
                         start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![],
                     };
                     let metadata = serde_json::to_vec(&row).unwrap();
-                    tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude','repo',$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes()]).map_err(sqlstate::error)?;
+                    tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude',$7,$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes(),&repo.as_bytes()]).map_err(sqlstate::error)?;
                 }
                 tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,'workspace-probe','yes')", &[&ns]).map_err(sqlstate::error)?;
                 tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256('raw-fixture'::bytea),'raw-fixture','page',1,false)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(())
             }).unwrap();
-            sources.push(OverviewSource { key:name.into(),label:name.into(),options,up:true });
+            sources.push(OverviewSource { key:machine.into(),label:name.into(),options,up:true });
             configs.push(config);
         }
         let authorized = vec![&sources[0],&sources[1]];
         let request = Request::parse("limit=1&harness=claude&repo=repo&model=m").unwrap();
         let first = read(&authorized,&request,None).unwrap().unwrap();
-        assert_eq!(first.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(0,"tie"),(1,"tie")]);
-        let second = read(&authorized,&request,Some((100,"tie","workspace-a"))).unwrap().unwrap();
-        assert_eq!(second.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(1,"tie")]);
+        assert_eq!(first.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(1,"tie"),(0,"tie")]);
+        let second = read(&authorized,&request,Some((100,"tie","machine-a"))).unwrap().unwrap();
+        assert_eq!(second.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(0,"tie")]);
+        let no_repo = read(&authorized,&Request::parse("no_repo=1&limit=10").unwrap(),None).unwrap().unwrap();
+        assert_eq!(no_repo.rows.len(),2);
+        assert!(no_repo.rows.iter().all(|(_,row)| row.key == "older" && row.repo.is_none()));
         let scope = authorized.iter().map(|source| super::super::namespace_context(&source.options.source.namespace().unwrap())).collect::<Vec<_>>().join(",");
         pool.transaction(&configs[0].namespace,txn::TxnKind::Write,&control,|tx| {
             tx.driver.query_one("SELECT set_config('semon.read_scope',$1,true)", &[&scope]).map_err(sqlstate::error)?;

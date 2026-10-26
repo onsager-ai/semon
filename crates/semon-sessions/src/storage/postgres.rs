@@ -118,13 +118,22 @@ pub(crate) fn captured_query_catalog(
     pool: PgPool,
     control: PgCancellation,
 ) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
-    if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) || !options.all {
+    if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) || !options.all
+    {
         return Err(super::StorageError::InvalidArguments);
     }
-    let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), &control)?;
+    let pool = pool.bind_source(
+        &config.namespace,
+        config.expected_stream_epoch.as_deref(),
+        &control,
+    )?;
     Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
-        pool, namespace: config.namespace.clone(), control,
-        generation: generation.to_owned(), options: options.clone(), captured: true,
+        pool,
+        namespace: config.namespace.clone(),
+        control,
+        generation: generation.to_owned(),
+        options: options.clone(),
+        captured: true,
     }))
 }
 
