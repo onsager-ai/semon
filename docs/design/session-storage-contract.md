@@ -1811,6 +1811,40 @@ PG alongside the complete scalar and open dimensions. Unrelated-history checks
 cover 0/256/2048 rows; their decoded-row counter is a bounded-read assertion, not
 a claim about allocator peak, SQL planner cost, or full backend qualification.
 
+## Catalog native binding prerequisite (Worker135, incomplete)
+
+The private Catalog-local `admission::capture` records the actual head, Source
+revision and bounded source-claim vector before model construction.
+`admission::stage_bound` locks the existing SourceState row, rejects changed
+heads/revisions/claims or a foreign namespace, qualifies the entire publication source cohort, then calls the existing
+shared physical producer in that same borrowed PgTxn. It creates no SourceState
+or authority. The ordinary SQLite publisher and PG binding use the same
+`source_matches_ledger` predicate. PG additionally opens the actual immutable
+current native page generation against its full Ledger and header contract,
+then requires its source ID to equal current Usage with the same receipt
+and parser. Native Usage availability is retained explicitly; Claude's absent
+native Usage is not incomplete file publication or a fabricated ready Usage.
+Conflicting duplicate sources, more than 64 distinct sources or
+more than 1 MiB of Catalog metadata refuse before Catalog effects.
+
+The returned private references are observations, not durable ownership or an
+admitted publication/selected lease. This does not qualify every page's payload
+availability, runtime/Source admission/epoch, head CAS, claim ACK, OpID, overview
+or retained proof owners. Those missing ports prevent an honest admitted head;
+the flow deliberately leaves claims pending and Catalog head unset. No tables,
+schema version, compatibility readers or public backend activation are added.
+
+`pg_catalog135_real_native_binding_before_effects_and_atomic_refusal` executes
+the ordinary SQLite oracle first, enables a tested process-wide SQLite refusal
+hook, and ingests the identical Raw with the actual private PG EventCache. It
+checks native-source binding and immutable Catalog parity, pre-effect refusal,
+all measured Catalog effect rollback boundaries, stale head/revision/claims, missing/corrupt page/Usage
+authority, namespace isolation and precancellation. Its rollback comparison
+covers every table in the ephemeral store with byte-exact complete rows. The Storage workflow runs
+`storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics`;
+the PG workflow runs the `pg_catalog135` group. Authored tests require exact-head
+CI and fresh independent review; no qualification is claimed here.
+
 ## Borrowed immutable Catalog reads (Worker131, incomplete)
 
 The private `postgres::catalog_effects::snapshot::with_generation` callback owns
