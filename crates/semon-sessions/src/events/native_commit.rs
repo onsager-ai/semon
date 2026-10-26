@@ -179,6 +179,10 @@ pub(crate) fn relationships<E: Relationships>(
 /// Native archive relocation is restricted to one harness home and opposite
 /// active/archive collections. Both physical adapters use this contract.
 pub(crate) fn relocation_namespace(path: &str) -> Option<(&str, bool)> {
-    path.rsplit_once("/archived_sessions/").map(|(root,_)|(root,true))
-        .or_else(||path.rsplit_once("/sessions/").map(|(root,_)|(root,false)))
+    path.rsplit_once("/archived_sessions/")
+        .map(|(root, _)| (root, true))
+        .or_else(|| {
+            path.rsplit_once("/sessions/")
+                .map(|(root, _)| (root, false))
+        })
 }
