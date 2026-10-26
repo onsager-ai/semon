@@ -699,6 +699,27 @@ impl NativeOwnership {
     /// conversion, singleton adoption, or public qualification is performed.
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
         let mut db = connection(config)?;
+        // Reopening an enrolled namespace is a read, not another enrollment.
+        // Keep the capability and all readiness checks in one snapshot; a
+        // damaged existing enrollment is refused rather than repaired here.
+        {
+            let tx = db.transaction().map_err(failed)?;
+            let registry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_namespaces' AND type='table')",
+                [], |r| r.get(0),
+            ).map_err(failed)?;
+            if registry {
+                let admission = tx.query_row(
+                    "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                    [config.namespace.as_str()], |r| r.get(0),
+                ).optional().map_err(failed)?;
+                if let Some(admission) = admission {
+                    let owner = Self { config: config.clone(), admission };
+                    owner.validate_ready(&tx)?;
+                    return Ok(owner);
+                }
+            }
+        }
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
