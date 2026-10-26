@@ -621,7 +621,7 @@ mod tests {
                 Err(StorageError::Unavailable)
             ));
             let loaded = load(&pool, &source, None, &control).unwrap();
-            assert_eq!(loaded.runs, [original.clone()]);
+            assert_eq!(loaded.runs.as_slice(), std::slice::from_ref(&original));
             assert_eq!(loaded.stamp, Some(before.clone()));
         }
         save(
@@ -693,8 +693,11 @@ mod tests {
             }
             READ_WORK.with(|work| work.set(0));
             assert_eq!(
-                load(&pool, &source, Some(&ids), &control).unwrap().runs,
-                [selected.clone()]
+                load(&pool, &source, Some(&ids), &control)
+                    .unwrap()
+                    .runs
+                    .as_slice(),
+                std::slice::from_ref(&selected)
             );
             READ_WORK.with(|work| assert_eq!(work.get(), 1));
         }
