@@ -7493,8 +7493,8 @@ pub(crate) fn prepare_semantic_batch(
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
         let binding = cache.query_runtime_binding()?;
-        prepared.relationships.presentation =
-            Some(crate::storage::selected::PresentationObservations::capture_with_authority(
+        prepared.relationships.presentation = Some(
+            crate::storage::selected::PresentationObservations::capture_with_authority(
                 options,
                 binding.as_ref(),
                 prepared.rows.iter().chain(
@@ -7504,8 +7504,13 @@ pub(crate) fn prepare_semantic_batch(
                         .values()
                         .map(|endpoint| &endpoint.row),
                 ),
-                options.facts.as_ref().map(|path| cache.facts_authority(path)).transpose()?,
-            ));
+                options
+                    .facts
+                    .as_ref()
+                    .map(|path| cache.facts_authority(path))
+                    .transpose()?,
+            ),
+        );
     }
     Ok(SemanticModelBatch { prepared })
 }
@@ -7524,8 +7529,11 @@ fn semantic_withdrawals(
                 && !facts.codex_rollout_is_current(options, &input.full_path(options))
         })
     {
-        let authority = std::sync::Arc::new(std::sync::Mutex::new(cache.facts_authority(facts_path)?));
-        let authority_guard = authority.lock().map_err(|_| io::Error::other("Facts authority unavailable"))?;
+        let authority =
+            std::sync::Arc::new(std::sync::Mutex::new(cache.facts_authority(facts_path)?));
+        let authority_guard = authority
+            .lock()
+            .map_err(|_| io::Error::other("Facts authority unavailable"))?;
         let facts_identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
         authority_guard.validate()?;

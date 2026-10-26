@@ -241,7 +241,11 @@ fn claims(
 /// rollout). The staged model witness binds them from record to publication;
 /// publication claims the path, so its owners leave Current under the same
 /// generation CAS while native rows, history and older proofs stay retained.
-fn withdrawals(tx: &mut PgTxn<'_>, batch: &Batch, prepared: &PreparedSources) -> Result<(), StorageError> {
+fn withdrawals(
+    tx: &mut PgTxn<'_>,
+    batch: &Batch,
+    prepared: &PreparedSources,
+) -> Result<(), StorageError> {
     if prepared.withdrawals.len() > 64 {
         return Err(StorageError::Busy);
     }

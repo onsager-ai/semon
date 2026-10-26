@@ -16,39 +16,58 @@ pub(crate) struct Withdrawal {
     pub(crate) facts_identity: crate::facts::source_authority::Identity,
     pub(crate) runtime: String,
     #[serde(skip)]
-    pub(crate) authority: Option<std::sync::Arc<std::sync::Mutex<crate::facts::source_authority::Sources>>>,
+    pub(crate) authority:
+        Option<std::sync::Arc<std::sync::Mutex<crate::facts::source_authority::Sources>>>,
 }
 
 impl Withdrawal {
-    fn with_authority<T>(&self, read: impl FnOnce(&crate::facts::source_authority::Sources) -> io::Result<T>) -> io::Result<T> {
+    fn with_authority<T>(
+        &self,
+        read: impl FnOnce(&crate::facts::source_authority::Sources) -> io::Result<T>,
+    ) -> io::Result<T> {
         if let Some(source) = &self.authority {
-            let source = source.lock().map_err(|_| io::Error::other("Facts authority unavailable"))?;
+            let source = source
+                .lock()
+                .map_err(|_| io::Error::other("Facts authority unavailable"))?;
             read(&source)
         } else {
-            read(&crate::facts::source_authority::Sources::sqlite(&self.facts_path)?)
+            read(&crate::facts::source_authority::Sources::sqlite(
+                &self.facts_path,
+            )?)
         }
     }
     pub(crate) fn authority_current(&self) -> io::Result<bool> {
         self.with_authority(|authority| {
-            let identity = crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
-            if identity != self.facts_identity || !authority.selection_known() { return Ok(false); }
+            let identity = crate::facts::source_authority::Identity::of(&fs::symlink_metadata(
+                &self.facts_path,
+            )?)?;
+            if identity != self.facts_identity || !authority.selection_known() {
+                return Ok(false);
+            }
             authority.validate()?;
             Ok(true)
         })
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
         if !crate::is_input_path("codex", &self.relative)
-            || !self.relative.ends_with(".jsonl") || !self.authority_current()? { return Ok(false); }
+            || !self.relative.ends_with(".jsonl")
+            || !self.authority_current()?
+        {
+            return Ok(false);
+        }
         let source = crate::open_input(Path::new(&self.path))?;
         let before = crate::events::Stat::from_metadata(&source.metadata()?)?;
-        if before != self.stat { return Ok(false); }
+        if before != self.stat {
+            return Ok(false);
+        }
         let withdrawn = self.with_authority(|authority| {
             let withdrawn = authority.codex_current(&self.relative)? == Some(false);
             authority.validate()?;
             Ok(withdrawn)
         })?;
         let current_source = crate::open_input(Path::new(&self.path))?;
-        Ok(withdrawn && crate::events::Stat::from_metadata(&source.metadata()?)? == before
+        Ok(withdrawn
+            && crate::events::Stat::from_metadata(&source.metadata()?)? == before
             && crate::events::Stat::from_metadata(&current_source.metadata()?)? == before
             && self.authority_current()?)
     }
@@ -120,7 +139,9 @@ impl LifecycleAuthority {
             .as_ref()
             .map(|path| {
                 let source = cache.facts_authority(path)?;
-                if !source.facts_known() { return Err(io::Error::other("Facts authority unavailable")); }
+                if !source.facts_known() {
+                    return Err(io::Error::other("Facts authority unavailable"));
+                }
                 source.validate()?;
                 Ok::<_, io::Error>((
                     path.clone(),
@@ -129,7 +150,11 @@ impl LifecycleAuthority {
             })
             .transpose()?;
         let authority = Self {
-            facts_activity: options.facts.as_ref().map(|_| crate::native_evidence::recorded_activity_generation(options)).transpose()?,
+            facts_activity: options
+                .facts
+                .as_ref()
+                .map(|_| crate::native_evidence::recorded_activity_generation(options))
+                .transpose()?,
             facts,
             source: options.source.clone(),
             claude_home: options.claude_home.clone(),
@@ -148,7 +173,9 @@ impl LifecycleAuthority {
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
         if let Some((path, identity)) = &self.facts
-            && crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? != *identity {
+            && crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
+                != *identity
+        {
             return Ok(false);
         }
         // Both modes recheck the same captured runtime inputs as the producer.
@@ -170,7 +197,10 @@ impl LifecycleAuthority {
         // An unchanged exact canonical descriptor preserves all Facts fields,
         // not just its version. Only the independent runtime files can change.
         let runtime_current = if self.facts.is_some() {
-            self.facts_activity.as_ref() == Some(&crate::native_evidence::recorded_activity_generation(&options)?)
+            self.facts_activity.as_ref()
+                == Some(&crate::native_evidence::recorded_activity_generation(
+                    &options,
+                )?)
         } else {
             crate::native_evidence::query_runtime_generation(&options)? == self.runtime
         };

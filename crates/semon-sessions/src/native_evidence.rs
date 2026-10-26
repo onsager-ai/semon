@@ -1610,12 +1610,23 @@ pub(crate) fn recorded_runtime_fingerprint_excluding(
 pub(crate) fn recorded_activity_generation(options: &Options) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut active = BTreeMap::new();
-    watch_tree(&options.claude_home.join("sessions"), &[".json"], &mut active);
-    let active = active.into_iter()
-        .filter(|(path, _)| path.extension().is_some_and(|extension| extension == "json"))
+    watch_tree(
+        &options.claude_home.join("sessions"),
+        &[".json"],
+        &mut active,
+    );
+    let active = active
+        .into_iter()
+        .filter(|(path, _)| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .map(|(path, stamp)| (path, stamp.map(|stamp| stamp.generation)))
         .collect::<Vec<_>>();
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&active).map_err(io::Error::other)?)))
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&active).map_err(io::Error::other)?)
+    ))
 }
 
 /// Aggregate generation for current local process and naming observations.
