@@ -623,8 +623,12 @@ mod tests {
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
         {
-            let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
-            let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+            let owner =
+                crate::events::store::configured::NativeOwnership::restore_transfer(&source)
+                    .unwrap();
+            let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+                .connection()
+                .unwrap();
             let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
             assert!(removed > 0);
         }

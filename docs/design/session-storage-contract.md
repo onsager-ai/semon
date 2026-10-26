@@ -197,6 +197,19 @@ Each page needs namespace, snapshot/version identity, bounded rows/bytes,
 continuation and digest. Checkpoint advancement and applied operation IDs commit
 together at the destination. Duplicate pages must be safe to replay.
 
+Completed semantic producers intentionally delete their temporary model batches.
+Migration preserves their original publication receipts exactly and validates
+the admitted persisted presentation, Native proof and ledger graph from an
+authorized frozen consistent snapshot. It does not re-execute historical
+producer computations or require a permanent archive of completed staging
+inputs. Unfinished staging/checkpoints remain authoritative transfer state.
+An adapter-local physical source ID is not logical source authority: retained
+SQLite prefixes bind the original ledger/header/root, and their physical page
+addresses may be translated when the optional source-ID hint is absent. This
+does not reconstruct missing proofs or grant Usage, Raw or publication authority.
+Ordinary reader admission still requires a genuine target publication effect;
+copying receipts/content cannot invent a source head, operation, ACK or lease.
+
 Catch-up follows the captured durable change revision and validates counts,
 identities, source witnesses, retained custody and proof reachability against
 that same snapshot. Hints alone do not export every authoritative mutation;

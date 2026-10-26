@@ -145,7 +145,9 @@ pub(super) fn capture(
                 ),
             )?;
             let generation = match original {
-                Some(original) => original.parse::<i64>().map_err(|_| StorageError::ScopeChanged)?,
+                Some(original) => original
+                    .parse::<i64>()
+                    .map_err(|_| StorageError::ScopeChanged)?,
                 None => {
                     // Existing qualified SQLite prefixes bind their ledger and
                     // chunk root, not a historical adapter-local Usage row ID.
