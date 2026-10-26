@@ -705,7 +705,8 @@ fn read_inner(
     if requested != key && !suffixed {
         return Ok(None);
     }
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
