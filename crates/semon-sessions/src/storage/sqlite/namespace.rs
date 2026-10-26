@@ -306,7 +306,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache = root.join("index.json");
-            drop(EventCache::open_scoped(&cache).unwrap());
+            drop(EventCache::open_scoped(&cache, &source).unwrap());
             let database = EventCache::path(&cache);
             let db = Connection::open(&database).unwrap();
             db.execute("INSERT INTO meta(key,value) VALUES('catalog_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [crate::model::summary::CATALOG_VERSION.to_string()]).unwrap();
@@ -408,7 +408,7 @@ mod tests {
             cache: f.root.join("index.json"),
             ..Options::default()
         };
-        assert!(EventCache::open_scoped(&options.cache).is_err());
+        assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
         assert!(is_bound(&f.db()).unwrap());
         assert_eq!(
             f.db()
@@ -572,7 +572,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(EventCache::open_scoped(&f.root.join("index.json")).is_ok());
+        assert!(EventCache::open_scoped(&f.root.join("index.json"), &crate::Options::default().source).is_ok());
         let second = f.config.admit_namespace().unwrap();
         assert!(second.generation > first.generation);
         assert_eq!(

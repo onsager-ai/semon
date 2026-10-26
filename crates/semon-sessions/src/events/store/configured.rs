@@ -476,6 +476,18 @@ pub(crate) struct NativeOwnership {
 }
 
 impl NativeOwnership {
+    /// Restore the exact admitted capability for a reader without enrollment,
+    /// schema mutation or a retry through another namespace.
+    pub(crate) fn restore(config: &StoreConfig) -> Result<Self, StorageError> {
+        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(failed)?;
+        crate::storage::sqlite::catalog_namespace::register(&db, &config.namespace)?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
+        let admission = crate::storage::sqlite::namespace::require_semantic_admitted(&db, &config.namespace)?;
+        let owner = Self { config: config.clone(), admission: i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)? };
+        owner.validate_ready(&db)?;
+        Ok(owner)
+    }
     pub(crate) fn config(&self) -> &StoreConfig {
         &self.config
     }
@@ -2071,7 +2083,7 @@ mod tests {
             Err(StorageError::Unavailable)
         );
         let legacy = f.root.join("legacy.json");
-        drop(EventCache::open_scoped(&legacy).unwrap());
+        drop(EventCache::open_scoped(&legacy, &crate::Options::default().source).unwrap());
         let mut config = f.config.clone();
         config.backend = StoreBackend::Sqlite {
             database: EventCache::path(&legacy),
@@ -2220,6 +2232,12 @@ mod tests {
             Self::with_named_setup("configured-events", setup)
         }
         fn with_named_setup(namespace: &str, setup: impl FnOnce(&Connection, &Path)) -> Self {
+            Self::with_admission(namespace, setup, false)
+        }
+        fn current(namespace: &str) -> Self {
+            Self::with_admission(namespace, |_, _| {}, true)
+        }
+        fn with_admission(namespace: &str, setup: impl FnOnce(&Connection, &Path), current: bool) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "semon-configured-event-{}-{}",
@@ -2245,10 +2263,14 @@ mod tests {
             )
             .unwrap();
             drop(db);
-            config.admit_namespace().unwrap();
-            for _ in 0..128 {
-                if config.assign_catalog_namespace(64).unwrap().complete {
-                    break;
+            if current {
+                NativeOwnership::admit(&config).unwrap();
+            } else {
+                config.admit_namespace().unwrap();
+                for _ in 0..128 {
+                    if config.assign_catalog_namespace(64).unwrap().complete {
+                        break;
+                    }
                 }
             }
             fs::write(&raw, concat!(
@@ -3076,7 +3098,7 @@ mod tests {
     }
 
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {
-        let mut a = Fixture::new();
+        let mut a = Fixture::current("source-a");
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
         a.config.backend = StoreBackend::Sqlite {
             database: a.root.join("model.sqlite3"),
@@ -3109,6 +3131,10 @@ mod tests {
             )
             .unwrap();
             let options = crate::Options {
+                source: crate::storage::HostSource::new(
+                    if i == 0 { a.config.namespace.clone() } else { b.namespace.clone() },
+                    a.config.expected_stream_epoch.clone().unwrap(),
+                ).unwrap(),
                 claude_home: home.join("claude"),
                 claude_json: home.join("claude.json"),
                 codex_home: home.join("codex"),
@@ -3293,7 +3319,7 @@ mod tests {
             // Same production derivation, using the existing unbound producer
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
-            let mut original = EventCache::open_scoped(&options[i].cache).unwrap();
+            let mut original = EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
             let mut original = crate::model::prepare_sources(
                 &options[i],
                 &mut original,
@@ -5481,7 +5507,7 @@ mod tests {
             // Keep the reference producer independent of the admitted
             // configured store, but give it the ordinary scoped cache that
             // the native producer requires for its source observations.
-            let mut unbound = EventCache::open_scoped(&options.cache).unwrap();
+            let mut unbound = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let mut expected =
                 crate::model::prepare_sources(options, &mut unbound, inputs, 1_790_000_000_000)
                     .unwrap();
@@ -6763,7 +6789,7 @@ mod tests {
             inputs: &[crate::Input],
             prepared: &crate::model::PreparedSources,
         ) {
-            let mut reference = EventCache::open_scoped(&options.cache).unwrap();
+            let mut reference = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let mut expected =
                 crate::model::prepare_sources(options, &mut reference, inputs, 1_790_000_000_000)
                     .unwrap();
@@ -7769,7 +7795,7 @@ mod tests {
                 let inputs = selector_inputs(options, duplicate);
                 let mut admitted = open(&f.config);
                 let (batch, model) = selector_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let (reference, _) = selector_ready(&mut ordinary, options, &inputs);
                 let task = if duplicate { "shared" } else { "child-1" };
                 let target = if duplicate {
@@ -7953,7 +7979,7 @@ mod tests {
                 let inputs = named_claude_inputs(options, copies);
                 let mut cache = open(&f.config);
                 let (batch, model) = claude_ready(&mut cache, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let before = shared_state(&f);
                 for (name, count) in [("worker", copies), ("absent", 0)] {
@@ -8439,7 +8465,7 @@ mod tests {
             let mut cache = open(&f.config);
             let (fresh, fresh_model) = claude_ready(&mut cache, options, &inputs);
             assert_ne!(fresh.epoch, old.epoch);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 1);
@@ -8608,7 +8634,7 @@ mod tests {
                 "restart does not duplicate native history"
             );
             assert_ne!(fresh.epoch, old.epoch);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 2, "ambiguity is bounded to two candidates");
@@ -8659,7 +8685,7 @@ mod tests {
             let inputs = claude_inputs(options, 65, 0);
             // The ordinary budget counts frontier observations, including empty
             // tasks and already-enrolled paths; it does not promise 64 new rows.
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             claude_ingest(&mut ordinary, options, &inputs);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             ordinary
@@ -9007,7 +9033,7 @@ mod tests {
                 let inputs = claude_inputs(options, copies, 1);
                 let mut admitted = open(&f.config);
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let ordinary_db =
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
@@ -9217,7 +9243,7 @@ mod tests {
             fs::write(old, raw).unwrap();
             let mut admitted = open(&f.config);
             let (batch, model) = claude_ready(&mut admitted, options, &inputs);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let db = f.db();
             let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
@@ -9288,7 +9314,7 @@ mod tests {
                 if known {
                     assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND value='claude72-1.jsonl' AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap(), "target must be discovered by the native filename frontier");
                 }
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let reference = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 assert_eq!(
@@ -9449,7 +9475,7 @@ mod tests {
                     .unwrap(),
                 0
             );
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             claude_ingest(&mut ordinary, options, &inputs);
             ordinary
                 .begin_semantic_stage_with_journal(&[seed], &runtime, true)

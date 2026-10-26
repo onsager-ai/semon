@@ -1684,6 +1684,7 @@ mod tests {
             std::fs::create_dir_all(&proc_root).unwrap();
             std::fs::write(proc_root.join("locks"), "").unwrap();
             Options {
+            source: crate::Options::default().source,
                 claude_home: home.join("claude"),
                 claude_json: home.join(".claude.json"),
                 codex_home: home.join("codex"),
@@ -1999,6 +2000,7 @@ mod tests {
     fn nav_override_only_accepts_a_known_item_and_same_origin_path() {
         let root = std::env::temp_dir().join("semon-account-test");
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

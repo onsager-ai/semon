@@ -221,8 +221,10 @@ impl Default for Options {
             env::var_os("CODEX_HOME").as_deref(),
         );
         Self {
-            source: storage::HostSource::load_or_create(&default_state_dir(&home).join("source.json"))
-                .expect("host Source configuration is unavailable or invalid"),
+            source: storage::HostSource::load_or_create(
+                &default_state_dir(&home).join("source.json"),
+            )
+            .expect("host Source configuration is unavailable or invalid"),
             claude_home,
             claude_json,
             codex_home,
@@ -757,7 +759,8 @@ fn has_live_process(node: &Node) -> bool {
 
 /// Collects a read-only, metadata-only session tree and writes the metadata cache.
 pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
-    let mut cache = events::EventCache::open_scoped(&options.cache, &options.source).map_err(io::Error::other)?;
+    let mut cache = events::EventCache::open_scoped(&options.cache, &options.source)
+        .map_err(io::Error::other)?;
     collect_with_index(options, &mut cache)
 }
 

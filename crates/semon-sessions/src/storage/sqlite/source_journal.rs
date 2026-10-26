@@ -1547,7 +1547,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache_path = root.join("index.json");
-            drop(EventCache::open_scoped(&cache_path).unwrap());
+            drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
             // Exercise the actual unbound producer before admission. Its old
             // counter must survive even when a newer observation was acked.
             let seed_paths = vec!["seed".into(), "acknowledged".into()];
@@ -1561,7 +1561,7 @@ mod tests {
                 .unwrap();
             drop(native);
             let database = EventCache::path(&cache_path);
-            let mut consumer = EventCache::open_scoped(&cache_path).unwrap();
+            let mut consumer = EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap();
             assert!(matches!(
                 consumer
                     .acknowledge_source_for_test("acknowledged")
@@ -1619,7 +1619,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache_path = root.join("index.json");
-            drop(EventCache::open_scoped(&cache_path).unwrap());
+            drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
             Self { root, cache_path }
         }
 
@@ -1846,7 +1846,7 @@ mod tests {
         for restart in [false, true] {
             let unbound = LegacyFixture::new();
             producer_restart_conformance(
-                || EventCache::open_scoped(&unbound.cache_path).unwrap(),
+                || EventCache::open_scoped(&unbound.cache_path, &crate::Options::default().source).unwrap(),
                 || unbound.open(),
                 &EventCache::path(&unbound.cache_path),
                 &unbound.root,
@@ -1871,7 +1871,7 @@ mod tests {
     fn finish_backfill_uses_a_real_published_generation_on_both_sqlite_profiles() {
         for configured in [false, true] {
             let fixture = LegacyFixture::new();
-            let mut cache = EventCache::open_scoped(&fixture.cache_path).unwrap();
+            let mut cache = EventCache::open_scoped(&fixture.cache_path, &crate::Options::default().source).unwrap();
             let generation = cache
                 .publish_catalog_projection_fenced(
                     &crate::slot_projection::Publication {
@@ -2251,7 +2251,7 @@ mod tests {
         ));
         assert!(!missing.exists());
         let unbound_cache = f.root.join("unbound.json");
-        drop(EventCache::open_scoped(&unbound_cache).unwrap());
+        drop(EventCache::open_scoped(&unbound_cache, &unbound_source).unwrap());
         let unbound_database = EventCache::path(&unbound_cache);
         let unbound_db = Connection::open(&unbound_database).unwrap();
         let unbound_epoch = unbound_db
@@ -2380,7 +2380,7 @@ mod tests {
                 .unwrap(),
             vec![("after-refusal".into(), Some(3))]
         );
-        assert!(EventCache::open_scoped(&f.root.join("index.json")).is_err());
+        assert!(EventCache::open_scoped(&f.root.join("index.json"), &crate::Options::default().source).is_err());
         assert_eq!(
             store.claims(&["seed".into()]).unwrap(),
             vec![("seed".into(), Some(1))]
