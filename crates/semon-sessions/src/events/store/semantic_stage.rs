@@ -245,7 +245,11 @@ pub(crate) fn support_sql<'a>(
             .prepare_cached("SELECT semon_semantic_support_layout(?1)")?
             .query_row([version], |r| r.get(0))?;
         if let Some(composite) = layout {
-            return if composite { Ok(scoped) } else { Err(rusqlite::Error::InvalidQuery) };
+            return if composite {
+                Ok(scoped)
+            } else {
+                Err(rusqlite::Error::InvalidQuery)
+            };
         }
     }
     observation_shapes(c)?;
@@ -268,11 +272,7 @@ pub(crate) fn support_sql<'a>(
                 "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
             )?
             .query_row([table], |r| r.get(0))?;
-        if !ns
-            || !namespace_valid
-            || !physical
-            || composite.is_some_and(|prior| prior != ns)
-        {
+        if !ns || !namespace_valid || !physical || composite.is_some_and(|prior| prior != ns) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         composite = Some(ns);
