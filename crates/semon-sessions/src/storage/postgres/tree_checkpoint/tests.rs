@@ -505,7 +505,9 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
         rows.push((family, data));
     }
     let source_paths = sqlite
-        .prepare("SELECT source_path FROM native_usage_sources ORDER BY source_id")
+        // Retained UsageSource generations are not additional Current files.
+        // Replaying them as duplicate paths violates Core's exact ledger CAS.
+        .prepare("SELECT source_path FROM native_usage_current ORDER BY source_id")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -579,12 +581,13 @@ pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
-    publish_current(tx, fixture, None)
+    publish_current(tx, fixture, None, false)
 }
 fn publish_current(
     tx: &mut PgTxn<'_>,
     fixture: &Fixture,
     previous: Option<&Fixture>,
+    append: bool,
 ) -> Result<(), StorageError> {
     // Real production Core + Usage + Tree writers; SQLite is closed before PG.
     let prior = |path: &str| {
@@ -606,7 +609,7 @@ fn publish_current(
                 path,
                 prior(path),
                 ledger,
-                false,
+                append,
             )?;
             crate::events::store::native_usage::algorithm::write(
                 &mut effects,
@@ -1318,14 +1321,34 @@ fn pg_tree_scalar119_real_producers_append_replacement_restart_and_history_bound
         let (mut pool, factory) = fixture(|_| {});
         let mut previous = None;
         let mut old = None::<Summary>;
-        for data in [&initial, &appended, &replacement] {
+        let mut previous_ids = None;
+        for (data, append) in [(&initial, false), (&appended, true), (&replacement, false)] {
             pool.transaction(
                 &ns("tree\0🦀"),
                 TxnKind::Write,
                 &PgCancellation::default(),
-                |tx| publish_current(tx, data, previous),
+                |tx| publish_current(tx, data, previous, append),
             )
             .unwrap();
+            let ids = pool
+                .transaction(
+                    &ns("tree\0🦀"),
+                    TxnKind::ReadSnapshot,
+                    &PgCancellation::default(),
+                    |tx| {
+                        let row = tx.driver.query_one("SELECT g.source_id,h.projection_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?;
+                        Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
+                    },
+                )
+                .unwrap();
+            if let Some(previous_ids) = previous_ids {
+                if append {
+                    assert_eq!(ids, previous_ids, "append retains the qualified generation");
+                } else {
+                    assert_ne!(ids, previous_ids, "replacement creates a new generation");
+                }
+            }
+            previous_ids = Some(ids);
             if let Some(mut old) = old.take() {
                 assert!(old.tool_name("missing").is_err());
                 assert!(old.load_shared_usage().is_err());
