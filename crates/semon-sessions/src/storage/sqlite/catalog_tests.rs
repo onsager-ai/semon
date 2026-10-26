@@ -475,9 +475,10 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
                 break;
             }
         }
+        let remaining: (Option<String>, i64, i64, i64) = db.query_row("SELECT (SELECT phase FROM catalog_semantic_stage),(SELECT count(*) FROM catalog_semantic_sources WHERE publication_done=0 OR ack_done=0),(SELECT count(*) FROM session_catalog_invalidations),(SELECT count(*) FROM storage_semantic_model_batches)", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
         assert!(
             finished && repaired,
-            "semantic representation repair did not finish"
+            "semantic representation repair did not finish: phase/pending/claims/models={remaining:?}"
         );
         for phase in ["indexing", "identity", "relations", "publication"] {
             assert!(

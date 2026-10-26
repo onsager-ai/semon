@@ -2004,63 +2004,6 @@ pub(crate) fn write_session_descriptions(
 }
 
 impl IndexStore for SqliteStore {
-    fn facts_write_begin(
-        &mut self,
-        options: &crate::Options,
-        intent: &crate::source_change::FactsIntent,
-    ) -> Result<(), StoreError> {
-        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-    fn facts_write_complete(
-        &mut self,
-        options: &crate::Options,
-        intent: &crate::source_change::FactsIntent,
-    ) -> Result<(), StoreError> {
-        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-    fn source_write_begin(
-        &mut self,
-        options: &crate::Options,
-        input: &crate::Input,
-        _: &crate::source_change::WriteIntent,
-    ) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
-        let path = input.full_path(options).to_string_lossy().into_owned();
-        resume_runtime_input(options, &path).map_err(|e| StoreError::Data(e.to_string()))?;
-        let state =
-            begin_source_write(options, input).map_err(|e| StoreError::Data(e.to_string()))?;
-        if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
-            let id = crate::read_regular_at_most(&input.full_path(options), 65536)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .and_then(|v| v["sessionId"].as_str().map(str::to_owned));
-            if let Some(id) = id {
-                enqueue_native(options, "claude", &id)
-                    .map_err(|e| StoreError::Data(e.to_string()))?;
-            }
-            if let Some(pid) = Path::new(&input.path)
-                .file_stem()
-                .and_then(|p| p.to_str())
-                .and_then(|p| p.parse::<u32>().ok())
-            {
-                enqueue_pid(options, pid).map_err(|e| StoreError::Data(e.to_string()))?;
-            }
-        }
-        Ok(state)
-    }
-    fn source_write_complete(
-        &mut self,
-        options: &crate::Options,
-        input: &crate::Input,
-        _: &crate::source_change::WriteIntent,
-        revision: i64,
-        completion: &crate::source_change::WriteCompletion,
-    ) -> Result<(), StoreError> {
-        complete_source_write(options, input, revision, completion.evidence.as_ref())
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -3940,6 +3883,11 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
 /// before changing durable rows or proof metadata. Writers that touch archive
 /// custody validate only the selected marker at that call site.
 pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
+    if !current_contract(connection)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    configured::NativeOwnership::validate_physical(connection)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     require_current(connection).map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
