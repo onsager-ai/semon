@@ -1674,6 +1674,8 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
         #[cfg(test)]
+        let _sql_lock = crate::source_change::SqlLockScope::enter();
+        #[cfg(test)]
         let reserved = std::time::Instant::now();
         self.validate(&tx)?;
         #[cfg(test)]
@@ -1751,6 +1753,8 @@ impl Writer {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
+        #[cfg(test)]
+        let _sql_lock = crate::source_change::SqlLockScope::enter();
         #[cfg(test)]
         let reserved = std::time::Instant::now();
         self.validate(&tx)?;
