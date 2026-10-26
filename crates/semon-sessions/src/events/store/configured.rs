@@ -1060,6 +1060,7 @@ impl Writer {
             .map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1074,7 +1075,7 @@ impl Writer {
             closed,
             None,
             super::CatalogWriter::Auto,
-            Some(owner),
+            owner,
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {
@@ -1101,6 +1102,7 @@ impl Writer {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1125,6 +1127,7 @@ impl Writer {
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: owner.clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1866,7 +1869,7 @@ mod tests {
         // public enrollment and the complete native writer remain unqualified.
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(metadata_schema()).unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
         db.execute_batch(semantic_stage::metadata_indexes())
             .unwrap();
@@ -2178,7 +2181,7 @@ mod tests {
         // Deliberately bypass public enrollment in this private family fixture.
         // The rest of the native writer is still unqualified for two sources.
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(copied_usage_schema()).unwrap();

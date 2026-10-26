@@ -232,9 +232,11 @@ mod current_recovery {
         let mut j = journal(&f);
         let i = intent(&f, Some(""));
         j.persist_intent(&i).unwrap();
-        f.db().execute("UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'", ["b".repeat(64)]).unwrap();
+        let mut wrong = f.config.clone();
+        wrong.expected_stream_epoch = Some("b".repeat(64));
         let before = f.state();
-        assert!(i.apply(&mut j).is_err());
+        assert!(NativeOwnership::restore(&wrong).is_err());
+        assert_eq!(j.pending_intents().unwrap(), vec![i]);
         assert_eq!(f.state(), before);
     }
 
