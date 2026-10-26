@@ -272,7 +272,7 @@ impl NativeEvidence {
             .as_ref()
             .and_then(|cache| cache.session_catalog_generation());
         if work.audit.is_some()
-            && !crate::events::store::note_catalog_audit(&self.options, generation.as_deref(), now)?
+            && !work.events.as_mut().expect("event cache initialized").note_catalog_audit(generation.as_deref(), now)?
         {
             return Ok(true);
         }
@@ -1121,11 +1121,7 @@ impl NativeEvidence {
                         let sources_pending = !cache.pending_catalog_sources(1)?.is_empty();
                         if controlled && !sources_pending {
                             let generation = cache.session_catalog_generation();
-                            if !crate::events::store::note_catalog_audit(
-                                &self.options,
-                                generation.as_deref(),
-                                now,
-                            )? {
+                            if !cache.note_catalog_audit(generation.as_deref(), now)? {
                                 audit_pending = true;
                             }
                         }

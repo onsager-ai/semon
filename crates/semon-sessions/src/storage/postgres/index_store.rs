@@ -481,6 +481,16 @@ impl IndexStore for NativeIndex {
             )
             .map_err(err)
     }
+    fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+            let ns = self.namespace.as_str().as_bytes();
+            let generation: Option<String> = tx.driver.query_one("SELECT catalog_generation FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?.get(0);
+            if generation.as_deref() != expected || generation.is_none() { return Ok(false); }
+            let ready: bool = tx.driver.query_one("SELECT NOT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
+            if ready { super::native_keys::put_meta(tx, b"catalog_observed_at", now.to_string().as_bytes())?; }
+            Ok(ready)
+        }).map_err(err)
+    }
     fn session_slots(
         &self,
         row: &crate::model::summary::CatalogRow,

@@ -703,25 +703,15 @@ pub(crate) fn relocated_catalog_source(
 /// Record a completed bounded metadata observation without replacing rows or
 /// their publication generation. Pending work or another publication prevents
 /// acknowledging this observation.
-pub(crate) fn note_catalog_audit(
-    options: &crate::Options,
-    expected: Option<&str>,
-    now: i64,
-) -> io::Result<bool> {
-    let journal = host_journal(options).map_err(io::Error::other)?;
-    let db = journal.connection().map_err(io::Error::other)?;
-    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    journal.validate(&tx).map_err(io::Error::other)?;
-    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", [expected], |r| r.get(0)).map_err(io::Error::other)?;
+pub(super) fn note_catalog_audit_tx(tx: &Connection, expected: Option<&str>, now: i64) -> rusqlite::Result<bool> {
+    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", [expected], |r| r.get(0))?;
     if ready {
         tx.execute(
             "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)",
             [now.to_string()],
         )
-        .map_err(io::Error::other)?;
+        ?;
     }
-    tx.commit().map_err(io::Error::other)?;
     Ok(ready)
 }
 
@@ -2111,6 +2101,14 @@ impl IndexStore for SqliteStore {
             )
             .optional()
             .map_err(failure)
+    }
+
+    fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        let ready = note_catalog_audit_tx(&tx, expected, now).map_err(failure)?;
+        tx.commit().map_err(failure)?;
+        Ok(ready)
     }
 
     fn publish_session_catalog_fenced(
