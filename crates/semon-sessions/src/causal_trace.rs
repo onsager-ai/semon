@@ -1103,6 +1103,8 @@ mod generation_tests {
             expected_stream_epoch: Some("a".repeat(64)),
         };
         config.create_native_store().unwrap();
+        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+        drop(crate::storage::sqlite::configured_index::open_semantic(capability).unwrap());
         let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
         let connection =
             crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
