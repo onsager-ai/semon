@@ -761,12 +761,17 @@ pub(crate) fn relative_status(
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
     match crate::storage::read_local_catalog_page(options, machine, &request) {
         Ok(reply) => reply,
-        Err(_) => error(
+        Err(cause) => {
+            #[cfg(test)]
+            eprintln!("catalog_page_read_failed: {cause}");
+            let _ = cause;
+            error(
             503,
             "catalog_unavailable",
             "The session catalog is unavailable. Retry after the background observation completes.",
             true,
-        ),
+            )
+        }
     }
 }
 
