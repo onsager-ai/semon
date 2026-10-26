@@ -29,6 +29,16 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON sto
 
 pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     db.execute_batch(SCHEMA).map_err(failed)?;
+    for statement in SCHEMA.lines().map(str::trim) {
+        if let Some(rest) = statement.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            let name = rest.split('(').next().ok_or(StorageError::Unavailable)?;
+            super::catalog_namespace::guard(db, name)?;
+        }
+    }
+    validate(db)
+}
+
+pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     // Compare the complete authored current physical contract, including key
     // order, STRICT/WITHOUT ROWID, indexes and immutable triggers. Never adopt
     // a partial shape.
@@ -68,7 +78,7 @@ pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
             return Err(StorageError::NamespaceUpgradePending);
         }
         if kind == "TABLE" {
-            super::catalog_namespace::guard(db, name)?;
+            super::catalog_namespace::validate_guard(db, name)?;
         }
     }
     Ok(())

@@ -441,15 +441,14 @@ fn failed(error: rusqlite::Error) -> StorageError {
         error.sqlite_error_code()
     );
     #[cfg(test)]
-    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
-        if (message.starts_with("no such ") || message.starts_with("private native"))
-            && message.len() < 160
-            && message
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
-        {
-            eprintln!("configured SQL contract failure: {message}");
-        }
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error
+        && (message.starts_with("no such ") || message.starts_with("private native"))
+        && message.len() < 160
+        && message
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
+    {
+        eprintln!("configured SQL contract failure: {message}");
     }
     #[cfg(test)]
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
@@ -757,6 +756,24 @@ impl NativeOwnership {
                 |r| r.get(0),
             )
             .map_err(failed)?;
+        if bound {
+            let admission = tx
+                .query_row(
+                    "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                    [config.namespace.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(failed)?;
+            if let Some(admission) = admission {
+                let owner = Self {
+                    config: config.clone(),
+                    admission,
+                };
+                owner.validate_ready(&tx)?;
+                return Ok(owner);
+            }
+        }
         if !bound {
             // Fresh profile only: existing native data requires migration.
             let source_meta: bool = tx
@@ -865,8 +882,8 @@ impl NativeOwnership {
             admission,
         };
         owner.validate(&tx)?;
+        prepare_owned(&tx, &owner)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        prepare_owned(&owner)?;
         Ok(owner)
     }
 }
@@ -876,14 +893,9 @@ pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageE
     create(config)
 }
 
-fn prepare_owned(owner: &NativeOwnership) -> Result<(), StorageError> {
-    let journal = SourceJournal::owned(owner.clone());
-    journal.prepare()?;
-    let mut db = connection(owner.config())?;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    owner.validate(&tx)?;
+fn prepare_owned(tx: &Connection, owner: &NativeOwnership) -> Result<(), StorageError> {
+    crate::storage::sqlite::source_journal::enroll(tx, owner.config())?;
+    crate::storage::sqlite::semantic::enroll(tx, owner.config(), owner.admission())?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);
@@ -937,7 +949,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
         )
         .map_err(failed)?;
     }
-    tx.commit().map_err(|_| StorageError::CommitUncertain)
+    Ok(())
 }
 
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
@@ -1662,6 +1674,8 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
         #[cfg(test)]
+        let _sql_lock = crate::source_change::SqlLockScope::enter();
+        #[cfg(test)]
         let reserved = std::time::Instant::now();
         self.validate(&tx)?;
         #[cfg(test)]
@@ -1739,6 +1753,8 @@ impl Writer {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
+        #[cfg(test)]
+        let _sql_lock = crate::source_change::SqlLockScope::enter();
         #[cfg(test)]
         let reserved = std::time::Instant::now();
         self.validate(&tx)?;
@@ -3614,7 +3630,7 @@ mod tests {
         let prepared = crate::model::prepare_sources(
             &options,
             &mut cache,
-            &[input.clone()],
+            std::slice::from_ref(&input),
             1_790_000_000_000,
         )
         .unwrap();

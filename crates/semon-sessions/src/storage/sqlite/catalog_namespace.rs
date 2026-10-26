@@ -1,7 +1,7 @@
 //! Namespace binding and current Catalog reader/writer fences.
 use super::failed;
 use crate::storage::{LogicalSourceNamespace, StorageError};
-use rusqlite::{Connection, functions::FunctionFlags};
+use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
 
 pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "session_catalog",
@@ -88,16 +88,32 @@ pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
     Ok(true)
 }
 
-pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
-    for (operation, predicate) in [
+fn guards(table: &str) -> [(String, String); 3] {
+    [
         ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-        (
-            "UPDATE",
-            "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-        ),
+        ("UPDATE", "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),
         ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-    ] {
-        db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END;", quote(&format!("storage_catalog_guard_{table}_{operation}")), quote(table))).map_err(failed)?;
+    ].map(|(operation, predicate)| {
+        let name = format!("storage_catalog_guard_{table}_{operation}");
+        let sql = format!("CREATE TRIGGER {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END", quote(&name), quote(table));
+        (name, sql)
+    })
+}
+
+pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
+    for (_, sql) in guards(table) {
+        db.execute_batch(&sql.replacen("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1))
+            .map_err(failed)?;
+    }
+    validate_guard(db, table)
+}
+
+pub(super) fn validate_guard(db: &Connection, table: &str) -> Result<(), StorageError> {
+    for (name, expected) in guards(table) {
+        let actual: Option<String> = db.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", rusqlite::params![name,table], |r|r.get(0)).optional().map_err(failed)?;
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
     }
     Ok(())
 }
@@ -229,7 +245,7 @@ mod current_navigation_tests {
         .unwrap();
 
         let db = f.db();
-        register(&db, &f.config.namespace).unwrap();
+        register(db, &f.config.namespace).unwrap();
         db.execute(
             "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','same','retained','codex','retained-history','retained/same')",
             [],
