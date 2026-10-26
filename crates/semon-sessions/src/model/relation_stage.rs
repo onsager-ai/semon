@@ -133,17 +133,19 @@ impl LifecycleAuthority {
         Ok(authority)
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
-        let facts = self.facts.as_ref().map(|(path, identity)| {
+        let facts = if let Some((path, identity)) = &self.facts {
             if crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? != *identity {
-                return Ok(None);
+                return Ok(false);
             }
             let facts = crate::facts::source_authority::CurrentSources::open(path)?;
             facts.validate()?;
-            Ok::<_, io::Error>(facts.facts_known().then_some(facts))
-        }).transpose()?;
-        if matches!(facts, Some(None)) {
-            return Ok(false);
-        }
+            if !facts.facts_known() {
+                return Ok(false);
+            }
+            Some(facts)
+        } else {
+            None
+        };
         // Both modes recheck the same captured runtime inputs as the producer.
         // No host configuration, EventCache or storage engine is opened here.
         let options = Options {
@@ -164,7 +166,7 @@ impl LifecycleAuthority {
         if let Some((path, identity)) = &self.facts {
             current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? == *identity;
         }
-        if let Some(Some(facts)) = facts {
+        if let Some(facts) = facts {
             facts.validate()?;
         }
         Ok(current)
