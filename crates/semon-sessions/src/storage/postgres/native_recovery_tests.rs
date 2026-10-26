@@ -65,29 +65,19 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let mut prepared_rows = Vec::new();
     for batch in inputs.chunks(64) {
-        prepared_rows.extend(
-            crate::model::prepare_sources(&options, &mut sqlite, batch, 1790812802000)
-                .unwrap()
-                .rows,
-        );
+        let prepared = crate::model::prepare_sources(&options, &mut sqlite, batch, 1790812802000)
+            .unwrap();
+        let (outcome, generation) = sqlite.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
+        assert!(generation.is_some());
+        prepared_rows.extend(prepared.rows);
     }
     drop(sqlite);
     let config = options.source.config(&options.cache).unwrap();
-    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(
-        crate::events::store::configured::NativeOwnership::admit(&config).unwrap(),
-    );
-    let mut db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-    let tx = db.transaction().unwrap();
-    let writer = crate::storage::sqlite::publication::CurrentWriter::admitted(&tx, &admission)
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
         .unwrap();
-    use crate::storage::catalog::CurrentPublicationStore;
-    for row in &prepared_rows {
-        writer
-            .current(row, &serde_json::to_string(row).unwrap())
-            .unwrap();
-        crate::storage::catalog::publish_current_sources(&writer, row).unwrap();
-    }
-    tx.commit().unwrap();
     crate::events::store::begin_catalog_recovery(&options, "recovery136 fixture").unwrap();
     let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let mut outcomes = Vec::new();
@@ -96,7 +86,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     }
     assert_eq!(outcomes, vec![false, false, true]);
     let expected = db
-        .prepare("SELECT source_path FROM catalog_backfill_sources ORDER BY source_path")
+        .prepare("SELECT source_path FROM catalog_backfill_sources WHERE namespace=semon_namespace() ORDER BY source_path")
         .unwrap()
         .query_map([], |r| r.get::<_, String>(0))
         .unwrap()

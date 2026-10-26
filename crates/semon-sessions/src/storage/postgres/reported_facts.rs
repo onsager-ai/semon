@@ -479,10 +479,12 @@ mod tests {
         assert_eq!(runs[1].last_cost, None);
         assert_eq!(runs[0].last_model_usage["模型\0"].input_tokens, u64::MAX);
         drop(cache);
-        let db = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+        let config = source.config(&cache_path).unwrap();
+        let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
         let text: String = db
             .query_row(
-                "SELECT value FROM meta WHERE key='claude_json_stamp'",
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'",
                 [],
                 |r| r.get(0),
             )

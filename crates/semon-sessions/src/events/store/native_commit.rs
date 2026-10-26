@@ -260,8 +260,12 @@ pub(crate) fn parser_oracle(
     let index = super::super::scan_file(source, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let connection = Connection::open(super::super::EventCache::path(cache_path)).unwrap();
-    let mut statement = connection.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE source_path=?1 ORDER BY harness COLLATE BINARY,native_id COLLATE BINARY").unwrap();
+    let config = host_source.config(cache_path).unwrap();
+    let owner = configured::NativeOwnership::admit(&config).unwrap();
+    let connection = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
+    let mut statement = connection.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 ORDER BY harness COLLATE BINARY,native_id COLLATE BINARY").unwrap();
     let rows = statement
         .query_map([source.to_str().unwrap()], |row| {
             Ok((row.get(0)?, row.get(1)?))

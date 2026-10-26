@@ -37,7 +37,7 @@ fn root() -> std::path::PathBuf {
     root
 }
 fn ledger(db: &rusqlite::Connection, path: &str) -> Ledger {
-    db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1",[path],|r|Ok(Ledger { stat:Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap()
+    db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE namespace=semon_namespace() AND path=?1",[path],|r|Ok(Ledger { stat:Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap()
 }
 fn body(harness: &str, append: bool) -> String {
     let mut rows = match (harness, append) {
@@ -81,7 +81,9 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
     let index = scan_file(path, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let db = rusqlite::Connection::open(EventCache::path(cache_path)).unwrap();
+    let config = source.config(cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let ledger = ledger(&db, path.to_str().unwrap());
     let rows = FAMILIES
         .iter()
@@ -91,7 +93,7 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
             } else {
                 family
             };
-            let mut stmt = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let mut stmt = db.prepare(&format!("SELECT * FROM {table} WHERE namespace=semon_namespace()")).unwrap();
             let names = stmt
                 .column_names()
                 .into_iter()
@@ -102,7 +104,7 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
                     names
                         .iter()
                         .enumerate()
-                        .filter(|(_, n)| n.as_str() != "file_id")
+                        .filter(|(_, n)| !matches!(n.as_str(), "file_id" | "namespace"))
                         .map(|(i, n)| {
                             let v: Value = r.get(i)?;
                             let bytes = match v {
@@ -229,10 +231,11 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
     let cache = root.join("cache.json");
     // The complete real SQLite producer runs before any PG fixture or writer.
     let oracle = phase(&cache, &path, "claude");
-    let carrier = EventCache::path(&cache);
-    let db = rusqlite::Connection::open(&carrier).unwrap();
+    let config = fixture_host_source().config(&cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let metadata = db
-        .prepare("SELECT key,value FROM meta WHERE length(key)>2704")
+        .prepare("SELECT key,value FROM meta WHERE namespace=semon_namespace() AND length(key)>2704")
         .unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .unwrap()

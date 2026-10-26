@@ -16,7 +16,7 @@ use std::{
 
 type OracleRows = Vec<(&'static str, Vec<Vec<(String, Value)>>)>;
 
-fn fixture_host_source() -> crate::storage::HostSource {
+pub(crate) fn fixture_host_source() -> crate::storage::HostSource {
     crate::storage::HostSource::new(ns("tree-checkpoint-fixtures"), "2".repeat(64)).unwrap()
 }
 
@@ -382,7 +382,7 @@ pub(crate) struct Fixture {
     pub(crate) rows: OracleRows,
 }
 fn read_ledger(sqlite: &rusqlite::Connection, path: &str) -> Ledger {
-    sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
+    sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE namespace=semon_namespace() AND path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
 }
 pub(crate) fn parser_fixture(harness: &str) -> Fixture {
     parser_fixture_path(harness, false)
@@ -497,12 +497,14 @@ fn capture_fixture_at(
     cache.flush_cold_writes().unwrap();
     let mut oracle = index.tree_summary.clone().unwrap();
     oracle.load_shared_usage().unwrap();
-    let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     // The compact scalar and SQLite's lazy restore omit closed IDs. Capture
     // their persisted dimension oracle before closing SQLite for the PG phase.
     oracle.closed_tools = sqlite
-        .prepare("SELECT t.tool_id FROM native_tree_tools t JOIN native_tree_headers h USING(projection_id) WHERE h.source_path=?1 AND t.closed=1 ORDER BY t.tool_id")
+        .prepare("SELECT t.tool_id FROM native_tree_tools t JOIN native_tree_headers h USING(namespace,projection_id) WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND t.closed=1 ORDER BY t.tool_id")
         .unwrap()
         .query_map([path.to_str().unwrap()], |r| r.get(0))
         .unwrap()
@@ -511,7 +513,7 @@ fn capture_fixture_at(
     // Verify the persisted scalar oracle before any PG connection exists.
     let stored: String = sqlite
         .query_row(
-            "SELECT value FROM meta WHERE key=?1",
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{}", path.to_str().unwrap())],
             |r| r.get(0),
         )
@@ -551,7 +553,7 @@ fn capture_fixture_at(
         } else {
             family.into()
         };
-        let mut stmt = sqlite.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let mut stmt = sqlite.prepare(&format!("SELECT * FROM {table} WHERE namespace=semon_namespace()")).unwrap();
         let names = stmt
             .column_names()
             .into_iter()
@@ -573,7 +575,7 @@ fn capture_fixture_at(
     let source_paths = sqlite
         // Retained UsageSource generations are not additional Current files.
         // Replaying them as duplicate paths violates Core's exact ledger CAS.
-        .prepare("SELECT source_path FROM native_usage_current ORDER BY source_id")
+        .prepare("SELECT source_path FROM native_usage_current WHERE namespace=semon_namespace() ORDER BY source_id")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -712,11 +714,13 @@ pub(crate) fn install_without_tree(
     install_families(tx, fixture, false)
 }
 pub(crate) fn oracle_witness(data: &Fixture) -> String {
-    let db = rusqlite::Connection::open(EventCache::path(&data.root.join("index.json"))).unwrap();
+    let config = fixture_host_source().config(&data.root.join("index.json")).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let path = data.path.strip_suffix("\0🦀").unwrap();
     let encoded: String = db
         .query_row(
-            "SELECT value FROM meta WHERE key=?1",
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{path}")],
             |r| r.get(0),
         )
@@ -1089,7 +1093,9 @@ fn pg_tree_checkpoint_real_copilot_has_no_tree_authority() {
     );
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     drop(sqlite);
     let (pool, _) = fixture(|_| {});
