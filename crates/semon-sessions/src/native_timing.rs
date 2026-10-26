@@ -700,7 +700,6 @@ pub(crate) struct Measurements {
     uncached_cleanup_reference: bool,
 }
 
-
 /// Static nested leaves of the existing inclusive cleanup measurement. Counts
 /// use the workload half of us_units; children must not be added to parents.
 pub(crate) struct CleanupLabels {
