@@ -50,4 +50,7 @@ mod tests;
 mod native_ingest_tests;
 
 #[cfg(test)]
+mod native_recovery_tests;
+
+#[cfg(test)]
 mod proxy_test;
