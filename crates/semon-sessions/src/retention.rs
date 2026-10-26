@@ -5,6 +5,7 @@ use crate::{
     catalog::CatalogIdentityError,
     events::EventCache,
     model::summary::{CatalogRow, CatalogSource},
+    storage::NativeReaderBinding,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -62,28 +63,32 @@ pub fn source_projection_ready(
     if !index.exists() {
         return Ok(None);
     }
-    let connection = Connection::open_with_flags(
-        index,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| Unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, root)
+        .map_err(|_| Unavailable)?;
+    let connection = binding.connection().map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| Unavailable)?;
     let transaction = connection
         .unchecked_transaction()
         .map_err(|_| Unavailable)?;
-    projection_ready(&transaction, root, path, full)
+    projection_ready(&transaction, &binding, root, path, full)
 }
 
 fn projection_ready(
     transaction: &Connection,
+    binding: &NativeReaderBinding,
     root: &str,
     path: &str,
     full: &str,
 ) -> Result<Option<SourceProjectionReady>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, Unavailable};
-    crate::events::store::require_current(transaction).map_err(|_| Unavailable)?;
+    if !binding
+        .validate(transaction, &binding.config().namespace)
+        .map_err(|_| Unavailable)?
+    {
+        return Ok(None);
+    }
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_version'",
@@ -125,7 +130,7 @@ fn projection_ready(
         } else {
             ""
         };
-        let mut statement=transaction.prepare(&format!("SELECT CASE WHEN octet_length({metadata})<=1048576 THEN {metadata} ELSE NULL END,{header} FROM session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) {tables} {current_header} WHERE session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9")).map_err(|_|Unavailable)?;
+        let mut statement=transaction.prepare(&format!("SELECT CASE WHEN octet_length({metadata})<=1048576 THEN {metadata} ELSE NULL END,{header} FROM main.session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) {tables} {current_header} WHERE session_catalog_sources.namespace=semon_namespace() AND session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9")).map_err(|_|Unavailable)?;
         let candidates = statement
             .query_map([lifecycle, full], |row| {
                 Ok((
@@ -263,6 +268,8 @@ pub fn retain_source_event_index(
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     let path = archive_index_path(options, proof, projection)?;
     let full = path.to_str().ok_or(InvalidArguments)?;
+    let binding = crate::storage::local_navigation_binding(options, &proof.source.root)
+        .map_err(|_| Unavailable)?;
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -270,13 +277,15 @@ pub fn retain_source_event_index(
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| Unavailable)?;
+    crate::storage::sqlite::catalog_namespace::register(&connection, &binding.config().namespace)
+        .map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| Unavailable)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Unavailable)?;
-    if !projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
+    if !projection_ready(&transaction, &binding, &proof.source.root, &proof.source.path, full)?
         .is_some_and(|ready| same_projection(&ready, projection))
         || !crate::events::retain_archive_index(&transaction, full, proof, projection)
             .map_err(|_| Unavailable)?
@@ -299,6 +308,8 @@ pub fn source_event_index_retained(
     use CatalogIdentityError::{InvalidArguments, Unavailable};
     let path = archive_index_path(options, proof, projection)?;
     let full = path.to_str().ok_or(InvalidArguments)?;
+    let binding = crate::storage::local_navigation_binding(options, &proof.source.root)
+        .map_err(|_| Unavailable)?;
     let connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -306,6 +317,8 @@ pub fn source_event_index_retained(
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| Unavailable)?;
+    crate::storage::sqlite::catalog_namespace::register(&connection, &binding.config().namespace)
+        .map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| Unavailable)?;
@@ -313,7 +326,7 @@ pub fn source_event_index_retained(
         .unchecked_transaction()
         .map_err(|_| Unavailable)?;
     Ok(
-        projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
+        projection_ready(&transaction, &binding, &proof.source.root, &proof.source.path, full)?
             .is_some_and(|ready| same_projection(&ready, projection))
             && crate::events::archive_index_retained(&transaction, full, proof, projection)
                 .map_err(|_| Unavailable)?,
