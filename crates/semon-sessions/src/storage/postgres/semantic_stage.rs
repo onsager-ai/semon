@@ -576,40 +576,37 @@ pub(super) fn select(
     let ns = tx.namespace.as_str().as_bytes();
     let mut hints = Vec::new();
     if let Some(generation) = generation {
-        let values=tx.driver.query("SELECT d.session_key,CASE WHEN octet_length(d.metadata)<=1048576 THEN d.metadata END,CASE WHEN octet_length(r.metadata)<=1048576 THEN r.metadata END FROM semon_pg_native_descriptions d JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=d.namespace_digest AND r.namespace=d.namespace AND r.session_key=d.session_key WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND r.generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-        if values.len() > 64 {
-            return Err(StorageError::Busy);
-        }
-        let mut bytes = 0usize;
-        for value in values {
-            let key = String::from_utf8(value.get(0)).map_err(|_| StorageError::ScopeChanged)?;
-            if context.endpoints.contains_key(&key) {
-                continue;
-            }
-            let owner: Vec<u8> = value
-                .get::<_, Option<Vec<u8>>>(2)
-                .ok_or(StorageError::Busy)?;
-            bytes = bytes.saturating_add(owner.len());
-            if bytes > MAX {
-                return Err(StorageError::Busy);
-            }
-            let owner: crate::model::summary::CatalogRow =
-                serde_json::from_slice(&owner).map_err(|_| StorageError::ScopeChanged)?;
-            if owner.harness != "claude" {
-                continue;
-            }
-            let raw: Vec<u8> = value
-                .get::<_, Option<Vec<u8>>>(1)
-                .ok_or(StorageError::Busy)?;
-            bytes = bytes.saturating_add(raw.len());
-            if bytes > MAX {
-                return Err(StorageError::Busy);
-            }
-            let description: serde_json::Value =
-                serde_json::from_slice(&raw).map_err(|_| StorageError::ScopeChanged)?;
-            if let Some(names) = description["names"].as_array() {
-                for name in names.iter().filter_map(|n| n.as_str()) {
-                    hints.push((key.clone(), name.to_owned()));
+        // Claude Current owners with saved names, by bounded key pages. Each
+        // page has its own 1 MiB budget and checks the deadline.
+        let mut after: Option<Vec<u8>> = None;
+        loop {
+            tx.check()?;
+            let values=tx.driver.query("WITH page AS MATERIALIZED (SELECT d.key_digest,d.session_key,d.metadata AS description,r.metadata AS owner FROM semon_pg_native_descriptions d JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=d.namespace_digest AND r.namespace=d.namespace AND r.key_digest=d.key_digest AND r.session_key=d.session_key WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND r.generation=$2 AND r.harness=$3 AND ($4::bytea IS NULL OR d.key_digest>$4) ORDER BY d.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(description)+octet_length(owner)) OVER ()<=1048576 THEN description END,owner FROM page ORDER BY key_digest", &[&ns,&generation.as_bytes(),&b"claude".as_slice(),&after]).map_err(sqlstate::error)?;
+            let Some(last) = values.last() else {
+                break;
+            };
+            after = Some(last.get(0));
+            for value in &values {
+                let key =
+                    String::from_utf8(value.get(1)).map_err(|_| StorageError::ScopeChanged)?;
+                let raw: Vec<u8> = value
+                    .get::<_, Option<Vec<u8>>>(2)
+                    .ok_or(StorageError::Busy)?;
+                if context.endpoints.contains_key(&key) {
+                    continue;
+                }
+                let owner: crate::model::summary::CatalogRow =
+                    serde_json::from_slice(&value.get::<_, Vec<u8>>(3))
+                        .map_err(|_| StorageError::ScopeChanged)?;
+                if owner.harness != "claude" || owner.key != key {
+                    return Err(StorageError::ScopeChanged);
+                }
+                let description: serde_json::Value =
+                    serde_json::from_slice(&raw).map_err(|_| StorageError::ScopeChanged)?;
+                if let Some(names) = description["names"].as_array() {
+                    for name in names.iter().filter_map(|n| n.as_str()) {
+                        hints.push((key.clone(), name.to_owned()));
+                    }
                 }
             }
         }
