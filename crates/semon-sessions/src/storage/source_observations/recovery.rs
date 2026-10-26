@@ -12,11 +12,26 @@ pub(crate) struct Page {
 
 impl Page {
     pub(crate) fn plan(after: &str, paths: Vec<String>) -> Result<Self, StorageError> {
-        Self::keyed(after, paths.into_iter().map(|path| (path.clone(), Some(path))).collect())
+        Self::keyed(
+            after,
+            paths
+                .into_iter()
+                .map(|path| (path.clone(), Some(path)))
+                .collect(),
+        )
     }
 
-    pub(crate) fn keyed(after: &str, entries: Vec<(String, Option<String>)>) -> Result<Self, StorageError> {
-        if entries.len() > ROWS || entries.iter().map(|(key, path)| key.len() + path.as_ref().map_or(0, String::len)).sum::<usize>() > BYTES {
+    pub(crate) fn keyed(
+        after: &str,
+        entries: Vec<(String, Option<String>)>,
+    ) -> Result<Self, StorageError> {
+        if entries.len() > ROWS
+            || entries
+                .iter()
+                .map(|(key, path)| key.len() + path.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+                > BYTES
+        {
             return Err(StorageError::Busy);
         }
         let mut prior = after;

@@ -1504,7 +1504,9 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
                 "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1").map_err(io::Error::other)?,
             [archive_index_key(path)], |row| row.get(0),
         ).optional().map_err(io::Error::other)?;
-        page_bytes = page_bytes.checked_add(usize::try_from(bytes.unwrap_or(0)).map_err(io::Error::other)?).ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        page_bytes = page_bytes
+            .checked_add(usize::try_from(bytes.unwrap_or(0)).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
         if page_bytes > crate::storage::source_observations::recovery::BYTES {
             return Err(io::Error::other(StorageError::Busy));
         }
@@ -5722,15 +5724,13 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         [archive_index_key(path)], |row| row.get(0),
     ).optional()?;
     encoded
-        .map(|value| {
-            decode_archive_marker(&value.ok_or(rusqlite::Error::InvalidQuery)?)
-        })
+        .map(|value| decode_archive_marker(&value.ok_or(rusqlite::Error::InvalidQuery)?))
         .transpose()
 }
 
 fn decode_archive_marker(value: &str) -> rusqlite::Result<ArchivedIndex> {
-    let record: ArchivedIndex = serde_json::from_str(value)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let record: ArchivedIndex =
+        serde_json::from_str(value).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if record.version != 6 || record.parser_version != CACHE_VERSION {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -5739,7 +5739,9 @@ fn decode_archive_marker(value: &str) -> rusqlite::Result<ArchivedIndex> {
 
 #[cfg(feature = "postgres")]
 pub(crate) fn validate_archive_marker(value: &str) -> Result<(), StorageError> {
-    decode_archive_marker(value).map(|_| ()).map_err(|_| StorageError::ScopeChanged)
+    decode_archive_marker(value)
+        .map(|_| ())
+        .map_err(|_| StorageError::ScopeChanged)
 }
 
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {

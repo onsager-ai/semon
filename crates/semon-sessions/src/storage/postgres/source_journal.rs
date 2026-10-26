@@ -154,15 +154,29 @@ impl SourceObservationStore for PgSourceJournal {
     fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
         // There is no unchecked metadata-only ready cache: validate the current
         // physical profile, then take the durable exact-operation path.
-        self.read(|tx| { tx.check()?; Ok(false) })
+        self.read(|tx| {
+            tx.check()?;
+            Ok(false)
+        })
     }
     fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
         self.read(super::native_recovery::cursor)
     }
-    fn recover(&mut self, operation: &SourceOperation, cursor: Option<&str>) -> Result<(SourceMutationReceipt, bool), StorageError> {
-        let intent = SourceIntent::Recover { operation: operation.clone(), cursor: cursor.map(str::to_owned) };
+    fn recover(
+        &mut self,
+        operation: &SourceOperation,
+        cursor: Option<&str>,
+    ) -> Result<(SourceMutationReceipt, bool), StorageError> {
+        let intent = SourceIntent::Recover {
+            operation: operation.clone(),
+            cursor: cursor.map(str::to_owned),
+        };
         if let Err(error) = validate_intent(Some(self.namespace.as_str()), &intent) {
-            return if error == StorageError::Conflict { Ok((SourceMutationReceipt::Conflict, false)) } else { Err(error) };
+            return if error == StorageError::Conflict {
+                Ok((SourceMutationReceipt::Conflict, false))
+            } else {
+                Err(error)
+            };
         }
         self.write(|tx| super::native_recovery::recover(tx, &intent))
     }
