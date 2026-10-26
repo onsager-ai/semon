@@ -2,7 +2,7 @@
 //! Event/ledger/proof and Catalog publication remain independently fenced.
 use super::{catalog_namespace, failed};
 use crate::storage::{
-    NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
+    NativeReaderBinding, StorageError, StoreConfig,
     source_observations::{
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
         operation_replay, validate_intent, validate_paths,
@@ -944,6 +944,7 @@ pub(crate) fn acknowledge_intent_sql(
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::StoreBackend;
     use super::*;
     use crate::events::{EventCache, FileIndex, Ledger, Stat, StoreError};
     use crate::storage::{LogicalSourceNamespace, source_observations::SourceObservationStore};
