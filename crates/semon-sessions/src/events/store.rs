@@ -924,30 +924,26 @@ impl DiscoveryState {
 /// `<path>.corrupt` and a new store is made in its place. Operational failures
 /// (a read-only directory or a lock held past the timeout) permit an in-memory
 /// cache. Unsupported contracts and malformed persistent values never do.
-pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
-    let (store, loaded) = match SqliteStore::attempt(path) {
-        Err(Unopened::Corrupt(error)) => {
-            set_aside(path).map_err(|aside| {
-                Unopened::Other(format!("{error}; it can't be set aside: {aside}"))
-            })?;
-            eprintln!(
-                "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
-                path.display()
-            );
-            SqliteStore::attempt(path)?
-        }
-        opened => opened?,
-    };
-    Ok((Box::new(store), loaded))
+pub(super) fn open(path: &Path, source: &crate::storage::HostSource) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
+    open_admitted(path, source).map_err(|error| Unopened::Other(error.to_string()))
+}
+
+fn open_admitted(path: &Path, source: &crate::storage::HostSource) -> Result<(Box<dyn IndexStore>, Loaded), crate::storage::StorageError> {
+    let mut config = source.config(path)?;
+    config.backend = crate::storage::StoreBackend::Sqlite { database: path.to_owned() };
+    if !path.try_exists().map_err(|_| crate::storage::StorageError::Unavailable)? {
+        configured::create(&config)?;
+    }
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    let (store, stamp) = crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
+    Ok((store, Loaded { files: Vec::new(), reported_runs: Vec::new(), stamp }))
 }
 
 /// Producer open: initialize the durable store without restoring unrelated indexes.
 /// Store failures are returned; a background worker must retry rather than silently
 /// switch to an unbounded in-memory rebuild.
-pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
-    let (store, loaded) =
-        SqliteStore::attempt_scoped(path, true).map_err(|error| error.to_string())?;
-    Ok((Box::new(store), loaded))
+pub(super) fn open_scoped(path: &Path, source: &crate::storage::HostSource) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+    open_admitted(path, source).map_err(|error| error.to_string())
 }
 
 /// Qualify an exact selected or recovery path without traversing unrelated
@@ -8636,7 +8632,7 @@ mod tests {
             .into_iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .collect::<Vec<_>>();
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let mut rows = Vec::new();
         let mut projections = Vec::new();
         for inputs in inputs.chunks(64) {
@@ -9243,7 +9239,7 @@ mod tests {
                 cache: store.path.with_extension("json"),
                 ..options.clone()
             };
-            let mut cache = crate::events::EventCache::open_scoped(&scoped_options.cache).unwrap();
+            let mut cache = crate::events::EventCache::open_scoped(&scoped_options.cache, &scoped_options.source).unwrap();
             let stage_before = crate::model::now_ms();
             assert_eq!(
                 store.semantic_begin(&paths, &runtime).unwrap(),
@@ -10345,7 +10341,7 @@ mod tests {
             .filter(|input| input.path.ends_with(".jsonl"))
             .collect::<Vec<_>>();
         assert_eq!(inputs.len(), 2049);
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let mut rows = Vec::new();
         let mut projections = Vec::new();
         for sources in inputs.chunks(64) {
@@ -12040,7 +12036,7 @@ mod tests {
                 assert!(archived_index(&db, "original").is_err());
             }
             unchanged();
-            match super::super::EventCache::open(&v1) {
+            match super::super::EventCache::open(&v1, &crate::Options::default().source) {
                 Err(error) => assert!(error.contains(reason), "{error}"),
                 Ok(_) => panic!("unsupported {name} became valid in-memory history"),
             }
@@ -12708,7 +12704,7 @@ mod tests {
         )
         .unwrap();
         let cache_path = root.join("index.json");
-        let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+        let mut cache = crate::events::EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let index = crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         cache.flush_cold_writes().unwrap();
         drop(cache);

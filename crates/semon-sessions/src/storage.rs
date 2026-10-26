@@ -13,6 +13,8 @@ pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub(crate) mod selected;
 pub mod source_observations;
+mod host_source;
+pub use host_source::HostSource;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
