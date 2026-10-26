@@ -363,11 +363,10 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError> {
-        if files
-            .iter()
-            .any(|(_, ledger, _)| ledger.offset != ledger.stat.size)
+        if !crate::events::native_commit::initial_batch(files)
+            .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?
         {
-            return Err(StoreError::Configured(StorageError::InvalidArguments));
+            return Ok(Outcome::Conflict);
         }
         let files = files
             .iter()

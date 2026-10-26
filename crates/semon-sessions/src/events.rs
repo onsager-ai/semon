@@ -3108,10 +3108,14 @@ impl EventCache {
     pub(crate) fn ingest_initial_batch(
         &mut self,
         requests: &[(&str, &Path, &str)],
-    ) -> Result<Vec<crate::storage::native_events::EventReceipt>, crate::storage::StorageError> {
+    ) -> Result<Vec<crate::storage::native_events::EventReceipt>, crate::storage::StorageError>
+    {
         use crate::storage::StorageError;
-        if !self.explicit_store || requests.is_empty() || requests.len() > 64
-            || !self.cold_writes.is_empty() || self.event_operation.is_some()
+        if !self.explicit_store
+            || requests.is_empty()
+            || requests.len() > 64
+            || !self.cold_writes.is_empty()
+            || self.event_operation.is_some()
         {
             return Err(StorageError::InvalidArguments);
         }
@@ -3124,7 +3128,10 @@ impl EventCache {
             if !paths.insert(path) || !ids.insert(id) {
                 return Err(StorageError::InvalidArguments);
             }
-            if let Some(receipt) = store.reconcile_event(id, path, harness).map_err(configured_error)? {
+            if let Some(receipt) = store
+                .reconcile_event(id, path, harness)
+                .map_err(configured_error)?
+            {
                 replay.push(receipt);
             }
         }
@@ -3149,13 +3156,22 @@ impl EventCache {
         self.scan_byte_budget = prior_budget;
         if let Err(error) = scanned {
             self.cold_writes.clear();
-            return Err(error.get_ref().and_then(|e| e.downcast_ref::<StorageError>()).copied().unwrap_or(StorageError::Unavailable));
+            return Err(error
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<StorageError>())
+                .copied()
+                .unwrap_or(StorageError::Unavailable));
         }
-        requests.iter().map(|(_, path, _)| {
-            self.store.as_ref().ok_or(StorageError::Unavailable)?
-                .event_receipt(path.to_str().ok_or(StorageError::InvalidArguments)?)
-                .map_err(configured_error)
-        }).collect()
+        requests
+            .iter()
+            .map(|(_, path, _)| {
+                self.store
+                    .as_ref()
+                    .ok_or(StorageError::Unavailable)?
+                    .event_receipt(path.to_str().ok_or(StorageError::InvalidArguments)?)
+                    .map_err(configured_error)
+            })
+            .collect()
     }
 
     /// Writes a file's change through to the store. `true` when another
@@ -3772,7 +3788,8 @@ pub(crate) fn scan_file(
                 hook();
             }
         }
-        if cache.atomic_cold && (recorded.is_some() || bounded || ledger.offset != ledger.stat.size) {
+        if cache.atomic_cold && (recorded.is_some() || bounded || ledger.offset != ledger.stat.size)
+        {
             return Err(io::Error::other(crate::storage::StorageError::Conflict));
         }
         if cache.scan_byte_budget.is_some()

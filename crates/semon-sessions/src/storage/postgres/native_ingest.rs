@@ -70,17 +70,26 @@ pub(super) fn begin(
     expected: Option<&Ledger>,
 ) -> Result<Intent, StorageError> {
     let digest = request(namespace, path, harness, id)?;
-    pool.transaction(namespace,TxnKind::Write,control,|tx|{
-        super::native_core::qualify(tx,path,expected)?;
-        let intent=Intent { id:id.to_owned(),path:path.to_owned(),harness:harness.to_owned(),request:digest,base:expected.map(header_ledger).unwrap_or_default(),revision:claim(tx,path)? };
-        if let Some(prior)=stored(tx,id)? {
-            if prior!=intent { return Err(StorageError::Conflict); }
+    pool.transaction(namespace, TxnKind::Write, control, |tx| {
+        super::native_core::qualify(tx, path, expected)?;
+        let intent = Intent {
+            id: id.to_owned(),
+            path: path.to_owned(),
+            harness: harness.to_owned(),
+            request: digest,
+            base: expected.map(header_ledger).unwrap_or_default(),
+            revision: claim(tx, path)?,
+        };
+        if let Some(prior) = stored(tx, id)? {
+            if prior != intent {
+                return Err(StorageError::Conflict);
+            }
         } else {
-            let key=format!("native_event_intent:{id}");
-            let value=serde_json::to_vec(&intent).map_err(|_|StorageError::Unavailable)?;
+            let key = format!("native_event_intent:{id}");
+            let value = serde_json::to_vec(&intent).map_err(|_| StorageError::Unavailable)?;
             // qualify() holds SourceState through COMMIT, so the exact prior
             // intent check above and this collision-checked write are atomic.
-            super::native_keys::put_meta(tx,key.as_bytes(),&value)?;
+            super::native_keys::put_meta(tx, key.as_bytes(), &value)?;
         }
         Ok(intent)
     })
@@ -153,15 +162,10 @@ pub(super) fn commit(
     index: &FileIndex,
 ) -> Result<(), StorageError> {
     validate_input(intent, path, expected, ledger, index)?;
-    let result = pool.apply_operation(
-        namespace,
-        &identity(intent),
-        control,
-        |tx| {
-            qualify_intent(tx, intent, path, expected)?;
-            complete(tx, intent, path, expected, changes, ledger, index)
-        },
-    );
+    let result = pool.apply_operation(namespace, &identity(intent), control, |tx| {
+        qualify_intent(tx, intent, path, expected)?;
+        complete(tx, intent, path, expected, changes, ledger, index)
+    });
     match result {
         Ok(_) => Ok(()),
         Err(StorageError::CommitUncertain) => {
@@ -240,21 +244,39 @@ fn complete(
     ledger: &Ledger,
     index: &FileIndex,
 ) -> Result<serde_json::Value, StorageError> {
-        let namespace = tx.namespace.clone();
-        // The bundle is a family effect, never the source of a receipt. Require
-        // the actual committed family authority below before recording outcome.
-        let _partial=super::native_bundle::stage(tx,crate::events::native_commit::Input {path,expected,changes,ledger,index,semantic_change:expected!=Some(ledger)})?;
-        let Some((_,stored_ledger))=native_reader::ledger(tx,path)? else { return Err(StorageError::ScopeChanged); };
-        if stored_ledger!=*ledger { return Err(StorageError::ScopeChanged); }
-        let pages=super::native_pages::current(tx,path,ledger)?;
-        pages.launch(tx)?;
-        native_reader::qualify_completion(tx,path,ledger,index)?;
-        if index.tree_summary.is_some() {
-            let exact:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending)",&[&namespace.as_str().as_bytes(),&path.as_bytes(),&header_ledger(ledger).as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if !exact { return Err(StorageError::ScopeChanged); }
+    let namespace = tx.namespace.clone();
+    // The bundle is a family effect, never the source of a receipt. Require
+    // the actual committed family authority below before recording outcome.
+    let _partial = super::native_bundle::stage(
+        tx,
+        crate::events::native_commit::Input {
+            path,
+            expected,
+            changes,
+            ledger,
+            index,
+            semantic_change: expected != Some(ledger),
+        },
+    )?;
+    let Some((_, stored_ledger)) = native_reader::ledger(tx, path)? else {
+        return Err(StorageError::ScopeChanged);
+    };
+    if stored_ledger != *ledger {
+        return Err(StorageError::ScopeChanged);
+    }
+    let pages = super::native_pages::current(tx, path, ledger)?;
+    pages.launch(tx)?;
+    native_reader::qualify_completion(tx, path, ledger, index)?;
+    if index.tree_summary.is_some() {
+        let exact:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending)",&[&namespace.as_str().as_bytes(),&path.as_bytes(),&header_ledger(ledger).as_bytes()]).map_err(sqlstate::error)?.get(0);
+        if !exact {
+            return Err(StorageError::ScopeChanged);
         }
-        let revision=claim(tx,path)?;
-        Ok(serde_json::json!({"operation_id":intent.id,"consumed_bytes":ledger.offset,"observed_revision":revision}))
+    }
+    let revision = claim(tx, path)?;
+    Ok(
+        serde_json::json!({"operation_id":intent.id,"consumed_bytes":ledger.offset,"observed_revision":revision}),
+    )
 }
 
 /// One Source-serialized transaction, with one durable native completion for

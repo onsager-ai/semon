@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     events::{EventCache, FileIndex},
-    storage::{StoreBackend, StoreConfig, native_events::NativeEventStore},
+    storage::{LogicalSourceNamespace, StoreBackend, StoreConfig, native_events::NativeEventStore},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -127,10 +127,18 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             lifecycle,
         });
     }
-    let batch_ids = (101..104).map(|id| format!("{id:064x}")).collect::<Vec<_>>();
-    let requests = cases.iter().zip(&batch_ids).map(|(case, id)| (id.as_str(), case.path.as_path(), case.harness)).collect::<Vec<_>>();
+    let batch_ids = (101..104)
+        .map(|id| format!("{id:064x}"))
+        .collect::<Vec<_>>();
+    let requests = cases
+        .iter()
+        .zip(&batch_ids)
+        .map(|(case, id)| (id.as_str(), case.path.as_path(), case.harness))
+        .collect::<Vec<_>>();
     let config = StoreConfig {
-        backend: StoreBackend::Sqlite { database: cases[0].root.join("batch133.sqlite3") },
+        backend: StoreBackend::Sqlite {
+            database: cases[0].root.join("batch133.sqlite3"),
+        },
         namespace: tests::ns("native133"),
         expected_stream_epoch: Some("a".repeat(64)),
     };
@@ -138,7 +146,15 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
     let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
     let mut sqlite = EventCache::open_semantic(cap).unwrap();
     let batch_oracle = sqlite.ingest_initial_batch(&requests).unwrap();
-    let oracle_indexes = cases.iter().map(|case| fingerprint(&crate::events::scan_file(&case.path, case.harness, &mut sqlite, &mut false).unwrap())).collect::<Vec<_>>();
+    let oracle_indexes = cases
+        .iter()
+        .map(|case| {
+            fingerprint(
+                &crate::events::scan_file(&case.path, case.harness, &mut sqlite, &mut false)
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
     drop(sqlite);
     let _guard = Guard::new();
     {
@@ -150,37 +166,101 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         let receipts = pg.ingest_initial_batch(&requests).unwrap();
         let boundaries = native_bundle::measured_boundaries();
         assert!(boundaries > 3, "must measure real native family effects");
-        assert_eq!(receipts.iter().map(|r| r.consumed_bytes).collect::<Vec<_>>(), batch_oracle.iter().map(|r| r.consumed_bytes).collect::<Vec<_>>());
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|r| r.consumed_bytes)
+                .collect::<Vec<_>>(),
+            batch_oracle
+                .iter()
+                .map(|r| r.consumed_bytes)
+                .collect::<Vec<_>>()
+        );
         for (case, oracle) in cases.iter().zip(&oracle_indexes) {
-            assert!(fingerprint(&crate::events::scan_file(&case.path, case.harness, &mut pg, &mut false).unwrap()) == *oracle);
+            assert!(
+                fingerprint(
+                    &crate::events::scan_file(&case.path, case.harness, &mut pg, &mut false)
+                        .unwrap()
+                ) == *oracle
+            );
         }
         let namespace = tests::ns("native133-fault");
         // First failure persists only prepared intents. Every later measured
         // family failure must restore this exact whole-schema snapshot.
-        let mut pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+        let mut pg =
+            EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
         native_bundle::inject_failure(Some(1));
         assert!(pg.ingest_initial_batch(&requests).is_err());
         let baseline = batch_snapshot(&pool, &namespace, &control);
         for point in 1..=boundaries {
-            let mut pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+            let mut pg =
+                EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
+                    .unwrap();
             native_bundle::inject_failure(Some(point));
             assert!(pg.ingest_initial_batch(&requests).is_err(), "fault {point}");
-            assert!(batch_snapshot(&pool, &namespace, &control) == baseline, "whole DB changed after fault {point}");
+            assert!(
+                batch_snapshot(&pool, &namespace, &control) == baseline,
+                "whole DB changed after fault {point}"
+            );
         }
         native_bundle::inject_failure(None);
-        let mut pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+        let mut pg =
+            EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
         pg.ingest_initial_batch(&requests).unwrap();
         drop(pg);
         // Reconcile durable individual receipts after restart without Raw I/O.
         for case in &cases {
             std::fs::rename(&case.path, case.root.join("batch133-missing.jsonl")).unwrap();
         }
-        let mut pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+        let mut pg =
+            EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
         let replay = pg.ingest_initial_batch(&requests).unwrap();
         assert!(replay.iter().all(|r| r.replayed));
-        assert_eq!(replay.iter().map(|r| r.consumed_bytes).collect::<Vec<_>>(), batch_oracle.iter().map(|r| r.consumed_bytes).collect::<Vec<_>>());
+        assert_eq!(
+            replay.iter().map(|r| r.consumed_bytes).collect::<Vec<_>>(),
+            batch_oracle
+                .iter()
+                .map(|r| r.consumed_bytes)
+                .collect::<Vec<_>>()
+        );
         for case in &cases {
             std::fs::rename(case.root.join("batch133-missing.jsonl"), &case.path).unwrap();
+        }
+        let stale = tests::ns("native133-stale");
+        let hook_pool = pool.clone();
+        let hook_namespace = stale.clone();
+        let hook_control = control.clone();
+        let hook_path = cases[0].path.to_str().unwrap().to_owned();
+        crate::events::BEFORE_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            hook_pool.transaction(&hook_namespace, txn::TxnKind::Write, &hook_control, |tx| source_journal::invalidate(tx, &hook_path)).unwrap();
+        })));
+        let mut pg = EventCache::open_pg_native(pool.clone(), stale.clone(), control.clone()).unwrap();
+        assert!(pg.ingest_initial_batch(&requests).is_err(), "stale Source claim");
+        let rows: i64 = pool.transaction(&stale, txn::TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_files WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0))
+        }).unwrap();
+        assert_eq!(rows, 0, "no partial cold batch after stale Source claim");
+        for same_ids in [true, false] {
+            let namespace = tests::ns(if same_ids { "native133-race-same" } else { "native133-race-different" });
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles = (0..2).map(|worker| {
+                let pool = pool.clone();
+                let namespace = namespace.clone();
+                let control = control.clone();
+                let barrier = barrier.clone();
+                let owned = cases.iter().enumerate().map(|(n, case)| (format!("{:064x}", 201 + n + if same_ids { 0 } else { worker * 16 }), case.path.clone(), case.harness)).collect::<Vec<_>>();
+                std::thread::spawn(move || {
+                    let mut pg = EventCache::open_pg_native(pool, namespace, control).unwrap();
+                    crate::events::BEFORE_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { barrier.wait(); })));
+                    let requests = owned.iter().map(|(id, path, harness)| (id.as_str(), path.as_path(), *harness)).collect::<Vec<_>>();
+                    pg.ingest_initial_batch(&requests)
+                })
+            }).collect::<Vec<_>>();
+            let outcomes = handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>();
+            assert!(outcomes.iter().any(Result::is_ok), "one batch writer must win");
+            for outcome in outcomes.into_iter().flatten() {
+                assert_eq!(outcome.len(), requests.len(), "no partial receipt batch");
+            }
         }
     }
     for case in cases {
@@ -260,7 +340,11 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
     }
 }
 
-fn batch_snapshot(pool: &PgPool, namespace: &LogicalSourceNamespace, control: &PgCancellation) -> Vec<(String, Vec<String>)> {
+fn batch_snapshot(
+    pool: &PgPool,
+    namespace: &LogicalSourceNamespace,
+    control: &PgCancellation,
+) -> Vec<(String, Vec<String>)> {
     pool.transaction(namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
         let tables = tx.driver.query("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND starts_with(table_name,'semon_pg_') ORDER BY table_name", &[]).map_err(sqlstate::error)?;
         let mut snapshot = Vec::new();
