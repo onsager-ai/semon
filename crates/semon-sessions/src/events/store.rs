@@ -11538,7 +11538,10 @@ mod summary_tests {
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         db.execute_batch("CREATE TRIGGER interrupt_summary BEFORE INSERT ON main.session_descriptions WHEN NEW.namespace=semon_namespace() AND NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
-        assert_eq!(store.save_session_descriptions(&rows).unwrap(), Outcome::Written);
+        assert_eq!(
+            store.save_session_descriptions(&rows).unwrap(),
+            Outcome::Written
+        );
         let batch = vec![
             ("first".into(), 1, "inputs".into(), "new".into()),
             ("second".into(), 1, "inputs".into(), "new".into()),
