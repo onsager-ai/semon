@@ -59,6 +59,10 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Canonical namespace factory structure and drift refusal
+        run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
+      - name: Native Claude name and owned member replay qualification
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: Native frontier physical-work qualification
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
       - name: Current native store admission and nonmutation
@@ -67,8 +71,6 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::tests::current_reopen_keeps_wal_reader_and_concurrent_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_initialization_holds_its_lock_through_the_first_wal_switch -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_open_rechecks_a_concurrent_version_change_before_writes -- --exact --nocapture
-      - name: Native Claude name and owned member replay qualification
-        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture

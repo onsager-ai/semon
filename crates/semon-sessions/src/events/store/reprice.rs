@@ -905,7 +905,11 @@ fn pending_step(
     }
 }
 
-fn catalog_sql<'a>(db: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+fn catalog_sql<'a>(
+    db: &Connection,
+    _legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
     let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
     if !composite {
         return Err(rusqlite::Error::InvalidQuery);
