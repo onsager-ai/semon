@@ -272,6 +272,35 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 &row.model.as_bytes(),
             ],
         )?;
+        // Physical incident index for ordinary lifecycle lookups: parent and
+        // selected trace endpoints. Reverse neighbors use the peer index.
+        let edges = row
+            .query
+            .as_ref()
+            .and_then(|q| q["selected"]["edges"].as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|edge| ["from", "to"].map(move |field| edge["query"][field].as_str()));
+        let peers = row
+            .parent
+            .as_deref()
+            .into_iter()
+            .chain(edges.flatten())
+            .filter(|peer| *peer != row.key)
+            .collect::<std::collections::BTreeSet<_>>();
+        for peer in peers {
+            self.put(
+                "semon_pg_native_catalog_links",
+                &["key_digest", "session_key", "peer_digest", "peer"],
+                "key_digest,peer_digest",
+                &[
+                    &digest(row.key.as_bytes()),
+                    &row.key.as_bytes(),
+                    &digest(peer.as_bytes()),
+                    &peer.as_bytes(),
+                ],
+            )?;
+        }
         Ok(true)
     }
     fn retire_sources(&self, _key: &str) -> Result<(), StorageError> {
@@ -321,6 +350,7 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 "path_digest",
                 "source_path",
                 "metadata",
+                "native_digest",
             ],
             "key_digest,path_digest",
             &[
@@ -329,6 +359,7 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 &digest(path),
                 &path,
                 &encoded(source)?,
+                &digest(source.native_id.as_bytes()),
             ],
         )
     }
