@@ -115,6 +115,12 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 
 /// Must be called after controlled DDL while holding the exclusive schema
 /// advisory lock. The epoch and DDL commit atomically in the caller's txn.
+///
+/// Production exposes no schema-evolution capability yet: the runtime role is
+/// intentionally denied DDL. Keep this test-only host fixture rather than
+/// leaving a dormant production capability that could be mistaken for a
+/// qualified schema migration API.
+#[cfg(test)]
 pub(super) fn advance_epoch(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx
         .driver
