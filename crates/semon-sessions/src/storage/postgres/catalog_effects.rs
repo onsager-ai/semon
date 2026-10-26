@@ -400,8 +400,16 @@ pub(super) fn stage(
     if let Some(projections) = publication.transcripts {
         catalog::publish_slot_rows(&effects, publication.rows, projections)?;
     }
+    crate::catalog_search::publish_current_rows_port(
+        &effects,
+        &publication.rows.iter().collect::<Vec<_>>(),
+        64,
+        |_, _| {},
+    )?;
     Ok(())
 }
+
+mod search;
 
 #[cfg(test)]
 mod tests;

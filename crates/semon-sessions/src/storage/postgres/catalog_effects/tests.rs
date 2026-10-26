@@ -15,6 +15,9 @@ use std::{fs, time::Duration};
 const L1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const L2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const TABLES: &[&str] = &[
+    "catalog_search_documents",
+    "catalog_search_memberships",
+    "catalog_search_counts",
     "catalog_rows",
     "catalog_sources",
     "catalog_dependencies",
@@ -32,6 +35,7 @@ struct Input {
     metadata: Vec<Vec<u8>>,
     slots: Vec<Vec<u8>>,
     trace: Vec<Vec<Vec<u8>>>,
+    search: Vec<Vec<u8>>,
 }
 impl Input {
     fn publication(&self) -> crate::slot_projection::Publication<'_> {
@@ -90,8 +94,8 @@ fn oracle() -> Input {
     assert!(!prepared.rows.is_empty());
     assert!(!prepared.transcripts.is_empty());
     drop(cache);
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
-    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut connection = rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+    let db = connection.transaction().unwrap();
     let writer = CurrentWriter::unbound(&db);
     for row in &prepared.rows {
         writer
@@ -103,6 +107,7 @@ fn oracle() -> Input {
                 &crate::storage::sqlite::trace::TraceWriter::unbound(&db),
                 row,
                 trace,
+        search,
             )
             .unwrap();
         }
@@ -113,7 +118,7 @@ fn oracle() -> Input {
         &prepared.transcripts,
     )
     .unwrap();
-    db.execute_batch("COMMIT").unwrap();
+    crate::catalog_search::publish_current_rows(&db, &prepared.rows.iter().collect::<Vec<_>>()).unwrap();
     let read = |sql: &str| {
         db.prepare(sql)
             .unwrap()
@@ -124,6 +129,7 @@ fn oracle() -> Input {
     };
     let metadata = read("SELECT metadata FROM session_catalog ORDER BY session_key");
     let slots = read("SELECT metadata FROM session_slots ORDER BY session_key,slot");
+    let search = read("SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents ORDER BY read_scope,session_key");
     let trace = [
         "SELECT metadata FROM session_trace_headers ORDER BY session_key",
         "SELECT metadata FROM session_trace_turns ORDER BY session_key,turn_id",
@@ -134,6 +140,7 @@ fn oracle() -> Input {
     .collect();
     assert!(!slots.is_empty());
     drop(db);
+    drop(connection);
     fs::remove_dir_all(root).unwrap();
     Input {
         rows: prepared.rows,
@@ -165,6 +172,12 @@ fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() 
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_rows ORDER BY session_key", &[]).map_err(sqlstate::error)?;
         assert_eq!(rows.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.metadata);
+        let search = tx.driver.query("SELECT scope,session_key,fields,complete FROM semon_pg_native_catalog_search_documents ORDER BY scope,session_key", &[]).map_err(sqlstate::error)?;
+        let search = search.iter().map(|row| {
+            let text = |index| String::from_utf8(row.get::<_, Vec<u8>>(index)).unwrap();
+            serde_json::to_vec(&serde_json::json!([text(0), text(1), serde_json::from_str::<serde_json::Value>(&text(2)).unwrap(), i32::from(row.get::<_, bool>(3))])).unwrap()
+        }).collect::<Vec<_>>();
+        assert_eq!(search, data.search);
         let slots = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_recipe_rows ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
         assert_eq!(slots.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.slots);
         for (index, (table, order)) in [

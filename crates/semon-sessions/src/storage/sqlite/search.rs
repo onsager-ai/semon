@@ -56,6 +56,9 @@ fn columns(scope: crate::CatalogReadScope) -> (&'static str, &'static str) {
 }
 impl SearchPublicationStore for SearchWriter<'_> {
     type Error = rusqlite::Error;
+    fn data(error: serde_json::Error) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+    }
     fn begin(&self, rows: &[&CatalogRow]) -> rusqlite::Result<()> {
         self.db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_search_members;")?;
         for row in rows {

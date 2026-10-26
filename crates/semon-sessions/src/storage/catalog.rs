@@ -58,6 +58,7 @@ pub(crate) trait CurrentPublicationStore {
 pub(crate) trait SearchPublicationStore {
     fn begin(&self, rows: &[&CatalogRow]) -> Result<(), Self::Error>;
     type Error;
+    fn data(error: serde_json::Error) -> Self::Error;
     fn validate(&self, key: &str) -> Result<(), Self::Error>;
     fn remove(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
     fn document(
