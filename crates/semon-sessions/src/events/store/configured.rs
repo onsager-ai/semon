@@ -196,31 +196,32 @@ impl Drop for WriterShapeProbe {
     }
 }
 
-/// Select an authored statement for the physical family shape, never rewrite
-/// SQL or retry errors against another schema. Singleton stores still support
-/// read-only admission/assignment; configured writes require validate_core.
+/// Require the current namespace-leading core before returning its statement.
+/// Unsupported earlier contracts never select another runtime statement.
 pub(super) fn sql<'a>(
     db: &Connection,
-    legacy: &'a str,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
     let started = WriterShapeProbe::start("core_shape_calls");
     let composite = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get::<_, bool>(0));
     WriterShapeProbe::finish("core_shape_query", started);
     let composite = composite?;
-    Ok(if composite { scoped } else { legacy })
+    if !composite {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(scoped)
 }
 
 pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
     sql(db, "", "namespace=semon_namespace() AND ")
 }
 
-/// Meta is qualified separately from the core rows. Until all store-global
-/// owners are ported, a composite files table must not imply composite meta.
-/// Select authored statements only; never retry or rewrite SQL on failure.
+/// Require the current metadata key contract. The unused first argument is
+/// being removed with the remaining consumer SQL ports in this workstream.
 pub(crate) fn metadata_sql<'a>(
     db: &Connection,
-    legacy: &'a str,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
     let started = WriterShapeProbe::start("meta_shape_calls");
@@ -233,12 +234,10 @@ pub(crate) fn metadata_sql<'a>(
     )?.query_row([], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)));
     WriterShapeProbe::finish("meta_shape_query", started);
     let (columns, namespace, key, values) = shape?;
-    let composite = match (columns, namespace, key, values) {
-        (2, 0, 1, 1) => false,
-        (3, 1, 2, 1) => true,
-        _ => return Err(rusqlite::Error::InvalidQuery),
-    };
-    Ok(if composite { scoped } else { legacy })
+    if (columns, namespace, key, values) != (3, 1, 2, 1) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(scoped)
 }
 
 // Empty is reserved for store metadata: LogicalSourceNamespace refuses it.
@@ -336,11 +335,11 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
 /// Create a new physical store only. Existing files, even empty ones, refuse.
 /// Enrollment and bounded Catalog assignment remain separate explicit steps.
 pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
-    create_with_layout(config, PhysicalLayout::CONFIGURED)
+    create_current(config)
 }
 
-fn create_with_layout(config: &StoreConfig, layout: PhysicalLayout) -> Result<(), StorageError> {
-    let ddl = authored_storage_ddl(layout).map_err(|_| StorageError::InvalidArguments)?;
+fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
+    let ddl = authored_storage_ddl();
     let epoch = config
         .expected_stream_epoch
         .as_deref()
@@ -778,21 +777,7 @@ impl NativeOwnership {
 
 #[allow(dead_code)]
 pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageError> {
-    create_with_layout(
-        config,
-        PhysicalLayout {
-            core: true,
-            metadata: true,
-            catalog: true,
-            trace: true,
-            copied_usage: true,
-            native_usage: true,
-            tree: true,
-            pricing_queue: true,
-            semantic_support: true,
-            semantic_stage: true,
-        },
-    )
+    create(config)
 }
 
 fn prepare_owned(owner: &NativeOwnership) -> Result<(), StorageError> {
@@ -901,8 +886,7 @@ fn validate_core(db: &Connection) -> Result<(), StorageError> {
 }
 
 fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
-    // Event preparation qualifies only the core. Metadata remains the authored
-    // singleton family until its complete writer/consumer boundary is qualified.
+    // Every Event writer uses the single current namespace metadata contract.
     let composite_meta: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta','main') WHERE name='namespace')",
@@ -910,11 +894,11 @@ fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
             |r| r.get(0),
         )
         .map_err(failed)?;
-    if composite_meta {
-        Err(StorageError::NamespaceUpgradePending)
-    } else {
-        Ok(())
+    if !composite_meta {
+        return Err(StorageError::NamespaceUpgradePending);
     }
+    metadata_sql(db, "", "").map_err(failed)?;
+    Ok(())
 }
 
 /// Constant-size preparation of a fresh composite core. Existing singleton
@@ -923,8 +907,6 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
     SourceJournal(config.clone()).validate(&db)?;
     validate_core(&db)?;
-    let composite_support =
-        semantic_stage::support_sql(&db, "", "namespace").map_err(failed)? == "namespace";
     validate_event_metadata(&db)?;
     SourceJournal(config.clone()).prepare()?;
     let tx = db
@@ -977,33 +959,21 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
         )
         .map_err(failed)?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
-            let record = if operation == "DELETE" { "OLD" } else { "NEW" };
             let metadata = if *table == "meta" {
-                // Native helpers may change source/proof metadata only. Catalog
-                // epochs, publication markers and custody records stay fenced.
-                // The enclosing guard binds this singleton family to its sole
-                // enrolled Source via storage_event_tables and rejects every
-                // unbound/wrong-Source writer. Do not manufacture a namespace
-                // column without the composite metadata primary key.
-                format!(
-                    " OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
-                )
-            } else if CORE_TABLES.contains(table)
-                || (composite_support
-                    && [
-                        "catalog_relocation_candidates",
-                        "catalog_native_dependencies",
-                        "session_source_mutations",
-                    ]
-                    .contains(table))
-            {
+                // Only native source metadata belongs to the Event writer.
+                // Validate both rows on UPDATE, including the source scope.
+                let rows: &[&str] = match operation {
+                    "UPDATE" => &["OLD", "NEW"],
+                    "DELETE" => &["OLD"],
+                    _ => &["NEW"],
+                };
+                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key='claude_json_stamp' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+            } else {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
                     "DELETE" => " OR OLD.namespace IS NOT semon_namespace()".to_owned(),
                     _ => " OR NEW.namespace IS NOT semon_namespace()".to_owned(),
                 }
-            } else {
-                String::new()
             };
             tx.execute_batch(&format!("CREATE TRIGGER storage_event_guard_{table}_{operation} BEFORE {operation} ON \"{table}\" WHEN semon_event_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='{table}' AND qualification IN(0,1)){metadata} BEGIN SELECT RAISE(ABORT,'configured event writer refused'); END;")).map_err(failed)?;
         }
@@ -1494,7 +1464,7 @@ mod tests {
     #[test]
     fn private_composite_metadata_recipe_epochs_and_pricing_have_explicit_owners() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch("CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL); INSERT INTO storage_source_journal VALUES('a',11),('b',22);
             CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,codex_native_usage TEXT,codex_pricing_fingerprint TEXT,PRIMARY KEY(namespace,file_id));
             CREATE TABLE native_usage_sources(source_path TEXT,usage_ready INTEGER);
@@ -1644,7 +1614,7 @@ mod tests {
         // Only the metadata/proof family is under test. Catalog ownership,
         // public enrollment and the complete native writer remain unqualified.
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
         db.execute_batch(semantic_stage::metadata_indexes(true))
@@ -1945,8 +1915,8 @@ mod tests {
             if !CORE_TABLES.contains(table) {
                 let namespace_pk: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND pk=1)", [table], |r| r.get(0)).unwrap();
                 assert!(
-                    !namespace_pk,
-                    "unported family claimed composite keys: {table}"
+                    namespace_pk,
+                    "current family lacks namespace-leading keys: {table}"
                 );
             }
         }
@@ -1958,7 +1928,7 @@ mod tests {
         // The rest of the native writer is still unqualified for two sources.
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
-        db.execute_batch(metadata_schema(false)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(copied_usage_schema(false)).unwrap();
         db.execute_batch(tree_state::SCHEMA).unwrap();
@@ -2299,17 +2269,13 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            Self::with_layout(PhysicalLayout::CONFIGURED)
+            Self::with_setup(|_, _| {})
         }
-        fn with_layout(layout: PhysicalLayout) -> Self {
-            Self::with_setup(layout, |_, _| {})
-        }
-        fn with_setup(layout: PhysicalLayout, setup: impl FnOnce(&Connection, &Path)) -> Self {
-            Self::with_named_setup("configured-events", layout, setup)
+        fn with_setup(setup: impl FnOnce(&Connection, &Path)) -> Self {
+            Self::with_named_setup("configured-events", setup)
         }
         fn with_named_setup(
             namespace: &str,
-            layout: PhysicalLayout,
             setup: impl FnOnce(&Connection, &Path),
         ) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -2326,17 +2292,13 @@ mod tests {
                 namespace: LogicalSourceNamespace::new(namespace).unwrap(),
                 expected_stream_epoch: Some("a".repeat(64)),
             };
-            if layout.semantic_support {
-                create_with_layout(&config, layout).unwrap();
-            } else {
-                config.create_native_store().unwrap();
-            }
+            config.create_native_store().unwrap();
             let StoreBackend::Sqlite { database } = &config.backend;
             let db = Connection::open(database).unwrap();
             let raw = root.join("native.jsonl");
             setup(&db, &raw);
             db.execute(
-                "INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')",
+                "INSERT INTO meta(namespace,key,value) VALUES('','original-custody','preserve-verbatim')",
                 [],
             )
             .unwrap();
@@ -2396,10 +2358,6 @@ mod tests {
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
         let f = Fixture::with_setup(
-            PhysicalLayout {
-                semantic_support: true,
-                ..PhysicalLayout::CONFIGURED
-            },
             |db, raw| {
                 let path = raw.to_string_lossy();
                 db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
@@ -2481,10 +2439,6 @@ mod tests {
     #[test]
     fn configured_semantic_support_mixed_family_refuses_before_ingest() {
         let f = Fixture::with_setup(
-            PhysicalLayout {
-                semantic_support: true,
-                ..PhysicalLayout::CONFIGURED
-            },
             |_, _| {},
         );
         // Establish valid current admission before injecting physical drift.
@@ -2510,17 +2464,7 @@ mod tests {
         })
         .unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        for ddl in authored_storage_ddl(PhysicalLayout {
-            core: true,
-            metadata: true,
-            catalog: true,
-            native_usage: true,
-            pricing_queue: true,
-            semantic_support: true,
-            semantic_stage: true,
-            ..PhysicalLayout::default()
-        })
-        .unwrap()
+        for ddl in authored_storage_ddl()
         {
             db.execute_batch(ddl).unwrap();
         }
@@ -2587,13 +2531,7 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(matches!(
-            authored_storage_ddl(PhysicalLayout {
-                semantic_stage: true,
-                ..PhysicalLayout::CONFIGURED
-            }),
-            Err(DdlProfileError::UnsupportedFamilyCombination)
-        ));
+        assert_eq!(authored_storage_ddl().len(), 22);
     }
 
     #[test]
@@ -4811,7 +4749,7 @@ mod tests {
     }
 
     fn semantic_fixture(namespace: &str) -> Fixture {
-        let f = Fixture::with_named_setup(namespace, PhysicalLayout::CONFIGURED, |_, _| {});
+        let f = Fixture::with_named_setup(namespace, |_, _| {});
         f.config
             .native_events()
             .unwrap()
@@ -4879,24 +4817,10 @@ mod tests {
 
     #[test]
     fn configured_semantic_stage_validates_every_authored_shape_and_cookie_rollback() {
-        for composite in [false, true] {
+        for composite in [true] {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
-            let layout = if composite {
-                PhysicalLayout {
-                    core: true,
-                    metadata: true,
-                    catalog: true,
-                    native_usage: true,
-                    pricing_queue: true,
-                    semantic_support: true,
-                    semantic_stage: true,
-                    ..PhysicalLayout::default()
-                }
-            } else {
-                PhysicalLayout::CONFIGURED
-            };
-            for ddl in authored_storage_ddl(layout).unwrap() {
+            for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
             assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
@@ -4978,7 +4902,7 @@ mod tests {
     fn configured_semantic_support_cache_rejects_transient_and_corrupt_layouts() {
         let mut db = Connection::open_in_memory().unwrap();
         tree_state::register(&db).unwrap();
-        for ddl in authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap() {
+        for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
         assert_eq!(

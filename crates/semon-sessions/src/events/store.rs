@@ -5297,118 +5297,38 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     Ok(Init::Ready)
 }
 
-/// Physical families, not API qualification or permission to publish. The
-/// unported support/history/stage owners remain singleton and fenced even in
-/// private composite fixtures. No individual member table can be selected.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct PhysicalLayout {
-    core: bool,
-    metadata: bool,
-    catalog: bool,
-    // The complete authored header/turn/edge/bookmark family.
-    trace: bool,
-    copied_usage: bool,
-    native_usage: bool,
-    tree: bool,
-    pricing_queue: bool,
-    semantic_support: bool,
-    semantic_stage: bool,
-}
-
-impl PhysicalLayout {
-    const CONFIGURED: Self = Self {
-        core: true,
-        metadata: false,
-        catalog: false,
-        trace: false,
-        copied_usage: false,
-        native_usage: false,
-        tree: false,
-        pricing_queue: false,
-        semantic_support: false,
-        semantic_stage: false,
-    };
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DdlProfileError {
-    UnsupportedFamilyCombination,
-}
-
-/// Select complete authored chunks before executing any DDL or payload DML.
-/// Composite copied peers require the same Tree shape; composite Tree FKs
-/// require composite core/native usage. Queue triggers have two supported
-/// physical producer shapes: singleton native usage or composite native usage.
-fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 22], DdlProfileError> {
-    if p.tree != p.copied_usage
-        || (p.tree && (!p.core || !p.native_usage))
-        || (p.pricing_queue && (!p.core || !p.native_usage))
-        || (!p.pricing_queue && (p.metadata || p.catalog || p.native_usage))
-        || (p.semantic_stage && (!p.semantic_support || !p.catalog || !p.metadata))
-    {
-        return Err(DdlProfileError::UnsupportedFamilyCombination);
-    }
-    let [usage, repair] = native_usage::schema(p.native_usage);
-    let file_pricing = if p.pricing_queue {
-        reprice::file_schema(true, p.metadata)
-    } else if p.core {
-        configured::pricing_file_schema(p.metadata)
-    } else {
-        reprice::file_schema(false, false)
-    };
-    Ok([
-        if p.semantic_stage {
-            crate::storage::sqlite::publication::SLOT_SCHEMA
-        } else {
-            SLOT_SCHEMA
-        },
-        catalog_schema(p.catalog),
-        semantic_stage::support_schema(p.semantic_support, p.semantic_stage),
-        metadata_schema(p.metadata),
-        if p.core {
-            configured::CORE_SCHEMA
-        } else {
-            LEGACY_EVENT_SCHEMA
-        },
-        copied_usage_schema(p.copied_usage),
+/// The single current physical contract. Every source-owned family uses a
+/// namespace-leading key; store-global metadata uses the reserved empty scope.
+fn authored_storage_ddl() -> [&'static str; 22] {
+    let [usage, repair] = native_usage::schema(true);
+    [
+        crate::storage::sqlite::publication::SLOT_SCHEMA,
+        catalog_schema(true),
+        semantic_stage::support_schema(true, true),
+        metadata_schema(),
+        configured::CORE_SCHEMA,
+        copied_usage_schema(true),
         usage,
         repair,
-        tree_state::schema(p.tree),
-        semantic_stage::schema(p.semantic_stage),
-        if p.core {
-            semantic_stage::SEMANTIC_CORE_INDEXES_NS
-        } else {
-            semantic_stage::SEMANTIC_CORE_INDEXES
-        },
-        semantic_stage::metadata_indexes(p.metadata),
+        tree_state::schema(true),
+        semantic_stage::schema(true),
+        semantic_stage::SEMANTIC_CORE_INDEXES_NS,
+        semantic_stage::metadata_indexes(true),
         crate::overview::SCHEMA,
-        crate::causal_trace::header_schema(p.trace),
-        if p.trace {
-            crate::storage::sqlite::trace::SCHEMA
-        } else {
-            crate::causal_trace::SCHEMA
-        },
-        if p.semantic_stage {
-            crate::storage::sqlite::history::SCHEMA
-        } else {
-            crate::history_projection::SCHEMA
-        },
-        if p.semantic_stage {
-            crate::storage::sqlite::search::SCHEMA
-        } else {
-            crate::catalog_search::SCHEMA
-        },
-        crate::storage::sqlite::changes::schema(p.metadata, p.catalog),
+        crate::causal_trace::header_schema(true),
+        crate::storage::sqlite::trace::SCHEMA,
+        crate::storage::sqlite::history::SCHEMA,
+        crate::storage::sqlite::search::SCHEMA,
+        crate::storage::sqlite::changes::schema(true, true),
         SOURCE_OBSERVATION_RECEIPTS_SCHEMA,
-        reprice::queue_schema(p.pricing_queue),
-        reprice::catalog_schema(p.pricing_queue, p.catalog, p.metadata),
-        file_pricing,
-    ])
+        reprice::queue_schema(true),
+        reprice::catalog_schema(true, true, true),
+        reprice::file_schema(true, true),
+    ]
 }
 
-/// The current default producer's cold-initialization DDL.
 fn storage_ddl() -> [&'static str; 22] {
-    authored_storage_ddl(PhysicalLayout::default()).expect("authored singleton profile")
+    authored_storage_ddl()
 }
 
 /// Qualify the complete authored current profile without changing the store.
@@ -5416,78 +5336,32 @@ fn storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
-    let scoped = connection.prepare_cached("SELECT s.name FROM main.sqlite_schema s JOIN pragma_table_info(s.name,'main') p ON p.name='namespace' WHERE s.type='table' AND s.name IN ('files','meta','session_catalog','session_trace_headers','usage_identity','native_usage_sources','native_tree_headers','pricing_recompute_pending','reported_runs','catalog_semantic_stage')")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
-    let mut flags = [false; 10];
-    for (flag, table) in flags.iter_mut().zip([
-        "files",
-        "meta",
-        "session_catalog",
-        "session_trace_headers",
-        "usage_identity",
-        "native_usage_sources",
-        "native_tree_headers",
-        "pricing_recompute_pending",
-        "reported_runs",
-        "catalog_semantic_stage",
-    ]) {
-        *flag = scoped.contains(table);
-    }
-    let [
-        core,
-        metadata,
-        catalog,
-        trace,
-        copied_usage,
-        native_usage,
-        tree,
-        pricing_queue,
-        semantic_support,
-        semantic_stage,
-    ] = flags;
-    let profile = PhysicalLayout {
-        core,
-        metadata,
-        catalog,
-        trace,
-        copied_usage,
-        native_usage,
-        tree,
-        pricing_queue,
-        semantic_support,
-        semantic_stage,
-    };
-    let Ok(ddl) = authored_storage_ddl(profile) else {
-        return Ok(false);
-    };
-    static INVENTORIES: OnceLock<Mutex<BTreeMap<PhysicalLayout, std::sync::Arc<String>>>> =
-        OnceLock::new();
-    let mut inventories = INVENTORIES
+    static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<String>>>> = OnceLock::new();
+    let mut inventory = INVENTORY
         .get_or_init(Mutex::default)
         .lock()
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(profile) {
+    if inventory.is_none() {
         let reference = Connection::open_in_memory()?;
         tree_state::register(&reference)?;
-        for chunk in ddl {
+        for chunk in authored_storage_ddl() {
             reference.execute_batch(chunk)?;
         }
         let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY type,name")?
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
             .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        entry.insert(std::sync::Arc::new(format!(
+        *inventory = Some(std::sync::Arc::new(format!(
             "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
             objects.len(),
             objects.join(",")
         )));
     }
-    let sql = inventories
-        .get(&profile)
+    let sql = inventory
+        .as_ref()
         .cloned()
         .ok_or(rusqlite::Error::InvalidQuery)?;
-    drop(inventories);
+    drop(inventory);
     connection
         .prepare_cached(sql.as_str())?
         .query_row([], |row| row.get(0))
@@ -5952,14 +5826,8 @@ fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
 
 const NATIVE_METADATA_MAX: usize = 1024 * 1024;
 
-/// The composite shape is exercised privately with the connected proof
-/// helpers. Public creation stays singleton until all global owners are ported.
-pub(crate) fn metadata_schema(composite: bool) -> &'static str {
-    if composite {
-        "CREATE TABLE IF NOT EXISTS meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;"
-    } else {
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;"
-    }
+pub(crate) fn metadata_schema() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;"
 }
 
 const NATIVE_METADATA_VALUE: &str =
