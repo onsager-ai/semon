@@ -517,6 +517,8 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     let original_slots = read(
         "SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
     );
+    assert_eq!(original, metadata, "original custody keeps the published row");
+    assert_eq!(original_slots, slots, "original custody keeps the complete recipe");
     assert!(!slots.is_empty());
     drop(cache);
     drop(connection);
