@@ -12382,11 +12382,11 @@ mod tests {
             sibling(&path, "-shm"),
             raw,
         ];
+        let state = catalog_state(&store.connection);
         let before = paths
             .iter()
             .map(|path| fs::read(path).unwrap())
             .collect::<Vec<_>>();
-        let state = catalog_state(&store.connection);
         for scoped in [false, true] {
             assert!(matches!(
                 SqliteStore::attempt_scoped(&path, scoped),
