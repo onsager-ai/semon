@@ -13,6 +13,36 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "page_blobs",
+        columns: "digest bytea,payload bytea",
+        key: "digest",
+    },
+    Table {
+        name: "page_generations",
+        columns: "generation bytea,source_id bigint,source_path bytea,ledger bytea,chunks_header bytea,launch_header bytea?",
+        key: "generation",
+    },
+    Table {
+        name: "page_refs",
+        columns: "generation bytea,kind smallint,page_key bytea,digest bytea",
+        key: "generation,kind,page_key",
+    },
+    Table {
+        name: "page_current",
+        columns: "path_digest bytea,source_path bytea,generation bytea",
+        key: "path_digest",
+    },
+    Table {
+        name: "source_mutations",
+        columns: "source_path bytea,evidence bytea",
+        key: "source_path",
+    },
+    Table {
+        name: "relocation_candidates",
+        columns: "old_path bytea,new_path bytea",
+        key: "old_path",
+    },
+    Table {
         name: "files",
         columns: "file_id bigint,path bytea,dev numeric,ino numeric,size numeric,mtime_ns bytea,ctime_ns bytea?,resume_at numeric,head_sha256 bytea,tail_sha256 bytea,entrypoint bytea?,title bytea?,agent_name bytea?,last_model bytea?,failed boolean,first_ms bigint?,last_ms bigint?,cwd bytea?,branch bytea?,pending bytea,tool_ids bytea,yields bytea,busy bytea,links bytea,codex_tokens bytea,codex_tokens_by_model bytea,rate_limits bytea?,codex_native_usage bytea?,codex_pricing_fingerprint bytea?,copilot bytea?",
         key: "file_id",
@@ -220,7 +250,7 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v3");
+    hash.update(b"semon-private-native-v5");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());
