@@ -161,7 +161,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["claude", "codex", "copilot"])
     );
-    sqlite.publish_partial_catalog_fenced(&expected).unwrap();
+    sqlite
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &expected.rows,
+                transcripts: Some(&expected.transcripts),
+            },
+            expected.base_generation.as_deref(),
+        )
+        .expect("SQLite complete ordinary source publication");
     // Selected body/field reads consume the fully published ordinary Query
     // profile, including its completion and reader binding, not a partial head.
     crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
