@@ -942,7 +942,7 @@ impl MachineView {
         }
         if work.events.is_none() {
             work.events = Some(
-                EventCache::open_scoped(&self.evidence.options.cache).map_err(io::Error::other)?,
+                EventCache::open_scoped(&self.evidence.options.cache, &self.evidence.options.source).map_err(io::Error::other)?,
             );
         }
         let index = work.events.as_mut().expect("native index loaded");
@@ -2124,7 +2124,7 @@ mod tests {
         );
         model::observe_catalog(
             &fixture.options,
-            &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
+            &mut EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -3088,7 +3088,7 @@ mod tests {
     fn native_image_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
         model::observe_catalog(
             core.options(),
-            &mut EventCache::open_scoped(&core.options().cache).unwrap(),
+            &mut EventCache::open_scoped(&core.options().cache, &core.options().source).unwrap(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -5111,7 +5111,7 @@ mod tests {
         }
         // Measure the active native aggregator before output-window trimming.
         fixture.options.all = true;
-        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         let built = model::build_query(
             &fixture.options,
             &mut cache,
@@ -6592,7 +6592,7 @@ mod tests {
                     let id = format!("unrelated-{n:04}");
                     fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated prompt"}})]);
                 }
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
                 model::observe_catalog(
                     &fixture.options,
                     &mut cache,
@@ -6612,7 +6612,7 @@ mod tests {
                     );
                 }
                 let mut work = Work::default();
-                work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+                work.events = Some(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
                 work.catalog_snapshot = Some(snapshot);
                 let view = fixture.viewer();
                 let before = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -6695,7 +6695,7 @@ mod tests {
         let view = fixture.viewer();
         let options = fixture.options.clone();
         *lock(&view.hooks.building) = Some(Arc::new(move || {
-            let mut other = EventCache::open_scoped(&options.cache).unwrap();
+            let mut other = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             model::observe_catalog(
                 &options,
                 &mut other,
@@ -6720,7 +6720,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let mut other = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut other = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         model::observe_catalog(
             &fixture.options,
             &mut other,
@@ -6757,7 +6757,7 @@ mod tests {
                 let id = format!("unrelated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -6769,7 +6769,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fs::write(&child, record("child", Some("new-parent"))).unwrap();
             let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
             work.catalog_snapshot = Some(snapshot);
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -6819,7 +6819,7 @@ mod tests {
                 model::now_ms(),
             )
             .unwrap();
-            let mut competing = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut competing = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             model::observe_catalog(
                 &fixture.options,
                 &mut competing,
@@ -6845,7 +6845,7 @@ mod tests {
                 let id = format!("existing-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"existing prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -6857,7 +6857,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
             let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
             work.catalog_snapshot = Some(snapshot);
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -6903,7 +6903,7 @@ mod tests {
                 let id = format!("isolated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"initial prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -6915,7 +6915,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             say(&fixture, "isolated-0000", 1, "one changed source");
             let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
             work.catalog_snapshot = Some(snapshot);
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);

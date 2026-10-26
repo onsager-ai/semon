@@ -1397,6 +1397,7 @@ pub(crate) struct EventCache {
     deferred_source_operations: bool,
     scoped: bool,
     explicit_store: bool,
+    host_source: Option<crate::storage::HostSource>,
     event_operation: Option<String>,
     retention_base: Vec<(String, Option<Ledger>)>,
     /// Source fences for the lazy producer, independently of legacy reopen state.
@@ -1826,11 +1827,11 @@ impl EventCache {
 
     /// Opens the durable index beside `v1_cache`. An unavailable or refused
     /// store is an error; admission failures must never become an empty cache.
-    pub(crate) fn open(v1_cache: &Path) -> Result<Self, String> {
+    pub(crate) fn open(v1_cache: &Path, source: &crate::storage::HostSource) -> Result<Self, String> {
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         let path = Self::path(v1_cache);
-        let mut cache = match store::open(&path) {
+        let mut cache = match store::open(&path, source) {
             Ok((store, loaded)) => {
                 crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
@@ -1841,6 +1842,10 @@ impl EventCache {
             Err(error) => return Err(error.to_string()),
         };
         cache.v1_cache = Some(v1_cache.to_owned());
+        cache.host_source = Some(source.clone());
+        cache.scoped = true;
+        cache.explicit_store = true;
+        cache.observation_namespace = source.namespace().map_err(|error| error.to_string())?.as_str().to_owned();
         cache
             .reconcile_pending_source_operation()
             .map_err(|error| error.to_string())?;
@@ -1849,13 +1854,16 @@ impl EventCache {
 
     /// Writable producer cache with lazy, exact-path FileIndex loads. Never falls
     /// back to a full restore or an in-memory producer after an open failure.
-    pub(crate) fn open_scoped(v1_cache: &Path) -> Result<Self, String> {
-        let (store, loaded) = store::open_scoped(&Self::path(v1_cache))?;
+    pub(crate) fn open_scoped(v1_cache: &Path, source: &crate::storage::HostSource) -> Result<Self, String> {
+        let (store, loaded) = store::open_scoped(&Self::path(v1_cache), source)?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
+        cache.explicit_store = true;
+        cache.observation_namespace = source.namespace().map_err(|error| error.to_string())?.as_str().to_owned();
         cache.lock_cache = Some(v1_cache.to_owned());
+        cache.host_source = Some(source.clone());
         cache
             .reconcile_pending_source_operation()
             .map_err(|error| error.to_string())?;
@@ -2632,7 +2640,8 @@ impl EventCache {
         let Some(v1_cache) = self.v1_cache.clone() else {
             return Ok(());
         };
-        match store::open(&Self::path(&v1_cache)) {
+        let source = self.host_source.clone().ok_or_else(|| io::Error::other("host Source admission unavailable"))?;
+        match store::open(&Self::path(&v1_cache), &source) {
             Ok((store, loaded)) => {
                 let runs: Vec<_> = self.reported_runs().cloned().collect();
                 let stamp = self.claude_json_stamp.take();
@@ -2640,6 +2649,7 @@ impl EventCache {
                 self.store = Some(store);
                 self.observation_path = Some(Self::path(&v1_cache));
                 self.v1_cache = Some(v1_cache);
+                self.host_source = Some(source);
                 self.reconcile_pending_source_operation()?;
                 // Runs read from `~/.claude.json` meanwhile are kept.
                 if let Some(stamp) = stamp
@@ -8171,7 +8181,7 @@ mod tests {
                 ),
             ],
         );
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(signal_tags(&index, SignalKind::Permission), ["acceptEdits"]);
         assert_eq!(
@@ -8194,7 +8204,7 @@ mod tests {
         assert_eq!(index.signals.len(), 5);
         let mut fresh = EventCache::default();
         let fresh_index = scan_file(&rollout, "codex", &mut fresh, &mut false).unwrap();
-        let reopened = EventCache::open(&v1).unwrap();
+        let reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let key = rollout.to_string_lossy();
         let entry = reopened
             .files
@@ -8223,7 +8233,7 @@ mod tests {
                 said("m1", &["after the compaction"]),
             ],
         );
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(index.signals.len(), 1);
         assert_eq!(index.signals[0].n.as_deref(), Some("auto"));
@@ -8334,14 +8344,14 @@ mod tests {
             "unlistedRootSecret":"unlisted-root-value"
         });
         fs::write(&claude_json, first.to_string()).unwrap();
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let mut dirty = false;
         cache
             .refresh_reported_runs(&claude_json, 2000, &mut dirty)
             .unwrap();
         assert!(dirty);
         drop(cache);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert_eq!(cache.reported_runs().count(), 1);
         let bytes = store_text(&v1);
         for secret in secrets.into_iter().chain([
@@ -8373,7 +8383,7 @@ mod tests {
             .unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
-        let reopened = EventCache::open(&v1).unwrap();
+        let reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let ids: BTreeSet<_> = reopened
             .reported_runs()
             .map(|snapshot| snapshot.last_session_id.as_str())
@@ -8391,7 +8401,7 @@ mod tests {
     #[test]
     fn missing_or_unreadable_claude_state_is_an_empty_input() {
         let root = scratch("reported-runs-missing");
-        let mut cache = EventCache::open(&root.join("index.json")).unwrap();
+        let mut cache = EventCache::open(&root.join("index.json"), &crate::Options::default().source).unwrap();
         let mut dirty = false;
         cache
             .refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty)
@@ -9002,7 +9012,7 @@ mod tests {
             .map(str::len)
             .sum::<usize>();
         fs::write(&log, &FIXTURE[..boundary]).unwrap();
-        let mut cache = EventCache::open(&cache_path).unwrap();
+        let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let initial = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
         assert_eq!(initial.yields.get("26789"), Some(&0));
         assert!(initial.events[0].y.as_ref().unwrap().done.is_none());
@@ -9054,7 +9064,7 @@ mod tests {
         let reopened = scan_file(
             &log,
             "codex",
-            &mut EventCache::open(&cache_path).unwrap(),
+            &mut EventCache::open(&cache_path, &crate::Options::default().source).unwrap(),
             &mut false,
         )
         .unwrap();
@@ -9478,12 +9488,12 @@ mod tests {
         );
 
         {
-            let mut cache = EventCache::open(&cache_path).unwrap();
+            let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
             assert!(cache.store.is_some(), "the SQLite event cache opens");
             let stored = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(codex_fixture_snapshot(&stored), cold_debug);
         }
-        let mut reopened = EventCache::open(&cache_path).unwrap();
+        let mut reopened = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let reopened_index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
         assert_eq!(codex_fixture_snapshot(&reopened_index), cold_debug);
         for (id, expected) in [
@@ -9598,7 +9608,7 @@ mod tests {
         assert_ne!(appended_namespaced_reply.f & UNKNOWN, 0);
         let incremental_debug = codex_fixture_snapshot(&incremental);
         drop(reopened);
-        let mut reopened = EventCache::open(&cache_path).unwrap();
+        let mut reopened = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let reopened_final = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
         assert_eq!(codex_fixture_snapshot(&reopened_final), incremental_debug);
         let reopened_appended = &reopened_final.events[by_id(&reopened_final, "appended-direct")];
@@ -9654,7 +9664,7 @@ mod tests {
         let log = root.join("legacy.jsonl");
         let cache_path = root.join("index.json");
         fs::write(&log, LEGACY).unwrap();
-        let mut cache = EventCache::open(&cache_path).unwrap();
+        let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         assert!(
             cache.store.is_some(),
             "paired evidence uses the SQLite event cache"
@@ -9748,7 +9758,7 @@ mod tests {
         let replay = scan_file(
             &log,
             "codex",
-            &mut EventCache::open(&cache_path).unwrap(),
+            &mut EventCache::open(&cache_path, &crate::Options::default().source).unwrap(),
             &mut false,
         )
         .unwrap();
@@ -9821,7 +9831,7 @@ mod tests {
         let path = root.join("lead.jsonl");
         let cache_path = root.join("index.json");
         write_lines(&path, &[claude_tool("call")]);
-        let mut cache = EventCache::open(&cache_path).unwrap();
+        let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let initial = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let proof = initial.source_chunks.clone().unwrap();
         let ledger = cache.revision(&path).unwrap();
@@ -9845,7 +9855,7 @@ mod tests {
                     .unwrap();
             }
             drop(connection);
-            let mut cache = EventCache::open(&cache_path).unwrap();
+            let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
             let parsed = PARSED.with(std::cell::Cell::get);
             let repaired = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
             assert_eq!(PARSED.with(std::cell::Cell::get), parsed);
@@ -9919,7 +9929,7 @@ mod tests {
 
     /// What the store beside `v1` holds for `path`, as a new process reads it.
     fn stored(v1: &Path, path: &Path) -> String {
-        let cache = EventCache::open(v1).unwrap();
+        let cache = EventCache::open(v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_some(), "the store opens");
         let key = path.to_string_lossy();
         let entry = cache.files.get(key.as_ref()).expect("the file is stored");
@@ -9968,7 +9978,7 @@ mod tests {
                 serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"session","padding":"x".repeat(8192)})
             );
             fs::write(&path, line.repeat(history_bytes / line.len())).unwrap();
-            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             scan_file(&path, "claude", &mut cache, &mut false).unwrap();
             let append = "{\"type\":\"system\",\"sessionId\":\"session\"}\n";
             let generation = "0123456789abcdef0123456789abcdef";
@@ -10032,7 +10042,7 @@ mod tests {
             drop(cache);
             let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
             db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
-            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let full = HASHED_BYTES.with(std::cell::Cell::get);
             scan_file(&path, "claude", &mut cache, &mut false).unwrap();
             assert!(
@@ -10051,7 +10061,7 @@ mod tests {
         let path = root.join("log.jsonl");
         let cache_path = root.join("index.json");
         write_lines(&path, &[claude_tool("call")]);
-        let mut cache = EventCache::open(&cache_path).unwrap();
+        let mut cache = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let mut dirty = false;
         let first = scan_file(&path, "claude", &mut cache, &mut dirty).unwrap();
         let address = Arc::as_ptr(&first);
@@ -10068,7 +10078,7 @@ mod tests {
         assert_eq!(cache.index_clone_duration(), Duration::ZERO);
         assert!(grown.events[0].r.is_some());
         assert!(grown.dirty_rows.is_none());
-        let mut restarted = EventCache::open(&cache_path).unwrap();
+        let mut restarted = EventCache::open(&cache_path, &crate::Options::default().source).unwrap();
         let loaded = scan_file(&path, "claude", &mut restarted, &mut dirty).unwrap();
         assert_eq!(index_snapshot(&grown), index_snapshot(&loaded));
         drop(cache);
@@ -10082,7 +10092,7 @@ mod tests {
         let path = root.join("log.jsonl");
         let cache_path = root.join("index.json");
         write_lines(&path, &[claude_tool("call")]);
-        let mut cache = EventCache::open_scoped(&cache_path).unwrap();
+        let mut cache = EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap();
         let first = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let weak = Arc::downgrade(&first);
         let expected = index_snapshot(&first);
@@ -10158,7 +10168,7 @@ mod tests {
         scan_file(
             &log,
             "claude",
-            &mut EventCache::open(&cache_path).unwrap(),
+            &mut EventCache::open(&cache_path, &crate::Options::default().source).unwrap(),
             &mut false,
         )
         .unwrap();
@@ -10177,7 +10187,7 @@ mod tests {
         scan_file(
             &log,
             "claude",
-            &mut EventCache::open(&cache_path).unwrap(),
+            &mut EventCache::open(&cache_path, &crate::Options::default().source).unwrap(),
             &mut false,
         )
         .unwrap();
@@ -10229,7 +10239,7 @@ mod tests {
             .collect();
         write_lines(&log, &lines);
         touch(&log, 1);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let scan = |cache: &mut EventCache| scan_file(&log, "claude", cache, &mut false).unwrap();
         ledger_trace();
         scan(&mut cache);
@@ -10242,7 +10252,7 @@ mod tests {
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
-        scan(&mut EventCache::open(&v1).unwrap());
+        scan(&mut EventCache::open(&v1, &crate::Options::default().source).unwrap());
         assert_eq!(ledger_trace(), ["append", "unchanged"]);
         assert_eq!(parsed(), before);
         assert_eq!(cold(&log), unsealed);
@@ -10278,7 +10288,7 @@ mod tests {
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
         touch(&log, 1);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let scan = |cache: &mut EventCache| scan_file(&log, "claude", cache, &mut false).unwrap();
         ledger_trace();
 
@@ -10291,7 +10301,7 @@ mod tests {
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
-        scan(&mut EventCache::open(&v1).unwrap());
+        scan(&mut EventCache::open(&v1, &crate::Options::default().source).unwrap());
         assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
         assert_eq!(parsed(), before);
 
@@ -10357,7 +10367,7 @@ mod tests {
         // Gone: its rows go with it.
         fs::remove_file(&log).unwrap();
         cache.retain(&BTreeSet::new(), &mut false).unwrap();
-        assert_eq!(EventCache::open(&v1).unwrap().paths().count(), 0);
+        assert_eq!(EventCache::open(&v1, &crate::Options::default().source).unwrap().paths().count(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10368,7 +10378,7 @@ mod tests {
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
         touch(&log, 1);
-        let mut first = EventCache::open(&v1).unwrap();
+        let mut first = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         scan_file(&log, "claude", &mut first, &mut false).unwrap();
         append_lines(&log, &[claude_result("t1")]);
         touch(&log, 2);
@@ -10379,7 +10389,7 @@ mod tests {
             *hook.borrow_mut() = Some(Box::new(move || {
                 append_lines(&other_log, &[said("m2", &["bb"])]);
                 touch(&other_log, 3);
-                let mut second = EventCache::open(&other_v1).unwrap();
+                let mut second = EventCache::open(&other_v1, &crate::Options::default().source).unwrap();
                 scan_file(&other_log, "claude", &mut second, &mut false).unwrap();
             }));
         });
@@ -10407,12 +10417,12 @@ mod tests {
                 log
             })
             .collect();
-        drop(EventCache::open(&v1).unwrap());
+        drop(EventCache::open(&v1, &crate::Options::default().source).unwrap());
         let writers: Vec<_> = (0..2)
             .map(|writer| {
                 let (v1, logs) = (v1.clone(), logs.clone());
                 std::thread::spawn(move || {
-                    let mut cache = EventCache::open(&v1).unwrap();
+                    let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
                     assert!(cache.store.is_some());
                     for round in 0..20 {
                         let id = format!("t{writer}-{round}");
@@ -10434,7 +10444,7 @@ mod tests {
         // A change that lost every retry stays in memory until its file
         // changes again; a new process catches the store up by resuming from
         // its rows, so any row written twice or lost shows below.
-        let mut last = EventCache::open(&v1).unwrap();
+        let mut last = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         for log in &logs {
             scan_file(log, "claude", &mut last, &mut false).unwrap();
         }
@@ -10464,7 +10474,7 @@ mod tests {
             }
             records.push(usage.clone());
             write_lines(&log, &records);
-            let mut cache = EventCache::open(&v1).unwrap();
+            let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
             let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
             assert_eq!(
@@ -10486,7 +10496,7 @@ mod tests {
                     .to_string()
                     .contains("usage store unavailable")
             );
-            let mut reopened = EventCache::open(&v1).unwrap();
+            let mut reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
             let index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
             assert_eq!(
@@ -10505,7 +10515,7 @@ mod tests {
         fs::write(EventCache::path(&v1), &garbage).unwrap();
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"])]);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(
             cache.store.is_some(),
             "a new store replaces the damaged one"
@@ -10537,7 +10547,7 @@ mod tests {
         let v1 = own.join("index.json");
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"])]);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         let path = EventCache::path(&v1);
         assert_eq!(mode(&own), 0o700);
@@ -10550,7 +10560,7 @@ mod tests {
         drop(cache);
         // Loosened by something else: tightened when opened.
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        let cache = EventCache::open(&v1).unwrap();
+        let cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_some());
         assert_eq!(mode(&path), 0o600);
         drop(cache);
@@ -10560,9 +10570,9 @@ mod tests {
         // owner-only.
         let checkout = root.join("projects/semon");
         loose(&checkout);
-        let direct = EventCache::open(&checkout.join("idx.json")).unwrap();
+        let direct = EventCache::open(&checkout.join("idx.json"), &crate::Options::default().source).unwrap();
         assert!(direct.store.is_some());
-        let nested = EventCache::open(&checkout.join("tmp/idx.json")).unwrap();
+        let nested = EventCache::open(&checkout.join("tmp/idx.json"), &crate::Options::default().source).unwrap();
         assert!(nested.store.is_some());
         assert_eq!(mode(&checkout), 0o755);
         assert_eq!(mode(&checkout.join("tmp")), 0o700);
@@ -10577,7 +10587,7 @@ mod tests {
         let target = root.join("elsewhere.sqlite3");
         fs::write(&target, b"").unwrap();
         std::os::unix::fs::symlink(&target, EventCache::path(&v1)).unwrap();
-        let cache = EventCache::open(&v1).unwrap();
+        let cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_none(), "never opened through a symlink");
         assert_eq!(fs::read(&target).unwrap(), b"", "the target is untouched");
         fs::remove_dir_all(root).unwrap();
@@ -10594,7 +10604,7 @@ mod tests {
         write_lines(&log, &[said("m1", &["aa"])]);
         write_lines(&other, &[said("o1", &["oo"])]);
         touch(&log, 1);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         cache.begin_scan().unwrap();
         scan_file(&log, "claude", &mut cache, &mut false).unwrap();
 
@@ -10603,7 +10613,7 @@ mod tests {
         let holder = rusqlite::Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
         let started = Instant::now();
-        assert!(EventCache::open(&v1).unwrap().store.is_some());
+        assert!(EventCache::open(&v1, &crate::Options::default().source).unwrap().store.is_some());
         assert!(
             started.elapsed() < Duration::from_millis(800),
             "{:?}",
@@ -10634,7 +10644,7 @@ mod tests {
         // writes `other` through though it didn't change again.
         holder.execute_batch("ROLLBACK").unwrap();
         drop(holder);
-        let mut second = EventCache::open(&v1).unwrap();
+        let mut second = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         scan_file(&log, "claude", &mut second, &mut false).unwrap();
         cache.end_scan();
         cache.begin_scan().unwrap();
@@ -10662,7 +10672,7 @@ mod tests {
         holder
             .execute_batch("BEGIN IMMEDIATE; CREATE TABLE held (x INTEGER);")
             .unwrap();
-        let mut fresh = EventCache::open(&fresh_v1).unwrap();
+        let mut fresh = EventCache::open(&fresh_v1, &crate::Options::default().source).unwrap();
         assert!(fresh.store.is_none());
         holder.execute_batch("ROLLBACK").unwrap();
         drop(holder);
@@ -10694,7 +10704,7 @@ mod tests {
         let v1 = state.join("index.json");
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
-        let mut cache = EventCache::open(&v1).unwrap();
+        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_none(), "no store in a read-only directory");
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(index_snapshot(&index), cold(&log));
