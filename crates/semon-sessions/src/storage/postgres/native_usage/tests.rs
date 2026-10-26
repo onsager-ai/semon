@@ -363,9 +363,12 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
     {
         let request = crate::selected_read::SelectedReadControl::default().with_limits(64, 1);
         let _scope = crate::selected_read::Scope::enter(&request);
-        assert_eq!(pool.transaction(&own, TxnKind::Write, &control, |tx| {
-            Usage::new(tx)?.current(&path)
-        }), Err(StorageError::Busy));
+        assert_eq!(
+            pool.transaction(&own, TxnKind::Write, &control, |tx| {
+                Usage::new(tx)?.current(&path)
+            }),
+            Err(StorageError::Busy)
+        );
     }
     for namespace in [&own, &foreign] {
         pool.transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -398,19 +401,37 @@ fn pg_native_keys128_usage_current_sql_rows_and_bytes_with_history_noise() {
             })
             .unwrap();
         }
-        let measurement = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            let selected = Usage::new(tx)?.current(path)?.unwrap();
-            let row = tx.driver.query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {CURRENT_SQL}"), &[&namespace.as_str().as_bytes(),&path.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?;
-            let plan: serde_json::Value = row.get(0);
-            fn visited(plan: &serde_json::Value) -> u64 {
-                let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                match plan.get("Plans").and_then(serde_json::Value::as_array) {
-                    Some(children) => removed + children.iter().map(visited).sum::<u64>(),
-                    None => (removed + plan["Actual Rows"].as_u64().unwrap()) * plan["Actual Loops"].as_u64().unwrap(),
+        let measurement = pool
+            .transaction(&namespace, TxnKind::Write, &control, |tx| {
+                let selected = Usage::new(tx)?.current(path)?.unwrap();
+                let row = tx
+                    .driver
+                    .query_one(
+                        &format!("EXPLAIN (ANALYZE, FORMAT JSON) {CURRENT_SQL}"),
+                        &[
+                            &namespace.as_str().as_bytes(),
+                            &path.as_bytes(),
+                            &i64::from(CACHE_VERSION),
+                        ],
+                    )
+                    .map_err(sqlstate::error)?;
+                let plan: serde_json::Value = row.get(0);
+                fn visited(plan: &serde_json::Value) -> u64 {
+                    let removed = plan
+                        .get("Rows Removed by Filter")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    match plan.get("Plans").and_then(serde_json::Value::as_array) {
+                        Some(children) => removed + children.iter().map(visited).sum::<u64>(),
+                        None => {
+                            (removed + plan["Actual Rows"].as_u64().unwrap())
+                                * plan["Actual Loops"].as_u64().unwrap()
+                        }
+                    }
                 }
-            }
-            Ok((visited(&plan[0]["Plan"]), selected.1.len()))
-        }).unwrap();
+                Ok((visited(&plan[0]["Plan"]), selected.1.len()))
+            })
+            .unwrap();
         assert!(
             measurement.0 <= 32,
             "noise={noise}, physical rows/bytes={measurement:?}"
