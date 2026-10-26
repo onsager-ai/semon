@@ -6829,7 +6829,24 @@ mod tests {
         // checkpointed. Copy the exact stream epoch and source evidence too.
         fs::copy(&seed, &left).unwrap();
         fs::copy(&seed, &right).unwrap();
-        (opened(&left).0, opened(&right).0)
+        let open = |path: PathBuf| {
+            let config = options.source.config(&path.with_extension("json")).unwrap();
+            let owner = configured::NativeOwnership::restore(&config).unwrap();
+            let connection = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
+            SqliteStore {
+                owner,
+                connection,
+                path,
+                selected_runs: None,
+                semantic_rejection: None,
+                traversal_observation: None,
+            }
+        };
+        (open(left), open(right))
     }
 
     type CatalogState = BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>;
@@ -7329,10 +7346,10 @@ mod tests {
         let meta = state.get_mut("main.meta").unwrap();
         let clock = meta
             .iter()
-            .filter(|row| row[0] == rusqlite::types::Value::Text("catalog_observed_at".into()))
+            .filter(|row| row[1] == rusqlite::types::Value::Text("catalog_observed_at".into()))
             .collect::<Vec<_>>();
         assert_eq!(clock.len(), 1);
-        let rusqlite::types::Value::Text(value) = &clock[0][1] else {
+        let rusqlite::types::Value::Text(value) = &clock[0][2] else {
             panic!("observation clock must be decimal text")
         };
         assert!(!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
@@ -7343,7 +7360,7 @@ mod tests {
         );
         // Separate successful commits have independent wall clocks. Every
         // other row and schema remains exact; rollback never uses this filter.
-        meta.retain(|row| row[0] != rusqlite::types::Value::Text("catalog_observed_at".into()));
+        meta.retain(|row| row[1] != rusqlite::types::Value::Text("catalog_observed_at".into()));
         state
     }
 
@@ -7957,12 +7974,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
             crate::retain_source_event_index(&options, &proof, &ready).unwrap();
-            let original =
-                Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+            let config = options.source.config(&options.cache).unwrap();
+            let original = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
             let original_recipes = catalog_recipes(&original, "session_slots", key);
             assert!(!original_recipes.is_empty());
             if unsupported {
-                original.execute("UPDATE session_slot_projections SET version=?1,source_generation=NULL WHERE session_key=?2", params![crate::slot_projection::VERSION-1,key]).unwrap();
+                original.execute("UPDATE main.session_slot_projections SET version=?1,source_generation=NULL WHERE namespace=semon_namespace() AND session_key=?2", params![crate::slot_projection::VERSION-1,key]).unwrap();
             }
             let header: (String, u32, Option<String>, i64) = original.query_row("SELECT generation,version,source_generation,total FROM session_slot_projections WHERE session_key=?1", [key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
             let archive: String = original
@@ -10043,23 +10064,29 @@ mod tests {
             let root = scratch(name);
             let v1 = root.join("index.json");
             let path = v1.with_extension("sqlite3");
+            let source =
+                crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+            let native = root.join("original.jsonl");
+            fs::write(&native, "{\"type\":\"user\",\"uuid\":\"original\",\"sessionId\":\"original\",\"message\":{\"role\":\"user\",\"content\":\"original native input\"}}\n").unwrap();
+            let mut cache = super::super::EventCache::open_scoped(&v1, &source).unwrap();
+            super::super::scan_file(&native, "claude", &mut cache, &mut false).unwrap();
+            drop(cache);
             let (mut store, _) = opened(&path);
-            store.write_runs(&[run()], &stamp()).unwrap();
             // Fixture writes and corruption target the physical current
-            // schema, rather than the reader's scoped views.
-            store.connection =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
-                    .connection()
-                    .unwrap();
-            store
-                .write_one("original", None, None, &ledger(1), &full())
-                .unwrap();
+            // schema through the admitted publisher, before any writes.
+            store.connection = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
+                    .unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
+            store.write_runs(&[run()], &stamp()).unwrap();
             // Custody is deliberately opaque to version classification.
             store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES('fixture-source','archive-custody','original proof')",
+                    "INSERT INTO meta VALUES('fixture-source','catalog_recovery_reason','original proof')",
                     [],
                 )
                 .unwrap();
@@ -10156,15 +10183,18 @@ mod tests {
         let path = root.join("index.sqlite3");
         let raw = root.join("native.jsonl");
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
+        let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+        let mut cache =
+            super::super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap();
+        super::super::scan_file(&raw, "claude", &mut cache, &mut false).unwrap();
+        drop(cache);
         let (mut store, _) = opened(&path);
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         store.write_runs(&[run()], &stamp()).unwrap();
-        store.connection =
-            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
-                .connection()
-                .unwrap();
-        store
-            .write_one("retained", None, None, &ledger(1), &full())
-            .unwrap();
         store
             .connection
             .execute(
@@ -10175,7 +10205,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta VALUES('fixture-source','archive-custody','independent authority')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_recovery_reason','independent authority')",
                 [],
             )
             .unwrap();
