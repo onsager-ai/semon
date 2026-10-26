@@ -1279,14 +1279,16 @@ pub(crate) fn render_session(
         if !keep_edge(id)? {
             continue;
         }
-        let recipes: Vec<_> = context
-            .iter()
-            .filter_map(|owner| owner.query.as_ref())
-            .flat_map(|query| query["selected"]["edges"].as_array().into_iter().flatten())
-            .filter(|edge| edge["id"] == id)
-            .cloned()
-            .collect();
-        let handoff = render_edge(id, context, records, &recipes, &bytes_left)?;
+        // This owner captured its complete field recipe at publication. Its
+        // retained relationship state must not be mixed with another owner's
+        // later Current observation. Context still qualifies every source read.
+        let handoff = render_edge(
+            id,
+            context,
+            records,
+            std::slice::from_ref(recipe),
+            &bytes_left,
+        )?;
         metadata += handoff.to_string().len();
         if metadata > 8 * 1024 * 1024 {
             return Err(unavailable(
