@@ -14,6 +14,21 @@ struct Reader<'a, 'b, 'tx> {
     host: &'a dyn SessionSourceReader,
 }
 
+/// Qualify exactly the same Native header before host preparation and reads.
+pub(in crate::storage::postgres) fn source_proof(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    source: &CatalogSource,
+) -> Result<native_pages::Pinned, StorageError> {
+    let ns = tx.namespace.as_str().as_bytes();
+    let rows = tx.driver.query("SELECT p.source_path=$3 AND s.source_path=$3 AND s.metadata=$4,CASE WHEN octet_length(p.page_generation)=64 THEN p.page_generation END FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_catalog_sources s USING(namespace_digest,namespace,generation,path_digest) WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND EXISTS(SELECT 1 FROM semon_pg_native_catalog_leases l WHERE l.namespace_digest=p.namespace_digest AND l.namespace=p.namespace AND l.generation=p.generation AND l.expires_at>(extract(epoch FROM clock_timestamp())*1000)::bigint) LIMIT 65", &[&ns, &generation.as_bytes(), &path(source)?.as_bytes(), &encoded(source)?]).map_err(sqlstate::error)?;
+    if rows.is_empty() || rows.len() > 64 || rows.iter().any(|row| !row.get::<_, bool>(0)) {
+        return Err(StorageError::ScopeChanged);
+    }
+    let id = text(rows[0].get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?)?;
+    native_pages::open(tx, path(source)?, &crate::source_carrier::ledger(source), ProofGenerationId(id))
+}
+
 // Keep proof custody and independent host authority explicit at this boundary.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::storage::postgres) fn with_reader<T>(
@@ -67,16 +82,7 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
         let hash = (|| {
             let mut borrowed = self.tx.lock().map_err(|_|StorageError::Unavailable)?;
             let tx = &mut **borrowed;
-            let ns = tx.namespace.as_str().as_bytes();
-            let rows = tx.driver.query("SELECT p.source_path=$3 AND s.source_path=$3 AND s.metadata=$4,CASE WHEN octet_length(p.page_generation)=64 THEN p.page_generation END FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_catalog_sources s USING(namespace_digest,namespace,generation,path_digest) WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND EXISTS(SELECT 1 FROM semon_pg_native_catalog_leases l WHERE l.namespace_digest=p.namespace_digest AND l.namespace=p.namespace AND l.generation=p.generation AND l.expires_at>(extract(epoch FROM clock_timestamp())*1000)::bigint) LIMIT 65", &[&ns, &self.generation.as_bytes(), &path(self.source)?.as_bytes(), &encoded(self.source)?]).map_err(sqlstate::error)?;
-            if rows.is_empty() || rows.len() > 64 { return Err(StorageError::ScopeChanged); }
-            for row in &rows {
-                if !row.get::<_, bool>(0) { return Err(StorageError::ScopeChanged); }
-            }
-            let id = text(rows[0].get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?)?;
-            let source = self.source;
-            let ledger = crate::events::Ledger { stat: crate::events::Stat { dev: source.dev, ino: source.ino, size: source.size, modified_ns: source.modified_ns, changed_ns: source.changed_ns }, offset: source.offset, prefix: source.prefix_sha256, tail: source.tail_sha256 };
-            native_pages::open(tx, path(source)?, &ledger, ProofGenerationId(id))?.chunk_hash(tx, index)
+            source_proof(tx, self.generation, self.source)?.chunk_hash(tx, index)
         })().map_err(io::Error::other)?;
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
