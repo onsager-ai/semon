@@ -1005,6 +1005,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(page_keys(second), oracle_history[1..].to_vec());
     }
     let query_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -1075,6 +1076,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         recent_options.all = false;
         recent_options.since = since;
         let recent_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
             pool: pool.clone(),
             namespace: namespace.clone(),
             control: control.clone(),
@@ -1139,6 +1141,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         (String, String),
         (crate::SessionSourceRef, std::sync::Arc<[u8]>),
     >;
+    #[derive(Clone)]
     struct BodyHost(BodySources);
     impl crate::SessionSourceReader for BodyHost {
         fn read_range(
@@ -1206,6 +1209,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         recent_options.all = false;
         recent_options.since = since;
         let store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
             pool: pool.clone(),
             namespace: namespace.clone(),
             control: control.clone(),
@@ -1294,47 +1298,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Captured content uses its admitted immutable generation and independent
     // host/proof authority. It is not an old live Query runtime context.
     let captured_bodies = |pool: &crate::storage::postgres::PgPool| {
-        super::super::snapshot::with_admitted_snapshot(
-            pool, &namespace, &control, &generation, |snapshot| {
-                let context = prepared.rows.iter().map(|row| {
-                    snapshot.catalog(&row.key, false)?.ok_or(StorageError::ScopeChanged)
-                }).collect::<Result<Vec<_>, _>>()?;
-                let mut sources = Vec::new();
-                for row in &context {
-                    for source in &row.sources {
-                        if sources.iter().any(|(old, _): &(&crate::model::summary::CatalogSource, crate::SessionSourceRef)| old.path == source.path) {
-                            continue;
-                        }
-                        sources.push((source, crate::SessionSourceRef {
-                            root: row.harness.clone(),
-                            path: crate::catalog::source_relative(&options, &row.harness, source).ok_or(StorageError::ScopeChanged)?,
-                            native_id: source.native_id.clone(), offset: source.offset,
-                            prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256,
-                        }));
-                    }
-                }
-                let records = super::super::selected_reader::SelectedRecords {
-                    tx: &snapshot.tx, generation: &generation, host: &retained_host, sources,
-                    pins: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                    bytes_left: std::sync::Mutex::new(64 * 1024 * 1024),
-                };
-                let mut result = std::collections::BTreeMap::new();
-                for row in &context {
-                    let (_, header, _) = snapshot.selected(&row.key, false, 0, 1)?.ok_or(StorageError::ScopeChanged)?;
-                    let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
-                    let observation = serde_json::from_value(row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"].clone()).map_err(|_| StorageError::ScopeChanged)?;
-                    let page = super::super::snapshot::query::PgPage { snapshot, key: &row.key, history: false, records: &records };
-                    let mut body = crate::query::transcript::render_page(&options, &row.key, row, &observation, total, false, total, 100, 1790812802000, &page).map_err(|_| StorageError::ScopeChanged)?;
-                    let summary = crate::query::transcript::render_session(&options, &row.key, &context, &records, 1790812802000,
-                        &|turn| snapshot.query_first_slot(&row.key, turn, false).map(|(_, slot)| slot).map_err(|_| crate::QueryError::new("unavailable", "Captured slot unavailable")),
-                        &|_| Ok(true), &|_| Ok(true), &|_| Ok(true)).map_err(|_| StorageError::ScopeChanged)?;
-                    body["window_start"] = serde_json::Value::Null;
-                    result.insert(row.key.clone(), serde_json::json!({"body":body,"fields":{"now":1790812802000i64,"session":summary,"window_start":null}}));
-                }
-                records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                Ok(result)
-            },
-        ).unwrap()
+        let mut captured_config = config.clone();
+        captured_config.backend = crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(), control: control.clone(),
+        };
+        let authorized = retained_host.clone();
+        let expected_namespace = namespace.as_str().to_owned();
+        let host = move |source: &str, _key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+            assert_eq!(source, expected_namespace);
+            Ok(Box::new(authorized.clone()))
+        };
+        prepared.rows.iter().map(|row| {
+            let args = serde_json::json!({"id":row.key,"limit":100});
+            let body = captured_config.call_captured_query_at(&options, &generation, "read_transcript", &args, 1790812802000, &host).unwrap();
+            let fields = captured_config.call_captured_query_at(&options, &generation, "get_session", &serde_json::json!({"id":row.key}), 1790812802000, &host).unwrap();
+            (row.key.clone(), serde_json::json!({"body":body,"fields":fields}))
+        }).collect::<std::collections::BTreeMap<_, _>>()
     };
     assert_eq!(captured_bodies(&pool), expected_bodies);
     struct DeniedHost;
@@ -1483,6 +1462,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(&fs::read(input.full_path(&options)).unwrap(), original);
     }
     let restarted_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -1686,6 +1666,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     let next_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -1843,6 +1824,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Conflict
     );
     let withdrawn_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -2082,6 +2064,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .key
     );
     let moved_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -2164,6 +2147,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // A selected read cannot reuse a publication under different runtime
     // Facts, even when its immutable Raw recipes and host custody still match.
     let changed_runtime_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -2629,6 +2613,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         bulk_generation = stage_publish(&mut moved_cache, chunk, 1790812806000).0;
     }
     let store_at = |generation: &str| super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
@@ -2819,6 +2804,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let cold_store =
         |generation: &str, options: &Options| super::super::snapshot::query::QueryCatalog {
+            captured: false,
             pool: cold.clone(),
             namespace: namespace.clone(),
             control: control.clone(),
@@ -3308,6 +3294,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Current row, so its body is read through the proof-owned retained
     // recipe from Raw bytes and equals the SQLite ordinary body exactly.
     let caught_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
