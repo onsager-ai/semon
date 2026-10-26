@@ -368,10 +368,9 @@ impl NativeEvidence {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
             work.events = Some(
                 match &self.store_config {
-                    Some(config) => EventCache::open_configured(config),
-                    None => EventCache::open_scoped(&self.options.cache, &self.options.source),
-                }
-                .map_err(io::Error::other)?,
+                    Some(config) => EventCache::open_configured(config).map_err(io::Error::other),
+                    None => EventCache::open_scoped(&self.options.cache, &self.options.source).map_err(io::Error::other),
+                }?,
             );
         }
         let cache = work.events.as_mut().expect("event cache initialized");
