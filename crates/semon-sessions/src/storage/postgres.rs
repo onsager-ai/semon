@@ -11,6 +11,7 @@ mod native_usage;
 mod native_usage_identity;
 mod operations;
 mod pool;
+mod reported_facts;
 mod schema;
 mod source_journal;
 mod sqlstate;
