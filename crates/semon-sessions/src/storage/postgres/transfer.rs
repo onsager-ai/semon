@@ -376,12 +376,27 @@ mod tests {
         // The accepted source's natural keys must remain unique across page
         // boundaries; report a capture defect before any destination insert.
         let mut fact_keys = std::collections::BTreeSet::new();
-        let pages = reverse.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+        let pages = reverse
+            .transfer_inbox()
+            .checkpoint(&manifest)
+            .unwrap()
+            .sequence;
         for sequence in 1..=pages {
-            let page = reverse.transfer_inbox().staged_page(&manifest, sequence).unwrap();
+            let page = reverse
+                .transfer_inbox()
+                .staged_page(&manifest, sequence)
+                .unwrap();
             for record in page.records {
-                if let transfer::TransferRecord::NativeRow { path, kind: transfer::NativeRowKind::UsageFact, values } = record {
-                    assert!(fact_keys.insert((path, values[0].as_i64().unwrap())), "duplicate native Usage fact key in reverse capture at page {sequence}");
+                if let transfer::TransferRecord::NativeRow {
+                    path,
+                    kind: transfer::NativeRowKind::UsageFact,
+                    values,
+                } = record
+                {
+                    assert!(
+                        fact_keys.insert((path, values[0].as_i64().unwrap())),
+                        "duplicate native Usage fact key in reverse capture at page {sequence}"
+                    );
                 }
             }
         }

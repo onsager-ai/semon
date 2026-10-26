@@ -75,7 +75,14 @@ pub(super) fn occupied(tx: &mut Inbox<'_, '_>) -> Result<bool, StorageError> {
     }).collect::<Vec<_>>();
     // Include orphaned physical rows too. The visible-owner joins above must
     // not make a corrupt destination appear empty before earlier pages commit.
-    for table in ["catalog_sources", "catalog_links", "catalog_history_headers", "catalog_history_slots", "catalog_history_sources", "catalog_history_progress"] {
+    for table in [
+        "catalog_sources",
+        "catalog_links",
+        "catalog_history_headers",
+        "catalog_history_slots",
+        "catalog_history_sources",
+        "catalog_history_progress",
+    ] {
         terms.push(format!("EXISTS(SELECT 1 FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)"));
     }
     Ok(tx
@@ -391,14 +398,21 @@ mod tests {
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
 
     #[test]
-    fn pg_current_transfer246_occupied_description_refused_before_native_commit() {
+    fn pg_current_transfer225_occupied_description_refused_before_native_commit() {
         let root = root();
         let source = sqlite(&root, "occupied-pg-source");
-        crate::storage::transfer::reported::tests::seed_native_usage(&source, &root.join("native.jsonl"), 130);
+        crate::storage::transfer::reported::tests::seed_native_usage(
+            &source,
+            &root.join("native.jsonl"),
+            130,
+        );
         let (pool, _) = super::super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig {
-            backend: crate::storage::StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
+            backend: crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            },
             namespace: source.namespace.clone(),
             expected_stream_epoch: source.expected_stream_epoch.clone(),
         };
@@ -406,10 +420,18 @@ mod tests {
         let mut writer = crate::storage::transfer::reported::tests::cache(&config);
         writer.save_session_description("existing", 1, "inputs", "owned destination");
         writer.publish_session_descriptions();
-        assert_eq!(writer.session_description("existing", 1, "inputs").as_deref(), Some("owned destination"));
+        assert_eq!(
+            writer
+                .session_description("existing", 1, "inputs")
+                .as_deref(),
+            Some("owned destination")
+        );
         drop(writer);
         let manifest = stage(&source, &config, &[123; 32]);
-        assert_eq!(config.transfer_inbox().apply_page(&manifest, 1), Err(StorageError::Conflict));
+        assert_eq!(
+            config.transfer_inbox().apply_page(&manifest, 1),
+            Err(StorageError::Conflict)
+        );
         pool.transaction(&config.namespace, TxnKind::Transfer, &control, |tx| {
             let ns = config.namespace.as_str().as_bytes();
             let row = tx.driver.query_one("SELECT (SELECT metadata FROM semon_pg_native_descriptions WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2),(SELECT count(*) FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)", &[&ns, &b"existing".as_slice()]).map_err(sqlstate::error)?;
