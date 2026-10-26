@@ -19,7 +19,7 @@ pub(crate) struct Withdrawal {
 
 impl Withdrawal {
     pub(crate) fn authority_current(&self) -> io::Result<bool> {
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
+        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
         let identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
         if identity != self.facts_identity || !authority.selection_known() {
@@ -41,7 +41,7 @@ impl Withdrawal {
         if before != self.stat {
             return Ok(false);
         }
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
+        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
         let withdrawn = authority.codex_current(&self.relative)? == Some(false);
         authority.validate()?;
         let current_source = crate::open_input(Path::new(&self.path))?;

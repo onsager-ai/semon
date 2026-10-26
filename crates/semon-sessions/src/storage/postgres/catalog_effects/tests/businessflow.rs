@@ -653,8 +653,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
-    let mut pg =
-        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
+        pool: pool.clone(), control: control.clone(),
+    }).unwrap();
+    config.create_native_store().unwrap();
+    assert_eq!(config.create_native_store().err(), Some(StorageError::Conflict));
+    let mut pg = EventCache::open_configured(&config).unwrap();
     for (at, input) in inputs.iter().enumerate() {
         pg.ingest(
             &format!("{:064x}", at + 1),
@@ -877,22 +881,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .is_err()
     );
-    let page = super::super::snapshot::with_admitted_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
-            crate::catalog::read_page_snapshot(
-                &options,
-                "",
-                &crate::catalog::Request::parse("limit=20").unwrap(),
-                snapshot,
-            )
-            .map_err(|_| StorageError::ScopeChanged)
-        },
-    )
-    .unwrap();
+    let page = config.catalog_page(&options, "limit=20").unwrap();
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
@@ -1334,8 +1323,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     assert_eq!(read_selected(), expected_field);
     drop(pg);
-    let mut resumed =
-        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let mut resumed = EventCache::open_configured(&config).unwrap();
     let after = resumed.query_runtime_binding().unwrap().unwrap();
     assert_eq!(binding.admission, after.admission);
     assert_eq!(binding.stream_epoch, after.stream_epoch);
@@ -2126,13 +2114,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             break ack.1.unwrap();
         }
     };
-    let facts_store = super::super::snapshot::query::QueryCatalog {
-        pool: pool.clone(),
-        namespace: namespace.clone(),
-        control: control.clone(),
-        generation: facts_generation,
-        options: facts_options.clone(),
-    };
+    assert_eq!(facts_generation.len(), 64);
+    let facts_store = crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
     let mut facts_query =
         crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
             vec![(namespace.as_str().into(), facts_options.clone())],
@@ -2142,7 +2125,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "list_sessions",
             &serde_json::json!({}),
             1790812805000,
-            &facts_store,
+            facts_store.as_ref(),
         )
         .unwrap();
     assert!(list.to_string().contains("source-write-after158"));

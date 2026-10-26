@@ -7521,7 +7521,7 @@ fn semantic_withdrawals(
                 && !facts.codex_rollout_is_current(options, &input.full_path(options))
         })
     {
-        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
+        let authority = crate::facts::source_authority::RawSources::open(facts_path)?;
         let facts_identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
         authority.validate()?;
