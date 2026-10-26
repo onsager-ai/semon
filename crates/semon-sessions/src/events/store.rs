@@ -2978,11 +2978,35 @@ impl SqliteStore {
                 }
             }
             stage("fences", &transaction);
+            // The same transaction owns replacement and withdrawal custody.
+            // Two missing outgoing owners suffice: the shared algorithm
+            // advances at most one and defers before changing membership.
+            transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;").map_err(failure)?;
+            for row in rows {
+                transaction.execute("INSERT INTO catalog_members VALUES (?1)", [&row.key]).map_err(failure)?;
+            }
+            let mut withdrawn = Vec::new();
+            if claims.is_none() {
+                let mut statement = transaction.prepare("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog c WHERE c.namespace=semon_namespace() AND c.lifecycle='current' AND c.session_key NOT IN (SELECT session_key FROM catalog_members) AND NOT EXISTS (SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key) ORDER BY c.session_key LIMIT 2").map_err(failure)?;
+                for text in statement.query_map([], |record| record.get::<_, String>(0)).map_err(failure)? {
+                    withdrawn.push(serde_json::from_str::<crate::model::summary::CatalogRow>(&text.map_err(failure)?).map_err(|_| failure(rusqlite::Error::InvalidQuery))?);
+                }
+            } else {
+                for key in &affected {
+                    let text: Option<String> = transaction.query_row("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog c WHERE c.namespace=semon_namespace() AND c.session_key=?1 AND c.lifecycle='current' AND c.session_key NOT IN (SELECT session_key FROM catalog_members) AND NOT EXISTS (SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key)", [key], |record| record.get(0)).optional().map_err(failure)?;
+                    if let Some(text) = text {
+                        withdrawn.push(serde_json::from_str::<crate::model::summary::CatalogRow>(&text).map_err(|_| failure(rusqlite::Error::InvalidQuery))?);
+                        if withdrawn.len() == 2 {
+                            break;
+                        }
+                    }
+                }
+            }
             let history =
                 crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, &admitted)
                     .map_err(StoreError::Configured)?;
             let preserved =
-                crate::storage::catalog::preserve_replacement_rows(&history, publication.rows);
+                crate::storage::catalog::preserve_rows(&history, publication.rows, &withdrawn);
             if !preserved.map_err(failure)? {
                 drop(history);
                 drop(publication_head);
@@ -3017,11 +3041,7 @@ impl SqliteStore {
                 let statements_started = metadata_measurements.start();
                 // A temporary membership table bounds deletion SQL parameters and
                 // never escapes the transaction or becomes part of the read model.
-                transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;").map_err(failure)?;
                 {
-                    let mut member = transaction
-                        .prepare("INSERT INTO catalog_members VALUES (?1)")
-                        .map_err(failure)?;
                     let current_effects =
                         crate::storage::sqlite::publication::CurrentWriter::admitted(
                             &transaction,
@@ -3062,7 +3082,6 @@ impl SqliteStore {
                             }
                             metadata_measurements.record("overview", started, 1);
                             let started = metadata_measurements.start();
-                            member.execute([&row.key]).map_err(failure)?;
                             metadata_measurements.record("catalog_members", started, 1);
                         }
                         if let Some(sample) = metadata_sample.as_mut() {
@@ -3128,7 +3147,6 @@ impl SqliteStore {
                                 sample.stage("overview", &transaction);
                             }
                             let started = metadata_measurements.start();
-                            member.execute([&row.key]).map_err(failure)?;
                             if let Some(sample) = sample.as_mut() {
                                 sample.stage("member_insert", &transaction);
                             }
