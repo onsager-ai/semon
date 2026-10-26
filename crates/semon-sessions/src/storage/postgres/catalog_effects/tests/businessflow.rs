@@ -853,6 +853,33 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .as_deref(),
         Some("metadata")
     );
+    // Disappearance withdraws Current membership, without consuming the host's
+    // independently retained bytes or any older Catalog/native proof.
+    let missing = copilot.to_str().unwrap().to_owned();
+    let missing_ledger = cache.ledger(&missing).unwrap().unwrap();
+    let retained_copy = oracle.root.join("retained-copilot156.jsonl");
+    fs::rename(&copilot, &retained_copy).unwrap();
+    let removal = vec![(missing.clone(), Some(missing_ledger.clone()))];
+    assert_eq!(cache.remove_files(&removal).unwrap(), crate::events::Outcome::Written);
+    let withdrawn_generation = cache.session_catalog_generation().unwrap().unwrap();
+    assert_ne!(withdrawn_generation, continued_generation);
+    assert_eq!(cache.remove_files(&removal).unwrap(), crate::events::Outcome::Written, "lost removal ACK");
+    assert_eq!(cache.session_catalog_generation().unwrap().as_deref(), Some(withdrawn_generation.as_str()));
+    let mut stale = missing_ledger;
+    stale.offset += 1;
+    assert_eq!(cache.remove_files(&[(missing.clone(),Some(stale))]).unwrap(), crate::events::Outcome::Conflict);
+    let withdrawn_store=super::super::snapshot::query::QueryCatalog {pool:pool.clone(),namespace:namespace.clone(),control:control.clone(),generation:withdrawn_generation.clone(),options:options.clone()};
+    let current=query.call_bound_catalog_at("list_sessions",&serde_json::json!({}),1790812802000,&withdrawn_store).unwrap();
+    assert_eq!(current["total"].as_u64(),Some((continued.rows.len()-1) as u64));
+    let removed_key=continued.rows.iter().find(|r|r.harness=="copilot").unwrap().key.clone();
+    assert!(!current.to_string().contains(&removed_key));
+    assert!(query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":removed_key,"limit":100}),1790812802000,&withdrawn_store,&retained_host).is_err());
+    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies);
+    drop(cache);
+    let (mut cache,_) = crate::storage::postgres::index_store::open(pool.clone(),namespace.clone(),control.clone()).unwrap();
+    assert_eq!(cache.remove_files(&removal).unwrap(),crate::events::Outcome::Written);
+    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies,"withdrawal preserves authorized old body after reopen");
+    assert_eq!(fs::read(&retained_copy).unwrap(),retained_host.0.values().find(|(r,_)|r.root=="copilot").unwrap().1.as_ref());
     let collision = ns("vertical140\0🦀other");
     let (other, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
