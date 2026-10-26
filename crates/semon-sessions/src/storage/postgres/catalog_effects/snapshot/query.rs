@@ -308,7 +308,7 @@ impl QueryCatalogStore for QueryCatalog {
                 });
                 for row in catalog {
                     let Some(c) = cutoff else {
-                        emit(chosen(row)?.0, None, bytes_left)?;
+                        loaded.insert(row.key.clone(), chosen(row)?.0);
                         continue;
                     };
                     let state = row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
@@ -322,6 +322,11 @@ impl QueryCatalogStore for QueryCatalog {
                 request.cursor = Some(next.ok_or(StorageError::ScopeChanged)?);
             }
             let Some(c) = cutoff else {
+                // An immutable owner's relationship summaries may still name
+                // a withdrawn peer. Membership comes from this cohort, as in
+                // the SQLite reader, rather than from embedded old summaries.
+                let keep = loaded.keys().cloned().collect::<BTreeSet<_>>();
+                for row in loaded.into_values() { emit(row, Some(&keep), bytes_left)?; }
                 // Each saved owner contains its complete relationship summaries.
                 // Exact edge/turn sets are loaded below from the immutable effects.
                 let (edges, turns) = {
