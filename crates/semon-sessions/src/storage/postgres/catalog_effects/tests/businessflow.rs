@@ -1123,7 +1123,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let cancelled = PgCancellation::default();
     cancelled.cancel();
     assert!(matches!(
-        crate::storage::postgres::index_store::open(pool, collision, cancelled),
+        crate::storage::postgres::index_store::open(pool.clone(), collision, cancelled),
         Err(StorageError::Busy)
     ));
     let facts_path=oracle.root.join("positive-facts158.json");
