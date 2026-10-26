@@ -314,7 +314,11 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         query: crate::catalog_search::Query<'_>,
     ) -> io::Result<crate::catalog_search::Selection> {
-        crate::catalog_search::read_admitted(self.0, query).map_err(io::Error::other)
+        crate::catalog_search::read_admitted(self.0, query).map_err(|cause| {
+            #[cfg(test)]
+            eprintln!("catalog_snapshot_search_failed: {cause}");
+            io::Error::other(cause)
+        })
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
         let sql = "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)";
