@@ -1553,6 +1553,22 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
                             db.execute_batch(ddl).unwrap();
                         }
                         assert_eq!(objects(&db), required_objects);
+                        assert!(current_objects_present(&db).unwrap());
+                        // A matching object name cannot conceal a malformed
+                        // index, trigger body or table in this current profile.
+                        for drift in [
+                            "DROP INDEX files_cwd; CREATE INDEX files_cwd ON files(path);",
+                            "DROP TRIGGER catalog_changes_delete; CREATE TRIGGER catalog_changes_delete AFTER DELETE ON session_catalog BEGIN SELECT 1; END;",
+                            "ALTER TABLE native_usage_sources ADD COLUMN unexpected TEXT;",
+                        ] {
+                            let tx = db.unchecked_transaction().unwrap();
+                            tx.execute_batch(drift).unwrap();
+                            let before = tx.total_changes();
+                            assert!(!current_objects_present(&tx).unwrap(), "{drift}");
+                            assert_eq!(tx.total_changes(), before);
+                            tx.rollback().unwrap();
+                            assert!(current_objects_present(&db).unwrap());
+                        }
                         assert_eq!(
                             db.query_row(
                                 "SELECT count(*) FROM pragma_foreign_key_check",
@@ -1640,6 +1656,9 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
 
     fn assembled_metadata_fixture(db: &Connection) {
         bind_fixture(db, "a");
+        // This fixture models an existing current store, including its journal
+        // contract. Admission must not switch a caller's journal mode for it.
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
         for ddl in authored_storage_ddl(PhysicalLayout {
             core: true,
             metadata: true,
