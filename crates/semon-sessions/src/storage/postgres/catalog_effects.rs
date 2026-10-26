@@ -1,4 +1,5 @@
-//! Private immutable Current/recipe/trace effects. This is NOT Catalog publication:
+//! Private immutable Current/recipe/trace/search and retained-history effects.
+//! This is NOT Catalog publication:
 //! no head, claim ACK, readiness, reader lease or backend qualification is issued.
 //! The complete admitted publisher must own the surrounding PgTxn and CAS.
 #![allow(dead_code)]
@@ -77,7 +78,7 @@ impl Effects<'_, '_> {
         key: &'static str,
         values: &[&(dyn ToSql + Sync)],
     ) -> Result<(), StorageError> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let generation = self.generation.as_bytes();
@@ -116,7 +117,7 @@ impl TracePublicationStore for Effects<'_, '_> {
         generation: &str,
         source: &str,
     ) -> Result<bool, StorageError> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let rows = tx.driver.query("SELECT session_key=$4 AND trace_generation=$5 AND source_generation=$6 FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &generation.as_bytes(), &source.as_bytes()]).map_err(sqlstate::error)?;
@@ -371,7 +372,7 @@ impl SlotPublicationStore for Effects<'_, '_> {
 
 /// Execute real shared Current/source/dependency and recipe algorithms in the
 /// caller's borrowed transaction. Returning () deliberately cannot become a
-/// Catalog receipt: History/search/overview/proofs/admission are missing.
+/// Catalog receipt: full History/overview/proof/admission qualification is missing.
 pub(super) fn stage(
     tx: &mut PgTxn<'_>,
     generation: &str,
@@ -400,8 +401,17 @@ pub(super) fn stage(
     if let Some(projections) = publication.transcripts {
         catalog::publish_slot_rows(&effects, publication.rows, projections)?;
     }
+    crate::catalog_search::publish_current_rows_port(
+        &effects,
+        &publication.rows.iter().collect::<Vec<_>>(),
+        64,
+        |_, _| {},
+    )?;
     Ok(())
 }
+
+mod search;
+pub(super) mod history;
 
 #[cfg(test)]
 mod tests;
