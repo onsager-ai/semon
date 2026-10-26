@@ -52,7 +52,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // and versioned session.start payload (model/tests.rs fixtures).
     let codex_id = "01234567-89ab-4cde-8123-456789abcdef";
     let copilot_id = "11234567-89ab-4cde-8123-456789abcdef";
-    let codex = options.codex_home.join(format!("sessions/2026/10/01/rollout-{codex_id}.jsonl"));
+    let codex = options
+        .codex_home
+        .join(format!("sessions/2026/10/01/rollout-{codex_id}.jsonl"));
     let copilot = options
         .copilot_home
         .join(format!("session-state/{copilot_id}/events.jsonl"));
@@ -120,18 +122,72 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             assert_eq!(query["runtime"].as_str(), Some(runtime.as_str()));
         }
     }
-    let published = pg.publish_partial_catalog_fenced(&prepared).unwrap();
+    // Drive the SAME ordinary queued producer against durable PG staging.
+    let paths = inputs.iter().map(|input| input.full_path(&options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let stage_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    assert_eq!(pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(), crate::events::Outcome::Written);
+    let mut stages = Vec::new();
+    let (published, semantic_batch, semantic_model) = loop {
+        let batch = pg.semantic_batch(64).unwrap().unwrap();
+        stages.push(batch.phase);
+        // Reopen mid-stage: resume must preserve the exact phase and epoch.
+        if batch.phase == crate::model::relation_stage::Phase::Identity {
+            drop(pg);
+            pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+            assert_eq!(pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(), crate::events::Outcome::Written);
+            let resumed = pg.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(resumed.epoch, batch.epoch);
+            assert_eq!(resumed.phase, batch.phase);
+        }
+        let model = pg.prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000).unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let ack = pg.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+            assert_eq!(pg.publish_semantic_catalog(&batch, model.prepared()).unwrap(), ack);
+            break (ack, batch, model);
+        }
+    };
+    assert_eq!(stages.len(), 4);
+    assert_eq!(producer_rows(&semantic_model.prepared().rows), producer_rows(&oracle.rows));
+    assert_eq!(pg.finish_semantic_stage(semantic_batch.epoch).unwrap(), crate::events::Outcome::Written);
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
     // A lost response retries the identical full request, even though its
     // expected head and acknowledged claims have advanced.
-    assert_eq!(pg.publish_partial_catalog_fenced(&prepared).unwrap().1.as_deref(), Some(generation.as_str()));
+    assert_eq!(
+        pg.publish_partial_catalog_fenced(&prepared)
+            .unwrap()
+            .1
+            .as_deref(),
+        Some(generation.as_str())
+    );
     let mut competing = prepared.rows.clone();
     competing[0].name.push_str(" competing publisher");
-    assert!(pg.publish_catalog_projection_fenced(&crate::slot_projection::Publication { rows: &competing, transcripts: Some(&prepared.transcripts) }, prepared.base_generation.as_deref()).is_err());
-    let page = super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {
-        crate::catalog::read_page_snapshot(&options, "", &crate::catalog::Request::parse("limit=20").unwrap(), snapshot).map_err(|_| StorageError::ScopeChanged)
-    }).unwrap();
+    assert!(
+        pg.publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &competing,
+                transcripts: Some(&prepared.transcripts)
+            },
+            prepared.base_generation.as_deref()
+        )
+        .is_err()
+    );
+    let page = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &options,
+                "",
+                &crate::catalog::Request::parse("limit=20").unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
@@ -142,23 +198,100 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         bytes: std::sync::Arc<[u8]>,
     }
     impl crate::SessionSourceReader for Host {
-        fn read_range(&self, source: &crate::SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> std::io::Result<crate::SessionSourceRange> {
-            if source != &self.source || expected.is_some_and(|g| g != "authorized-fixture") || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX { return Err(std::io::Error::other("fixture authority mismatch")); }
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            if source != &self.source
+                || expected.is_some_and(|g| g != "authorized-fixture")
+                || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
+            {
+                return Err(std::io::Error::other("fixture authority mismatch"));
+            }
             let at = usize::try_from(offset).map_err(std::io::Error::other)?;
             let end = self.bytes.len().min(at.saturating_add(max));
-            let bytes = self.bytes.get(at..end).ok_or_else(|| std::io::Error::other("fixture range"))?;
-            Ok(crate::SessionSourceRange { generation: "authorized-fixture".into(), length: self.bytes.len() as u64, offset, bytes: std::sync::Arc::from(bytes), cached: false })
+            let bytes = self
+                .bytes
+                .get(at..end)
+                .ok_or_else(|| std::io::Error::other("fixture range"))?;
+            Ok(crate::SessionSourceRange {
+                generation: "authorized-fixture".into(),
+                length: self.bytes.len() as u64,
+                offset,
+                bytes: std::sync::Arc::from(bytes),
+                cached: false,
+            })
         }
     }
-    let (projection, slot) = prepared.transcripts.iter().find_map(|projection| projection.slots.iter().find(|slot| matches!(slot.recipe, crate::slot_projection::Recipe::U) && slot.field.is_some() && slot.file.is_some()).map(|slot| (projection, slot))).expect("ordinary producer must capture a selected native user field");
-    let selected = prepared.rows.iter().find(|row| row.key == projection.key).unwrap();
-    let source = selected.sources.iter().find(|source| source.path == slot.file.as_ref().unwrap().path).unwrap();
-    let input = inputs.iter().find(|input| input.full_path(&options) == source.path).unwrap();
-    let reference = crate::SessionSourceRef { root: input.root.as_str().to_owned(), path: input.path.clone(), native_id: source.native_id.clone(), offset: source.offset, prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256 };
-    let host = Host { source: reference.clone(), bytes: std::sync::Arc::from(fs::read(&source.path).unwrap()) };
+    let (projection, slot) = prepared
+        .transcripts
+        .iter()
+        .find_map(|projection| {
+            projection
+                .slots
+                .iter()
+                .find(|slot| {
+                    matches!(slot.recipe, crate::slot_projection::Recipe::U)
+                        && slot.field.is_some()
+                        && slot.file.is_some()
+                })
+                .map(|slot| (projection, slot))
+        })
+        .expect("ordinary producer must capture a selected native user field");
+    let selected = prepared
+        .rows
+        .iter()
+        .find(|row| row.key == projection.key)
+        .unwrap();
+    let source = selected
+        .sources
+        .iter()
+        .find(|source| source.path == slot.file.as_ref().unwrap().path)
+        .unwrap();
+    let input = inputs
+        .iter()
+        .find(|input| input.full_path(&options) == source.path)
+        .unwrap();
+    let reference = crate::SessionSourceRef {
+        root: input.root.as_str().to_owned(),
+        path: input.path.clone(),
+        native_id: source.native_id.clone(),
+        offset: source.offset,
+        prefix_sha256: source.prefix_sha256,
+        tail_sha256: source.tail_sha256,
+    };
+    let host = Host {
+        source: reference.clone(),
+        bytes: std::sync::Arc::from(fs::read(&source.path).unwrap()),
+    };
     let field = slot.field.as_ref().unwrap();
-    let expected_field = crate::native_field::preview(&host, &reference, field, "prompt", &mut (1024 * 1024)).unwrap();
-    let read_selected = || super::super::selected_reader::with_reader(&pool, &namespace, &control, &generation, source, &reference, &host, |reader| crate::native_field::preview(reader, &reference, field, "prompt", &mut (1024 * 1024))).unwrap();
+    let expected_field =
+        crate::native_field::preview(&host, &reference, field, "prompt", &mut (1024 * 1024))
+            .unwrap();
+    let read_selected = || {
+        super::super::selected_reader::with_reader(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            source,
+            &reference,
+            &host,
+            |reader| {
+                crate::native_field::preview(
+                    reader,
+                    &reference,
+                    field,
+                    "prompt",
+                    &mut (1024 * 1024),
+                )
+            },
+        )
+        .unwrap()
+    };
     assert_eq!(read_selected(), expected_field);
     drop(pg);
     let mut resumed =
@@ -166,7 +299,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let after = resumed.query_runtime_binding().unwrap().unwrap();
     assert_eq!(binding.admission, after.admission);
     assert_eq!(binding.stream_epoch, after.stream_epoch);
-    assert_eq!(resumed.session_catalog_generation().as_deref(), Some(generation.as_str()));
+    assert_eq!(
+        resumed.session_catalog_generation().as_deref(),
+        Some(generation.as_str())
+    );
     let repeated =
         crate::model::prepare_sources(&options, &mut resumed, &inputs, 1790812802000).unwrap();
     assert_eq!(
@@ -199,10 +335,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         receipt.consumed_bytes,
         raw[0].len() as u64 + append.len() as u64
     );
-    assert_eq!(continued.rows.iter().flat_map(|row| &row.sources).find(|source| source.path == path).unwrap().offset, receipt.consumed_bytes);
-    let continued_generation = resumed.publish_partial_catalog_fenced(&continued).unwrap().1.unwrap();
+    assert_eq!(
+        continued
+            .rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path == path)
+            .unwrap()
+            .offset,
+        receipt.consumed_bytes
+    );
+    let continued_generation = resumed
+        .publish_partial_catalog_fenced(&continued)
+        .unwrap()
+        .1
+        .unwrap();
     assert_ne!(continued_generation, generation);
-    assert_eq!(read_selected(), expected_field, "retained selected proof must survive a newer publication");
+    assert_eq!(
+        read_selected(),
+        expected_field,
+        "retained selected proof must survive a newer publication"
+    );
     assert_eq!(
         fs::read(&path).unwrap(),
         [raw[0].as_slice(), append.as_bytes()].concat()

@@ -1,9 +1,9 @@
 //! A request-owned host reader qualified by leased immutable PG native proofs.
 //! The host still authorizes bytes; Catalog metadata never opens a local file.
 use super::*;
-use crate::{SessionSourceReader, SessionSourceRef, SessionSourceRange};
-use crate::storage::postgres::{PgPool, PgCancellation, txn::TxnKind, native_pages};
+use crate::storage::postgres::{PgCancellation, PgPool, native_pages, txn::TxnKind};
 use crate::storage::{LogicalSourceNamespace, proof_lifetime::ProofGenerationId};
+use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
 use std::{io, sync::Arc};
 
 struct Reader<'a> {
@@ -26,15 +26,42 @@ pub(in crate::storage::postgres) fn with_reader<T>(
     host: &dyn SessionSourceReader,
     read: impl FnOnce(&dyn SessionSourceReader) -> io::Result<T>,
 ) -> Result<T, StorageError> {
-    if reference.native_id != source.native_id || reference.offset != source.offset || reference.prefix_sha256 != source.prefix_sha256 || reference.tail_sha256 != source.tail_sha256 { return Err(StorageError::ScopeChanged); }
+    if reference.native_id != source.native_id
+        || reference.offset != source.offset
+        || reference.prefix_sha256 != source.prefix_sha256
+        || reference.tail_sha256 != source.tail_sha256
+    {
+        return Err(StorageError::ScopeChanged);
+    }
     snapshot::with_admitted_generation(pool, namespace, control, generation, |_| {
-        read(&Reader { pool, namespace, control, generation, source, reference, host }).map_err(|_| StorageError::ScopeChanged)
+        read(&Reader {
+            pool,
+            namespace,
+            control,
+            generation,
+            source,
+            reference,
+            host,
+        })
+        .map_err(|_| StorageError::ScopeChanged)
     })
 }
 
 impl SessionSourceReader for Reader<'_> {
-    fn read_range(&self, reference: &SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> io::Result<SessionSourceRange> {
-        if reference != self.reference || max == 0 || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX || offset >= self.source.offset { return Err(io::Error::other(StorageError::InvalidArguments)); }
+    fn read_range(
+        &self,
+        reference: &SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<SessionSourceRange> {
+        if reference != self.reference
+            || max == 0
+            || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
+            || offset >= self.source.offset
+        {
+            return Err(io::Error::other(StorageError::InvalidArguments));
+        }
         let size = crate::source_chunks::SIZE;
         let index = usize::try_from(offset / size as u64).map_err(io::Error::other)?;
         let start = index as u64 * size as u64;
@@ -54,11 +81,26 @@ impl SessionSourceReader for Reader<'_> {
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
         let part = self.host.read_range(reference, expected, start, length)?;
-        if part.offset != start || part.bytes.len() != length || part.length < self.source.offset || expected.is_some_and(|g| g != part.generation) || <[u8; 32]>::from(Sha256::digest(&part.bytes)) != hash { return Err(io::Error::other(StorageError::ScopeChanged)); }
+        if part.offset != start
+            || part.bytes.len() != length
+            || part.length < self.source.offset
+            || expected.is_some_and(|g| g != part.generation)
+            || <[u8; 32]>::from(Sha256::digest(&part.bytes)) != hash
+        {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
         let begin = (offset - start) as usize;
         let end = length.min(begin.saturating_add(max));
-        Ok(SessionSourceRange { generation: part.generation, length: self.source.offset, offset, bytes: Arc::from(&part.bytes[begin..end]), cached: part.cached })
+        Ok(SessionSourceRange {
+            generation: part.generation,
+            length: self.source.offset,
+            offset,
+            bytes: Arc::from(&part.bytes[begin..end]),
+            cached: part.cached,
+        })
     }
 }
 
-fn text(value: Vec<u8>) -> Result<String, StorageError> { String::from_utf8(value).map_err(|_| StorageError::ScopeChanged) }
+fn text(value: Vec<u8>) -> Result<String, StorageError> {
+    String::from_utf8(value).map_err(|_| StorageError::ScopeChanged)
+}

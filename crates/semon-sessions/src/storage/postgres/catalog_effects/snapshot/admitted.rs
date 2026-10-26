@@ -3,8 +3,12 @@ use super::*;
 use crate::{catalog::Request, storage::catalog::CatalogSnapshot};
 use std::io;
 
-fn failed(error: StorageError) -> io::Error { io::Error::other(error) }
-fn unavailable<T>() -> io::Result<T> { Err(failed(StorageError::NamespaceUpgradePending)) }
+fn failed(error: StorageError) -> io::Error {
+    io::Error::other(error)
+}
+fn unavailable<T>() -> io::Result<T> {
+    Err(failed(StorageError::NamespaceUpgradePending))
+}
 
 impl CatalogSnapshot for Snapshot<'_, '_> {
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
@@ -28,25 +32,47 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         self.require_current()?;
-        if request.limit > 64 || request.scope != crate::CatalogReadScope::Current { return unavailable(); }
+        if request.limit > 64 || request.scope != crate::CatalogReadScope::Current {
+            return unavailable();
+        }
         let tx = self.tx.borrow_mut();
         let ns = tx.namespace.as_str().as_bytes();
         let bytes: i64 = tx.driver.query_one("SELECT coalesce(sum(octet_length(metadata)),0)::bigint FROM (SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65) bounded", &[&ns, &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
-        if bytes > MAX as i64 { return Err(failed(StorageError::Busy)); }
+        if bytes > MAX as i64 {
+            return Err(failed(StorageError::Busy));
+        }
         let rows = tx.driver.query("SELECT session_key,metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns, &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
-        if rows.len() > 64 { return Err(failed(StorageError::Busy)); }
+        if rows.len() > 64 {
+            return Err(failed(StorageError::Busy));
+        }
         let mut output = Vec::new();
         for row in rows {
             let key: Vec<u8> = row.get(0);
             let bytes: Vec<u8> = row.get(1);
             crate::selected_read::charge(64, bytes.len())?;
             let value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if value.key.as_bytes() != key { return Err(failed(StorageError::ScopeChanged)); }
+            if value.key.as_bytes() != key {
+                return Err(failed(StorageError::ScopeChanged));
+            }
             if request.sid.as_ref().is_some_and(|key| key != &value.key)
-                || request.harness.as_ref().is_some_and(|h| h != &value.harness)
+                || request
+                    .harness
+                    .as_ref()
+                    .is_some_and(|h| h != &value.harness)
                 || request.model.as_ref().is_some_and(|m| m != &value.model)
-                || request.repo.as_ref().is_some_and(|repo| value.repo.as_deref().unwrap_or("") != repo)
-                || request.cursor.as_ref().is_some_and(|cursor| value.last.unwrap_or(0) > cursor.last || (value.last.unwrap_or(0) == cursor.last && (value.key < cursor.key || (!cursor.inclusive && value.key == cursor.key)))) { continue; }
+                || request
+                    .repo
+                    .as_ref()
+                    .is_some_and(|repo| value.repo.as_deref().unwrap_or("") != repo)
+                || request.cursor.as_ref().is_some_and(|cursor| {
+                    value.last.unwrap_or(0) > cursor.last
+                        || (value.last.unwrap_or(0) == cursor.last
+                            && (value.key < cursor.key
+                                || (!cursor.inclusive && value.key == cursor.key)))
+                })
+            {
+                continue;
+            }
             output.push(value);
         }
         output.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.key.cmp(&b.key)));
@@ -54,10 +80,40 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         tx.check().map_err(failed)?;
         Ok(output)
     }
-    fn search(&self, _: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { unavailable() }
-    fn has_history(&self, key: &str) -> io::Result<bool> { self.catalog(key, true).map(|row| row.is_some()).map_err(failed) }
-    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> { self.catalog(key, true).map_err(failed)?.map(|row| serde_json::to_string(&row).map_err(io::Error::other)).transpose() }
-    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> { self.has_history(&row.key) }
-    fn selected_details(&self, _: &str, _: &[CatalogSource], _: &mut dyn FnMut(&CatalogRow) -> serde_json::Value) -> io::Result<Option<serde_json::Value>> { unavailable() }
-    fn transcript_observation(&self, _: &str, _: &str, _: bool) -> io::Result<Option<serde_json::Value>> { unavailable() }
+    fn search(
+        &self,
+        _: crate::catalog_search::Query<'_>,
+    ) -> io::Result<crate::catalog_search::Selection> {
+        unavailable()
+    }
+    fn has_history(&self, key: &str) -> io::Result<bool> {
+        self.catalog(key, true)
+            .map(|row| row.is_some())
+            .map_err(failed)
+    }
+    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
+        self.catalog(key, true)
+            .map_err(failed)?
+            .map(|row| serde_json::to_string(&row).map_err(io::Error::other))
+            .transpose()
+    }
+    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
+        self.has_history(&row.key)
+    }
+    fn selected_details(
+        &self,
+        _: &str,
+        _: &[CatalogSource],
+        _: &mut dyn FnMut(&CatalogRow) -> serde_json::Value,
+    ) -> io::Result<Option<serde_json::Value>> {
+        unavailable()
+    }
+    fn transcript_observation(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> io::Result<Option<serde_json::Value>> {
+        unavailable()
+    }
 }
