@@ -191,7 +191,9 @@ pub(super) fn reuse(
     writer: Option<&configured::Writer>,
 ) -> Result<Option<String>, StoreError> {
     if let Some(writer) = writer {
-        writer.validate(&store.connection).map_err(StoreError::Configured)?;
+        writer
+            .validate(&store.connection)
+            .map_err(StoreError::Configured)?;
     }
     let started = measurements.start();
     let (candidates, steps) =
@@ -236,7 +238,9 @@ pub(super) fn reuse(
         return Ok(None);
     }
     let metadata = match writer {
-        Some(writer) => writer.tree(old, &prior.stat).map_err(StoreError::Configured)?,
+        Some(writer) => writer
+            .tree(old, &prior.stat)
+            .map_err(StoreError::Configured)?,
         None => store.read_tree(old, &prior.stat).map_err(failure)?,
     };
     let Some((_, metadata)) = metadata else {
@@ -407,7 +411,8 @@ pub(super) fn reuse(
     .map_err(failure)?;
     invalidate_bound_catalog_source(&tx, old, "removed").map_err(failure)?;
     invalidate_bound_catalog_source(&tx, path, "changed").map_err(failure)?;
-    tx.commit().map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
+    tx.commit()
+        .map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
     Ok(Some(old.clone()))
 }
 
