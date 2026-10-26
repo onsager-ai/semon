@@ -333,3 +333,24 @@ fn current_transfer225_native_rows_real_ingest_paged_absent_raw_and_reverse() {
     assert_eq!(sqlite_core(&reverse, &path), expected);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn current_transfer225_usage_multi_page_absent_raw_exact_native_reader() {
+    let root=root();let source=sqlite(&root,"usage-source");let target=sqlite(&root,"usage-target");let reverse=sqlite(&root,"usage-reverse");
+    let path=root.join("usage.jsonl");seed_native_usage(&source,&path,130);
+    let load=|config:&StoreConfig| {
+        let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        let store=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (ledger,index)=store.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras,"usage":index.usage(),"signals":index.signals,"chunks":index.source_chunks.as_ref().unwrap().hashes,"launch":index.handoff_index})
+    };
+    let expected=load(&source);assert_eq!(expected["usage"].as_object().unwrap().len(),130);
+    let manifest=stage(&source,&target,&[99;32]);
+    let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    let mut message=0;let mut identities=0;
+    for sequence in 1..=pages {let page=source.transfer_inbox().staged_page(&manifest,sequence).unwrap();assert!(page.records.len()<=MAX_PAGE_ROWS);for record in page.records {if let TransferRecord::NativeRow{kind,..}=record {match kind {super::super::NativeRowKind::MessageUsage=>message+=1,super::super::NativeRowKind::CopiedUsage=>identities+=1,_=>{}}}}}
+    assert_eq!(message,130);assert_eq!(identities,130);
+    std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
+    let manifest=stage(&target,&reverse,&[100;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);
+    std::fs::remove_dir_all(root).unwrap();
+}

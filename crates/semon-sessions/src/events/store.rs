@@ -550,7 +550,8 @@ const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file
      VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24)";
 
-pub(crate) const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
+pub(crate) const CODEX_USAGE_COLUMNS: &str =
+    "seq, model, input, output, cache_write, cache_read, t";
 
 const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
