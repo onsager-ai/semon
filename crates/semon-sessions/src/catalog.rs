@@ -766,10 +766,10 @@ pub(crate) fn page(options: &Options, machine: &str, request: Request) -> Viewer
             eprintln!("catalog_page_read_failed: {cause}");
             let _ = cause;
             error(
-            503,
-            "catalog_unavailable",
-            "The session catalog is unavailable. Retry after the background observation completes.",
-            true,
+                503,
+                "catalog_unavailable",
+                "The session catalog is unavailable. Retry after the background observation completes.",
+                true,
             )
         }
     }
