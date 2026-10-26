@@ -533,9 +533,9 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     }
 }
 
-const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
+pub(crate) const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
-const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
+pub(crate) const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
@@ -550,7 +550,8 @@ const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file
      VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24)";
 
-const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
+pub(crate) const CODEX_USAGE_COLUMNS: &str =
+    "seq, model, input, output, cache_write, cache_read, t";
 
 const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";

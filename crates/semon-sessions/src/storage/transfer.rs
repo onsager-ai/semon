@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 pub(crate) mod inventory;
+pub(crate) mod native_pages;
+pub(crate) mod native_rows;
 pub(crate) mod reported;
+pub use native_pages::{NativePageKind, NativeSource};
+pub use native_rows::NativeRowKind;
 pub use reported::CaptureProgress;
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -195,6 +199,23 @@ pub enum TransferRecord {
     },
     ReportedFact(crate::facts::ReportedRunSnapshot),
     SourceIntent(super::source_observations::SourceIntent),
+    NativeSource(NativeSource),
+    NativeRow {
+        path: String,
+        kind: NativeRowKind,
+        values: Vec<serde_json::Value>,
+    },
+    NativePage {
+        path: String,
+        kind: NativePageKind,
+        key: String,
+        payload: String,
+    },
+    NativeMetadata {
+        path: String,
+        key: String,
+        value: String,
+    },
     /// Fixed current FILE columns after file_id/path; physical IDs are not portable.
     NativeFile {
         path: String,
@@ -266,6 +287,16 @@ impl TransferRecord {
             Self::Metadata { .. } => Category::Metadata,
             Self::ReportedFact(_) => Category::ReportedFacts,
             Self::SourceIntent(_) => Category::SourceObservations,
+            Self::NativeSource(_) => Category::PageGenerations,
+            Self::NativeRow { kind, .. } => {
+                if *kind == NativeRowKind::Signal {
+                    Category::Events
+                } else {
+                    Category::Usage
+                }
+            }
+            Self::NativePage { .. } => Category::PageBlobs,
+            Self::NativeMetadata { .. } => Category::NativeHeaders,
             Self::NativeFile { .. } => Category::Ledgers,
             Self::NativeEvent { .. } => Category::Events,
         }
@@ -444,6 +475,12 @@ impl TransferInbox {
                 TransferRecord::ReportedFact(run) => {
                     crate::events::reported_rows::ReportedRow::new(run)
                         .map_err(|_| StorageError::InvalidArguments)?;
+                }
+                TransferRecord::NativeRow { .. } => native_rows::validate(record)?,
+                TransferRecord::NativeSource(_)
+                | TransferRecord::NativePage { .. }
+                | TransferRecord::NativeMetadata { .. } => {
+                    native_pages::validate(record)?;
                 }
                 TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
                     record.validate_native()?;
