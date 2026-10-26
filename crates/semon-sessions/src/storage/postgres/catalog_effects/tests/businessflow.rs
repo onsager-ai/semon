@@ -1215,7 +1215,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .map(|i| {
             let input = crate::Input {
                 root: crate::InputRoot::Claude,
-                path: format!("projects/project/bulk169-{i:03}.jsonl").into(),
+                path: format!("projects/project/bulk169-{i:03}.jsonl"),
             };
             let body = serde_json::json!({"type":"user","sessionId":format!("bulk169-{i:03}"),"uuid":format!("bulk-{i}"),"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"sanitized bulk input"}});
             fs::write(input.full_path(&facts_options), format!("{body}\n")).unwrap();
