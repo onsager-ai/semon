@@ -16,10 +16,19 @@ pub(super) fn error(error: super::pool::DriverError) -> StorageError {
     match error {
         super::pool::DriverError::Pg(error) => {
             #[cfg(test)]
-            eprintln!(
-                "PG_DIAGNOSTIC sqlstate={}",
-                error.code().map_or("none", |code| code.code())
-            );
+            {
+                use std::error::Error;
+                let cause = error.source();
+                eprintln!(
+                    "PG_DIAGNOSTIC sqlstate={} closed={} wrong_type={} io_kind={:?}",
+                    error.code().map_or("none", |code| code.code()),
+                    error.is_closed(),
+                    cause.is_some_and(|cause| cause.is::<tokio_postgres::types::WrongType>()),
+                    cause
+                        .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                        .map(std::io::Error::kind),
+                );
+            }
             classify(error.code().map(|code| code.code()), false)
         }
         super::pool::DriverError::Interrupted => StorageError::Busy,

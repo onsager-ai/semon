@@ -77,7 +77,9 @@ pub(crate) fn stage(
     };
     let checkpoint = source.checkpoint(&manifest).unwrap();
     let target = target.transfer_inbox();
-    target.begin(&manifest).unwrap();
+    target.begin(&manifest).unwrap_or_else(|error| {
+        panic!("begin fixture {} failed: {error:?}", operation[0])
+    });
     for sequence in 1..=checkpoint.sequence {
         let page = source.staged_page(&manifest, sequence).unwrap();
         assert_eq!(
@@ -348,6 +350,45 @@ pub(crate) fn seed_catalog(
             .unwrap(),
         crate::events::Outcome::Written
     );
+    let rows = finish_catalog(&mut cache, &options, &input);
+    (options, rows)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn advance_catalog(
+    config: &StoreConfig,
+    options: &crate::Options,
+) -> Vec<crate::model::summary::CatalogRow> {
+    use std::io::Write;
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/sanitized/catalog.jsonl".into(),
+    };
+    let path = input.full_path(options);
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{}", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})).unwrap();
+    drop(file);
+    let mut cache = cache(config);
+    cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
+    cache.flush_cold_writes().unwrap();
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(
+                &[path.to_str().unwrap().to_owned()],
+                "transfer-real-model",
+                true,
+            )
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    finish_catalog(&mut cache, options, &input)
+}
+
+fn finish_catalog(
+    cache: &mut crate::events::EventCache,
+    options: &crate::Options,
+    input: &crate::Input,
+) -> Vec<crate::model::summary::CatalogRow> {
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
         if batch.paths.is_empty() {
@@ -355,8 +396,8 @@ pub(crate) fn seed_catalog(
         }
         let model = cache
             .prepare_semantic_model_batch(
-                &options,
-                std::slice::from_ref(&input),
+                options,
+                std::slice::from_ref(input),
                 &batch,
                 1_790_000_000_000,
             )
@@ -393,7 +434,7 @@ pub(crate) fn seed_catalog(
                     .as_deref(),
                 Some("sanitized transfer description")
             );
-            return (options, model.prepared().rows.clone());
+            return model.prepared().rows.clone();
         }
     }
     panic!("real source Catalog did not publish");
