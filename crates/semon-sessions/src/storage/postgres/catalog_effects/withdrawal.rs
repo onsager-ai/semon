@@ -31,6 +31,19 @@ pub(in crate::storage::postgres) fn remove(
             Err(StorageError::Conflict)
         };
     }
+    // A deferred mixed/connected withdrawal is acknowledged by its exact Index
+    // intent, before and after the semantic catch-up publishes its successor.
+    let deferred = encoded(&("withdrawal-deferred-v1", &request))?;
+    let mut replayed = 0;
+    for (path, _) in files {
+        let intent = tx.driver.query("SELECT evidence=$3 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns, &path.as_bytes(), &deferred]).map_err(sqlstate::error)?;
+        if intent.first().is_some_and(|row| row.get::<_, bool>(0)) {
+            replayed += 1;
+        }
+    }
+    if replayed == files.len() {
+        return Ok(Outcome::Written);
+    }
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
     if active {
         return Ok(Outcome::Conflict);
@@ -57,6 +70,7 @@ pub(in crate::storage::postgres) fn remove(
         .collect::<Vec<_>>();
     // Owners reading a withdrawn Source, by bounded key pages.
     let mut removed = Vec::new();
+    let mut connected = false;
     let mut after = None;
     while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))? {
         for (_, value) in &page {
@@ -64,13 +78,11 @@ pub(in crate::storage::postgres) fn remove(
                 .sources
                 .iter()
                 .filter(|s| paths.contains(s.path.to_string_lossy().as_ref()))
-                .count();
+                .collect::<Vec<_>>();
             // A mixed-source owner requires ordinary semantic reconstruction.
             // Never drop its surviving sources or return a partial-success receipt.
-            if hits != value.sources.len() {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-            for source in &value.sources {
+            connected |= hits.len() != value.sources.len();
+            for source in hits {
                 let ledger = files
                     .iter()
                     .find(|(p, _)| Some(p.as_str()) == source.path.to_str())
@@ -87,7 +99,8 @@ pub(in crate::storage::postgres) fn remove(
     // Preserve relationship semantics: withdrawal of one endpoint requires the
     // connected ordinary producer, rather than a stale surviving edge.
     let mut after = None;
-    while !removed.is_empty()
+    while !connected
+        && !removed.is_empty()
         && let Some(page) = owners(tx, &previous, &after, None)?
     {
         for (_, row) in &page {
@@ -109,10 +122,14 @@ pub(in crate::storage::postgres) fn remove(
                         })
                     })
             {
-                return Err(StorageError::NamespaceUpgradePending);
+                connected = true;
+                break;
             }
         }
         after = page.last().map(|(digest, _)| digest.clone());
+    }
+    if connected {
+        return defer(tx, files, &deferred);
     }
     let generation = format!("{:x}", Sha256::digest(&operation));
     let stage=tx.driver.query_one("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
@@ -162,6 +179,30 @@ pub(in crate::storage::postgres) fn remove(
         )?;
         tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
+    tx.check()?;
+    Ok(Outcome::Written)
+}
+
+/// Mixed or connected owners are rebuilt by the ordinary semantic producer.
+/// This commit records only the Index intent and the `removed` invalidation;
+/// the qualified Current generation stays until the catch-up publication CAS.
+fn defer(
+    tx: &mut PgTxn<'_>,
+    files: &[(String, Option<Ledger>)],
+    intent: &[u8],
+) -> Result<Outcome, StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    for (path, ledger) in files {
+        tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&intent]).map_err(sqlstate::error)?;
+        super::super::native_keys::put_meta(
+            tx,
+            format!("source-retired:{path}").as_bytes(),
+            &encoded(ledger)?,
+        )?;
+        super::super::source_journal::invalidate(tx, path)?;
+        tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    }
+    tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
     tx.check()?;
     Ok(Outcome::Written)
 }

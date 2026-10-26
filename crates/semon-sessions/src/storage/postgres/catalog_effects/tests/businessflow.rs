@@ -1402,9 +1402,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(partial_list["total"].as_u64(), Some(total));
     assert!(partial_list.to_string().contains("source-write-after158"));
-    // (c) An isolated Source withdraws by bounded pages. A Source of a mixed
-    // or connected owner refuses and leaves Current untouched: removal and
-    // the owner's semantic republication are separate commits today.
+    // (c) An isolated Source withdraws by bounded pages. A mixed or connected
+    // owner's Source is withdrawn last, below, through the semantic catch-up.
     let (mut store, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
         namespace.clone(),
@@ -1412,12 +1411,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let agent = claude_agent.to_str().unwrap().to_owned();
-    let agent_ledger = store.ledger(&agent).unwrap().unwrap();
-    assert!(store.remove_files(&[(agent, Some(agent_ledger))]).is_err());
-    assert_eq!(
-        store.session_catalog_generation().unwrap().as_deref(),
-        Some(partial_generation.as_str())
-    );
+    let agent_removal = vec![(agent.clone(), store.ledger(&agent).unwrap())];
     let gone = bulk[1].full_path(&facts_options);
     let gone_path = gone.to_str().unwrap().to_owned();
     let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
@@ -1598,4 +1592,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .complete()
     .unwrap();
     assert_eq!(crate::read_facts(&facts_path).unwrap(), renamed);
+    // (e) A connected Source withdrawal commits only its Index intent and the
+    // `removed` invalidation. The qualified Current generation stays until the
+    // ordinary semantic catch-up publishes; an exact lost-ACK replay is applied.
+    let qualified = store.session_catalog_generation().unwrap();
+    assert_eq!(
+        store.remove_files(&agent_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    let reason: Vec<u8> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let row = tx.driver.query_one("SELECT reason FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&namespace.as_str().as_bytes(), &agent.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(row.get::<_, String>(0).into_bytes())
+    }).unwrap();
+    assert_eq!(reason, b"removed");
+    assert_eq!(
+        store.remove_files(&agent_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
 }
