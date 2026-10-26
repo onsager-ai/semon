@@ -129,6 +129,14 @@ pub(crate) fn local_catalog_generation(
 pub(crate) fn navigation_store(
     binding: NativeReaderBinding,
 ) -> Box<dyn navigation::NativeNavigationStore> {
+    #[cfg(feature = "postgres")]
+    if let StoreBackend::Postgres { pool, control } = &binding.config().backend {
+        return Box::new(postgres::navigation::Navigation {
+            config: binding.config().clone(),
+            pool: pool.clone(),
+            control: control.clone(),
+        });
+    }
     Box::new(sqlite::navigation::SqliteNavigation(binding))
 }
 
@@ -143,6 +151,11 @@ impl NativeReaderBinding {
             Ok(request) => request,
             Err(reply) => return reply,
         };
+        #[cfg(feature = "postgres")]
+        if let StoreBackend::Postgres { pool, control } = &self.config().backend {
+            return postgres::catalog_page(self.config(), pool, control, options, source, &request)
+                .unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true));
+        }
         sqlite::catalog::read_page(self, options, source, &request).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
     }
     pub(crate) fn bookmark_identity(
@@ -151,6 +164,17 @@ impl NativeReaderBinding {
         source: &str,
         key: &str,
     ) -> Result<Option<crate::CatalogSessionIdentity>, CatalogIdentityError> {
+        #[cfg(feature = "postgres")]
+        if let StoreBackend::Postgres { pool, control } = &self.config().backend {
+            return postgres::navigation::bookmark_identity(
+                self.config(),
+                pool,
+                control,
+                options,
+                source,
+                key,
+            );
+        }
         sqlite::catalog::history_identity(self, options, source, key)
     }
 }
@@ -330,7 +354,7 @@ impl StoreConfig {
             crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
         #[cfg(feature = "postgres")]
         if let StoreBackend::Postgres { pool, control } = &self.backend {
-            return postgres::catalog_page(self, pool, control, options, &request);
+            return postgres::catalog_page(self, pool, control, options, self.namespace.as_str(), &request);
         }
         let binding = NativeReaderBinding::Admitted(self.clone());
         sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(

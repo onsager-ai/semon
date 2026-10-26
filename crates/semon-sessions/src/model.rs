@@ -7440,6 +7440,7 @@ pub(crate) fn prepare_semantic_batch(
             "semantic model inputs differ from staged batch",
         ));
     }
+    cache.prepare_facts_authority(options)?;
     let mut prepared = match batch.phase {
         relation_stage::Phase::Indexing => {
             prepare_semantic_index_sources(options, cache, inputs, now)?
@@ -7455,7 +7456,7 @@ pub(crate) fn prepare_semantic_batch(
         }
     };
     if batch.phase != relation_stage::Phase::Indexing {
-        prepared.withdrawals = semantic_withdrawals(options, inputs)?;
+        prepared.withdrawals = semantic_withdrawals(options, cache, inputs)?;
     }
     // Preserve the shared parser's input order. Only the typed claim witness
     // follows the storage batch order; claim values and membership stay exact.
@@ -7480,7 +7481,7 @@ pub(crate) fn prepare_semantic_batch(
     if batch.phase == relation_stage::Phase::Publication {
         if !batch.context.prior_owners.is_empty() {
             prepared.relationships.lifecycle_authority =
-                Some(relation_stage::LifecycleAuthority::capture(options)?);
+                Some(relation_stage::LifecycleAuthority::capture(options, cache)?);
         }
         prepared.relationships.retired_owners = batch
             .context
@@ -7492,8 +7493,8 @@ pub(crate) fn prepare_semantic_batch(
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
         let binding = cache.query_runtime_binding()?;
-        prepared.relationships.presentation =
-            Some(crate::storage::selected::PresentationObservations::capture(
+        prepared.relationships.presentation = Some(
+            crate::storage::selected::PresentationObservations::capture_with_authority(
                 options,
                 binding.as_ref(),
                 prepared.rows.iter().chain(
@@ -7503,13 +7504,20 @@ pub(crate) fn prepare_semantic_batch(
                         .values()
                         .map(|endpoint| &endpoint.row),
                 ),
-            ));
+                options
+                    .facts
+                    .as_ref()
+                    .map(|path| cache.facts_authority(path))
+                    .transpose()?,
+            ),
+        );
     }
     Ok(SemanticModelBatch { prepared })
 }
 
 fn semantic_withdrawals(
     options: &Options,
+    cache: &EventCache,
     inputs: &[crate::Input],
 ) -> io::Result<Vec<relation_stage::Withdrawal>> {
     let facts = MachineFacts::of(options);
@@ -7521,15 +7529,19 @@ fn semantic_withdrawals(
                 && !facts.codex_rollout_is_current(options, &input.full_path(options))
         })
     {
-        let authority = crate::facts::source_authority::RawSources::open(facts_path)?;
+        let authority =
+            std::sync::Arc::new(std::sync::Mutex::new(cache.facts_authority(facts_path)?));
+        let authority_guard = authority
+            .lock()
+            .map_err(|_| io::Error::other("Facts authority unavailable"))?;
         let facts_identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
-        authority.validate()?;
+        authority_guard.validate()?;
         for input in inputs
             .iter()
             .filter(|input| input.root == crate::InputRoot::Codex)
         {
-            if authority.codex_current(&input.path)? != Some(false) {
+            if authority_guard.codex_current(&input.path)? != Some(false) {
                 continue;
             }
             let path = input.full_path(options);
@@ -7544,10 +7556,11 @@ fn semantic_withdrawals(
                 stat,
                 facts_path: facts_path.clone(),
                 facts_identity: facts_identity.clone(),
+                authority: Some(authority.clone()),
                 runtime: runtime.clone(),
             });
         }
-        authority.validate()?;
+        authority_guard.validate()?;
     }
     for withdrawal in &withdrawals {
         if !withdrawal.current()? {
@@ -7598,10 +7611,11 @@ pub(crate) fn prepare_semantic_index_sources(
         .iter()
         .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
         .collect::<io::Result<Vec<_>>>()?;
+    cache.prepare_facts_authority(options)?;
     let base_generation = cache.session_catalog_generation();
     let facts = MachineFacts::of(options);
     let runtime = crate::native_evidence::query_runtime_generation(options)?;
-    let withdrawals = semantic_withdrawals(options, inputs)?;
+    let withdrawals = semantic_withdrawals(options, cache, inputs)?;
     let (mut files, _, _) = scan_selected(
         options,
         cache,

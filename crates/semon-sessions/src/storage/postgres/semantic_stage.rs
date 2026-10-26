@@ -216,7 +216,7 @@ fn claims(
     {
         return Err(StorageError::Conflict);
     }
-    withdrawals(batch, prepared)?;
+    withdrawals(tx, batch, prepared)?;
     if prepared.rows.iter().any(|row| {
         row.sources.len() > 64
             || row.sources.iter().any(|source| {
@@ -241,7 +241,11 @@ fn claims(
 /// rollout). The staged model witness binds them from record to publication;
 /// publication claims the path, so its owners leave Current under the same
 /// generation CAS while native rows, history and older proofs stay retained.
-fn withdrawals(batch: &Batch, prepared: &PreparedSources) -> Result<(), StorageError> {
+fn withdrawals(
+    tx: &mut PgTxn<'_>,
+    batch: &Batch,
+    prepared: &PreparedSources,
+) -> Result<(), StorageError> {
     if prepared.withdrawals.len() > 64 {
         return Err(StorageError::Busy);
     }
@@ -262,7 +266,7 @@ fn withdrawals(batch: &Batch, prepared: &PreparedSources) -> Result<(), StorageE
                 .iter()
                 .flat_map(|row| &row.sources)
                 .any(|source| source.path == std::path::Path::new(&negative.path))
-            || !negative.current().unwrap_or(false)
+            || !super::current_sources::withdrawal_current(tx, negative)?
         {
             return Err(StorageError::Conflict);
         }
