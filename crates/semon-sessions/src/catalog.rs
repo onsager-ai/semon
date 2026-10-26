@@ -865,6 +865,8 @@ pub(crate) fn read_page_snapshot(
         if meta("search_version")?.as_deref() != Some(crate::catalog_search::VERSION)
             || meta(&format!("search_generation_{scope}"))?.as_deref() != Some(generation.as_str())
         {
+            #[cfg(test)]
+            eprintln!("catalog_search_unavailable version_current={} generation_current={}", meta("search_version")?.as_deref() == Some(crate::catalog_search::VERSION), meta(&format!("search_generation_{scope}"))?.as_deref() == Some(generation.as_str()));
             return Ok(error(
                 503,
                 "search_unavailable",

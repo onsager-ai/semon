@@ -707,7 +707,11 @@ pub(crate) fn relocated_catalog_source(
 /// Record a completed bounded metadata observation without replacing rows or
 /// their publication generation. Pending work or another publication prevents
 /// acknowledging this observation.
-pub(super) fn note_catalog_audit_tx(tx: &Connection, expected: Option<&str>, now: i64) -> rusqlite::Result<bool> {
+pub(super) fn note_catalog_audit_tx(
+    tx: &Connection,
+    expected: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<bool> {
     let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", [expected], |r| r.get(0))?;
     if ready {
         tx.execute(
@@ -1137,7 +1141,7 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
-    tx.execute_batch("DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?;
+    tx.execute_batch("DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); UPDATE main.storage_source_journal SET backfill_state='discovering' WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_reason'),'catalog_recovery_reason',?1)",
         [reason],
@@ -2108,7 +2112,10 @@ impl IndexStore for SqliteStore {
     }
 
     fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
         require_current_sql(&tx).map_err(failure)?;
         let ready = note_catalog_audit_tx(&tx, expected, now).map_err(failure)?;
         tx.commit().map_err(failure)?;
