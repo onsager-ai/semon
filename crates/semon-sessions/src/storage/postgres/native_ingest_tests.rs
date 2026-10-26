@@ -235,33 +235,84 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         let hook_namespace = stale.clone();
         let hook_control = control.clone();
         let hook_path = cases[0].path.to_str().unwrap().to_owned();
-        crate::events::BEFORE_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
-            hook_pool.transaction(&hook_namespace, txn::TxnKind::Write, &hook_control, |tx| source_journal::invalidate(tx, &hook_path)).unwrap();
-        })));
-        let mut pg = EventCache::open_pg_native(pool.clone(), stale.clone(), control.clone()).unwrap();
-        assert!(pg.ingest_initial_batch(&requests).is_err(), "stale Source claim");
-        let rows: i64 = pool.transaction(&stale, txn::TxnKind::ReadSnapshot, &control, |tx| {
-            Ok(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_files WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0))
-        }).unwrap();
+        crate::events::BEFORE_COMMIT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                hook_pool
+                    .transaction(&hook_namespace, txn::TxnKind::Write, &hook_control, |tx| {
+                        source_journal::invalidate(tx, &hook_path)
+                    })
+                    .unwrap();
+            }))
+        });
+        let mut pg =
+            EventCache::open_pg_native(pool.clone(), stale.clone(), control.clone()).unwrap();
+        assert!(
+            pg.ingest_initial_batch(&requests).is_err(),
+            "stale Source claim"
+        );
+        let rows: i64 = pool
+            .transaction(&stale, txn::TxnKind::ReadSnapshot, &control, |tx| {
+                Ok(tx
+                    .driver
+                    .query_one(
+                        "SELECT count(*) FROM semon_pg_native_files WHERE namespace=$1",
+                        &[&tx.namespace.as_str().as_bytes()],
+                    )
+                    .map_err(sqlstate::error)?
+                    .get(0))
+            })
+            .unwrap();
         assert_eq!(rows, 0, "no partial cold batch after stale Source claim");
         for same_ids in [true, false] {
-            let namespace = tests::ns(if same_ids { "native133-race-same" } else { "native133-race-different" });
+            let namespace = tests::ns(if same_ids {
+                "native133-race-same"
+            } else {
+                "native133-race-different"
+            });
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-            let handles = (0..2).map(|worker| {
-                let pool = pool.clone();
-                let namespace = namespace.clone();
-                let control = control.clone();
-                let barrier = barrier.clone();
-                let owned = cases.iter().enumerate().map(|(n, case)| (format!("{:064x}", 201 + n + if same_ids { 0 } else { worker * 16 }), case.path.clone(), case.harness)).collect::<Vec<_>>();
-                std::thread::spawn(move || {
-                    let mut pg = EventCache::open_pg_native(pool, namespace, control).unwrap();
-                    crate::events::BEFORE_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { barrier.wait(); })));
-                    let requests = owned.iter().map(|(id, path, harness)| (id.as_str(), path.as_path(), *harness)).collect::<Vec<_>>();
-                    pg.ingest_initial_batch(&requests)
+            let handles = (0..2)
+                .map(|worker| {
+                    let pool = pool.clone();
+                    let namespace = namespace.clone();
+                    let control = control.clone();
+                    let barrier = barrier.clone();
+                    let owned = cases
+                        .iter()
+                        .enumerate()
+                        .map(|(n, case)| {
+                            (
+                                format!(
+                                    "{:064x}",
+                                    201 + n + if same_ids { 0 } else { worker * 16 }
+                                ),
+                                case.path.clone(),
+                                case.harness,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    std::thread::spawn(move || {
+                        let mut pg = EventCache::open_pg_native(pool, namespace, control).unwrap();
+                        crate::events::BEFORE_COMMIT.with(|hook| {
+                            *hook.borrow_mut() = Some(Box::new(move || {
+                                barrier.wait();
+                            }))
+                        });
+                        let requests = owned
+                            .iter()
+                            .map(|(id, path, harness)| (id.as_str(), path.as_path(), *harness))
+                            .collect::<Vec<_>>();
+                        pg.ingest_initial_batch(&requests)
+                    })
                 })
-            }).collect::<Vec<_>>();
-            let outcomes = handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>();
-            assert!(outcomes.iter().any(Result::is_ok), "one batch writer must win");
+                .collect::<Vec<_>>();
+            let outcomes = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                outcomes.iter().any(Result::is_ok),
+                "one batch writer must win"
+            );
             for outcome in outcomes.into_iter().flatten() {
                 assert_eq!(outcome.len(), requests.len(), "no partial receipt batch");
             }
