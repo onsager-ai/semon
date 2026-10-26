@@ -4166,6 +4166,50 @@ fn create_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Tightens the existing store and its SQLite siblings without creating any
+/// of them. Selected opens call this only after read-only qualification.
+fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::other("its path is a symlink"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(O_NOFOLLOW);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for sibling_path in [
+            path.to_owned(),
+            sibling(path, "-wal"),
+            sibling(path, "-shm"),
+        ] {
+            if let Ok(metadata) = fs::symlink_metadata(&sibling_path)
+                && metadata.is_file()
+                && metadata.permissions().mode() & 0o077 != 0
+            {
+                fs::set_permissions(&sibling_path, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let owner = file.metadata()?.uid();
+        if let Some(state) = tightened(path, semon_state)
+            && let Ok(metadata) = fs::symlink_metadata(&state)
+            && metadata.is_dir()
+            && metadata.uid() == owner
+            && metadata.permissions().mode() & 0o077 != 0
+        {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = semon_state;
+        drop(file);
+    }
+    Ok(())
+}
+
 /// CI-only paired measurements reuse the producer's connection-local policy.
 #[cfg(test)]
 pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connection> {
