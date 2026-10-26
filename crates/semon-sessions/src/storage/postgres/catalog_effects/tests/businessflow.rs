@@ -1231,9 +1231,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         stage_runtime,
         "the selected fixture's runtime changed after its publication"
     );
+    let body_read_pass = std::cell::Cell::new(0usize);
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
+        let pass = body_read_pass.get() + 1;
+        body_read_pass.set(pass);
+        eprintln!("pg_body_read_pass={pass}");
         prepared
             .rows
             .iter()
@@ -1246,7 +1250,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         store,
                         host,
                     )
-                    .unwrap_or_else(|error| panic!("PG selected body {}: {error:?}", row.key));
+                    .unwrap_or_else(|error| panic!("PG selected body pass={pass}: {error:?}"));
                 let fields = query
                     .call_bound_selected_at(
                         "get_session",
