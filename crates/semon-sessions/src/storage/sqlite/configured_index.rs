@@ -191,7 +191,8 @@ impl IndexStore for ConfiguredIndex {
         file: &mut LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        self.native.relocate_codex(path, stat, id, file, measurements)
+        self.native
+            .relocate_codex(path, stat, id, file, measurements)
     }
     fn append_evidence(
         &self,
