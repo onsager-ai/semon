@@ -5731,7 +5731,10 @@ fn put_usage(
     Ok(())
 }
 
-pub(crate) fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite::Result<()> {
+pub(crate) fn put_run(
+    statement: &mut Statement<'_>,
+    run: &ReportedRunSnapshot,
+) -> rusqlite::Result<()> {
     let row = super::reported_rows::ReportedRow::new(run)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let ReportedRunSnapshot {
