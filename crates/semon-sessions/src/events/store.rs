@@ -691,12 +691,17 @@ pub(crate) fn audit_catalog_sources(
     after: Option<&str>,
     runtime: &str,
 ) -> io::Result<Option<String>> {
-    let config = options.source.config(&options.cache).map_err(io::Error::other)?;
+    let config = options
+        .source
+        .config(&options.cache)
+        .map_err(io::Error::other)?;
     let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
     let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
-        .runtime_binding().map_err(io::Error::other)?
+        .runtime_binding()
+        .map_err(io::Error::other)?
         .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
-    let observations = crate::native_evidence::RuntimeObservations::bound(&runtime_binding, runtime)?;
+    let observations =
+        crate::native_evidence::RuntimeObservations::bound(&runtime_binding, runtime)?;
     let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let db = journal.connection().map_err(io::Error::other)?;
     let machine = crate::facts::MachineFacts::of(options);
@@ -1048,9 +1053,8 @@ pub(crate) fn prioritize_projection_sources(
 
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
-/// Callers qualify `tx` before this page: the admitted SourceJournal through
-/// its owner/namespace/epoch validation, the unbound store through
-/// `require_current_sql`, which refuses every namespace-bound store.
+/// The admitted SourceJournal qualifies `tx` through its current physical
+/// contract and owner/namespace/epoch validation before this page.
 pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     let after: Option<String> = tx
         .query_row(
