@@ -377,7 +377,7 @@ impl ReductionWitness {
 }
 
 fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWitness> {
-    let rows=c.prepare("SELECT source_path,claim,ledger,withdrawal IS NOT NULL FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 ORDER BY source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows=c.prepare("SELECT s.source_path,s.claim,s.ledger,s.withdrawal IS NOT NULL,EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // A bounded reducer cannot certify an unbounded component. Native owner
     // closure qualification remains a separate, explicitly limited port.
     if rows.len() > 64 {
@@ -394,7 +394,7 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             return Ok(ReductionWitness::Changed);
         }
     }
-    for (path, claim, recorded, withdrawn) in rows {
+    for (path, claim, recorded, withdrawn, indexed) in rows {
         let actual = super::source_journal::claims(c, ns, std::slice::from_ref(&path))?[0].1;
         let ledger = crate::events::store::ledger_row(c, &path)?
             .map(|(_, l)| serde_json::to_string(&l))
@@ -402,7 +402,7 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         if actual != claim
             || ledger != recorded
-            || (recorded.is_none() && !withdrawn && !removed_source(c, ns, &path)?)
+            || (!indexed && !withdrawn && !removed_source(c, ns, &path)?)
         {
             return Ok(ReductionWitness::Changed);
         }
@@ -416,11 +416,18 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
 // reduction/publication consume only persisted evidence and exact claims/ledgers.
 // Retained recipes and proofs remain owned by the Catalog.
 fn removed_source(c: &Connection, ns: &str, path: &str) -> rusqlite::Result<bool> {
-    c.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND reason='removed') AND NOT EXISTS(SELECT 1 FROM main.files WHERE namespace=?1 AND path=?2)", params![ns,path], |r| r.get(0))
+    let removed: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND reason='removed')", params![ns,path], |r| r.get(0))?;
+    if !removed {
+        return Ok(false);
+    }
+    match crate::events::store::ledger_row(c, path)? {
+        None => Ok(true),
+        Some((_, ledger)) => crate::events::store::archive_ledger_retained(c, path, &ledger),
+    }
 }
 
 fn removed_paths(c: &Connection, ns: &str) -> rusqlite::Result<std::collections::BTreeSet<String>> {
-    let paths = c.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND ledger IS NULL AND withdrawal IS NULL ORDER BY source_path LIMIT 65")?.query_map([ns], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let paths = c.prepare("SELECT s.source_path FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 AND s.withdrawal IS NULL AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if paths.len() > 64 {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -2930,7 +2937,12 @@ impl Stage {
                 );
                 return Ok(Outcome::Conflict);
             }
-            tx.execute("UPDATE main.catalog_semantic_sources SET index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path]).map_err(error)?;
+            let retained = crate::events::store::ledger_row(&tx, path)
+                .map_err(error)?
+                .map(|(_, ledger)| serde_json::to_string(&ledger))
+                .transpose()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            tx.execute("UPDATE main.catalog_semantic_sources SET ledger=?3,index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path,retained]).map_err(error)?;
         }
         for (path, harness, native) in &prepared.indexed_native_parents {
             if !seen.contains(path) {
