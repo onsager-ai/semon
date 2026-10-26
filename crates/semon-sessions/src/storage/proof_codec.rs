@@ -9,6 +9,30 @@ pub(crate) const TTL_MAX: u32 = 60_000;
 pub(crate) const LEASE_CAP: i64 = 64;
 pub(crate) const METADATA_MAX: usize = 1_048_576;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PresentationManifest {
+    pub(crate) entries: Vec<(String, String)>,
+    pub(crate) observations: Option<crate::storage::selected::PresentationObservations>,
+}
+
+pub(crate) fn verify_presentation_entry(
+    key: &str,
+    metadata: &str,
+    slots: &str,
+    text: &str,
+    manifest: &str,
+) -> Result<(), StorageError> {
+    let manifest: PresentationManifest = serde_json::from_str(manifest).map_err(|_| StorageError::ScopeChanged)?;
+    let entry = presentation_entry(metadata, slots, text)?;
+    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
+        || !manifest.entries.iter().any(|(k, digest)| k == key && *digest == entry)
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GenerationRecord {
     pub(crate) namespace: String,
