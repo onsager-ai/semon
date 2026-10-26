@@ -34,18 +34,17 @@ impl History<'_, '_> {
             })
             .transpose()
     }
+    /// The owner row carries its header's keyset columns, so retained history
+    /// filters and pages on the owner index without joining every header.
     fn link(&self, key: &str, owner: &str, original: bool) -> Result<(), StorageError> {
-        self.effects.put(
-            "semon_pg_native_catalog_history_owners",
-            &["key_digest", "session_key", "owner_generation", "original"],
-            "key_digest",
-            &[
-                &digest(key.as_bytes()),
-                &key.as_bytes(),
-                &owner.as_bytes(),
-                &original,
-            ],
-        )
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+        boundary(&tx)
     }
     fn metadata(
         &self,

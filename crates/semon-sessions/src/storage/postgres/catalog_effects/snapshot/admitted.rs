@@ -41,7 +41,8 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         }
         // Retained history is the current rows plus every history owner of
         // this generation without a current row, read from its proof-owned
-        // immutable header. Both sides keyset on the same SQL columns.
+        // immutable header. Both sides filter and keyset on their own indexed
+        // columns (owners carry the header's), and the decode re-checks them.
         let history = request.scope == crate::CatalogReadScope::RetainedHistory;
         let tx = self
             .tx
@@ -66,7 +67,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 FROM semon_pg_native_catalog_rows
                 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
                 UNION ALL
-                SELECT o.session_key,h.metadata,h.last_ms,h.harness,h.repo,h.model,true
+                SELECT o.session_key,h.metadata,o.last_ms,o.harness,o.repo,o.model,true
                 FROM semon_pg_native_catalog_history_owners o
                 JOIN semon_pg_native_catalog_history_headers h
                   ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
