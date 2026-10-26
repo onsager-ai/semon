@@ -411,13 +411,12 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
 }
 
 // A missing scan result is not a withdrawal. Only an ordinary producer's
-// durable removal, with no live ledger and a still-absent file, can complete
-// its staged path. Retained recipes and proofs remain owned by the Catalog.
+// durable removal, with no live ledger, can complete its staged path. Physical
+// absence is observed by the producer under Source locks before this transaction;
+// reduction/publication consume only persisted evidence and exact claims/ledgers.
+// Retained recipes and proofs remain owned by the Catalog.
 fn removed_source(c: &Connection, ns: &str, path: &str) -> rusqlite::Result<bool> {
-    let removed: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND reason='removed') AND NOT EXISTS(SELECT 1 FROM main.files WHERE namespace=?1 AND path=?2)", params![ns,path], |r| r.get(0))?;
-    Ok(removed
-        && std::fs::symlink_metadata(path)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+    c.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND reason='removed') AND NOT EXISTS(SELECT 1 FROM main.files WHERE namespace=?1 AND path=?2)", params![ns,path], |r| r.get(0))
 }
 
 fn removed_paths(c: &Connection, ns: &str) -> rusqlite::Result<std::collections::BTreeSet<String>> {
@@ -2920,7 +2919,11 @@ impl Stage {
             if seen.contains(path) || prepared.withdrawals.iter().any(|w| &w.path == path) {
                 continue;
             }
-            if !removed_source(&tx, ns, path).map_err(error)? {
+            if !prepared.removed_sources.contains(path)
+                || !removed_source(&tx, ns, path).map_err(error)?
+            {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: removal_evidence physical_absent={} durable_removed={}", prepared.removed_sources.contains(path), removed_source(&tx, ns, path).map_err(error)?);
                 return Ok(Outcome::Conflict);
             }
             tx.execute("UPDATE main.catalog_semantic_sources SET index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path]).map_err(error)?;

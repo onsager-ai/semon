@@ -7324,6 +7324,9 @@ pub(crate) struct PreparedSources {
     pub(crate) message_dependencies: Option<Vec<String>>,
     pub(crate) relationships: relation_stage::Context,
     pub(crate) indexed_sources: Vec<(String, summary::CatalogSource)>,
+    /// Physical absence observed during Index preparation under Source locks.
+    /// Publication still requires the durable removal and exact claim/ledger CAS.
+    pub(crate) removed_sources: BTreeSet<String>,
     pub(crate) indexed_native_parents: Vec<(String, String, String)>,
     pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
 }
@@ -7626,6 +7629,16 @@ pub(crate) fn prepare_semantic_index_sources(
         ScanSelection::Semantic(inputs),
     )?;
     verify_sidecars(&files)?;
+    let mut removed_sources = BTreeSet::new();
+    for path in &paths {
+        if !files.iter().any(|file| file.path == std::path::Path::new(path))
+            && !withdrawals.iter().any(|withdrawal| withdrawal.path == *path)
+            && fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        {
+            removed_sources.insert(path.clone());
+        }
+    }
     let claims = cache.catalog_claims(&paths)?;
     let proofs = crate::query_source::Sources::capture(
         options,
@@ -7707,6 +7720,7 @@ pub(crate) fn prepare_semantic_index_sources(
         base_generation,
         claims,
         indexed_sources,
+        removed_sources,
         indexed_native_parents,
         withdrawals,
         lineage_dependencies,
@@ -8758,6 +8772,7 @@ fn build_sources_inner(
                 relationships,
                 message_dependencies,
                 indexed_sources: Vec::new(),
+                removed_sources: BTreeSet::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),
             })));
