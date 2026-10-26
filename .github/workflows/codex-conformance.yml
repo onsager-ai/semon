@@ -45,7 +45,11 @@ jobs:
             ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Run parser event fixture tests on the exact head
-        run: cargo test --locked -p semon-sessions 'events::tests::'
+        run: |
+          cargo test --locked -p semon-sessions 'events::tests::'
+          for run in 1 2 3 4 5; do
+            cargo test --locked -p semon-sessions events::tests::two_processes_indexing_at_once_end_equal_to_a_cold_read -- --exact
+          done
 
       - name: Run durable owned-turn lifecycle regressions on the exact head
         run: |
