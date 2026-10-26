@@ -254,7 +254,11 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
                 .map(str::to_owned)
                 .map_err(|error| {
                     #[cfg(test)]
-                    eprintln!("native tree metadata_scope=unclassified_key");
+                    if key.len() <= 64
+                        && key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    {
+                        eprintln!("native tree metadata_scope=unclassified_key key={key}");
+                    }
                     rusqlite::Error::UserFunctionError(Box::new(error))
                 })
         },
@@ -837,7 +841,9 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
             let predicate = if table == "meta" {
                 match operation {
                     "INSERT" => "NEW.namespace IS NOT semon_meta_scope(NEW.key)",
-                    "UPDATE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)",
+                    "UPDATE" => {
+                        "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)"
+                    }
                     "DELETE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key)",
                     _ => unreachable!(),
                 }
@@ -1581,7 +1587,7 @@ impl Writer {
         let mut db = connection(&self.config)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failed)?;
+            .map_err(|error| failed(error))?;
         self.validate(&tx)?;
         if ledger_row(&tx, path)
             .map_err(failed)?
@@ -1647,7 +1653,7 @@ impl Writer {
         let mut db = connection(&self.config)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failed)?;
+            .map_err(|error| failed(error))?;
         self.validate(&tx)?;
         let mut work = Vec::new();
         for (path, expected, _, ledger, _) in files {
