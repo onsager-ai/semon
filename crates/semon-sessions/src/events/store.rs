@@ -11908,7 +11908,7 @@ fn current_test_store(
         expected_stream_epoch: Some("a".repeat(64)),
     };
     let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
-    drop(EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
+    drop(super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
     let owner = configured::NativeOwnership::restore(&config).unwrap();
     let connection = configured::connection(&config).unwrap();
     crate::storage::NativeReaderBinding::Semantic(owner.clone())

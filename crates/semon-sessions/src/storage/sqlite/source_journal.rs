@@ -1355,7 +1355,11 @@ mod tests {
         let baseline = {
             let db = Connection::open(database).unwrap();
             let mut statement = db.prepare("SELECT operation_id FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied' ORDER BY operation_id").unwrap();
-            statement.query_map([namespace], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            statement
+                .query_map([namespace], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
         };
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut cache = open_cache();
@@ -1426,12 +1430,17 @@ mod tests {
         let count: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND outcome='applied'", params![namespace, operation.id], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
         let mut statement = db.prepare("SELECT operation_id FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied' ORDER BY operation_id").unwrap();
-        let applied = statement.query_map([namespace], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let applied = statement
+            .query_map([namespace], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
         assert!(baseline.iter().all(|id| applied.contains(id)));
         let added: Vec<_> = applied.iter().filter(|id| !baseline.contains(id)).collect();
         assert!(added.contains(&&operation.id));
         assert_eq!(
-            added.len(), 2,
+            added.len(),
+            2,
             "one original operation plus the later operation"
         );
         assert_eq!(
@@ -1525,8 +1534,10 @@ mod tests {
             .unwrap()
             .expect("real publisher generation");
         drop(cache);
-        let database = EventCache::path(&fixture.cache_path);
-        let config = crate::Options::default().source.config(&fixture.cache_path).unwrap();
+        let config = crate::Options::default()
+            .source
+            .config(&fixture.cache_path)
+            .unwrap();
         crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
         let open = || {
             Box::new(SourceJournal::owned(

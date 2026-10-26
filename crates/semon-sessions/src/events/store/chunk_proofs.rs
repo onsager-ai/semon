@@ -436,8 +436,7 @@ impl Focused {
                 .execute_batch("BEGIN DEFERRED")
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         }
-        db.1
-            .validate(&connection, &db.1.config().namespace)
+        db.1.validate(&connection, &db.1.config().namespace)
             .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
