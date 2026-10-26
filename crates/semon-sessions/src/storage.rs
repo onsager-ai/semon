@@ -241,13 +241,14 @@ impl StoreConfig {
         sqlite::namespace::admit(self)
     }
 
-    /// One bounded, resumable supported-current Catalog assignment step. The
-    /// native Event/ledger gate stays closed, and originals remain preserved.
+    /// Old-schema Catalog assignment is unsupported. Create a current store
+    /// and use current-format transfer for an already current source instead.
+    #[deprecated(note = "old-schema assignment is unsupported; use current store admission")]
     pub fn assign_catalog_namespace(
         &self,
-        max_rows: usize,
+        _max_rows: usize,
     ) -> Result<CatalogAssignmentProgress, StorageError> {
-        sqlite::catalog_namespace::assign(self, max_rows)
+        Err(StorageError::NamespaceUpgradePending)
     }
 
     /// Undo the read-only admission stage for its exact first-source witness.

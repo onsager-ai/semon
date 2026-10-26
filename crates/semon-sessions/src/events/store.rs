@@ -2469,7 +2469,7 @@ impl IndexStore for SqliteStore {
                 None,
                 None,
                 &mut row_measurements,
-                self.owner.namespace(),
+                self.owner.config().namespace.as_str(),
                 &layout,
                 &mut usage_deletes,
             )
@@ -2547,7 +2547,14 @@ fn invalidate_catalog_source(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
-    crate::storage::sqlite::source_journal::invalidate(transaction, &transaction.query_row("SELECT semon_namespace()", [], |row| row.get::<_, String>(0))?, path, reason)
+    crate::storage::sqlite::source_journal::invalidate(
+        transaction,
+        &transaction.query_row("SELECT semon_namespace()", [], |row| {
+            row.get::<_, String>(0)
+        })?,
+        path,
+        reason,
+    )
 }
 
 fn queue_tree_repair_tx(tx: &Transaction<'_>, path: &str, ledger: &Ledger) -> io::Result<()> {
@@ -5784,7 +5791,9 @@ fn write_index_changes(
         changes,
         expected,
         &mut crate::native_timing::Measurements::default(),
-        &transaction.query_row("SELECT semon_namespace()", [], |row| row.get::<_, String>(0))?,
+        &transaction.query_row("SELECT semon_namespace()", [], |row| {
+            row.get::<_, String>(0)
+        })?,
         layout,
         &mut UsageDeletes::default(),
     )
