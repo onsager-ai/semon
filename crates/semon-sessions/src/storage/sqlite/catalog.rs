@@ -126,18 +126,12 @@ fn read_range(
     mut args: Vec<SqlValue>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
-    let (table, index, namespace_filter) = if qualified {
-        (
-            "main.session_catalog",
-            if index == "sqlite_autoindex_session_catalog_1" {
-                "storage_ns_catalog_identity".to_owned()
-            } else {
-                format!("storage_ns_{index}")
-            },
-            "namespace=semon_namespace() AND ",
-        )
+    // The current namespace schema leads every Catalog index with namespace,
+    // including the (namespace,session_key) primary key autoindex.
+    let (table, namespace_filter) = if qualified {
+        ("main.session_catalog", "namespace=semon_namespace() AND ")
     } else {
-        ("session_catalog", index.to_owned(), "")
+        ("session_catalog", "")
     };
     let sql = format!(
         "SELECT metadata,session_key,last_ms,harness,repo FROM {table} INDEXED BY {index} WHERE {namespace_filter}{filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
@@ -229,7 +223,7 @@ pub(crate) fn source_proof_observation(
     let transaction = connection.transaction()?;
     let qualified = binding.validate(&transaction, &binding.config().namespace)?;
     let sql = if qualified {
-        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY storage_ns_session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
+        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
     } else {
         "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
     };
