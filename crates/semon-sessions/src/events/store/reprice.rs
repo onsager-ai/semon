@@ -98,7 +98,6 @@ pub(super) fn file_schema() -> &'static str {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Work {
-    #[serde(alias = "fingerprint")]
     target_fingerprint: String,
     completed_fingerprint: String,
     fetched_at: u64,
@@ -124,20 +123,18 @@ struct SourceJob {
 
 /// One bounded step. Each transaction holds at most one source fact batch or
 /// one qualified session's metadata. Durable cursors resume after process exit.
-pub(crate) fn step(path: &Path, table: Arc<EffectiveTable>) -> rusqlite::Result<bool> {
-    step_inner(path, table, true)
+pub(crate) fn step(
+    owner: &configured::NativeOwnership,
+    table: Arc<EffectiveTable>,
+) -> rusqlite::Result<bool> {
+    step_inner(owner, table, true)
 }
 
-fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    // This Options producer has no configured namespace authority. Keep the
-    // admission fence ahead of even its optional metadata-only fast path.
-    if crate::storage::sqlite::namespace::is_bound(&connection)? {
-        return Ok(false);
-    }
+fn owner_error(error: crate::storage::StorageError) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn idle(connection: &Connection, fingerprint: &str) -> rusqlite::Result<bool> {
     let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
         .query_row(PROGRESS_SQL, params![TARGET, COMPLETED], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -150,27 +147,18 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
 const PROGRESS_SQL: &str = "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())";
 
 fn step_inner(
-    path: &Path,
+    owner: &configured::NativeOwnership,
     table: Arc<EffectiveTable>,
     check_current: bool,
 ) -> rusqlite::Result<bool> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-    // The completed check is a single read-only metadata query. It never opens
-    // an IMMEDIATE transaction or decodes the work cursor or owner payloads.
-    if idle(path, &table.fingerprint)? {
-        return Ok(false);
-    }
-    let mut connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(50))?;
-    if !current(&connection)? {
+    let mut connection = configured::connection(owner.config()).map_err(owner_error)?;
+    owner.validate_ready(&connection).map_err(owner_error)?;
+    // A completed owner needs only metadata reads and never decodes payloads.
+    if idle(&connection, &table.fingerprint)? {
         return Ok(false);
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    owner.validate_ready(&tx).map_err(owner_error)?;
     let (current_target, current_completed, has_pending): (Option<String>, Option<String>, bool) =
         tx.query_row(PROGRESS_SQL, params![TARGET, COMPLETED], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -193,15 +181,6 @@ fn step_inner(
     // newer process's completed/partial work back to its older fetch.
     if work.fetched_at > table.fetched_at {
         return Ok(false);
-    }
-    if work.target_fingerprint.is_empty() && work.phase == 3 {
-        // Migrate the old completed Work encoding without repeating its pass.
-        work.target_fingerprint = current_target
-            .clone()
-            .unwrap_or_else(|| table.fingerprint.clone());
-    }
-    if work.phase == 3 && work.completed_fingerprint.is_empty() {
-        work.completed_fingerprint = work.target_fingerprint.clone();
     }
     if work.target_fingerprint != table.fingerprint {
         work = Work {
@@ -581,12 +560,6 @@ fn catalog_step(
     table: &Arc<EffectiveTable>,
     pending_key: Option<&str>,
 ) -> rusqlite::Result<bool> {
-    if "1" == "1" {
-        // History/description/overview repricing requires the current namespace owner.
-        // Refuse before reading a payload or mutating a Catalog row; public
-        // admission remains closed until those producers are ported together.
-        return Err(rusqlite::Error::InvalidQuery);
-    }
     let next: Option<(String, Option<String>)> = if let Some(key) = pending_key {
         tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND pricing_fingerprint IS NOT ?2",params![key,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
     } else {
@@ -635,12 +608,12 @@ fn catalog_step(
                 replace_costs(query, &old, &cost)?;
             }
             tx.execute(
-                "UPDATE session_history_catalog SET metadata=?2 WHERE session_key=?1",
+                "UPDATE session_history_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
                 params![key, json(&history)?],
             )?;
         }
     }
-    let description:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(description)<=1048576 THEN description ELSE NULL END FROM session_descriptions WHERE session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
+    let description:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(description)<=1048576 THEN description ELSE NULL END FROM session_descriptions WHERE namespace=semon_namespace() AND session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
     if let Some(encoded) = description {
         let mut value: Value = decode_json(0, &encoded)?;
         // Only replace a summary with the same exact retained source cohort.
@@ -660,12 +633,12 @@ fn catalog_step(
             replace_costs(&mut value, &old, &cost)?;
             clear_cost_checks(&mut value);
             tx.execute(
-                "UPDATE session_descriptions SET description=?2 WHERE session_key=?1",
+                "UPDATE session_descriptions SET description=?2 WHERE namespace=semon_namespace() AND session_key=?1",
                 params![key, json(&value)?],
             )?;
         }
     }
-    let overview:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(summary)<=1048576 THEN summary ELSE NULL END FROM session_overview WHERE session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
+    let overview:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(summary)<=1048576 THEN summary ELSE NULL END FROM session_overview WHERE namespace=semon_namespace() AND session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
     let mut content_generation = None;
     if let Some(encoded) = overview {
         let mut value: Value = decode_json(0, &encoded)?;
@@ -700,7 +673,7 @@ fn catalog_step(
                 serde_json::from_value(value.clone()).map_err(sql_json)?;
             content_generation = Some(crate::overview::content_generation(&summary));
             tx.execute(
-                "UPDATE session_overview SET summary=?2 WHERE session_key=?1",
+                "UPDATE session_overview SET summary=?2 WHERE namespace=semon_namespace() AND session_key=?1",
                 params![key, json(&value)?],
             )?;
             tx.execute(metadata_increment(tx)?, ["overview_generation"])?;
@@ -1042,9 +1015,16 @@ mod tests {
         )
         .unwrap();
     }
+    fn owner(path: &Path) -> configured::NativeOwnership {
+        configured::NativeOwnership::restore(&crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite { database: path.to_owned() },
+            namespace: crate::events::store::fixture_namespace(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        }).unwrap()
+    }
     fn drain(path: &Path, table: &Arc<EffectiveTable>) {
         for _ in 0..64 {
-            if !step_inner(path, Arc::clone(table), false).unwrap() {
+            if !step_inner(&owner(path), Arc::clone(table), false).unwrap() {
                 return;
             }
         }
@@ -2353,10 +2333,10 @@ mod tests {
             })
             .unwrap();
         let decoded = REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get);
-        crate::pricing::runtime::register_index(path.clone());
-        crate::pricing::runtime::register_index(path.clone());
+        crate::pricing::runtime::register_index(owner(&path));
+        crate::pricing::runtime::register_index(owner(&path));
         for _ in 0..8 {
-            assert!(!step_inner(&path, Arc::clone(&table), false).unwrap());
+            assert!(!step_inner(&owner(&path), Arc::clone(&table), false).unwrap());
         }
         let after: (i64, String) = Connection::open(&path)
             .unwrap()
@@ -2444,7 +2424,7 @@ mod tests {
         assert_eq!(pending_source_count(&store.connection, p), 1);
         REPRICE_PAYLOAD_DECODES.with(|count| count.set(0));
 
-        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert!(step_inner(&owner(&path), Arc::clone(&current), false).unwrap());
         assert_eq!(pending_source_count(&store.connection, p), 1);
         assert_eq!(
             store
@@ -2524,7 +2504,7 @@ mod tests {
 
         let mut completed = false;
         for _ in 0..30 {
-            let progressed = step_inner(&path, Arc::clone(&current), false).unwrap();
+            let progressed = step_inner(&owner(&path), Arc::clone(&current), false).unwrap();
             if pending_source_count(&store.connection, p) == 0 {
                 let stamp: String = store
                     .connection
@@ -2649,7 +2629,7 @@ mod tests {
         let old_facts = source_facts(&store.connection, old_id);
         mark_file_stale(&store.connection, native, &old.fingerprint, None);
         assert_eq!(pending_source_count(&store.connection, native), 1);
-        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert!(step_inner(&owner(&path), Arc::clone(&current), false).unwrap());
         assert_eq!(pending_source_count(&store.connection, native), 1);
         assert_eq!(
             store
@@ -2716,7 +2696,7 @@ mod tests {
         assert_eq!(pending_source_count(&store.connection, native), 1);
         let replacement_facts = source_facts(&store.connection, replacement_id);
 
-        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert!(step_inner(&owner(&path), Arc::clone(&current), false).unwrap());
         assert_eq!(pending_source_count(&store.connection, native), 1);
         assert!(
             store
@@ -2741,7 +2721,7 @@ mod tests {
 
         let mut completed = false;
         for _ in 0..30 {
-            let progressed = step_inner(&path, Arc::clone(&current), false).unwrap();
+            let progressed = step_inner(&owner(&path), Arc::clone(&current), false).unwrap();
             if pending_source_count(&store.connection, native) == 0 {
                 let stamp: String = store
                     .connection
@@ -3035,7 +3015,7 @@ mod tests {
             .unwrap();
         drop(store);
         let table = table("openai", "gpt-6.1-sol", 7.0, 1);
-        assert!(step_inner(&path, Arc::clone(&table), false).unwrap());
+        assert!(step_inner(&owner(&path), Arc::clone(&table), false).unwrap());
         let c = Connection::open(&path).unwrap();
         assert_eq!(
             c.query_row(

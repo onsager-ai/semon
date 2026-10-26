@@ -229,6 +229,7 @@ pub(crate) fn configured(config: &StoreConfig) -> Box<dyn SourceObservationStore
 
 impl SourceJournal {
     pub(crate) fn owned(owner: crate::events::store::configured::NativeOwnership) -> Self {
+        crate::pricing::runtime::register_index(owner.clone());
         Self {
             writer: std::cell::RefCell::new(None),
             config: owner.config().clone(),
