@@ -18,6 +18,9 @@ pub(super) fn capture_native(
         })
         .transpose()?
         .unwrap_or(0);
+    if state.native_family >= 3 {
+        return super::pages::capture(tx, state);
+    }
     if state.native_family == 0 {
         let next: Option<i64> =
             tx.0.query_row(
@@ -109,7 +112,7 @@ pub(super) fn capture_native(
             if !sizes.is_empty() {
                 return Err(StorageError::Busy);
             }
-            state.native_family = if extra { 0 } else { 2 };
+            state.native_family = if extra { 3 } else { 2 };
             state.cursor = Some((id.to_be_bytes().to_vec(), -1));
         } else {
             let sql = format!(
@@ -133,11 +136,18 @@ pub(super) fn capture_native(
                 };
                 record.validate_native()?;
                 let size = transfer::encode_bounded(&record, transfer::MAX_PAGE_BYTES)?.len() + 1;
-                if encoded_bytes.checked_add(size).is_none_or(|n| n > transfer::MAX_PAGE_BYTES) { break; }
+                if encoded_bytes
+                    .checked_add(size)
+                    .is_none_or(|n| n > transfer::MAX_PAGE_BYTES)
+                {
+                    break;
+                }
                 encoded_bytes += size;
                 records.push(record);
             }
-            if records.is_empty() { return Err(StorageError::Busy); }
+            if records.is_empty() {
+                return Err(StorageError::Busy);
+            }
             let last = match records.last().ok_or(StorageError::ScopeChanged)? {
                 TransferRecord::NativeEvent { values, .. } => {
                     values[1].as_i64().ok_or(StorageError::ScopeChanged)?

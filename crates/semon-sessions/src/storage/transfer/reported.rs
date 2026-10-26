@@ -62,6 +62,7 @@ pub(crate) struct CaptureState {
     pub(crate) native: bool,
     pub(crate) native_path: Option<String>,
     pub(crate) native_family: u8,
+    pub(crate) native_key: Option<String>,
 }
 impl CaptureState {
     pub(crate) fn progress(&self) -> CaptureProgress {
@@ -156,6 +157,7 @@ pub(crate) fn start_capture(
         native: false,
         native_path: None,
         native_family: 0,
+        native_key: None,
     };
     tx.put(FREEZE, &encode_bounded(operation, MAX_MANIFEST_BYTES)?)?;
     if let Some(stamp) = stamp {
@@ -269,6 +271,10 @@ pub(crate) fn prepare_apply(
                             | Category::Metadata
                             | Category::Ledgers
                             | Category::Events
+                            | Category::PageGenerations
+                            | Category::PageBlobs
+                            | Category::NativeHeaders
+                            | Category::Usage
                     ))
         })
     {
@@ -356,6 +362,10 @@ pub(crate) fn prepare_apply(
                 crate::events::reported_rows::decode_stamp(value.as_bytes())
                     .map_err(|_| StorageError::ScopeChanged)?;
             }
+            TransferRecord::NativeRow { .. } => native_rows::validate(record)?,
+            TransferRecord::NativeSource(_)
+            | TransferRecord::NativePage { .. }
+            | TransferRecord::NativeMetadata { .. } => native_pages::validate(record)?,
             TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
                 record.validate_native()?
             }

@@ -292,6 +292,12 @@ pub(crate) fn seed_native(config: &StoreConfig, path: &Path, count: usize, opera
     cache.flush_cold_writes().unwrap();
 }
 
+pub(crate) fn seed_native_usage(config: &StoreConfig, path: &Path, count: usize) {
+    let body=(0..count).map(|i| format!("{}\n",serde_json::json!({"type":"assistant","uuid":format!("r{i}"),"timestamp":"2026-01-01T00:00:00Z","message":{"id":format!("m{i}"),"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"sanitized"}],"usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}}}))).collect::<String>();
+    std::fs::write(path,body).unwrap();
+    let mut cache=cache(config);cache.ingest(&"4".repeat(64),path,"claude").unwrap();cache.flush_cold_writes().unwrap();
+}
+
 pub(crate) fn sqlite_core(config: &StoreConfig, path: &Path) -> serde_json::Value {
     let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
     let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
@@ -326,4 +332,45 @@ fn current_transfer225_native_rows_real_ingest_paged_absent_raw_and_reverse() {
     apply(&reverse, &manifest);
     assert_eq!(sqlite_core(&reverse, &path), expected);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_transfer225_usage_multi_page_absent_raw_exact_native_reader() {
+    let root=root();let source=sqlite(&root,"usage-source");let target=sqlite(&root,"usage-target");let reverse=sqlite(&root,"usage-reverse");
+    let path=root.join("usage.jsonl");seed_native_usage(&source,&path,130);
+    let load=|config:&StoreConfig| {
+        let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        let store=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (ledger,index)=store.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras,"usage":index.usage(),"signals":index.signals.iter().map(|s|(&s.k,s.o,s.t,s.at,&s.n,s.v)).collect::<Vec<_>>(),"chunks":index.source_chunks.as_ref().unwrap().hashes,"launch":index.handoff_index})
+    };
+    let expected=load(&source);assert_eq!(expected["usage"].as_object().unwrap().len(),130);
+    let manifest=stage(&source,&target,&[99;32]);
+    let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    let mut message=0;let mut identities=0;
+    for sequence in 1..=pages {let page=source.transfer_inbox().staged_page(&manifest,sequence).unwrap();assert!(page.records.len()<=MAX_PAGE_ROWS);for record in page.records {if let TransferRecord::NativeRow{kind,..}=record {match kind {super::super::NativeRowKind::MessageUsage=>message+=1,super::super::NativeRowKind::CopiedUsage=>identities+=1,_=>{}}}}}
+    assert_eq!(message,130);assert_eq!(identities,130);
+    std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
+    let manifest=stage(&target,&reverse,&[100;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_transfer225_normalized_usage_facts_cross_pages_and_reverse() {
+    let root=root();let source=sqlite(&root,"normalized-source");let target=sqlite(&root,"normalized-target");let reverse=sqlite(&root,"normalized-reverse");
+    let path=root.join("native-codex.jsonl");
+    seed_codex_usage(&source,&path);
+    let load=|config:&StoreConfig| {let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();let reader=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();let (ledger,index)=reader.load_file(path.to_str().unwrap()).unwrap().unwrap();serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"usage":index.codex_usage(),"events":index.codex_usage_events(),"chunks":index.source_chunks.as_ref().unwrap().hashes})};
+    let expected=load(&source);assert!(!expected["usage"].as_object().unwrap().is_empty());
+    let manifest=stage(&source,&target,&[101;32]);let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;let mut facts=0;
+    for sequence in 1..=pages {for record in source.transfer_inbox().staged_page(&manifest,sequence).unwrap().records {if matches!(record,TransferRecord::NativeRow{kind:super::super::NativeRowKind::UsageFact,..}){facts+=1;}}}assert_eq!(facts,70);
+    std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
+    let manifest=stage(&target,&reverse,&[102;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);std::fs::remove_dir_all(root).unwrap();
+}
+
+pub(crate) fn seed_codex_usage(config:&StoreConfig,path:&Path) {
+    let mut body=format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":"transfer-thread","cwd":"/sanitized"}}));
+    body.push_str(&format!("{}\n",serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5"}})));
+    for i in 0..70 {body.push_str(&format!("{}\n",serde_json::json!({"type":"token_usage_record","payload":{"thread_id":"transfer-thread","session_id":"transfer-session","turn_id":format!("turn-{i}"),"response_id":format!("response-{i}"),"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"cache_write_input_tokens":2,"reasoning_output_tokens":0}}})));}
+    std::fs::write(path,body).unwrap();let mut cache=cache(config);cache.ingest(&"5".repeat(64),path,"codex").unwrap();cache.flush_cold_writes().unwrap();drop(cache);
 }

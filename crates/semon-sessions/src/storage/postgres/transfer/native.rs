@@ -20,6 +20,9 @@ pub(super) fn capture_native(
         })
         .transpose()?
         .unwrap_or(0);
+    if state.native_family >= 3 {
+        return super::pages::capture(tx, state);
+    }
     if state.native_family == 0 {
         let rows = native_reader::transfer_rows(
             tx.0,
@@ -57,7 +60,7 @@ pub(super) fn capture_native(
             &[&ns, &id, &extra, &ordinal],
         )?;
         if rows.is_empty() {
-            state.native_family = if extra { 0 } else { 2 };
+            state.native_family = if extra { 3 } else { 2 };
             state.cursor = Some((id.to_be_bytes().to_vec(), -1));
         } else {
             let path = state
@@ -126,6 +129,16 @@ pub(super) fn apply_native(
         }
         _ => return Err(StorageError::InvalidArguments),
     };
+    insert(tx, table, &columns, values)
+}
+
+pub(super) fn insert(
+    tx: &mut Inbox<'_, '_>,
+    table: &str,
+    columns: &str,
+    values: Vec<serde_json::Value>,
+) -> Result<(), StorageError> {
+    let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let mut binds: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(ns)];
     let mut names = vec!["namespace".to_owned()];
     let mut slots = vec!["$1".to_owned()];
@@ -148,6 +161,7 @@ pub(super) fn apply_native(
             "reply",
             "reply_e",
             "peer",
+            "billing_split_unknown",
         ]
         .contains(&name)
         {
@@ -166,8 +180,19 @@ pub(super) fn apply_native(
                 )
             })
         } else if [
-            "file_id", "first_ms", "last_ms", "seq", "t", "parent", "poll", "reply_t", "item",
+            "file_id",
+            "first_ms",
+            "last_ms",
+            "seq",
+            "t",
+            "parent",
+            "poll",
+            "reply_t",
+            "item",
             "peer_pid",
+            "source_id",
+            "billing_timestamp",
+            "v",
         ]
         .contains(&name)
         {
