@@ -12,6 +12,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
         History => ("session_history_catalog", "session_key,metadata", &[]),
         HistoryRecipe => ("session_history_projections", "session_key,generation,source_generation,version,total,incomplete", &[5]),
         HistorySlot => ("session_history_slots", "session_key,slot,metadata", &[]),
+        HistoryOriginal => ("(SELECT namespace,substr(key,25) AS session_key,value AS metadata FROM main.meta WHERE key>='history_original_header:' AND key<'history_original_header;')", "session_key,metadata", &[]),
         TraceHeader => ("session_trace_headers", "session_key,generation,source_generation,metadata", &[]),
         TraceTurn => ("session_trace_turns", "session_key,turn_id,start_id,metadata", &[]),
         TraceEdge => ("session_trace_edges", "session_key,edge_id,metadata", &[]),
@@ -38,6 +39,10 @@ pub(super) fn capture(tx: &mut Inbox<'_>, state: &mut CaptureState) -> Result<tr
         return Ok(state.progress());
     };
     let generation: Option<String> = tx.0.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'", [tx.1], |r| r.get(0)).optional().map_err(failed)?;
+    let generation = match generation {
+        Some(generation) => Some(generation),
+        None => tx.get(catalog_rows::IMPORTED_GENERATION, 64)?.map(|bytes| String::from_utf8(bytes).map_err(|_|StorageError::ScopeChanged)).transpose()?,
+    };
     let Some(generation) = generation else {
         // Absence of a publication is not an empty replacement publication.
         transfer::reported::finish_capture(tx, state)?;
@@ -54,7 +59,8 @@ pub(super) fn capture(tx: &mut Inbox<'_>, state: &mut CaptureState) -> Result<tr
         format!(" AND ({keys})>({})", (2..binds.len()+1).map(|i| format!("?{i}")).collect::<Vec<_>>().join(","))
     } else { String::new() };
     let current = if kind == CatalogRowKind::Current { " AND lifecycle='current'" } else { "" };
-    let suffix = format!("FROM main.{table} WHERE namespace=?1{current}{after} ORDER BY {keys}");
+    let table = if table.starts_with('(') { table.to_owned() } else { format!("main.{table}") };
+    let suffix = format!("FROM {table} WHERE namespace=?1{current}{after} ORDER BY {keys}");
     let size = names.iter().map(|n| format!("coalesce(octet_length({n}),0)")).collect::<Vec<_>>().join("+");
     let sizes = tx.0.prepare(&format!("SELECT {size} {suffix} LIMIT 64")).map_err(failed)?.query_map(rusqlite::params_from_iter(&binds), |r| r.get::<_,i64>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
     let mut count = 0;
@@ -78,7 +84,11 @@ pub(super) fn capture(tx: &mut Inbox<'_>, state: &mut CaptureState) -> Result<tr
 
 pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), StorageError> {
     catalog_rows::validate(record)?;
-    let TransferRecord::CatalogRow { kind, values, .. } = record else { return Err(StorageError::InvalidArguments); };
+    let TransferRecord::CatalogRow { generation, kind, values } = record else { return Err(StorageError::InvalidArguments); };
+    catalog_rows::bind_imported_generation(tx, generation)?;
+    if *kind == CatalogRowKind::HistoryOriginal {
+        return tx.put(&format!("history_original_header:{}", values[0].as_str().ok_or(StorageError::ScopeChanged)?), values[1].as_str().ok_or(StorageError::ScopeChanged)?.as_bytes());
+    }
     let (table, columns, _) = spec(*kind);
     let (columns, values) = if *kind == CatalogRowKind::Current {
         let metadata = values[1].as_str().ok_or(StorageError::ScopeChanged)?;
