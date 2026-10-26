@@ -3056,11 +3056,10 @@ mod tests {
             prefix: sha2::Sha256::digest(b"").into(),
             tail: sha2::Sha256::digest(b"").into(),
         };
-        let (mut store, _) = SqliteStore::attempt(
+        let mut store = crate::events::store::current_test_store(
             &root.join("index.sqlite3"),
             &crate::events::store::fixture_namespace(),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        );
         assert_eq!(
             store
                 .write_one(&path, None, None, &captured, &FileIndex::default())
