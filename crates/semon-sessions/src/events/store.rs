@@ -5093,7 +5093,9 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
     let application: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     if application != 0 {
-        return Ok(Init::Unsupported("unsupported session index: application id"));
+        return Ok(Init::Unsupported(
+            "unsupported session index: application id",
+        ));
     }
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
@@ -5187,6 +5189,14 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Unsupported(
             "unsupported session index: missing current schema object",
         ));
+    }
+    for sql in [
+        "SELECT namespace,operation_id,payload_digest,outcome,recovery_done FROM source_observation_receipts LIMIT 0",
+        "SELECT sequence,namespace,operation_id,payload_digest,payload FROM source_observation_intents LIMIT 0",
+    ] {
+        if let Err(error) = connection.prepare(sql) {
+            return malformed_schema(error);
+        }
     }
     let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
@@ -5421,7 +5431,9 @@ fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
             objects.into_iter().collect::<Vec<_>>().join(",")
         )
     });
-    connection.prepare_cached(sql)?.query_row([], |row| row.get(0))
+    connection
+        .prepare_cached(sql)?
+        .query_row([], |row| row.get(0))
 }
 
 /// Initialize only a fresh store; requalify under the writer lock.
@@ -12285,7 +12297,10 @@ mod tests {
             fail(SqliteStore::attempt_scoped(&path, true));
             unchanged();
             if name != "archive" {
-                assert!(SqliteStore::attempt_selected(&path).is_err(), "selected {name}");
+                assert!(
+                    SqliteStore::attempt_selected(&path).is_err(),
+                    "selected {name}"
+                );
                 assert!(focused_connection(&path).is_err(), "focused {name}");
             } else {
                 let db = focused_connection(&path).unwrap();
@@ -12340,15 +12355,43 @@ mod tests {
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
         let (mut store, _) = opened(&path);
         store.write_runs(&[run()], &stamp()).unwrap();
-        store.write_one("retained", None, None, &ledger(1), &full()).unwrap();
-        store.connection.execute("INSERT INTO session_history_catalog VALUES('retained','retained custody')", []).unwrap();
-        store.connection.execute("INSERT INTO meta VALUES('archive-custody','independent authority')", []).unwrap();
-        store.connection.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
-        let paths = [path.clone(), sibling(&path, "-wal"), sibling(&path, "-shm"), raw];
-        let before = paths.iter().map(|path| fs::read(path).unwrap()).collect::<Vec<_>>();
+        store
+            .write_one("retained", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_history_catalog VALUES('retained','retained custody')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta VALUES('archive-custody','independent authority')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
+        let paths = [
+            path.clone(),
+            sibling(&path, "-wal"),
+            sibling(&path, "-shm"),
+            raw,
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
         let state = catalog_state(&store.connection);
         for scoped in [false, true] {
-            assert!(matches!(SqliteStore::attempt_scoped(&path, scoped), Err(Unopened::Unsupported(_))));
+            assert!(matches!(
+                SqliteStore::attempt_scoped(&path, scoped),
+                Err(Unopened::Unsupported(_))
+            ));
             for (path, bytes) in paths.iter().zip(&before) {
                 let actual = fs::read(path).unwrap();
                 assert_eq!(Sha256::digest(&actual), Sha256::digest(bytes));
@@ -12361,9 +12404,34 @@ mod tests {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }
         assert_eq!(catalog_state(&store.connection), state);
-        assert_eq!(store.connection.query_row("SELECT count(*) FROM reported_runs", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(store.connection.query_row("SELECT metadata FROM session_history_catalog", [], |row| row.get::<_, String>(0)).unwrap(), "retained custody");
-        assert_eq!(store.connection.query_row("SELECT value FROM meta WHERE key='archive-custody'", [], |row| row.get::<_, String>(0)).unwrap(), "independent authority");
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM reported_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT metadata FROM session_history_catalog", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "retained custody"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key='archive-custody'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "independent authority"
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -12373,25 +12441,52 @@ mod tests {
         let root = scratch("current-wal-reopen");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
-        store.write_one("original", None, None, &ledger(1), &full()).unwrap();
+        store
+            .write_one("original", None, None, &ledger(1), &full())
+            .unwrap();
         let reader = focused_connection(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
-        assert_eq!(reader.query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         let other_path = path.clone();
         BEFORE_STORAGE_INIT.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 std::thread::spawn(move || {
                     let (mut other, _) = opened(&other_path);
-                    other.write_one("concurrent", None, None, &ledger(2), &full()).unwrap();
-                }).join().unwrap();
+                    other
+                        .write_one("concurrent", None, None, &ledger(2), &full())
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
             }));
         });
         let (current, loaded) = opened(&path);
         assert_eq!(loaded.files.len(), 2);
-        assert_eq!(reader.query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         reader.execute_batch("ROLLBACK").unwrap();
-        assert_eq!(reader.query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        assert_eq!(current.connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)).unwrap(), "ok");
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            current
+                .connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
         drop(reader);
         drop(current);
         drop(store);
