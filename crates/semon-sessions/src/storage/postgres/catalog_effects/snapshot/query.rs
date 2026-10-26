@@ -33,13 +33,22 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
-        let runtime_observation = (!self.captured).then(|| super::super::super::current_sources::Runtime::open(
-            &self.pool,
-            &self.namespace,
-            &self.control,
-            &self.options,
-        )).transpose().map_err(unavailable)?;
-        let runtime = runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|error| QueryError::io(&error))?;
+        let runtime_observation = (!self.captured)
+            .then(|| {
+                super::super::super::current_sources::Runtime::open(
+                    &self.pool,
+                    &self.namespace,
+                    &self.control,
+                    &self.options,
+                )
+            })
+            .transpose()
+            .map_err(unavailable)?;
+        let runtime = runtime_observation
+            .as_ref()
+            .map(|observation| observation.generation(&self.options))
+            .transpose()
+            .map_err(|error| QueryError::io(&error))?;
         if self.captured && !self.options.all {
             return Err(unavailable(StorageError::InvalidArguments));
         }
@@ -47,7 +56,9 @@ impl QueryCatalogStore for QueryCatalog {
         // immutable; the selected snapshot below also fences its runtime.
         let window = if !self.options.all && !self.options.scan_window {
             let part = self.read_cohort(namespace, now, &mut (8 * 1024 * 1024))?;
-            if part.generation != self.generation || Some(part.runtime.as_str()) != runtime.as_deref() {
+            if part.generation != self.generation
+                || Some(part.runtime.as_str()) != runtime.as_deref()
+            {
                 return Err(unavailable(StorageError::ScopeChanged));
             }
             if !part.rows.contains_key(key) {
