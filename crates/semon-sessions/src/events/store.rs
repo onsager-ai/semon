@@ -2348,7 +2348,8 @@ impl IndexStore for SqliteStore {
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        relocation::reuse(self, path, stat, id, file, measurements, None)
+        let writer = configured::Writer::owned(self.owner.clone());
+        relocation::reuse(self, path, stat, id, file, measurements, &writer)
     }
 
     fn append_evidence(
@@ -4037,7 +4038,7 @@ impl SqliteStore {
         }
         validate_prior_reported(&transaction, &rows)?;
         {
-            let mut put = transaction.prepare(PUT_RUN)?;
+            let mut put = transaction.prepare(PUT_RUN_SCOPED)?;
             for row in rows {
                 put_run(&mut put, &row.run)?;
             }
@@ -8678,7 +8679,7 @@ mod tests {
                 "original nullable/versioned header remains exact"
             );
             assert_eq!(
-                crate::history_projection::qualified(&batch.connection, &history, false).unwrap(),
+                crate::history_projection::qualified(&batch.connection, &history).unwrap(),
                 !unsupported,
                 "unsupported custody must not gain completion authority"
             );
@@ -8882,7 +8883,7 @@ mod tests {
             .unwrap();
             assert_eq!(history.harness, "codex");
             assert!(
-                crate::history_projection::qualified(&store.connection, &history, false).unwrap()
+                crate::history_projection::qualified(&store.connection, &history).unwrap()
             );
             assert_eq!(
                 store
@@ -8997,7 +8998,7 @@ mod tests {
             .unwrap();
         let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).unwrap();
         assert_eq!(history.sources, old.sources);
-        assert!(crate::history_projection::qualified(&batch.connection, &history, false).unwrap());
+        assert!(crate::history_projection::qualified(&batch.connection, &history).unwrap());
         let recipes = catalog_recipes(&batch.connection, "session_history_slots", &old.key)
             .into_iter()
             .map(|(_, text)| text)

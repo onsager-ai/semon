@@ -320,10 +320,10 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .map_err(io::Error::other)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        crate::history_projection::admitted_catalog(self.0, key).map_err(io::Error::other)
+        crate::history_projection::catalog(self.0, key).map_err(io::Error::other)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        crate::history_projection::qualified(self.0, row, true).map_err(io::Error::other)
+        crate::history_projection::qualified(self.0, row).map_err(io::Error::other)
     }
     fn selected_details(
         &self,
@@ -345,7 +345,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self.0, key, generation, history, true)
+        crate::transcript_range::observation(self.0, key, generation, history)
             .map_err(io::Error::other)
     }
 }

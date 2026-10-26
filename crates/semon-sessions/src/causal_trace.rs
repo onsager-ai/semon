@@ -692,7 +692,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             let turn = decode(encoded)?;
             if !sessions.contains_key(&sid) {
                 let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
-                let metadata = crate::history_projection::admitted_catalog(&tx, &sid)
+                let metadata = crate::history_projection::catalog(&tx, &sid)
                     .map_err(|_| 503u16)?
                     .or(tx
                         .query_row(
@@ -807,7 +807,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 },
                 None => TraceParticipantActivity::Unavailable,
             };
-            let metadata = crate::history_projection::admitted_catalog(&tx, &sid)
+            let metadata = crate::history_projection::catalog(&tx, &sid)
                 .map_err(|_| 503u16)?
                 .or(tx
                     .query_row(
@@ -874,7 +874,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 previews_incomplete = true;
                 continue;
             };
-            let metadata=crate::history_projection::admitted_catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
+            let metadata=crate::history_projection::catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
             let Some(metadata) = metadata else {
                 previews_incomplete = true;
                 continue;

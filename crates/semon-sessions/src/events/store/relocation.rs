@@ -186,13 +186,9 @@ pub(super) fn reuse(
     native_id: &str,
     file: &mut crate::sealed::LogFile,
     measurements: &mut crate::native_timing::Measurements,
-    writer: Option<&configured::Writer>,
+    writer: &configured::Writer,
 ) -> Result<Option<String>, StoreError> {
-    if let Some(writer) = writer {
-        writer
-            .validate(&store.connection)
-            .map_err(StoreError::Configured)?;
-    }
+    writer.validate(&store.connection).map_err(StoreError::Configured)?;
     let started = measurements.start();
     let (candidates, steps) =
         candidate_paths(&store.connection, native_id, path, started.is_some()).map_err(failure)?;
@@ -228,12 +224,7 @@ pub(super) fn reuse(
     if stat.size < prior.offset {
         return Ok(None);
     }
-    let metadata = match writer {
-        Some(writer) => writer
-            .tree(old, &prior.stat)
-            .map_err(StoreError::Configured)?,
-        None => store.read_tree(old, &prior.stat).map_err(failure)?,
-    };
+    let metadata = writer.tree(old, &prior.stat).map_err(StoreError::Configured)?;
     let Some((_, metadata)) = metadata else {
         return Ok(None);
     };
@@ -304,9 +295,7 @@ pub(super) fn reuse(
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failure)?;
-    if let Some(writer) = writer {
-        writer.validate(&tx).map_err(StoreError::Configured)?;
-    }
+    writer.validate(&tx).map_err(StoreError::Configured)?;
     if ledger_row(&tx, old)
         .map_err(failure)?
         .map(|(_, ledger)| ledger)
