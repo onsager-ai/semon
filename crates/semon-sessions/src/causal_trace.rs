@@ -48,6 +48,9 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    pub(crate) fn selected_query_recipe(&self, summary: &crate::overview::Summary) -> Option<Value> {
+        self.query.as_ref().map(|query|query.selected_recipe(summary))
+    }
     pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> String {
         String::from_utf8(generation_bytes(&publication_session(row, self), self))
             .expect("JSON trace publication witness")
