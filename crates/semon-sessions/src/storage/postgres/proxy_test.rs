@@ -386,6 +386,53 @@ fn target_receipts(real: &Factory) -> i64 {
 }
 
 #[test]
+fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
+    let (_, real) = fixture(|_| {});
+    let proxy = Proxy::new(target(&real), false);
+    let pool = proxy_pool(real, &proxy);
+    let namespace = ns("captured-source-a");
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |_| Ok(())).unwrap();
+    let options = crate::Options {
+        source: crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap(),
+        all: true,
+        ..crate::Options::default()
+    };
+    let config = crate::storage::StoreConfig {
+        namespace,
+        expected_stream_epoch: Some("a".repeat(64)),
+        backend: crate::storage::StoreBackend::Postgres {
+            pool,
+            control: PgCancellation::default(),
+        },
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let request = crate::SelectedReadControl::new(
+        Instant::now() + Duration::from_secs(20),
+        cancelled.clone(),
+    );
+    let host = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        panic!("cancelled metadata SQL must not admit host bytes")
+    };
+    proxy.replies.set(true);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| config.call_captured_query_at(
+            &options,
+            "external-machine-z",
+            &"b".repeat(64),
+            "get_session",
+            &serde_json::json!({"id":"claude:one"}),
+            0,
+            &request,
+            &host,
+        ));
+        proxy.replies.witness();
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(worker.join().unwrap().unwrap_err().code, "unavailable");
+    });
+    proxy.recover();
+}
+
+#[test]
 fn pg_proxy_startup_reply_freeze_bounds_acquisition() {
     let (_, real) = fixture(|_| {});
     let proxy = Proxy::new(target(&real), true);

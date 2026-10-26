@@ -7643,7 +7643,25 @@ pub(crate) fn prepare_semantic_index_sources(
             removed_sources.insert(path.clone());
         }
     }
+    // A semantic scan does not retire an omitted input. These paths, however,
+    // were observed NotFound under the Source locks above. Let the ordinary
+    // removal writer compare their ledgers and persist removal before the
+    // staged consumer uses them. A new claim resumes through the existing
+    // source-generation restart, rather than consuming the old stage witness.
     let claims = cache.catalog_claims(&paths)?;
+    if !removed_sources.is_empty() {
+        let absent_inputs = inputs
+            .iter()
+            .filter(|input| {
+                removed_sources.contains(input.full_path(options).to_string_lossy().as_ref())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        cache.retire_scoped_sources(options, &absent_inputs, &BTreeSet::new(), &facts)?;
+        if claims != cache.catalog_claims(&paths)? {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+    }
     let proofs = crate::query_source::Sources::capture(
         options,
         files
