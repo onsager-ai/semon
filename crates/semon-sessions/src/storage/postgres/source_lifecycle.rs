@@ -580,6 +580,7 @@ pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&cr
 
 fn facts_request(tx:&PgTxn<'_>,intent:&crate::source_change::FactsIntent)->Result<Vec<u8>,StorageError> {
     if intent.operation.is_empty()||intent.operation.len()>512||intent.path.is_empty()||intent.path.len()>4096 {return Err(StorageError::InvalidArguments);}
+    if intent.wanted.version!=2 || !matches!(intent.before.version,0|2) {return Err(StorageError::ScopeChanged);}
     let request=serde_json::to_vec(&("facts-source-write-v1",tx.namespace.as_str(),intent)).map_err(|_|StorageError::InvalidArguments)?;
     if request.len()>1048576 {return Err(StorageError::Busy);}Ok(request)
 }
@@ -588,6 +589,9 @@ pub(super) fn facts_begin(tx:&mut PgTxn<'_>,intent:&crate::source_change::FactsI
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let key=format!("facts-write-intent:{}",intent.operation);
     if let Some(prior)=super::native_keys::read_meta(tx,key.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
+    // Retained active/archive membership needs the shared relocation planner;
+    // until that adapter is connected, refuse before the receiver writes Facts.
+    if intent.before.codex_rollouts!=intent.wanted.codex_rollouts || intent.before.codex_provisional_rollouts!=intent.wanted.codex_provisional_rollouts {return Err(StorageError::NamespaceUpgradePending);}
     if model_cache::generation(tx)?!=intent.head || actual!=&intent.before || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.is_some() {return Err(StorageError::Conflict);}
     super::native_keys::put_meta(tx,key.as_bytes(),&request)?;
     super::native_keys::put_meta(tx,b"facts-write-inflight",&request)?;tx.check()
