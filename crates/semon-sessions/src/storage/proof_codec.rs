@@ -23,10 +23,14 @@ pub(crate) fn verify_presentation_entry(
     text: &str,
     manifest: &str,
 ) -> Result<(), StorageError> {
-    let manifest: PresentationManifest = serde_json::from_str(manifest).map_err(|_| StorageError::ScopeChanged)?;
+    let manifest: PresentationManifest =
+        serde_json::from_str(manifest).map_err(|_| StorageError::ScopeChanged)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest.entries.iter().any(|(k, digest)| k == key && *digest == entry)
+        || !manifest
+            .entries
+            .iter()
+            .any(|(k, digest)| k == key && *digest == entry)
     {
         return Err(StorageError::ScopeChanged);
     }
