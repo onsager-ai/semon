@@ -194,7 +194,12 @@ pub(super) fn seen(
     if receipt != header_ledger(ledger) {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    c.query_row(SEEN_SQL,params![id,identity],|r|Ok(Seen { tree:r.get(0)?,model:r.get(1)? }))
+    c.query_row(SEEN_SQL, params![id, identity], |r| {
+        Ok(Seen {
+            tree: r.get(0)?,
+            model: r.get(1)?,
+        })
+    })
 }
 
 pub(super) fn restore(

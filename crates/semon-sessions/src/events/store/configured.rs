@@ -5719,7 +5719,8 @@ mod tests {
             .unwrap();
         let mut writer = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let path = f.raw.to_str().unwrap();
         let mut db = connection(&f.config).unwrap();
@@ -5750,7 +5751,8 @@ mod tests {
         drop(writer);
         let mut restarted = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             restarted
                 .ingest(&"a".repeat(64), &f.raw, "codex")
