@@ -2,6 +2,7 @@
 //! SQLite oracle. Full admitted publication/selected qualification is separate.
 use super::*;
 use crate::events::EventCache;
+use crate::storage::native_events::NativeEventStore;
 
 fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
     let mut value = serde_json::to_value(rows).unwrap();
