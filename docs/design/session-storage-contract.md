@@ -11,6 +11,27 @@ The #380 candidate has scoped independent acceptance and green CI. Its authorize
 MAIN merge and exact-MAIN qualification remain a prerequisite to #477 MAIN.
 This work grants no MAIN, deployment, publication or real-data migration authority.
 
+The WIP PG captured-body port is `StoreConfig::call_captured_query_at`.
+It names one acknowledged immutable publication and requires the request's
+`CatalogReaderFactory`; generation addresses never grant Raw access. The port
+uses ordinary Query envelopes and shared body/field rendering with leased Native
+proofs. It accepts a complete (`all=true`) capture and refuses recent-window
+Options. Live Query continues to reject expired runtime context, including PID
+changes; it does not automatically select this capture path. This port's exact
+CI qualification remains pending.
+
+PG workspace listing now has a WIP native global SQL selection path for explicit
+authorized namespaces sharing one pool. Namespace/epoch/admission/head and
+revocation checks include sources without matching rows. Keyset ordering is
+last descending, key ascending, namespace ascending. Bounded metadata search
+uses the existing Unicode lowercase field rules. Workspace RLS additions apply
+only to SELECT on the required Catalog/authority metadata tables; ordinary
+single-Source write policies and Native proof/Raw boundaries remain unchanged.
+Only selected rows enter shared per-Source presentation. SQLite retains its
+formal union path; mixed or different-pool PG workspaces refuse explicitly.
+The existing source and metadata limits remain, and exact CI qualification of
+the new SQL, isolation and presentation path is pending.
+
 ## One current SQLite contract
 
 All current tables use the namespace-leading physical contract. Namespace-local

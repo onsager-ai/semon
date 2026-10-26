@@ -16,6 +16,7 @@ pub(in crate::storage::postgres) struct QueryCatalog {
     pub(in crate::storage::postgres) control: PgCancellation,
     pub(in crate::storage::postgres) generation: String,
     pub(in crate::storage::postgres) options: Options,
+    pub(in crate::storage::postgres) captured: bool,
 }
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
@@ -32,21 +33,21 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
-        let runtime_observation = super::super::super::current_sources::Runtime::open(
+        let runtime_observation = (!self.captured).then(|| super::super::super::current_sources::Runtime::open(
             &self.pool,
             &self.namespace,
             &self.control,
             &self.options,
-        )
-        .map_err(unavailable)?;
-        let runtime = runtime_observation
-            .generation(&self.options)
-            .map_err(|error| QueryError::io(&error))?;
+        )).transpose().map_err(unavailable)?;
+        let runtime = runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|error| QueryError::io(&error))?;
+        if self.captured && !self.options.all {
+            return Err(unavailable(StorageError::InvalidArguments));
+        }
         // Use the same qualified window closure as listing. Its generation is
         // immutable; the selected snapshot below also fences its runtime.
         let window = if !self.options.all && !self.options.scan_window {
             let part = self.read_cohort(namespace, now, &mut (8 * 1024 * 1024))?;
-            if part.generation != self.generation || part.runtime != runtime {
+            if part.generation != self.generation || Some(part.runtime.as_str()) != runtime.as_deref() {
                 return Err(unavailable(StorageError::ScopeChanged));
             }
             if !part.rows.contains_key(key) {
@@ -76,14 +77,15 @@ impl QueryCatalogStore for QueryCatalog {
                 let binding = snapshot
                     .runtime_binding()
                     .ok_or(StorageError::ScopeChanged)?;
-                let observations =
-                    crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-                        .map_err(|_| StorageError::ScopeChanged)?;
-                let expected = observations.expected(&row);
+                let expected = runtime.as_deref().map(|runtime| {
+                    crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
+                        .map(|observations| observations.expected(&row))
+                        .map_err(|_| StorageError::ScopeChanged)
+                }).transpose()?.flatten();
                 if !crate::model::summary::query_observation_matches(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
                     &row.sources,
-                    true,
+                    !self.captured,
                     expected.as_deref(),
                 )
                 .map_err(|_| StorageError::ScopeChanged)?
@@ -195,10 +197,7 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                    if runtime_observation
-                        .generation(&self.options)
-                        .map_err(|_| StorageError::Unavailable)?
-                        != runtime
+                    if runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|_| StorageError::Unavailable)? != runtime
                     {
                         return Err(StorageError::ScopeChanged);
                     }
@@ -245,10 +244,7 @@ impl QueryCatalogStore for QueryCatalog {
                     let _ = error;
                     StorageError::ScopeChanged
                 })?;
-                if runtime_observation
-                    .generation(&self.options)
-                    .map_err(|_| StorageError::Unavailable)?
-                    != runtime
+                if runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|_| StorageError::Unavailable)? != runtime
                 {
                     return Err(StorageError::ScopeChanged);
                 }

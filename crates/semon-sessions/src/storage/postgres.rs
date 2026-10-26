@@ -106,6 +106,25 @@ pub(crate) fn configured_query_catalog(
         control,
         generation,
         options: options.clone(),
+        captured: false,
+    }))
+}
+
+/// Explicit immutable publication read; host Raw authority is still required.
+pub(crate) fn captured_query_catalog(
+    options: &crate::Options,
+    config: &super::StoreConfig,
+    generation: &str,
+    pool: PgPool,
+    control: PgCancellation,
+) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
+    if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) || !options.all {
+        return Err(super::StorageError::InvalidArguments);
+    }
+    let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), &control)?;
+    Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
+        pool, namespace: config.namespace.clone(), control,
+        generation: generation.to_owned(), options: options.clone(), captured: true,
     }))
 }
 
@@ -191,3 +210,5 @@ pub(crate) fn catalog_page(
         },
     )
 }
+
+pub(crate) mod workspace_catalog;
