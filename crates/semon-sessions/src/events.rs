@@ -1483,7 +1483,6 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportedFileStamp {
@@ -3336,23 +3335,32 @@ pub(crate) fn scan_file(
             .record("relocation_lookup", started, 1);
         let started = cache.scan_measurements.start();
         let recorded = prepared_ledger;
-        let mut base = None;
+        let trusted_receiver = match recorded.as_ref() {
+            Some(ledger) => cache
+                .store
+                .as_ref()
+                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+                .append_evidence(&key)
+                .map_err(store_io_error)?
+                .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat)),
+            None => false,
+        };
         let mut trusted_append = false;
+        let mut base = None;
         if let Some(ledger) = &recorded
             && !force_replace
         {
-            if ledger.stat == stat || ledger.resumes(&stat, &mut file) {
+            if ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file) {
                 match cache.base(&key, ledger)? {
                     Base::Found(index) => {
                         cache.require_usage_store(&index)?;
-                        trusted_append = evidence
+                        trusted_append = trusted_receiver
                             && index
                                 .source_chunks
                                 .as_ref()
                                 .is_some_and(|chunks| chunks.resume.is_some());
                         if ledger.stat == stat
                             || trusted_append
-                            || !evidence
                             || ledger.resumes(&stat, &mut file)
                         {
                             base = Some(index);
@@ -3400,9 +3408,11 @@ pub(crate) fn scan_file(
                     .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
         {
             trace("unchanged");
-            let ledger = ledger.clone();
-            let index = Arc::clone(index);
-            cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
+            {
+                let ledger = ledger.clone();
+                let index = Arc::clone(index);
+                cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
+            }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
             cache.files.insert(

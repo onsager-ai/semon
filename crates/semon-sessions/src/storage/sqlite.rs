@@ -281,10 +281,7 @@ mod tests {
         let mut config = fixture.config();
         config.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
-            config
-                .open()
-                .unwrap()
-                .read_snapshot(&fixture.namespace()),
+            config.open().unwrap().read_snapshot(&fixture.namespace()),
             Err(StorageError::ScopeChanged)
         ));
         let mut config = fixture.config();

@@ -57,18 +57,11 @@ use super::{
     ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
 };
 use crate::storage::sqlite::source_journal;
-use crate::storage::{
-    StorageError,
-    source_observations::{
-        SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
-        operation_replay, validate_paths,
-    },
-};
+use crate::storage::StorageError;
 use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
 std::thread_local! {
-    static LOSE_RECOVERY_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_FRESH_WAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -273,55 +266,6 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 /// about the store's size, and it would otherwise stay that large.
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
-macro_rules! catalog_ddl {
-    () => {
-        "
-CREATE TABLE IF NOT EXISTS session_catalog (
-    session_key TEXT PRIMARY KEY,
-    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
-    last_ms INTEGER NOT NULL,
-    harness TEXT NOT NULL,
-    repo TEXT,
-    parent_key TEXT,
-    metadata TEXT NOT NULL,
-    pricing_fingerprint TEXT
-) STRICT;
-CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(harness, last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_order_model ON session_catalog(json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_harness_model ON session_catalog(harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_repo_model ON session_catalog(repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_harness_repo_model ON session_catalog(harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_order_model ON session_catalog(json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness_model ON session_catalog(harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_repo_model ON session_catalog(repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo_model ON session_catalog(harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
-CREATE INDEX IF NOT EXISTS session_catalog_query_last ON session_catalog(json_extract(metadata,'$.query.last'),session_key);
-CREATE INDEX IF NOT EXISTS session_catalog_query_current_state ON session_catalog(json_extract(metadata,'$.query.state'),session_key) WHERE lifecycle='current';
-CREATE TABLE IF NOT EXISTS session_catalog_sources (
-    session_key TEXT NOT NULL,
-    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
-    harness TEXT NOT NULL,
-    native_id TEXT NOT NULL,
-    source_path TEXT NOT NULL,
-    PRIMARY KEY(session_key, source_path)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
-CREATE INDEX IF NOT EXISTS session_catalog_native_aliases ON session_catalog_sources(native_id, session_key);
-CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(source_path, session_key);
-CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sources(lifecycle, harness, native_id, session_key);
-CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(lifecycle, source_path, session_key);
-"
-    };
-}
 macro_rules! catalog_support_ddl {
     () => {
         "
@@ -370,28 +314,6 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 "
     };
 }
-macro_rules! slot_ddl {
-    () => {
-        "
-CREATE TABLE IF NOT EXISTS session_slot_projections (
-    session_key TEXT PRIMARY KEY,
-    generation TEXT NOT NULL,
-    source_generation TEXT,
-    version INTEGER NOT NULL,
-    total INTEGER NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS session_slot_projection_version ON session_slot_projections(version,session_key);
-CREATE TABLE IF NOT EXISTS session_slots (
-    session_key TEXT NOT NULL,
-    slot INTEGER NOT NULL,
-    metadata TEXT NOT NULL,
-    PRIMARY KEY(session_key,slot)
-) STRICT, WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS session_slots_turn ON session_slots(session_key,CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.turn') END,slot);
-"
-    };
-}
 macro_rules! source_observation_receipts_ddl {
     () => {
         "
@@ -416,13 +338,6 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
     };
 }
 pub(crate) const SOURCE_OBSERVATION_RECEIPTS_SCHEMA: &str = source_observation_receipts_ddl!();
-#[cfg(test)]
-const SCHEMA: &str = concat!(
-    slot_ddl!(),
-    catalog_ddl!(),
-    catalog_support_ddl!(),
-    source_observation_receipts_ddl!()
-);
 const CATALOG_SUPPORT_SCHEMA: &str = catalog_support_ddl!();
 
 const COMPOSITE_CATALOG_SCHEMA: &str = "
@@ -1903,7 +1818,7 @@ pub(super) fn read_selected(
         }
         loaded.files.push((path, ledger, index));
     }
-    let mut runs = connection.prepare(&reported_select_sql(connection, true)?)?;
+    let mut runs = connection.prepare(&reported_select_sql(true))?;
     for id in native_ids {
         let mut rows = runs.query([id])?;
         while let Some(row) = rows.next()? {
@@ -2002,7 +1917,9 @@ pub(crate) fn local_reader(options: &crate::Options) -> io::Result<Connection> {
 
 /// Admitted reader binding for the fixture namespace of an existing store.
 #[cfg(test)]
-pub(crate) fn fixture_reader_binding(path: &Path) -> io::Result<crate::storage::NativeReaderBinding> {
+pub(crate) fn fixture_reader_binding(
+    path: &Path,
+) -> io::Result<crate::storage::NativeReaderBinding> {
     let epoch: String = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .and_then(|db| {
             db.query_row(
@@ -2916,8 +2833,6 @@ fn closed_catalog(
     Ok(true)
 }
 
-
-
 #[derive(Clone, Copy)]
 enum CatalogWriter {
     Auto,
@@ -3440,8 +3355,6 @@ impl SqliteStore {
                             search_rows.push(row);
                         }
                         if changed || previous_version.as_deref() != Some(&version) {
-                            #[cfg(test)]
-                            let started = metadata_measurements.start();
                             crate::storage::catalog::publish_current_sources_measured(
                                 &current_effects,
                                 row,
@@ -5179,11 +5092,14 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
         }
         values.push(value.flatten());
     }
-    let pricing: Option<String> = connection.query_row("SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1",
-        [path], |r| {
+    let pricing: Option<String> = connection.query_row(
+        "SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1",
+        [path],
+        |r| {
             crate::selected_read::row(r, 64)?;
             r.get(0)
-        })?;
+        },
+    )?;
     values.push(pricing);
     super::tree_rows::interpretation(
         &values
@@ -5749,7 +5665,7 @@ fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
 }
 
 fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&reported_select_sql(connection, false)?)?;
+    let mut statement = connection.prepare(&reported_select_sql(false))?;
     let mut rows = statement.query([])?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next()? {
@@ -5762,7 +5678,7 @@ fn read_runs_selected(
     connection: &Connection,
     ids: &std::collections::BTreeSet<String>,
 ) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&reported_select_sql(connection, true)?)?;
+    let mut statement = connection.prepare(&reported_select_sql(true))?;
     let mut runs = Vec::new();
     for id in ids {
         let mut rows = statement.query([id])?;
@@ -5773,17 +5689,16 @@ fn read_runs_selected(
     Ok(runs)
 }
 
-fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Result<String> {
-    let scope = "namespace=semon_namespace() AND ";
-    Ok(if selected {
-        format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 ORDER BY start")
-    } else if scope.is_empty() {
-        format!("SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start")
+fn reported_select_sql(selected: bool) -> String {
+    if selected {
+        format!(
+            "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() AND session_id=?1 ORDER BY start"
+        )
     } else {
         format!(
             "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start"
         )
-    })
+    }
 }
 
 fn validate_prior_reported(
@@ -6579,7 +6494,7 @@ mod tests {
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
     use crate::storage::source_observations::{
-        SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
     };
 
     // Exercise the admitted SourceJournal for this store's database and the
@@ -6618,7 +6533,10 @@ mod tests {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
             let mut journal = source_journal(&self.path)?;
-            if journal.recovery_is_current().map_err(StoreError::Configured)? {
+            if journal
+                .recovery_is_current()
+                .map_err(StoreError::Configured)?
+            {
                 return Ok(true);
             }
             let cursor = journal.recovery_cursor().map_err(StoreError::Configured)?;
@@ -6800,10 +6718,7 @@ mod tests {
                 Some(true)
             );
             let tx = store.connection.transaction().unwrap();
-            assert_eq!(
-                "scoped",
-                "singleton"
-            );
+            assert_eq!("scoped", "singleton");
             tx.execute_batch("DROP INDEX usage_identity_peers;")
                 .unwrap();
             assert!(validate_copied_usage(&tx).is_err());
@@ -7227,97 +7142,6 @@ mod tests {
     }
 
     #[test]
-    fn source_observation_owner_port_rolls_back_effect_and_receipt_on_temp_fault() {
-        let root = scratch("owner-observation-tx");
-        let (mut store, _) = opened(&root.join("index.sqlite3"));
-        let paths = vec!["/owner-source.jsonl".to_owned()];
-        let operation = SourceOperation::capture(
-            "",
-            "discover",
-            &serde_json::to_vec(&(&paths, false)).unwrap(),
-        );
-        let intent = SourceIntent::Discover {
-            operation: operation.clone(),
-            paths: paths.clone(),
-            complete: false,
-        };
-        IndexStore::source_observations_mut(&mut store)
-            .unwrap()
-            .persist_intent(&intent)
-            .unwrap();
-        store.connection.execute_batch("CREATE TEMP TRIGGER fail_owner_receipt BEFORE INSERT ON source_observation_receipts BEGIN SELECT RAISE(ABORT,'owner receipt fault'); END;").unwrap();
-        assert!(
-            intent
-                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
-                .is_err()
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row("SELECT count(*) FROM catalog_backfill_sources", [], |r| r
-                    .get::<_, i64>(
-                    0
-                ))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM source_observation_receipts",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            SourceObservationStore::pending_intents(&store).unwrap(),
-            vec![intent.clone()]
-        );
-        store
-            .connection
-            .execute_batch("DROP TRIGGER fail_owner_receipt;")
-            .unwrap();
-        assert_eq!(
-            intent
-                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
-                .unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        // Completion is already durable before the producer's final ACK call.
-        assert!(
-            SourceObservationStore::pending_intents(&store)
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM source_observation_receipts",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-        let changes = store.connection.total_changes();
-        SourceObservationStore::acknowledge_intent(&mut store, &operation).unwrap();
-        assert_eq!(store.connection.total_changes(), changes);
-        assert_eq!(
-            intent
-                .apply(IndexStore::source_observations_mut(&mut store).unwrap())
-                .unwrap(),
-            SourceMutationReceipt::AlreadyApplied
-        );
-        assert_eq!(store.connection.total_changes(), changes);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn event_cache_uses_owner_committed_discovery_witness() {
         let root = scratch("producer-owner-witness");
         let path = root.join("index.sqlite3");
@@ -7357,393 +7181,6 @@ mod tests {
             assert_eq!(counts.committed_changes, 0);
         }
         drop(cache);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    fn seed_recovery(store: &SqliteStore, count: usize) {
-        for i in 0..count {
-            store.connection.execute(
-                "INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?1,'claude',?1,?2)",
-                params![format!("recover-{i:03}"), format!("/recover-{i:03}.jsonl")],
-            ).unwrap();
-        }
-        store
-            .connection
-            .execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after','')",
-                [],
-            )
-            .unwrap();
-    }
-
-    fn recovery_intent(cursor: Option<&str>) -> SourceIntent {
-        SourceIntent::Recover {
-            operation: SourceOperation::capture(
-                "",
-                "recover",
-                &serde_json::to_vec(&cursor).unwrap(),
-            ),
-            cursor: cursor.map(str::to_owned),
-        }
-    }
-
-    fn recovery_count(db: &Connection, table: &str) -> i64 {
-        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-            row.get(0)
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn recovery_receipt_unknown_ack_replays_original_done_after_restart_and_peer_progress() {
-        let root = scratch("recovery-unknown-ack");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        seed_recovery(&store, 65);
-        let original = recovery_intent(Some(""));
-        store.persist_intent(&original).unwrap();
-        LOSE_RECOVERY_ACK.with(|flag| flag.set(true));
-        assert_eq!(
-            original.apply(&mut store),
-            Err(StorageError::CommitUncertain)
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "catalog_backfill_sources"),
-            64
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "source_observation_intents"),
-            0
-        );
-        drop(store);
-        let (mut store, _) = opened(&path);
-        // Another worker advances the remaining page and then completes repair.
-        let cursor = store.recovery_cursor().unwrap();
-        let next = recovery_intent(cursor.as_deref());
-        store.persist_intent(&next).unwrap();
-        assert_eq!(
-            next.apply(&mut store).unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        let cursor = store.recovery_cursor().unwrap();
-        let last = recovery_intent(cursor.as_deref());
-        store.persist_intent(&last).unwrap();
-        assert_eq!(
-            store.recover(last.operation(), cursor.as_deref()).unwrap(),
-            (SourceMutationReceipt::Applied, true)
-        );
-        let before = store.connection.total_changes();
-        assert_eq!(
-            store.recover(original.operation(), Some("")).unwrap(),
-            (SourceMutationReceipt::AlreadyApplied, false)
-        );
-        assert_eq!(store.connection.total_changes(), before);
-        // A stored true result also survives a newly requested recovery pass.
-        store
-            .connection
-            .execute("INSERT INTO meta VALUES('catalog_recovery_after','')", [])
-            .unwrap();
-        let before = store.connection.total_changes();
-        assert_eq!(
-            store.recover(last.operation(), cursor.as_deref()).unwrap(),
-            (SourceMutationReceipt::AlreadyApplied, true)
-        );
-        assert_eq!(store.connection.total_changes(), before);
-        assert_eq!(
-            recovery_count(&store.connection, "catalog_backfill_sources"),
-            65
-        );
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_owner_temp_receipt_fault_rolls_back_page_receipt_and_ack() {
-        let root = scratch("recovery-owner-fault");
-        let (mut store, _) = opened(&root.join("index.sqlite3"));
-        seed_recovery(&store, 1);
-        let intent = recovery_intent(Some(""));
-        store.persist_intent(&intent).unwrap();
-        store.connection.execute_batch("CREATE TEMP TRIGGER fail_recovery_receipt BEFORE INSERT ON source_observation_receipts BEGIN SELECT RAISE(ABORT,'recovery receipt fault'); END;").unwrap();
-        assert!(intent.apply(&mut store).is_err());
-        assert_eq!(
-            recovery_count(&store.connection, "catalog_backfill_sources"),
-            0
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "session_catalog_invalidations"),
-            0
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "source_observation_receipts"),
-            0
-        );
-        assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-        assert_eq!(store.recovery_cursor().unwrap().as_deref(), Some(""));
-        store
-            .connection
-            .execute_batch("DROP TRIGGER fail_recovery_receipt")
-            .unwrap();
-        assert_eq!(
-            intent.apply(&mut store).unwrap(),
-            SourceMutationReceipt::Applied
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "catalog_backfill_sources"),
-            1
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "session_catalog_invalidations"),
-            1
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "source_observation_receipts"),
-            1
-        );
-        assert!(store.pending_intents().unwrap().is_empty());
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_cursor_conflict_has_terminal_receipt_and_no_page() {
-        let root = scratch("recovery-cursor-conflict");
-        let (mut store, _) = opened(&root.join("index.sqlite3"));
-        seed_recovery(&store, 1);
-        let intent = recovery_intent(Some(""));
-        store.persist_intent(&intent).unwrap();
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value='/newer' WHERE key='catalog_recovery_after'",
-                [],
-            )
-            .unwrap();
-        assert_eq!(
-            store.recover(intent.operation(), Some("")).unwrap(),
-            (SourceMutationReceipt::Conflict, false)
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "catalog_backfill_sources"),
-            0
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "session_catalog_invalidations"),
-            0
-        );
-        assert_eq!(
-            recovery_count(&store.connection, "source_observation_receipts"),
-            1
-        );
-        assert!(store.pending_intents().unwrap().is_empty());
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value='' WHERE key='catalog_recovery_after'",
-                [],
-            )
-            .unwrap();
-        let before = store.connection.total_changes();
-        assert_eq!(
-            store.recover(intent.operation(), Some("")).unwrap(),
-            (SourceMutationReceipt::Conflict, false)
-        );
-        assert_eq!(store.connection.total_changes(), before);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_event_cache_one_page_per_call_then_seven_statement_zero_write_noop() {
-        let root = scratch("recovery-producer-pages");
-        let path = root.join("index.sqlite3");
-        let (store, _) = opened(&path);
-        seed_recovery(&store, 130);
-        let peer = Connection::open(&path).unwrap();
-        let mut cache = crate::events::EventCache {
-            store: Some(Box::new(store)),
-            observation_path: Some(path),
-            ..crate::events::EventCache::default()
-        };
-        for expected in [64, 128, 130] {
-            assert!(!cache.discover_recovery_sources().unwrap());
-            assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), expected);
-        }
-        assert!(cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "source_observation_receipts"), 4);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        let _recording = crate::native_timing::catalog_commit_tests::recording(true);
-        crate::native_timing::take_discovery_records();
-        assert!(cache.discover_recovery_sources().unwrap());
-        let records = crate::native_timing::take_discovery_records();
-        assert_eq!(records.len(), 1);
-        let counts = &records[0].1;
-        assert_eq!(counts.statements, 7);
-        assert_eq!(counts.skipped, 1);
-        assert_eq!(counts.rows, 0);
-        assert_eq!(counts.committed_changes, 0);
-        assert_eq!(counts.factory_opens, 0);
-        assert_eq!(recovery_count(&peer, "source_observation_receipts"), 4);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        drop(cache);
-        drop(peer);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_event_cache_reconciles_same_unknown_ack_without_a_second_page() {
-        let root = scratch("recovery-producer-unknown-ack");
-        let path = root.join("index.sqlite3");
-        let (store, _) = opened(&path);
-        seed_recovery(&store, 65);
-        let peer = Connection::open(&path).unwrap();
-        let mut cache = crate::events::EventCache {
-            store: Some(Box::new(store)),
-            observation_path: Some(path),
-            ..crate::events::EventCache::default()
-        };
-        LOSE_RECOVERY_ACK.with(|flag| flag.set(true));
-        assert!(cache.discover_recovery_sources().is_err());
-        let original = cache.pending_source_operation.clone().unwrap();
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert!(cache.pending_source_operation.is_none());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert_eq!(recovery_count(&peer, "source_observation_receipts"), 1);
-        let digest: String = peer
-            .query_row(
-                "SELECT payload_digest FROM source_observation_receipts",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(digest, original.operation().payload_digest);
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 65);
-        drop(cache);
-        drop(peer);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_event_cache_restart_replays_pending_capture_and_keeps_original_done() {
-        let root = scratch("recovery-producer-restart");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        seed_recovery(&store, 65);
-        let original = recovery_intent(Some(""));
-        store.persist_intent(&original).unwrap();
-        drop(store);
-        let (store, _) = opened(&path);
-        let peer = Connection::open(&path).unwrap();
-        let mut cache = crate::events::EventCache {
-            store: Some(Box::new(store)),
-            observation_path: Some(path),
-            ..crate::events::EventCache::default()
-        };
-        cache.reconcile_pending_source_operation().unwrap();
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert_eq!(recovery_count(&peer, "source_observation_receipts"), 1);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        drop(cache);
-        drop(peer);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_event_cache_binding_namespace_is_not_replaced_with_native() {
-        let root = scratch("recovery-producer-namespace");
-        let path = root.join("index.sqlite3");
-        let (store, _) = opened(&path);
-        seed_recovery(&store, 1);
-        let peer = Connection::open(&path).unwrap();
-        let mut cache = crate::events::EventCache {
-            store: Some(Box::new(store)),
-            observation_path: Some(path),
-            observation_namespace: "foreign-binding".into(),
-            ..crate::events::EventCache::default()
-        };
-        assert!(cache.discover_recovery_sources().is_err());
-        assert_eq!(
-            cache
-                .pending_source_operation
-                .as_ref()
-                .unwrap()
-                .operation()
-                .namespace,
-            "foreign-binding"
-        );
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 0);
-        assert_eq!(recovery_count(&peer, "source_observation_receipts"), 0);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        drop(cache);
-        drop(peer);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_receipt_trigger_cannot_arm_a_completed_witness_over_a_new_marker() {
-        let root = scratch("recovery-receipt-witness");
-        let (mut store, _) = opened(&root.join("index.sqlite3"));
-        let intent = recovery_intent(None);
-        store.persist_intent(&intent).unwrap();
-        store.connection.execute_batch("CREATE TEMP TRIGGER request_recovery_after_receipt AFTER INSERT ON source_observation_receipts BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
-        assert_eq!(
-            store.recover(intent.operation(), None).unwrap(),
-            (SourceMutationReceipt::Applied, true)
-        );
-        assert!(!store.recovery_is_current().unwrap());
-        assert_eq!(store.recovery_cursor().unwrap().as_deref(), Some(""));
-        // Replay still reports the original Done and performs no new page.
-        let before = store.connection.total_changes();
-        assert_eq!(
-            store.recover(intent.operation(), None).unwrap(),
-            (SourceMutationReceipt::AlreadyApplied, true)
-        );
-        assert_eq!(store.connection.total_changes(), before);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_event_cache_defers_competing_pending_pages_without_losing_identity() {
-        let root = scratch("recovery-producer-competing");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        seed_recovery(&store, 65);
-        let first = recovery_intent(Some(""));
-        let second = recovery_intent(Some(""));
-        store.persist_intent(&first).unwrap();
-        store.persist_intent(&second).unwrap();
-        let peer = Connection::open(&path).unwrap();
-        let mut cache = crate::events::EventCache {
-            store: Some(Box::new(store)),
-            observation_path: Some(path),
-            ..crate::events::EventCache::default()
-        };
-        cache.reconcile_pending_source_operation().unwrap();
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 1);
-        // The second capture conflicts at its original cursor; no page runs.
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 64);
-        assert_eq!(recovery_count(&peer, "source_observation_intents"), 0);
-        let outcome: String = peer
-            .query_row(
-                "SELECT outcome FROM source_observation_receipts WHERE operation_id=?1",
-                [&second.operation().id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(outcome, "conflict");
-        assert!(!cache.discover_recovery_sources().unwrap());
-        assert_eq!(recovery_count(&peer, "catalog_backfill_sources"), 65);
-        assert!(cache.discover_recovery_sources().unwrap());
-        drop(cache);
-        drop(peer);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7894,10 +7331,14 @@ mod tests {
             )
             .unwrap();
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
-        let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+        let journal = options
+            .source
+            .config(&options.cache)
+            .unwrap()
+            .source_observations()
+            .unwrap();
         assert_eq!(
-            crate::storage::source_observations::SourceObservationStore::pending(&store, 64)
-                .unwrap(),
+            journal.pending(64).unwrap(),
             vec![path.clone()]
         );
         assert_eq!(
@@ -10863,8 +10304,8 @@ mod tests {
         );
         assert_eq!(tx.total_changes(), changed_before);
         assert_eq!(usage_delete_snapshot(&tx), before);
-        let work = write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default())
-            .unwrap();
+        let work =
+            write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default()).unwrap();
         assert_eq!(
             work,
             UsageDeleteWork {
@@ -10878,9 +10319,7 @@ mod tests {
         // Frozen rowwise reference: each deletion gets its own prepare;
         // compare complete values and the actual trigger event order.
         let tx = reference.unchecked_transaction().unwrap();
-        let mut put = tx
-            .prepare(COMPOSITE_PUT_USAGE)
-            .unwrap();
+        let mut put = tx.prepare(COMPOSITE_PUT_USAGE).unwrap();
         let mut identity = tx.prepare("INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)").unwrap();
         for id in &changes.usage {
             tx.execute("DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2", params![1, id]).unwrap();
@@ -10997,14 +10436,9 @@ mod tests {
         assert_eq!(usage_delete_snapshot(&db), before);
         // A new transaction constructs new statements, even after rollback.
         let tx = db.unchecked_transaction().unwrap();
-        let work = write_copied_usage_rows(
-            &tx,
-            1,
-            &changes,
-            &BTreeMap::new(),
-            &mut Default::default(),
-        )
-        .unwrap();
+        let work =
+            write_copied_usage_rows(&tx, 1, &changes, &BTreeMap::new(), &mut Default::default())
+                .unwrap();
         assert_eq!(work.identity_prepares + work.usage_prepares, 2);
         tx.rollback().unwrap();
     }
@@ -11060,14 +10494,8 @@ mod tests {
         let tx = db.unchecked_transaction().unwrap();
         let changed_before = tx.total_changes();
         assert!(
-            write_copied_usage_rows(
-                &tx,
-                1,
-                &changes,
-                &BTreeMap::new(),
-                &mut Default::default(),
-            )
-            .is_err()
+            write_copied_usage_rows(&tx, 1, &changes, &BTreeMap::new(), &mut Default::default(),)
+                .is_err()
         );
         assert_eq!(tx.total_changes(), changed_before);
         tx.rollback().unwrap();
@@ -11075,15 +10503,9 @@ mod tests {
         .unwrap();
         let tx = db.unchecked_transaction().unwrap();
         assert_eq!(
-            write_copied_usage_rows(
-                &tx,
-                1,
-                &changes,
-                &BTreeMap::new(),
-                &mut Default::default(),
-            )
-            .unwrap()
-            .identity_prepares,
+            write_copied_usage_rows(&tx, 1, &changes, &BTreeMap::new(), &mut Default::default(),)
+                .unwrap()
+                .identity_prepares,
             1
         );
         tx.commit().unwrap();
@@ -11393,9 +10815,16 @@ mod tests {
                     SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err(),
                     "selected {name}"
                 );
-                assert!(fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).is_err(), "focused {name}");
+                assert!(
+                    fixture_reader_binding(&path)
+                        .and_then(|binding| focused_connection(&binding))
+                        .is_err(),
+                    "focused {name}"
+                );
             } else {
-                let db = fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).unwrap();
+                let db = fixture_reader_binding(&path)
+                    .and_then(|binding| focused_connection(&binding))
+                    .unwrap();
                 assert!(archived_index(&db, "original").is_err());
             }
             unchanged();
@@ -11491,7 +10920,11 @@ mod tests {
             }
         }
         assert!(SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err());
-        assert!(fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).is_err());
+        assert!(
+            fixture_reader_binding(&path)
+                .and_then(|binding| focused_connection(&binding))
+                .is_err()
+        );
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }
@@ -11536,7 +10969,9 @@ mod tests {
         store
             .write_one("original", None, None, &ledger(1), &full())
             .unwrap();
-        let reader = fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).unwrap();
+        let reader = fixture_reader_binding(&path)
+            .and_then(|binding| focused_connection(&binding))
+            .unwrap();
         reader.execute_batch("BEGIN").unwrap();
         assert_eq!(
             reader
@@ -12361,16 +11796,15 @@ pub(crate) fn remove_files_tx(
                 &format!(
                     "DELETE FROM {table} WHERE {}file_id IN \
                          (SELECT file_id FROM files WHERE {}path = ?1)",
-                    "namespace=semon_namespace() AND ",
-                    "namespace=semon_namespace() AND "
+                    "namespace=semon_namespace() AND ", "namespace=semon_namespace() AND "
                 ),
                 [path],
             )?;
         }
         transaction.execute(
-                "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
-                [path],
-            )?;
+            "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
+            [path],
+        )?;
         transaction.execute(
             "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
             [path],

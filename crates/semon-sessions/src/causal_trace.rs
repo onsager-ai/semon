@@ -2,11 +2,10 @@
 //! readers follow one requested turn, never a workspace model or native body.
 use crate::{
     Options,
-    events::EventCache,
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -951,6 +950,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+    use rusqlite::Connection;
 
     fn legacy_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
         json!([
