@@ -3778,21 +3778,7 @@ impl SqliteStore {
                     self.semantic_rejection = Some("source_ledger_missing");
                     return Ok(Outcome::Conflict);
                 };
-                if (
-                    ledger.stat.dev,
-                    ledger.stat.ino,
-                    ledger.offset,
-                    ledger.prefix,
-                    ledger.tail,
-                    ledger.stat.changed_ns,
-                ) != (
-                    source.dev,
-                    source.ino,
-                    source.offset,
-                    source.prefix_sha256,
-                    source.tail_sha256,
-                    source.changed_ns,
-                ) {
+                if !crate::storage::catalog::source_matches_ledger(source, &ledger) {
                     self.semantic_rejection = Some("source_identity");
                     return Ok(Outcome::Conflict);
                 }
