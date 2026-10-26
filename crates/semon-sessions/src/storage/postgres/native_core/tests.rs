@@ -126,7 +126,7 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
 fn assert_rows(tx: &mut PgTxn<'_>, phase: &Phase) -> Result<(), StorageError> {
     for (family, expected) in &phase.rows {
         let table = format!("semon_pg_native_{family}");
-        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
+        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id','path_digest','cwd_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
         let select = columns
             .iter()
             .map(|c| {
@@ -193,6 +193,92 @@ fn assert_rows(tx: &mut PgTxn<'_>, phase: &Phase) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+#[test]
+fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
+    use sha2::{Digest, Sha256};
+    let root = root();
+    let mut directory = root.clone();
+    for level in 0u64..16 {
+        let component = (0u64..3)
+            .map(|part| format!("{:x}", Sha256::digest((level * 3 + part).to_be_bytes())))
+            .collect::<String>();
+        directory.push(component);
+    }
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("source🦀.jsonl");
+    let path_text = path.to_str().unwrap();
+    assert!(path_text.len() > 2704);
+    let cwd = format!("{path_text}\0🦀");
+    let input = body("claude", false)
+        .lines()
+        .map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value.get("cwd").is_some() {
+                value["cwd"] = serde_json::json!(cwd);
+            }
+            format!("{value}\n")
+        })
+        .collect::<String>();
+    std::fs::write(&path, input).unwrap();
+    let cache = root.join("cache.json");
+    // The complete real SQLite producer runs before any PG fixture or writer.
+    let oracle = phase(&cache, &path, "claude");
+    let carrier = EventCache::path(&cache);
+    let db = rusqlite::Connection::open(&carrier).unwrap();
+    let metadata = db.prepare("SELECT key,value FROM meta WHERE length(key)>2704")
+        .unwrap().query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(!metadata.is_empty(), "real producer emitted long addressed metadata");
+    drop(db);
+    std::fs::rename(&carrier, root.join("oracle-held")).unwrap();
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("keys125\0🦀");
+    let control = PgCancellation::default();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let _scope = crate::selected_read::Scope::ensure();
+        write(tx, path_text, None, &oracle.ledger, &oracle.index, None)?;
+        assert_rows(tx, &oracle)?;
+        for (key,value) in &metadata {
+            super::super::native_keys::put_meta(tx,key.as_bytes(),value.as_bytes())?;
+            assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(value.as_bytes().to_vec()));
+        }
+        // A NUL/non-BMP logical metadata address is lossless independently of
+        // the filesystem's prohibition on NUL in a physical path component.
+        let key = format!("native_probe:{path_text}\0🦀");
+        super::super::native_keys::put_meta(tx,key.as_bytes(),b"local")?;
+        assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(b"local".to_vec()));
+        Ok(())
+    }).unwrap();
+    let bounds = pool.inner.limits;
+    drop(pool);
+    let pool = crate::storage::postgres::PgPool::open(factory.clone(),bounds).unwrap();
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let _scope = crate::selected_read::Scope::ensure();
+        assert_rows(tx,&oracle)?;
+        for (key,value) in &metadata {
+            assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(value.as_bytes().to_vec()));
+        }
+        Ok(())
+    }).unwrap();
+    pool.transaction(&ns("foreign\0🦀"),TxnKind::Write,&control,|tx| {
+        let _scope = crate::selected_read::Scope::ensure();
+        let key = metadata[0].0.as_bytes();
+        assert_eq!(super::super::native_keys::read_meta(tx,key,1048576)?,None);
+        super::super::native_keys::put_meta(tx,key,b"foreign")
+    }).unwrap();
+    // Exercise the collision branch with the actual full-key equality function,
+    // rather than pretending a cryptographic collision was naturally produced.
+    assert!(pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx| {
+        tx.driver.query_one("SELECT semon_pg_native_key_matches($1,sha256($2::bytea),$2)",&[&b"wrong stored key".as_slice(),&path_text.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(())
+    }).is_err());
+    assert!(!carrier.exists(), "PG did not recreate the removed SQLite carrier");
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn pg_native_core_real_parser_initial_append_replacement_restart_oracle() {
     for harness in ["claude", "codex", "copilot"] {

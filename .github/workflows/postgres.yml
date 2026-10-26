@@ -104,6 +104,9 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Native keys125 long file and metadata producer oracle
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture
       - name: Strict published Tree scalar and deferred interpretation qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
