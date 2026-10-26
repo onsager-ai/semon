@@ -447,6 +447,22 @@ type CompletionRow = (String, String, Option<i64>, Option<i64>, String);
 #[cfg(test)]
 thread_local! {
     static FAIL_EFFECT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static REPORTED_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn reported_effect() -> rusqlite::Result<()> {
+    REPORTED_FAIL_AFTER.with(|point| match point.get() {
+        Some(1) => {
+            point.set(None);
+            Err(rusqlite::Error::InvalidQuery)
+        }
+        Some(n) => {
+            point.set(Some(n - 1));
+            Ok(())
+        }
+        None => Ok(()),
+    })
 }
 
 #[cfg(test)]
@@ -1000,6 +1016,28 @@ struct Intent {
     revision: Option<i64>,
 }
 
+fn read_reported_stamp(db: &Connection) -> Result<Option<ReportedFileStamp>, StorageError> {
+    let text: Option<String> = db
+        .query_row(
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
+    if text.is_none() {
+        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=semon_namespace() LIMIT 1)", [], |r| r.get(0)).map_err(failed)?;
+        if exists {
+            return Err(StorageError::Unavailable);
+        }
+    }
+    text.map(|text| {
+        super::super::reported_rows::decode_stamp(text.as_bytes())
+            .map_err(|_| StorageError::Unavailable)
+    })
+    .transpose()
+}
+
 pub(crate) struct Writer {
     config: StoreConfig,
     owner: Option<NativeOwnership>,
@@ -1067,12 +1105,7 @@ impl Writer {
             return Err(StorageError::NamespaceUpgradePending);
         }
         let db = self.snapshot()?;
-        let text: Option<String> = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'", [], |r| r.get(0)).optional().map_err(failed)?;
-        text.map(|text| {
-            super::super::reported_rows::decode_stamp(text.as_bytes())
-                .map_err(|_| StorageError::Unavailable)
-        })
-        .transpose()
+        read_reported_stamp(&db)
     }
 
     pub(crate) fn reported_runs(
@@ -1083,7 +1116,46 @@ impl Writer {
             return Err(StorageError::NamespaceUpgradePending);
         }
         let db = self.snapshot()?;
+        read_reported_stamp(&db)?;
         read_runs_selected(&db, ids).map_err(failed)
+    }
+
+    /// Current-contract export; callbacks stage their output until this returns
+    /// success. One owned SQLite snapshot binds the stamp and all row pages.
+    #[allow(dead_code)] // Private current-family migration seam; not public qualification.
+    pub(crate) fn export_reported_runs(
+        &self,
+        mut check: impl FnMut() -> Result<(), StorageError>,
+        mut begin: impl FnMut(Option<&ReportedFileStamp>) -> Result<(), StorageError>,
+        mut record: impl FnMut(ReportedRunSnapshot) -> Result<(), StorageError>,
+    ) -> Result<(), StorageError> {
+        if self.owner.is_none() {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        check()?;
+        let db = self.snapshot()?;
+        let stamp = read_reported_stamp(&db)?;
+        begin(stamp.as_ref())?;
+        let mut statement = db.prepare(&format!("SELECT {RUN_COLUMNS},length(CAST(session_id AS BLOB))+length(CAST(model_usage AS BLOB)) FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start")).map_err(failed)?;
+        let mut rows = statement.query([]).map_err(failed)?;
+        loop {
+            check()?;
+            let Some(row) = rows.next().map_err(failed)? else {
+                break;
+            };
+            let bytes: i64 = row.get(10).map_err(failed)?;
+            let bytes = usize::try_from(bytes).map_err(|_| StorageError::Unavailable)?;
+            let charged = bytes
+                .checked_mul(8)
+                .and_then(|n| n.checked_add(512))
+                .ok_or(StorageError::Busy)?;
+            if bytes > 32 * 1024 * 1024 || charged > 64 * 1024 * 1024 {
+                return Err(StorageError::Busy);
+            }
+            check()?;
+            record(read_run(row).map_err(failed)?)?;
+        }
+        check()
     }
 
     pub(crate) fn save_reported_runs(
@@ -1112,11 +1184,15 @@ impl Writer {
                 put_run(&mut put, &row.run).map_err(failed)?;
                 #[cfg(test)]
                 effect("reported_run").map_err(failed)?;
+                #[cfg(test)]
+                reported_effect().map_err(failed)?;
             }
         }
         tx.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),'claude_json_stamp',?1) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", [stamp]).map_err(failed)?;
         #[cfg(test)]
         effect("reported_stamp").map_err(failed)?;
+        #[cfg(test)]
+        reported_effect().map_err(failed)?;
         let all = match selected {
             Some(ids) => read_runs_selected(&tx, ids),
             None => read_runs(&tx),
@@ -2769,6 +2845,72 @@ mod tests {
         let writer = Writer::owned(owner);
         assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
         let before = writer.reported_stamp().unwrap().unwrap();
+        let mut exported = Vec::new();
+        let mut exported_stamp = None;
+        writer
+            .export_reported_runs(
+                || Ok(()),
+                |stamp| {
+                    exported_stamp = stamp.cloned();
+                    Ok(())
+                },
+                |run| {
+                    exported.push(run);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(exported, expected);
+        assert_eq!(exported_stamp, Some(before.clone()));
+        let mut replacement = expected[0].clone();
+        replacement.capture_at += 1000;
+        let advanced_stamp = ReportedFileStamp {
+            size: before.size.wrapping_add(1),
+            ..before.clone()
+        };
+        let mut old_snapshot = Vec::new();
+        writer
+            .export_reported_runs(
+                || Ok(()),
+                |stamp| {
+                    assert_eq!(stamp, Some(&before));
+                    writer.save_reported_runs(
+                        std::slice::from_ref(&replacement),
+                        &advanced_stamp,
+                        Some(&selected),
+                    )?;
+                    Ok(())
+                },
+                |run| {
+                    old_snapshot.push(run);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(old_snapshot, expected);
+        assert_eq!(writer.reported_stamp().unwrap(), Some(advanced_stamp));
+        assert_eq!(
+            writer
+                .save_reported_runs(&expected, &before, Some(&selected))
+                .unwrap(),
+            expected
+        );
+        let mut checks = 0;
+        assert!(matches!(
+            writer.export_reported_runs(
+                || {
+                    checks += 1;
+                    if checks >= 4 {
+                        Err(StorageError::Busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| Ok(()),
+                |_| Ok(())
+            ),
+            Err(StorageError::Busy)
+        ));
         let changed = ReportedFileStamp {
             size: 123,
             ..before.clone()
@@ -2777,6 +2919,23 @@ mod tests {
             last_session_id: "new".into(),
             ..Default::default()
         };
+        let changes = (0..3)
+            .map(|n| ReportedRunSnapshot {
+                last_session_id: format!("new-{n}"),
+                ..run.clone()
+            })
+            .collect::<Vec<_>>();
+        let original_state = shared_state(&a);
+        for point in 1..=4 {
+            REPORTED_FAIL_AFTER.with(|flag| flag.set(Some(point)));
+            assert!(writer.save_reported_runs(&changes, &changed, None).is_err());
+            assert_eq!(
+                REPORTED_FAIL_AFTER.with(|flag| flag.get()),
+                None,
+                "unreached boundary {point}"
+            );
+            assert_eq!(shared_state(&a), original_state);
+        }
         for point in ["reported_run", "reported_stamp"] {
             FAIL_EFFECT.with(|flag| flag.set(Some(point)));
             assert!(
@@ -2816,6 +2975,62 @@ mod tests {
             .is_err()
         );
         assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
+    }
+
+    #[test]
+    fn configured_reported_runs_corruption_and_ownership_refuse_before_effect() {
+        for poison in [
+            "UPDATE reported_runs SET model_usage='broken' WHERE namespace=semon_namespace()",
+            "UPDATE meta SET value='broken' WHERE namespace=semon_namespace() AND key='claude_json_stamp'",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'",
+            "DELETE FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='reported_runs'",
+            "UPDATE storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace=semon_namespace()",
+            "DELETE FROM storage_namespaces WHERE namespace=semon_namespace()",
+            "DELETE FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+        ] {
+            let (a, _, _) = same_db_sources();
+            let writer = Writer::owned(NativeOwnership::admit(&a.config).unwrap());
+            let run = ReportedRunSnapshot {
+                last_session_id: "same\0原生".into(),
+                last_duration: Some(u64::MAX),
+                ..Default::default()
+            };
+            let stamp: ReportedFileStamp =
+                serde_json::from_str(r#"{"dev":1,"ino":2,"size":3,"modified_ns":4}"#).unwrap();
+            writer
+                .save_reported_runs(std::slice::from_ref(&run), &stamp, None)
+                .unwrap();
+            // Inject stored corruption outside the writer, then restore every
+            // authored guard before testing refusal by the warm production API.
+            let table = poison
+                .split_whitespace()
+                .nth(if poison.starts_with("UPDATE") { 1 } else { 2 })
+                .unwrap();
+            let db = connection(&a.config).unwrap();
+            let guards = db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 ORDER BY name").unwrap().query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            for (name, _) in &guards {
+                db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+                    .unwrap();
+            }
+            db.execute_batch(poison).unwrap();
+            for (_, ddl) in guards {
+                db.execute_batch(&ddl).unwrap();
+            }
+            let before = shared_state(&a);
+            assert!(
+                writer
+                    .save_reported_runs(std::slice::from_ref(&run), &stamp, None)
+                    .is_err(),
+                "{poison}"
+            );
+            assert_eq!(shared_state(&a), before, "{poison}");
+            assert!(
+                writer
+                    .reported_runs(&BTreeSet::from([run.last_session_id]))
+                    .is_err(),
+                "{poison}"
+            );
+        }
     }
 
     fn same_db_sources() -> (Fixture, StoreConfig, PathBuf) {

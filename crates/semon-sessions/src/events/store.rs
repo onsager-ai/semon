@@ -6853,12 +6853,23 @@ fn validate_prior_reported(
     }
     let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
     if let Some(stamp) = stamp {
-        from_json::<ReportedFileStamp>(0, &stamp)?;
+        super::reported_rows::decode_stamp(stamp.as_bytes())
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    } else {
+        let exists = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE {scope}1=1 LIMIT 1)"),
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
     Ok(())
 }
 
 fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
+    let model_usage: String = row.get(8)?;
     let run = ReportedRunSnapshot {
         last_session_id: row.get(0)?,
         last_start_time: row.get(1)?,
@@ -6868,11 +6879,18 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
         last_tool_duration: row.get::<_, Option<i64>>(5)?.map(uint),
         last_lines_added: row.get::<_, Option<i64>>(6)?.map(uint),
         last_lines_removed: row.get::<_, Option<i64>>(7)?.map(uint),
-        last_model_usage: from_json(8, &row.get::<_, String>(8)?)?,
+        last_model_usage: from_json(8, &model_usage)?,
         capture_at: row.get(9)?,
     };
     super::reported_rows::ReportedRow::new(&run)
-        .map(|row| row.run)
+        .and_then(|row| {
+            if row.model_usage != model_usage {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "noncanonical reported model usage",
+                ));
+            }
+            Ok(row.run)
+        })
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 8,
