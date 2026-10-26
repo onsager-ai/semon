@@ -2763,28 +2763,8 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        let owner = self.owner.clone();
-        self.publish_catalog_owned(
-            publication,
-            expected_generation,
-            claims,
-            preserve_complete,
-            semantic,
-            writer,
-            &owner,
-        )
-    }
-
-    fn publish_catalog_owned(
-        &mut self,
-        publication: &crate::slot_projection::Publication<'_>,
-        expected_generation: Option<&str>,
-        claims: Option<&[(String, Option<i64>)]>,
-        preserve_complete: bool,
-        semantic: Option<&crate::model::relation_stage::Batch>,
-        writer: CatalogWriter,
-        owner: &configured::NativeOwnership,
-    ) -> Result<(Outcome, Option<String>), StoreError> {
+        let ownership = self.owner.clone();
+        let owner = &ownership;
         #[cfg(any(test, feature = "test-hooks"))]
         if crate::test_hooks::catalog_paused(&self.path) {
             return Ok((Outcome::Conflict, None));
@@ -3021,8 +3001,6 @@ impl SqliteStore {
             let preserved =
                 crate::storage::catalog::preserve_rows(&history, publication.rows, &withdrawn);
             if !preserved.map_err(failure)? {
-                drop(history);
-                drop(publication_head);
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
@@ -3076,23 +3054,13 @@ impl SqliteStore {
                         // row's newly written Current/source membership.
                         for row in rows {
                             let started = metadata_measurements.start();
-                            if producer.is_some() {
-                                crate::overview::publish_current_owned(
-                                    &transaction,
-                                    row,
-                                    &mut overview_measurements,
-                                    owner,
-                                )
-                                .map_err(failure)?;
-                            } else {
-                                crate::overview::publish_current_owned(
-                                    &transaction,
-                                    row,
-                                    &mut overview_measurements,
-                                    owner,
-                                )
-                                .map_err(failure)?;
-                            }
+                            crate::overview::publish_current_owned(
+                                &transaction,
+                                row,
+                                &mut overview_measurements,
+                                owner,
+                            )
+                            .map_err(failure)?;
                             metadata_measurements.record("overview", started, 1);
                             let started = metadata_measurements.start();
                             metadata_measurements.record("catalog_members", started, 1);
@@ -3138,23 +3106,13 @@ impl SqliteStore {
                             changed[position]
                         } else {
                             let started = metadata_measurements.start();
-                            if producer.is_some() {
-                                crate::overview::publish_current_owned(
-                                    &transaction,
-                                    row,
-                                    &mut overview_measurements,
-                                    owner,
-                                )
-                                .map_err(failure)?;
-                            } else {
-                                crate::overview::publish_current_owned(
-                                    &transaction,
-                                    row,
-                                    &mut overview_measurements,
-                                    owner,
-                                )
-                                .map_err(failure)?;
-                            }
+                            crate::overview::publish_current_owned(
+                                &transaction,
+                                row,
+                                &mut overview_measurements,
+                                owner,
+                            )
+                            .map_err(failure)?;
                             metadata_measurements.record("overview", started, 1);
                             if let Some(sample) = sample.as_mut() {
                                 sample.stage("overview", &transaction);
@@ -3471,9 +3429,6 @@ impl SqliteStore {
             // inside the new actual-COMMIT clock or counter window. Hub's
             // production publisher has no traversal probes.
             commit_boundary.capture(&transaction);
-            drop(slot_effects);
-            drop(history);
-            drop(publication_head);
             transaction.commit().map_err(failure)?;
             crate::pricing::runtime::notify_reprice();
             commit_boundary.capture(&self.connection);
