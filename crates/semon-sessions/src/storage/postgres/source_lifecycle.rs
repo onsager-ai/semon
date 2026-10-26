@@ -531,6 +531,10 @@ pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate
             tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
         }
     }
+    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+        let old=crate::read_regular_at_most(&input.full_path(options),65536).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v|v["sessionId"].as_str().map(str::to_owned));
+        if let Some(old)=old {for affected in dependent_paths(tx,"claude",&old)? {super::source_journal::invalidate(tx,&affected)?;}}
+    }
     let state=RawIntent{request:request.clone(),revision,previous:previous.clone()};
     super::native_keys::put_meta(tx,raw_intent_key(intent).as_bytes(),&serde_json::to_vec(&state).map_err(|_|StorageError::Unavailable)?)?;
     super::native_keys::put_meta(tx,inflight.as_bytes(),&request)?;
