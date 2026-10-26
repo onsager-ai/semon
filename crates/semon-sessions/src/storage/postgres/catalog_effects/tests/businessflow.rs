@@ -2292,6 +2292,42 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{gone} retained search"
     );
     assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
+    // Retained-only selected body: on the successor a withdrawn key has no
+    // Current row, so its body is read through the proof-owned retained
+    // recipe from Raw bytes and equals the SQLite ordinary body exactly.
+    let caught_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: options.clone(),
+    };
+    for key in &removed {
+        let body = query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":key,"limit":100}),
+                1790812802000,
+                &caught_store,
+                &retained_host,
+            )
+            .unwrap();
+        assert_eq!(body, expected_bodies[key]["body"], "retained body {key}");
+        assert!(body.to_string().contains("sanitized agent answer"));
+        let fields = query
+            .call_bound_selected_at(
+                "get_session",
+                &serde_json::json!({"id":key}),
+                1790812802000,
+                &caught_store,
+                &retained_host,
+            )
+            .unwrap();
+        assert!(
+            fields.is_object() && fields.to_string().contains(key.as_str()),
+            "retained fields {key}: {fields}"
+        );
+    }
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
