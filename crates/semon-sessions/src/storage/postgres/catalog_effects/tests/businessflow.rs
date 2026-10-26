@@ -170,9 +170,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    // Recent windows (options.all=false): the SQLite oracle is fully published
-    // through the ordinary closed-catalog path and its exact lists are saved
-    // before the PG no-SQLite phase.
+    // Recent windows (options.all=false): the ordinary SQLite Query refresh
+    // fully publishes a fresh oracle cache; its exact lists are saved before
+    // the PG no-SQLite phase.
     let recent_windows = [
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -180,17 +180,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     ];
     let recent_machine = "vertical140\0🦀";
     let mut closed_options = options.clone();
-    closed_options.cache = oracle.root.join("oracle-closed140");
-    {
-        let mut closed = EventCache::open_scoped(&closed_options.cache).unwrap();
-        let prepared =
-            crate::model::prepare_sources(&closed_options, &mut closed, &inputs, 1790812802000)
-                .unwrap();
-        closed
-            .publish_closed_catalog_fenced(&prepared)
-            .unwrap()
-            .expect("SQLite closed oracle publication");
-    }
+    closed_options.cache = oracle.root.join("oracle-query177");
     let oracle_recent = recent_windows
         .iter()
         .map(|since| {
@@ -200,13 +190,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let list = crate::Query::from_sources(std::sync::Arc::new(
                 crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
             ))
-            .call_catalog_at(
-                "list_sessions",
-                &serde_json::json!({}),
-                None,
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
+            .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
             .expect("SQLite recent-window list");
             (*since, list)
         })
