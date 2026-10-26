@@ -549,7 +549,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         let recorded = options
             .facts
             .as_ref()
-            .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+            .and_then(|path| crate::storage::facts_authority(options, path).ok());
         let mut db = crate::events::store::local_reader(options).map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
@@ -740,7 +740,9 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 let status = crate::catalog::relative_status(
                     options,
                     &runtime_observations,
-                    recorded.as_ref(),
+                    recorded.as_ref().map(|source| {
+                        source as &dyn crate::facts::source_authority::SourceAuthority
+                    }),
                     &row,
                 );
                 missing.other |= status["observation"] == "unavailable";

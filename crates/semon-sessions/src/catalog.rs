@@ -76,9 +76,7 @@ pub fn session_source_proof(
     let current = options
         .facts
         .as_ref()
-        .map(|file| {
-            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
-        })
+        .map(|file| crate::storage::facts_authority(options, file).map_err(|_| Unavailable))
         .transpose()?;
     if current.as_ref().is_some_and(|source| {
         !source.facts_known() || (root == "codex" && !source.selection_known())
@@ -712,7 +710,7 @@ pub(crate) fn recorded_status(
 pub(crate) fn relative_status(
     options: &Options,
     runtime: &crate::native_evidence::RuntimeObservations,
-    recorded: Option<&crate::facts::source_authority::CurrentSources>,
+    recorded: Option<&dyn crate::facts::source_authority::SourceAuthority>,
     row: &CatalogRow,
 ) -> Value {
     let unavailable = || json!({"state":null,"observation":"unavailable"});
@@ -801,7 +799,7 @@ pub(crate) fn read_page_snapshot(
     let runtime = if pinned.is_some() {
         None
     } else {
-        crate::native_evidence::query_runtime_generation(options).ok()
+        transaction.runtime_generation(options).ok()
     };
     let runtime_binding = transaction.runtime_binding();
     let runtime_observations = match (pinned, runtime_binding.as_ref()) {
@@ -820,7 +818,7 @@ pub(crate) fn read_page_snapshot(
         .is_none()
         .then_some(options)
         .and_then(|options| options.facts.as_ref())
-        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+        .and_then(|path| transaction.facts_authority(path).ok());
     let facts_known = pinned.map_or_else(
         || options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known()),
         |saved| saved.facts_known,
@@ -1019,7 +1017,7 @@ pub(crate) fn read_page_snapshot(
                     runtime_observations
                         .as_ref()
                         .map(|runtime| {
-                            relative_status(options, runtime, recorded.as_ref(), relative)
+                            relative_status(options, runtime, recorded.as_deref(), relative)
                         })
                         .unwrap_or(Value::Null)
                 })

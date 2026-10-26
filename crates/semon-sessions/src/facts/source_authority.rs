@@ -253,6 +253,33 @@ pub(crate) enum Sources {
     #[cfg(feature = "postgres")]
     Postgres(crate::storage::postgres::current_sources::CurrentSources),
 }
+
+/// Current Facts authority, including a view borrowed from a Catalog lease.
+/// Implementations read only the header and requested membership.
+pub(crate) trait SourceAuthority {
+    fn validate(&self) -> io::Result<()>;
+    fn facts_known(&self) -> bool;
+    fn selection_known(&self) -> bool;
+    fn hostname(&self) -> Option<String>;
+    fn codex_current(&self, relative: &str) -> io::Result<Option<bool>>;
+}
+impl SourceAuthority for Sources {
+    fn validate(&self) -> io::Result<()> {
+        Sources::validate(self)
+    }
+    fn facts_known(&self) -> bool {
+        Sources::facts_known(self)
+    }
+    fn selection_known(&self) -> bool {
+        Sources::selection_known(self)
+    }
+    fn hostname(&self) -> Option<String> {
+        Sources::hostname(self)
+    }
+    fn codex_current(&self, relative: &str) -> io::Result<Option<bool>> {
+        Sources::codex_current(self, relative)
+    }
+}
 impl std::fmt::Debug for Sources {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CurrentSources")
