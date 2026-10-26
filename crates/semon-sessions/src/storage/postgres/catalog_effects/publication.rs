@@ -220,6 +220,21 @@ fn publish_operation(
     }
     if let Some((previous, mentioned, claimed)) = carried {
         super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
+        super::carry::retained_search(tx, &generation, previous, &leaving)?;
+        // Staged counts predate the carried owners' memberships; the
+        // unadmitted successor's aggregate is rebuilt once, as withdrawal does.
+        use crate::storage::catalog::SearchPublicationStore;
+        tx.driver.execute("DELETE FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns, &generation.as_bytes()]).map_err(sqlstate::error)?;
+        let effects = Effects {
+            tx: RefCell::new(&mut *tx),
+            generation: &generation,
+        };
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            effects.counts(scope)?;
+        }
     }
     for reference in refs {
         tx.check()?;
