@@ -176,6 +176,12 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
     "native_launch_calls:",
     "native_parent_marker:",
     "native_proof_tree:",
+    "native_query_session:",
+    "native_query_header:",
+    "native_query_turn:",
+    "native_query_edge:",
+    "native_query_virtual:",
+    "native_query_virtual-slot:",
     "native_published_chunks:",
     "native_published_chunks_manifest:",
     "native_source_chunks:",
@@ -510,8 +516,9 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
         |_| Ok(1_i64),
     )
     .map_err(failed)?;
-    validate_copied_usage(&db).map_err(failed)?;
-    semantic_stage::validate_support(&db).map_err(failed)?;
+    // Qualify the committed physical layout before taking a writer reservation.
+    // Admission, epoch and mutable writer qualification are rechecked in the tx.
+    NativeOwnership::validate_physical(&db)?;
     Ok(db)
 }
 
@@ -576,12 +583,34 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_physical(db: &Connection) -> Result<(), StorageError> {
+        let version: i64 = db.pragma_query_value(None, "schema_version", |r| r.get(0)).map_err(failed)?;
+        let cached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)", [], |r| r.get(0)).map_err(failed)?;
+        if cached {
+            let layout: Option<bool> = db.query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0)).map_err(failed)?;
+            if layout == Some(true) {
+                return Ok(());
+            }
+        }
         validate_core(db)?;
         validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
         validate_copied_usage(db).map_err(failed)?;
         semantic_stage::validate_support(db).map_err(failed)?;
+        // Match the existing copied-usage/support layout caches: never retain
+        // an uncommitted cookie, which rollback could reuse for different DDL.
+        if db.is_autocommit() {
+            db.create_scalar_function(
+                "semon_native_layout",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                move |context| {
+                    let observed: i64 = context.get(0)?;
+                    Ok((observed == version).then_some(true))
+                },
+            )
+            .map_err(failed)?;
+        }
         Ok(())
     }
 

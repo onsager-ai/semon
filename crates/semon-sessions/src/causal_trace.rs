@@ -1150,7 +1150,8 @@ mod generation_tests {
         assert_eq!(outcome, crate::events::Outcome::Written);
         assert_eq!(
             connection
-                .query_row("SELECT writes FROM trace_effects", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT writes FROM trace_effects", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             0
         );
