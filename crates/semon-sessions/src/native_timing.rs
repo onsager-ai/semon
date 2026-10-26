@@ -700,7 +700,6 @@ pub(crate) struct Measurements {
     uncached_cleanup_reference: bool,
 }
 
-const CLEANUP_SQL: &str = "DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')";
 
 /// Static nested leaves of the existing inclusive cleanup measurement. Counts
 /// use the workload half of us_units; children must not be added to parents.
