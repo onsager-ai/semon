@@ -14,6 +14,8 @@ struct Reader<'a, 'b, 'tx> {
     host: &'a dyn SessionSourceReader,
 }
 
+// Keep proof custody and independent host authority explicit at this boundary.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::storage::postgres) fn with_reader<T>(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,

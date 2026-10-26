@@ -19,6 +19,7 @@ pub(super) struct Binding {
     schema_oid: i64,
     version: i32,
     epoch: i64,
+    native_contract: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -46,7 +47,7 @@ pub(super) fn binding(
     let rows = tx
         .driver
         .query(
-            "SELECT d.oid::bigint,d.datname::text,sr.oid::bigint,cr.oid::bigint,n.oid::bigint,marker.version,marker.epoch,cr.rolsuper,cr.rolbypassrls,(owner.owner=CURRENT_USER),has_schema_privilege(CURRENT_USER,n.oid,'CREATE'),(has_table_privilege(CURRENT_USER,marker_table.oid,'SELECT') AND (owner.owner=CURRENT_USER OR NOT (has_table_privilege(CURRENT_USER,marker_table.oid,'INSERT') OR has_table_privilege(CURRENT_USER,marker_table.oid,'UPDATE') OR has_table_privilege(CURRENT_USER,marker_table.oid,'DELETE')))),current_setting('semon.namespace',true) FROM pg_database d JOIN pg_roles sr ON sr.rolname=session_user JOIN pg_roles cr ON cr.rolname=current_user JOIN pg_namespace n ON n.nspname=current_schema() JOIN pg_class marker_table ON marker_table.relnamespace=n.oid AND marker_table.relname='semon_pg_schema' AND marker_table.relkind='r' JOIN semon_pg_schema marker ON marker.tableoid=marker_table.oid JOIN pg_class owner_table ON owner_table.relnamespace=n.oid AND owner_table.relname='semon_pg_store_owner' AND owner_table.relkind='r' JOIN semon_pg_store_owner owner ON owner.tableoid=owner_table.oid AND owner.singleton WHERE d.datname=current_database()",
+            "SELECT d.oid::bigint,d.datname::text,sr.oid::bigint,cr.oid::bigint,n.oid::bigint,marker.version,marker.epoch,marker.native_contract,cr.rolsuper,cr.rolbypassrls,(owner.owner=CURRENT_USER),has_schema_privilege(CURRENT_USER,n.oid,'CREATE'),(has_table_privilege(CURRENT_USER,marker_table.oid,'SELECT') AND (owner.owner=CURRENT_USER OR NOT (has_table_privilege(CURRENT_USER,marker_table.oid,'INSERT') OR has_table_privilege(CURRENT_USER,marker_table.oid,'UPDATE') OR has_table_privilege(CURRENT_USER,marker_table.oid,'DELETE')))),COALESCE((SELECT bool_and(CASE WHEN t.relname='semon_pg_schema' OR t.relname LIKE 'semon_pg_store_%' THEN has_table_privilege(CURRENT_USER,t.oid,'SELECT') AND (owner.owner=CURRENT_USER OR NOT (has_table_privilege(CURRENT_USER,t.oid,'INSERT') OR has_table_privilege(CURRENT_USER,t.oid,'UPDATE') OR has_table_privilege(CURRENT_USER,t.oid,'DELETE'))) ELSE (has_table_privilege(CURRENT_USER,t.oid,'SELECT') AND has_table_privilege(CURRENT_USER,t.oid,'INSERT') AND has_table_privilege(CURRENT_USER,t.oid,'UPDATE') AND has_table_privilege(CURRENT_USER,t.oid,'DELETE')) END) FROM pg_class t WHERE t.relnamespace=n.oid AND t.relkind='r' AND t.relname LIKE 'semon_pg_%'),false),current_setting('semon.namespace',true) FROM pg_database d JOIN pg_roles sr ON sr.rolname=session_user JOIN pg_roles cr ON cr.rolname=current_user JOIN pg_namespace n ON n.nspname=current_schema() JOIN pg_class marker_table ON marker_table.relnamespace=n.oid AND marker_table.relname='semon_pg_schema' AND marker_table.relkind='r' JOIN semon_pg_schema marker ON marker.tableoid=marker_table.oid JOIN pg_class owner_table ON owner_table.relnamespace=n.oid AND owner_table.relname='semon_pg_store_owner' AND owner_table.relkind='r' JOIN semon_pg_store_owner owner ON owner.tableoid=owner_table.oid AND owner.singleton WHERE d.datname=current_database()",
             &[],
         )
         .map_err(sqlstate::error)?;
@@ -54,12 +55,13 @@ pub(super) fn binding(
         return Err(StorageError::ScopeChanged);
     }
     let row = &rows[0];
-    let is_store_owner: bool = row.get(9);
-    if row.get::<_, bool>(7)
-        || row.get::<_, bool>(8)
-        || (!is_store_owner && row.get::<_, bool>(10))
-        || !row.get::<_, bool>(11)
-        || row.get::<_, Option<String>>(12).as_deref()
+    let is_store_owner: bool = row.get(10);
+    if row.get::<_, bool>(8)
+        || row.get::<_, bool>(9)
+        || (!is_store_owner && row.get::<_, bool>(11))
+        || !row.get::<_, bool>(12)
+        || !row.get::<_, bool>(13)
+        || row.get::<_, Option<String>>(14).as_deref()
             != Some(super::namespace_context(namespace).as_str())
         || row.get::<_, i64>(6) < 1
     {
@@ -73,6 +75,7 @@ pub(super) fn binding(
         schema_oid: row.get(4),
         version: row.get(5),
         epoch: row.get(6),
+        native_contract: row.get(7),
     })
 }
 

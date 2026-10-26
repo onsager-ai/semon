@@ -156,11 +156,15 @@ impl SourceObservationStore for PgSourceJournal {
         // physical profile, then take the durable exact-operation path.
         self.read(|tx| {
             tx.check()?;
+            super::native_recovery::head(tx)?;
             Ok(false)
         })
     }
     fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
-        self.read(super::native_recovery::cursor)
+        self.read(|tx| {
+            super::native_recovery::head(tx)?;
+            super::native_recovery::cursor(tx)
+        })
     }
     fn recover(
         &mut self,
@@ -187,6 +191,11 @@ impl SourceObservationStore for PgSourceJournal {
             return Err(StorageError::InvalidArguments);
         }
         self.write(|tx| {
+            // Recovery needs a published head; cold native ingestion must be
+            // able to persist its intent before the first Catalog exists.
+            if matches!(intent, SourceIntent::Recover { .. }) {
+                super::native_recovery::head(tx)?;
+            }
             let operation = intent.operation();
             let namespace = tx.namespace.as_str().as_bytes();
             let existing = tx.driver.query("SELECT payload FROM semon_pg_source_intents WHERE namespace_digest=sha256($1::bytea) AND operation_id=$2", &[&namespace, &operation.id]).map_err(sqlstate::error)?;

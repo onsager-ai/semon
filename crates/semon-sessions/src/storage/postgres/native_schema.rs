@@ -706,27 +706,34 @@ mod tests {
 
     #[test]
     fn pg_native_shape_drift_refuses_warm_admission_before_effects() {
-        for ddl in [
-            "ALTER TABLE semon_pg_native_files DROP COLUMN title",
-            "DROP INDEX semon_pg_native_files_cwd",
-            "DROP POLICY native_namespace ON semon_pg_native_events",
-            "ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY",
-            "ALTER TABLE semon_pg_native_signals ALTER COLUMN v TYPE numeric",
-            "ALTER TABLE semon_pg_native_recovery DROP CONSTRAINT semon_pg_native_recovery_pkey",
-            "ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION",
-            "UPDATE semon_pg_schema SET native_contract=decode('00','hex')",
+        for (change, controlled) in [
+            ("ALTER TABLE semon_pg_native_files DROP COLUMN title", true),
+            ("DROP INDEX semon_pg_native_files_cwd", true),
+            ("DROP POLICY native_namespace ON semon_pg_native_events", true),
+            ("ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY", true),
+            ("ALTER TABLE semon_pg_native_signals ALTER COLUMN v TYPE numeric", true),
+            ("ALTER TABLE semon_pg_native_recovery DROP CONSTRAINT semon_pg_native_recovery_pkey", true),
+            ("ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION", true),
+            ("UPDATE semon_pg_schema SET native_contract=decode('00','hex')", false),
         ] {
             let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
             let control = PgCancellation::default();
             pool.transaction(&ns("warm"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
                 .unwrap();
-            factory.client().batch_execute(ddl).unwrap();
+            if controlled {
+                pool.controlled_schema_change(&control, |tx| {
+                    tx.driver.batch_execute(change).map_err(sqlstate::error)
+                })
+                .unwrap();
+            } else {
+                factory.client().batch_execute(change).unwrap();
+            }
             assert_eq!(
                 pool.apply_operation(&ns("warm"), &identity(), &control, |_| panic!(
-                    "drift admitted effects: {ddl}"
+                    "drift admitted effects: {change}"
                 )),
                 Err(StorageError::ScopeChanged),
-                "{ddl}"
+                "{change}"
             );
             assert_eq!(count(&factory), 0);
             assert!(matches!(
