@@ -281,6 +281,9 @@ pub(crate) fn prepare_apply(
                             | Category::Slots
                             | Category::Trace
                             | Category::Search
+                            | Category::Operations
+                            | Category::Proofs
+                            | Category::ProofReferences
                     ))
         })
     {

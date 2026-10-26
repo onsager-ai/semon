@@ -4,7 +4,7 @@
 use super::failed;
 use crate::events::store::configured::NativeOwnership;
 use crate::model::summary::CatalogRow;
-use crate::storage::proof_codec::{self, LEASE_CAP, TTL_MAX, PresentationManifest};
+use crate::storage::proof_codec::{self, LEASE_CAP, PresentationManifest, TTL_MAX};
 use crate::storage::proof_lifetime::{
     ProofGenerationId, ProofReaderLease, ReaderPage, ReaderSnapshot,
 };

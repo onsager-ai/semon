@@ -9,11 +9,26 @@ use tokio_postgres::types::{ToSql, Type};
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
     use CatalogRowKind::*;
     match kind {
-        PublicationReceipt => ("semon_pg_native_semantic_publications", "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata"),
-        PresentationRoot => ("semon_pg_native_selected_roots", "publication,base,manifest,digest"),
-        ProofGeneration => ("semon_pg_native_selected_generations", "id,session_key,publication,proof,admission,stream,metadata,slots,prefix"),
-        Presentation => ("semon_pg_native_selected_presentations", "id,session_key,metadata"),
-        ProofSource => ("semon_pg_native_selected_sources", "id,session_key,path,ledger"),
+        PublicationReceipt => (
+            "semon_pg_native_semantic_publications",
+            "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata",
+        ),
+        PresentationRoot => (
+            "semon_pg_native_selected_roots",
+            "publication,base,manifest,digest",
+        ),
+        ProofGeneration => (
+            "semon_pg_native_selected_generations",
+            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+        ),
+        Presentation => (
+            "semon_pg_native_selected_presentations",
+            "id,session_key,metadata",
+        ),
+        ProofSource => (
+            "semon_pg_native_selected_sources",
+            "id,session_key,path,ledger",
+        ),
         ProofRef => ("semon_pg_native_selected_refs", "session_key,kind,id"),
         Dependency => (
             "semon_pg_native_catalog_dependencies",
@@ -71,7 +86,11 @@ const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation
 const HISTORY_PROGRESS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,p.session_key,p.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_progress p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.owner_generation AND p.key_digest=o.key_digest AND p.session_key=o.session_key) AS history_progress";
 const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.original_header FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE h.original_header IS NOT NULL) AS history_original";
 
-fn verify_authority(tx: &mut Inbox<'_, '_>, kind: CatalogRowKind, values: &[Value]) -> Result<(), StorageError> {
+fn verify_authority(
+    tx: &mut Inbox<'_, '_>,
+    kind: CatalogRowKind,
+    values: &[Value],
+) -> Result<(), StorageError> {
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
@@ -79,28 +98,47 @@ fn verify_authority(tx: &mut Inbox<'_, '_>, kind: CatalogRowKind, values: &[Valu
     match kind {
         PresentationRoot => {
             let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND proof_digest=$3)", &[&ns,&text(0)?.as_bytes(),&text(3)?.as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if !exists { return Err(StorageError::ScopeChanged); }
+            if !exists {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         ProofGeneration => {
             let record = catalog_rows::proof_generation(tx.0.namespace.as_str(), values)?;
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(p.metadata)<=1048576 THEN p.metadata END FROM semon_pg_native_semantic_publications p JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.proof_digest=$3 AND p.admission=$4", &[&ns,&record.publication.as_bytes(),&record.proof.as_bytes(),&(record.admission as i64)]).map_err(sqlstate::error)?;
-            let rows: Vec<String> = serde_json::from_slice(&row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?).map_err(|_| StorageError::ScopeChanged)?;
-            if !rows.contains(&record.metadata) { return Err(StorageError::ScopeChanged); }
+            let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_semantic_publications p JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.proof_digest=$3 AND p.admission=$4 AND convert_from(p.metadata,'UTF8')::jsonb ? convert_from($5::bytea,'UTF8'))", &[&ns,&record.publication.as_bytes(),&record.proof.as_bytes(),&(record.admission as i64),&record.metadata.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            if !exists {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         Presentation => {
             let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
-            let metadata = decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
-            let slots = decode(row.get::<_,Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
-            let manifest = decode(row.get::<_,Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
-            crate::storage::proof_codec::verify_presentation_entry(text(1)?, &metadata, &slots, text(2)?, &manifest)?;
+            let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
+            let slots = decode(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
+            let manifest = decode(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+            crate::storage::proof_codec::verify_presentation_entry(
+                text(1)?,
+                &metadata,
+                &slots,
+                text(2)?,
+                &manifest,
+            )?;
         }
         ProofSource => {
             let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND id=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
-            catalog_rows::verify_source_edge(&decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?, text(2)?, text(3)?)?;
+            catalog_rows::verify_source_edge(
+                &decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?,
+                text(2)?,
+                text(3)?,
+            )?;
         }
         ProofRef => {
-            let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_presentations p USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3)", &[&ns,&text(2)?.as_bytes(),&text(0)?.as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if !exists { return Err(StorageError::ScopeChanged); }
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,(SELECT count(*) FROM semon_pg_native_selected_sources s WHERE s.namespace_digest=g.namespace_digest AND s.namespace=g.namespace AND s.id=g.id AND s.key_digest=g.key_digest AND s.session_key=g.session_key) FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_presentations p USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(2)?.as_bytes(),&text(0)?.as_bytes()]).map_err(sqlstate::error)?;
+            let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(
+                &row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?,
+            )
+            .map_err(|_| StorageError::ScopeChanged)?;
+            if usize::try_from(row.get::<_, i64>(1)).ok() != Some(metadata.sources.len()) {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         _ => {}
     }
@@ -357,9 +395,15 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         return Ok(());
     }
     let (table, columns) = match kind {
-        PublicationReceipt => ("semantic_publications", "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata"),
+        PublicationReceipt => (
+            "semantic_publications",
+            "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata",
+        ),
         PresentationRoot => ("selected_roots", "publication,base,manifest,digest"),
-        ProofGeneration => ("selected_generations", "id,session_key,publication,proof,admission,stream,metadata,slots,prefix"),
+        ProofGeneration => (
+            "selected_generations",
+            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+        ),
         Presentation => ("selected_presentations", "id,session_key,metadata"),
         ProofSource => ("selected_sources", "id,session_key,path,ledger"),
         ProofRef => ("selected_refs", "session_key,kind,id"),
@@ -401,7 +445,16 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     for (name, value) in columns.split(',').zip(values) {
         names.push(name);
         slots.push(format!("${}", binds.len() + 1));
-        let bind: Box<dyn ToSql + Sync> = if ["version", "total", "slot", "members", "epoch", "admission", "source_revision"].contains(&name)
+        let bind: Box<dyn ToSql + Sync> = if [
+            "version",
+            "total",
+            "slot",
+            "members",
+            "epoch",
+            "admission",
+            "source_revision",
+        ]
+        .contains(&name)
         {
             Box::new(value.as_i64().ok_or(StorageError::ScopeChanged)?)
         } else if name == "complete" {
@@ -510,25 +563,59 @@ mod tests {
         };
         config.create_native_store().unwrap();
         let manifest = stage(&source, &config, &[120; 32]);
-        for category in [transfer::Category::Operations, transfer::Category::Proofs, transfer::Category::ProofReferences] {
-            assert!(manifest.categories.iter().find(|c| c.category == category).unwrap().rows > 0);
+        for category in [
+            transfer::Category::Operations,
+            transfer::Category::Proofs,
+            transfer::Category::ProofReferences,
+        ] {
+            assert!(
+                manifest
+                    .categories
+                    .iter()
+                    .find(|c| c.category == category)
+                    .unwrap()
+                    .rows
+                    > 0
+            );
         }
         std::fs::remove_dir_all(&options.claude_home).unwrap();
         apply(&config, &manifest);
-        let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+        let pages = source
+            .transfer_inbox()
+            .checkpoint(&manifest)
+            .unwrap()
+            .sequence;
         let mut checked_forgery = false;
         for sequence in 1..=pages {
-            for mut record in source.transfer_inbox().staged_page(&manifest, sequence).unwrap().records {
-                if let TransferRecord::CatalogRow { kind: CatalogRowKind::ProofGeneration, values, .. } = &mut record {
+            for mut record in source
+                .transfer_inbox()
+                .staged_page(&manifest, sequence)
+                .unwrap()
+                .records
+            {
+                if let TransferRecord::CatalogRow {
+                    kind: CatalogRowKind::ProofGeneration,
+                    values,
+                    ..
+                } = &mut record
+                {
                     values[0] = Value::String("0".repeat(64));
-                    assert!(matches!(transaction(&config, &pool, &control, |tx| super::apply(tx, &record)), Err(StorageError::ScopeChanged)));
+                    assert!(matches!(
+                        transaction(&config, &pool, &control, |tx| super::apply(tx, &record)),
+                        Err(StorageError::ScopeChanged)
+                    ));
                     checked_forgery = true;
                     break;
                 }
             }
-            if checked_forgery { break; }
+            if checked_forgery {
+                break;
+            }
         }
-        assert!(checked_forgery, "real publisher must contribute original selected proof authority");
+        assert!(
+            checked_forgery,
+            "real publisher must contribute original selected proof authority"
+        );
         assert_eq!(
             crate::storage::transfer::reported::tests::cache(&config)
                 .session_description(&expected[0].key, 1, "transfer-inputs")

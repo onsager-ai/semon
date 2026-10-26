@@ -67,9 +67,10 @@ pub(crate) fn stage(
     // Each call commits at most one bounded page; reconstruct the handle
     // between calls to exercise durable capture resumption.
     let manifest = loop {
-        match source.capture(operation).unwrap_or_else(|error| {
-            panic!("capture fixture {} failed: {error:?}", operation[0])
-        }) {
+        match source
+            .capture(operation)
+            .unwrap_or_else(|error| panic!("capture fixture {} failed: {error:?}", operation[0]))
+        {
             CaptureProgress::Capturing { .. } => continue,
             CaptureProgress::Ready(manifest) => break manifest,
         }

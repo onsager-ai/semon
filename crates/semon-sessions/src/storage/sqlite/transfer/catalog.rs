@@ -8,10 +8,26 @@ use rusqlite::types::Value;
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) {
     use CatalogRowKind::*;
     match kind {
-        PublicationReceipt => ("storage_semantic_publications", "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata", &[]),
-        PresentationRoot => ("storage_proof_presentation_roots", "publication,base,manifest,digest", &[]),
-        ProofGeneration => ("storage_proof_generations", "id,session_key,publication,proof,admission,stream,metadata,slots,prefix", &[]),
-        Presentation => ("storage_proof_presentations", "id,session_key,metadata", &[]),
+        PublicationReceipt => (
+            "storage_semantic_publications",
+            "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata",
+            &[],
+        ),
+        PresentationRoot => (
+            "storage_proof_presentation_roots",
+            "publication,base,manifest,digest",
+            &[],
+        ),
+        ProofGeneration => (
+            "storage_proof_generations",
+            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+            &[],
+        ),
+        Presentation => (
+            "storage_proof_presentations",
+            "id,session_key,metadata",
+            &[],
+        ),
         ProofSource => ("storage_proof_sources", "id,session_key,path,ledger", &[]),
         ProofRef => ("storage_proof_refs", "session_key,kind,id", &[]),
         Current => ("session_catalog", "session_key,metadata", &[]),
@@ -111,31 +127,48 @@ fn sql_value(value: &serde_json::Value) -> Result<Value, StorageError> {
     })
 }
 
-fn verify_authority(tx: &Inbox<'_>, kind: CatalogRowKind, values: &[serde_json::Value]) -> Result<(), StorageError> {
+fn verify_authority(
+    tx: &Inbox<'_>,
+    kind: CatalogRowKind,
+    values: &[serde_json::Value],
+) -> Result<(), StorageError> {
     use CatalogRowKind::*;
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
     match kind {
         PresentationRoot => {
             let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND proof_digest=?3)", params![tx.1,text(0)?,text(3)?], |r| r.get(0)).map_err(failed)?;
-            if !exists { return Err(StorageError::ScopeChanged); }
+            if !exists {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         ProofGeneration => {
             let record = catalog_rows::proof_generation(tx.1, values)?;
-            let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(p.metadata)<=1048576 THEN p.metadata END FROM storage_semantic_publications p JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace=?1 AND p.generation=?2 AND p.proof_digest=?3 AND p.admission=?4", params![tx.1,record.publication,record.proof,record.admission as i64], |r| r.get(0)).map_err(failed)?;
-            let rows: Vec<String> = serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?;
-            if !rows.contains(&record.metadata) { return Err(StorageError::ScopeChanged); }
+            let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications p JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace=?1 AND p.generation=?2 AND p.proof_digest=?3 AND p.admission=?4 AND EXISTS(SELECT 1 FROM json_each(p.metadata) WHERE value=?5))", params![tx.1,record.publication,record.proof,record.admission as i64,record.metadata], |r| r.get(0)).map_err(failed)?;
+            if !exists {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         Presentation => {
             let (metadata,slots,manifest): (String,String,String) = tx.0.query_row("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM storage_proof_generations g JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![tx.1,text(0)?,text(1)?], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-            crate::storage::proof_codec::verify_presentation_entry(text(1)?, &metadata, &slots, text(2)?, &manifest)?;
+            crate::storage::proof_codec::verify_presentation_entry(
+                text(1)?,
+                &metadata,
+                &slots,
+                text(2)?,
+                &manifest,
+            )?;
         }
         ProofSource => {
             let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![tx.1,text(0)?,text(1)?], |r| r.get(0)).map_err(failed)?;
             catalog_rows::verify_source_edge(&metadata, text(2)?, text(3)?)?;
         }
         ProofRef => {
-            let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_generations g JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3)", params![tx.1,text(2)?,text(0)?], |r| r.get(0)).map_err(failed)?;
-            if !exists { return Err(StorageError::ScopeChanged); }
+            let (metadata,count): (String,i64) = tx.0.query_row("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,(SELECT count(*) FROM storage_proof_sources s WHERE s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key) FROM storage_proof_generations g JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![tx.1,text(2)?,text(0)?], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
+            let row: crate::model::summary::CatalogRow =
+                serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?;
+            if usize::try_from(count).ok() != Some(row.sources.len()) {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         _ => {}
     }
