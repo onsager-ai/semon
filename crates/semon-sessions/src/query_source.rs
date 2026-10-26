@@ -118,7 +118,7 @@ impl Sources {
                     let c = crate::events::store::focused_connection(&binding)?;
                     c.busy_timeout(std::time::Duration::from_millis(100))
                         .map_err(io::Error::other)?;
-                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(c));
+                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(c, binding));
                 }
                 let ledger = Ledger {
                     stat: Stat {
@@ -257,9 +257,16 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        crate::events::store::require_current(&db)
-            .map_err(|error| crate::source_carrier::FailureStage::ProofOpenDb.wrap(error))?;
-        let db = crate::events::store::chunk_proofs::Snapshot::new(db);
+        let binding = crate::storage::local_navigation_binding(options, "")
+            .map_err(|error| {
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
+            })?;
+        binding
+            .validate(&db, &binding.config().namespace)
+            .map_err(|error| {
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
+            })?;
+        let db = crate::events::store::chunk_proofs::Snapshot::new(db, binding);
         #[cfg(test)]
         if let Some(hook) = BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow_mut().take()) {
             hook();
@@ -310,7 +317,10 @@ impl Sources {
         owner.validate_ready(&db).map_err(io::Error::other)?;
         let config = owner.config();
         let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
-        let db = crate::events::store::chunk_proofs::Snapshot::owned(db, owner.clone());
+        let db = crate::events::store::chunk_proofs::Snapshot::new(
+            db,
+            crate::storage::NativeReaderBinding::Semantic(owner.clone()),
+        );
         let mut proofs = Vec::with_capacity(sources.len());
         for source in sources {
             let proof = crate::events::store::chunk_proofs::Focused::with_db(

@@ -12,21 +12,11 @@ mod published;
 
 /// Own the selected read transaction until the last lazy proof reader drops.
 /// Connections are never returned to a pool with an unfinished transaction.
-pub(crate) struct Snapshot(
-    Mutex<Connection>,
-    Option<crate::events::store::configured::NativeOwnership>,
-);
+pub(crate) struct Snapshot(Mutex<Connection>, crate::storage::NativeReaderBinding);
 
 impl Snapshot {
-    pub(crate) fn new(db: Connection) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(db), None))
-    }
-
-    pub(crate) fn owned(
-        db: Connection,
-        owner: crate::events::store::configured::NativeOwnership,
-    ) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(db), Some(owner)))
+    pub(crate) fn new(db: Connection, binding: crate::storage::NativeReaderBinding) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(db), binding))
     }
 
     fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
@@ -387,28 +377,19 @@ impl Focused {
         ledger: &Ledger,
         raw_before: Option<u64>,
     ) -> io::Result<Self> {
-        Self::open_connected(
-            || super::focused_connection(binding),
-            cache,
-            path,
-            ledger,
-            raw_before,
-        )
-    }
-
-    fn open_connected(
-        connect: impl FnOnce() -> io::Result<Connection>,
-        cache: &Path,
-        path: &str,
-        ledger: &Ledger,
-        raw_before: Option<u64>,
-    ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
         let result = (|| {
-            let db = connect().map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+            let db = super::focused_connection(binding)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-            Self::with_db_inner(Snapshot::new(db), cache, path, ledger, &mut diagnostic)
+            Self::with_db_inner(
+                Snapshot::new(db, binding.clone()),
+                cache,
+                path,
+                ledger,
+                &mut diagnostic,
+            )
         })();
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
@@ -455,23 +436,9 @@ impl Focused {
                 .execute_batch("BEGIN DEFERRED")
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         }
-        if let Some(owner) = &db.1 {
-            // Only typed native custody can qualify an enrolled proof reader.
-            // The unbound factory below continues refusing enrolled stores.
-            owner
-                .validate_ready(&connection)
-                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-        } else {
-            if !super::current(&connection)
-                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
-            {
-                return Err(
-                    FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
-                );
-            }
-            super::require_current(&connection)
-                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
-        }
+        db.1
+            .validate(&connection, &db.1.config().namespace)
+            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
             diagnostic.index_offset = Some(index.offset);

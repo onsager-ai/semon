@@ -79,7 +79,7 @@ impl NativeReaderBinding {
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.validate(&db, &self.config().namespace)?;
-        Ok(crate::events::store::chunk_proofs::Snapshot::new(db))
+        Ok(crate::events::store::chunk_proofs::Snapshot::new(db, self.clone()))
     }
 
     pub(super) fn snapshot(
