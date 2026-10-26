@@ -20,8 +20,7 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
 impl QueryCatalogStore for QueryCatalog {
     fn selected_body(&self, key: &str, args: &serde_json::Value, now: i64, host: &dyn crate::SessionSourceReader) -> Result<serde_json::Value, QueryError> {
         if !self.options.all { return Err(unavailable(StorageError::NamespaceUpgradePending)); }
-        with_admitted_generation(&self.pool, &self.namespace, &self.control, &self.generation, |_| {
-            with_generation(&self.pool, &self.namespace, &self.control, &self.generation, |snapshot| {
+        with_admitted_snapshot(&self.pool, &self.namespace, &self.control, &self.generation, |snapshot| {
                 let (row, header, _) = snapshot.selected(key, false, 0, 1)?.ok_or(StorageError::ScopeChanged)?;
                 let total = usize::try_from(header.3).map_err(|_|StorageError::ScopeChanged)?;
                 let observation: crate::slot_projection::QueryObservation = serde_json::from_value(row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"].clone()).map_err(|_|StorageError::ScopeChanged)?;
@@ -77,7 +76,6 @@ impl QueryCatalogStore for QueryCatalog {
                 let answer = crate::query::transcript::render_page(&self.options,key,&row,&observation,total,forward,from,args["limit"].as_u64().map_or(crate::tx::PAGE_ENTRIES,|v|v as usize),now,&page).map_err(|_|StorageError::Unavailable)?;
                 records.finish().map_err(|_|StorageError::ScopeChanged)?;
                 Ok(answer)
-            })
         }).map_err(unavailable)
     }
     fn read_cohort(
