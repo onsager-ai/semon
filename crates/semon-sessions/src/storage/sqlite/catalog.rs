@@ -381,7 +381,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         }
         let sql = "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)";
         let tx = self.0;
-        tx.query_row(sql, [key], |row| row.get(0)).map_err(io::Error::other)
+        tx.query_row(sql, [key], |row| row.get(0))
+            .map_err(io::Error::other)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
         if !self.1 {
