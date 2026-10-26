@@ -77,10 +77,11 @@ impl QueryCatalogStore for QueryCatalog {
                 let binding = snapshot
                     .runtime_binding()
                     .ok_or(StorageError::ScopeChanged)?;
-                let observations =
-                    crate::native_evidence::RuntimeObservations::bound(&binding, runtime.as_deref().unwrap_or(""))
-                        .map_err(|_| StorageError::ScopeChanged)?;
-                let expected = observations.expected(&row);
+                let expected = runtime.as_deref().map(|runtime| {
+                    crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
+                        .map(|observations| observations.expected(&row))
+                        .map_err(|_| StorageError::ScopeChanged)
+                }).transpose()?.flatten();
                 if !crate::model::summary::query_observation_matches(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
                     &row.sources,

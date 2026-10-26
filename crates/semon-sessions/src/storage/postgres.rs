@@ -210,3 +210,5 @@ pub(crate) fn catalog_page(
         },
     )
 }
+
+pub(crate) mod workspace_catalog;
