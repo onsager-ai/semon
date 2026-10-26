@@ -2096,7 +2096,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &runtime,
         )
         .unwrap();
-    let facts_generation = loop {
+    let (facts_generation, facts_rows) = loop {
         let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
         let model = moved_cache
             .prepare_semantic_model_batch(&facts_options, &moved_inputs, &batch, 1790812805000)
@@ -2111,7 +2111,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .publish_semantic_catalog(&batch, model.prepared())
                 .unwrap();
             moved_cache.finish_semantic_stage(batch.epoch).unwrap();
-            break ack.1.unwrap();
+            break (ack.1.unwrap(), model.prepared().rows.clone());
         }
     };
     assert_eq!(facts_generation.len(), 64);
@@ -2126,6 +2126,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let bound_list = facts_query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812805000, facts_store.as_ref()).unwrap();
     assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
+    let facts_host = body_host(&facts_options, &facts_rows);
+    for row in &facts_rows {
+        for tool in ["read_transcript", "get_session"] {
+            let args = serde_json::json!({"id":row.key});
+            let expected = facts_query.call_bound_selected_at(tool, &args, 1790812805000, facts_store.as_ref(), &facts_host).unwrap();
+            let actual = facts_query.call_selected_at(namespace.as_str(), &row.key, tool, &args, Some(&facts_host), crate::SessionSourceReadMode::ProviderOnly, 1790812805000).unwrap();
+            assert_eq!(actual, expected, "configured ordinary Facts selected {tool} {}", row.key);
+        }
+    }
+
     assert_eq!(
         fs::read(&path).unwrap(),
         [raw[0].as_slice(), append.as_bytes(), extra.as_bytes()].concat()
