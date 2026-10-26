@@ -29,7 +29,7 @@ impl QueryCatalogStore for QueryCatalog {
         now: i64,
         host: &dyn crate::SessionSourceReader,
     ) -> Result<serde_json::Value, QueryError> {
-        if namespace != &self.namespace || !self.options.all {
+        if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
         with_admitted_snapshot(
@@ -177,12 +177,16 @@ impl QueryCatalogStore for QueryCatalog {
     fn read_cohort(
         &self,
         namespace: &LogicalSourceNamespace,
-        _: i64,
+        now: i64,
         bytes_left: &mut usize,
     ) -> Result<Part, QueryError> {
-        if namespace != &self.namespace || !self.options.all {
+        if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
+        // The recent window uses the SQLite reader's cutoff rules.
+        let cutoff = (!self.options.all).then(|| {
+            now.saturating_sub(i64::try_from(self.options.since.as_millis()).unwrap_or(i64::MAX))
+        });
         let runtime = crate::native_evidence::query_runtime_generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
@@ -193,6 +197,41 @@ impl QueryCatalogStore for QueryCatalog {
             let mut owners = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
+            let mut emit = |row: crate::model::summary::CatalogRow, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+                if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
+                let expected = observations.expected(&row);
+                let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+                if !crate::model::summary::query_observation_matches(saved, &row.sources, true, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
+                let witness = saved.to_string();
+                *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
+                let summaries = saved["rows"].as_object().ok_or(StorageError::ScopeChanged)?;
+                if !summaries.contains_key(&row.key) { return Err(StorageError::ScopeChanged); }
+                for (id, value) in summaries.iter().filter(|(id, _)| keep.is_none_or(|keep| keep.contains(*id))) {
+                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(StorageError::ScopeChanged); }
+                    rows.insert(id.clone(), value.clone());
+                    owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                }
+                witnesses.push((row.key.clone(), witness));
+                // Content generation belongs to the same immutable selected trace.
+                use crate::storage::selected::ContextLookup;
+                let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
+                if let Some((_, Some(version))) = version { content.insert(row.key, version); }
+                Ok(())
+            };
+            // As the SQLite reader: a Current key with retained history
+            // contributes its retained history row to the cohort.
+            let chosen = |row: crate::model::summary::CatalogRow| -> Result<(crate::model::summary::CatalogRow, bool), StorageError> {
+                Ok(match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
+                    Some(text) => {
+                        let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+                        if history.key != row.key { return Err(StorageError::ScopeChanged); }
+                        (history, true)
+                    }
+                    None => (row, false),
+                })
+            };
+            let query_last = |row: &crate::model::summary::CatalogRow| row.query.as_ref().and_then(|query| query["last"].as_i64());
+            let mut loaded = BTreeMap::new();
             loop {
                 let mut catalog = snapshot.rows(&request).map_err(|_| StorageError::Unavailable)?;
                 let more = catalog.len() > request.limit;
@@ -206,64 +245,135 @@ impl QueryCatalogStore for QueryCatalog {
                     last: row.last.unwrap_or(0), key: row.key.clone(),
                 });
                 for row in catalog {
-                    // As the SQLite reader: a Current key with retained history
-                    // contributes its retained history row to the cohort.
-                    let row = match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
-                        Some(text) => {
-                            let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
-                            if history.key != row.key { return Err(StorageError::ScopeChanged); }
-                            history
-                        }
-                        None => row,
+                    let Some(c) = cutoff else {
+                        emit(chosen(row)?.0, None, bytes_left)?;
+                        continue;
                     };
-                    if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
-                    let expected = observations.expected(&row);
-                    let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-                    if !crate::model::summary::query_observation_matches(saved, &row.sources, true, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
-                    let witness = saved.to_string();
-                    *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
-                    let summaries = saved["rows"].as_object().ok_or(StorageError::ScopeChanged)?;
-                    if !summaries.contains_key(&row.key) { return Err(StorageError::ScopeChanged); }
-                    for (id, value) in summaries {
-                        if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(StorageError::ScopeChanged); }
-                        rows.insert(id.clone(), value.clone());
-                        owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                    let state = row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
+                    let current_recent = row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state;
+                    let (row, history) = chosen(row)?;
+                    if current_recent || (history && query_last(&row).is_some_and(|last| last >= c)) {
+                        loaded.insert(row.key.clone(), row);
                     }
-                    witnesses.push((row.key.clone(), witness));
-                    // Content generation belongs to the same immutable selected trace.
-                    use crate::storage::selected::ContextLookup;
-                    let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
-                    if let Some((_, Some(version))) = version { content.insert(row.key, version); }
                 }
                 if !more { break; }
                 request.cursor = Some(next.ok_or(StorageError::ScopeChanged)?);
             }
-            // Each saved owner contains its complete relationship summaries.
-            // Exact edge/turn sets are loaded below from the immutable effects.
-            let (edges, turns) = {
-                let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
-                let mut sets = Vec::new();
-                for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
-                    let digest_column = if column == "edge_id" { "edge_digest" } else { "turn_digest" };
-                    let mut after: Option<(Vec<u8>, Vec<u8>)> = None;
-                    let mut values = BTreeSet::new();
+            let Some(c) = cutoff else {
+                // Each saved owner contains its complete relationship summaries.
+                // Exact edge/turn sets are loaded below from the immutable effects.
+                let (edges, turns) = {
+                    let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
+                    let mut sets = Vec::new();
+                    for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
+                        let digest_column = if column == "edge_id" { "edge_digest" } else { "turn_digest" };
+                        let mut after: Option<(Vec<u8>, Vec<u8>)> = None;
+                        let mut values = BTreeSet::new();
+                        loop {
+                            tx.check()?;
+                            let after_key = after.as_ref().map(|v| v.0.as_slice());
+                            let after_id = after.as_ref().map(|v| v.1.as_slice());
+                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                            for row in &page {
+                                let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                                *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
+                                values.insert(value);
+                            }
+                            if page.len() < 64 { break; }
+                            after = page.last().map(|row| (row.get(0), row.get(1)));
+                        }
+                        sets.push(values);
+                    }
+                    (sets.remove(0), sets.remove(0))
+                };
+                return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns });
+            };
+            // Recent window: edges active or touched since the cutoff, then the
+            // last/recent turns of each kept owner and their linked endpoints.
+            let mut keep: BTreeSet<String> = loaded.keys().cloned().collect();
+            let mut needed = keep.clone();
+            let mut edges = BTreeSet::new();
+            let mut turns = BTreeSet::new();
+            let json = |bytes: Option<Vec<u8>>| -> Result<serde_json::Value, StorageError> {
+                serde_json::from_slice(&bytes.ok_or(StorageError::Busy)?).map_err(|_| StorageError::ScopeChanged)
+            };
+            let endpoint = |metadata: &serde_json::Value| -> Result<(String, Option<String>), StorageError> {
+                let from = metadata["from"].as_str().ok_or(StorageError::ScopeChanged)?.to_owned();
+                Ok((from, metadata["to"].as_str().filter(|to| *to != "you").map(str::to_owned)))
+            };
+            {
+                let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let mut after: Option<(Vec<u8>, Vec<u8>)> = None;
+                loop {
+                    tx.check()?;
+                    let after_key = after.as_ref().map(|v| v.0.as_slice());
+                    let after_id = after.as_ref().map(|v| v.1.as_slice());
+                    let page = tx.driver.query("SELECT key_digest,edge_digest,CASE WHEN octet_length(session_key)<=65536 AND octet_length(edge_id)<=65536 AND octet_length(metadata)<=65536 THEN session_key END,edge_id,metadata FROM semon_pg_native_catalog_trace_edges WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,edge_digest)>($3,$4)) ORDER BY key_digest,edge_digest LIMIT 64", &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                    for row in &page {
+                        let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                        let id = text(row.get(3))?;
+                        let metadata = json(row.get(4))?;
+                        let status = metadata["status"].as_str().is_some_and(|status| matches!(status, "work" | "wait" | "new"));
+                        if !(metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["done"].as_i64().is_some_and(|done| done >= c) || status) { continue; }
+                        let (from, to) = endpoint(&metadata)?;
+                        *bytes_left = bytes_left.checked_sub(owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len)).ok_or(StorageError::Busy)?;
+                        needed.insert(owner);
+                        edges.insert(id);
+                        keep.insert(from);
+                        keep.extend(to);
+                    }
+                    if page.len() < 64 { break; }
+                    after = page.last().map(|row| (row.get(0), row.get(1)));
+                }
+            }
+            for owner in keep.clone() {
+                let mut links = Vec::new();
+                {
+                    let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                    let mut after: Option<Vec<u8>> = None;
                     loop {
                         tx.check()?;
-                        let after_key = after.as_ref().map(|v| v.0.as_slice());
-                        let after_id = after.as_ref().map(|v| v.1.as_slice());
-                        let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                        let page = tx.driver.query("SELECT turn_digest,CASE WHEN octet_length(turn_id)<=65536 AND octet_length(metadata)<=65536 THEN turn_id END,metadata FROM semon_pg_native_catalog_trace_turns WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND ($4::bytea IS NULL OR turn_digest>$4) ORDER BY turn_digest LIMIT 64", &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &owner.as_bytes(), &after]).map_err(sqlstate::error)?;
                         for row in &page {
-                            let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
-                            *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
-                            values.insert(value);
+                            let id = text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
+                            let metadata = json(row.get(2))?;
+                            let last = metadata["last"] == serde_json::json!(1) || metadata["last"] == serde_json::json!(true);
+                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c)) { continue; }
+                            let start = metadata["start"].as_str().map(str::to_owned);
+                            let sent: Vec<String> = metadata["sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                            *bytes_left = bytes_left.checked_sub(id.len() + start.as_ref().map_or(0, String::len) + sent.iter().map(String::len).sum::<usize>()).ok_or(StorageError::Busy)?;
+                            turns.insert(id);
+                            links.extend(start.into_iter().chain(sent));
                         }
                         if page.len() < 64 { break; }
-                        after = page.last().map(|row| (row.get(0), row.get(1)));
+                        after = page.last().map(|row| row.get(0));
                     }
-                    sets.push(values);
                 }
-                (sets.remove(0), sets.remove(0))
-            };
+                use crate::storage::selected::ContextLookup;
+                for id in links {
+                    if edges.insert(id.clone())
+                        && let Some(metadata) = snapshot.edge(&owner, &id).map_err(|_| StorageError::Unavailable)?
+                    {
+                        let (from, to) = endpoint(&serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?)?;
+                        keep.insert(from);
+                        keep.extend(to);
+                    }
+                }
+            }
+            needed.extend(keep.iter().cloned());
+            for key in &needed {
+                let row = match loaded.remove(key) {
+                    Some(row) => row,
+                    None => match snapshot.catalog(key, false)? {
+                        Some(row) => chosen(row)?.0,
+                        None => continue,
+                    },
+                };
+                emit(row, Some(&keep), bytes_left)?;
+            }
+            if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
+                return Err(StorageError::ScopeChanged);
+            }
             Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns })
         }).map_err(unavailable)
     }
