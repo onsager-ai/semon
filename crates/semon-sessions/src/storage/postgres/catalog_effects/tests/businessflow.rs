@@ -1740,14 +1740,38 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         current["total"].as_u64(),
         Some(all_total - 1),
         "PG ids={:?}; SQLite withdrawal total={} ids={:?}; owner keys={:?}",
-        current["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
+        current["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
         withdrawal_oracle["total"],
-        withdrawal_oracle["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
-        continued.rows.iter().map(|row| &row.key).collect::<Vec<_>>()
+        withdrawal_oracle["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        continued
+            .rows
+            .iter()
+            .map(|row| &row.key)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
-        current["sessions"].as_array().unwrap().iter().map(|row| &row["id"]).collect::<Vec<_>>(),
-        withdrawal_oracle["sessions"].as_array().unwrap().iter().map(|row| &row["id"]).collect::<Vec<_>>(),
+        current["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| &row["id"])
+            .collect::<Vec<_>>(),
+        withdrawal_oracle["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| &row["id"])
+            .collect::<Vec<_>>(),
         "withdrawal preserves the exact SQLite Query order, including virtual peers"
     );
     let removed_key = continued
