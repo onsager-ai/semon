@@ -376,6 +376,10 @@ pub(crate) fn seed_catalog(
                     .0,
                 crate::events::Outcome::Written
             );
+            let key = &model.prepared().rows[0].key;
+            cache.save_session_description(key, 1, "transfer-inputs", "sanitized transfer description");
+            cache.publish_session_descriptions();
+            assert_eq!(cache.session_description(key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
             return (options, model.prepared().rows.clone());
         }
     }
@@ -401,6 +405,7 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     );
     std::fs::remove_dir_all(&options.claude_home).unwrap();
     apply(&target, &manifest);
+    assert_eq!(cache(&target).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
     let owner =
         crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
     let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
@@ -441,6 +446,7 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
         );
     }
     apply(&reverse, &backwards);
+    assert_eq!(cache(&reverse).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
