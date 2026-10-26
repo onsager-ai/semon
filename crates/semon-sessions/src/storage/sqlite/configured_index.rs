@@ -1,11 +1,14 @@
 //! Explicit configured IndexStore. Unported families still refuse.
+use crate::events::store::{
+    begin_source_write, complete_source_write, enqueue_facts, enqueue_native, enqueue_pid,
+    resume_runtime_input,
+};
 use crate::events::{
     DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
 };
 use crate::sealed::LogFile;
-use crate::events::store::{enqueue_facts, resume_runtime_input, begin_source_write, enqueue_native, enqueue_pid, complete_source_write};
-use std::path::Path;
 use crate::storage::{StorageError, StoreConfig};
+use std::path::Path;
 use std::{collections::BTreeSet, io, sync::Arc};
 
 pub(super) struct ConfiguredIndex {
@@ -115,7 +118,11 @@ impl IndexStore for ConfiguredIndex {
             .map_err(|e| StoreError::Data(e.to_string()))
     }
 
-    fn resume_runtime_input(&mut self, options: &crate::Options, path: &str) -> Result<(), StoreError> {
+    fn resume_runtime_input(
+        &mut self,
+        options: &crate::Options,
+        path: &str,
+    ) -> Result<(), StoreError> {
         resume_runtime_input(options, path).map_err(|e| StoreError::Data(e.to_string()))
     }
 
