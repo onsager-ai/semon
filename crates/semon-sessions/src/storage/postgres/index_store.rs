@@ -74,9 +74,6 @@ fn read_error(error: std::io::Error) -> StoreError {
         });
     err(storage)
 }
-fn pending<T>() -> Result<T, StoreError> {
-    Err(err(StorageError::NamespaceUpgradePending))
-}
 
 impl NativeIndex {
     fn summary(
