@@ -199,6 +199,41 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "recent-window fixture lacks a boundary: {:?}",
         oracle_recent.values().map(|list| &list["total"]).collect::<Vec<_>>()
     );
+    // Retained-history scope through the ordinary SQLite viewer page over the
+    // fully published Query cache; exact ordered keys are saved before the PG
+    // no-SQLite phase. Nothing is withdrawn yet, so it equals the current page.
+    let mut history_options = closed_options.clone();
+    history_options.all = false;
+    history_options.since = recent_windows[2];
+    let page_keys = |reply: crate::ViewerReply| -> Vec<String> {
+        assert_eq!(reply.status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let oracle_history = page_keys(crate::catalog::session_catalog_page(
+        &history_options,
+        recent_machine,
+        "scope=retained_history&limit=50",
+    ));
+    let mut ordered = expected.rows.clone();
+    ordered.sort_by(|a, b| b.last.unwrap_or(0).cmp(&a.last.unwrap_or(0)).then(a.key.cmp(&b.key)));
+    assert_eq!(
+        oracle_history,
+        ordered.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        oracle_history,
+        page_keys(crate::catalog::session_catalog_page(
+            &history_options,
+            recent_machine,
+            "limit=50",
+        ))
+    );
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -412,6 +447,53 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
+    // P3: retained history over the admitted PG generation equals the SQLite
+    // oracle page: exact ordered keys and full producer rows, then a keyset
+    // second page continues without overlap.
+    let (history_rows, history_page, history_next) = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            use crate::storage::catalog::CatalogSnapshot;
+            let request = crate::catalog::Request::parse("scope=retained_history&limit=50").unwrap();
+            let rows = snapshot.rows(&request).map_err(|_| StorageError::ScopeChanged)?;
+            let page = crate::catalog::read_page_snapshot(&options, recent_machine, &request, snapshot)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let first = crate::catalog::read_page_snapshot(
+                &options,
+                recent_machine,
+                &crate::catalog::Request::parse("scope=retained_history&limit=1").unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)?;
+            Ok((rows, page, first))
+        },
+    )
+    .unwrap();
+    assert_eq!(page_keys(history_page), oracle_history);
+    assert_eq!(
+        producer_rows(&history_rows),
+        producer_rows(&ordered)
+    );
+    assert!(history_rows.iter().all(|row| row.lifecycle == crate::model::summary::CatalogLifecycle::Current));
+    let first: serde_json::Value = serde_json::from_slice(&history_next.body).unwrap();
+    assert_eq!(first["items"][0]["key"].as_str(), oracle_history.first().map(String::as_str));
+    if oracle_history.len() > 1 {
+        let cursor = first["next_cursor"].as_str().expect("retained history keyset cursor");
+        let second = super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &options,
+                recent_machine,
+                &crate::catalog::Request::parse(&format!("scope=retained_history&limit=50&cursor={}", crate::viewer::percent_encode(cursor))).unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        })
+        .unwrap();
+        assert_eq!(page_keys(second), oracle_history[1..].to_vec());
+    }
     let query_store = super::super::snapshot::query::QueryCatalog {
         pool: pool.clone(),
         namespace: namespace.clone(),
