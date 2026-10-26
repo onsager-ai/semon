@@ -34,6 +34,10 @@ through the existing removal writer after its physical observations, retaining
 its Source locks and read snapshot through the ledger comparison and write.
 PostgreSQL staging likewise consumes prepared physical absence with durable
 removal evidence; an unledgered missing path alone cannot authorize retirement.
+Resumed primitive indexing also sends physically absent, ledgered inputs through
+the ordinary removal writer before recording. If that advances a claim, the
+producer yields its old preparation. The next qualified negative primitive pins
+the exact removal claim and retained ledger for later reduction checks.
 
 Pending slot outcomes record the absence of a final native result, separately
 from a recorded result with unknown exit status. Recipes never store live flags

@@ -2949,7 +2949,11 @@ impl Stage {
                 .map(|(_, ledger)| serde_json::to_string(&ledger))
                 .transpose()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
-            tx.execute("UPDATE main.catalog_semantic_sources SET ledger=?3,index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path,retained]).map_err(error)?;
+            // The ordinary removal can create a newer dirty claim during
+            // preparation. The current claims were compared with the prepared
+            // vector above; bind this exact durable negative observation before
+            // marking the primitive complete. Later reductions recheck it.
+            tx.execute("UPDATE main.catalog_semantic_sources SET claim=(SELECT revision FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2),ledger=?3,index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path,retained]).map_err(error)?;
         }
         for (path, harness, native) in &prepared.indexed_native_parents {
             if !seen.contains(path) {
