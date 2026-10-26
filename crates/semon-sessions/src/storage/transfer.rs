@@ -189,13 +189,22 @@ impl SnapshotManifest {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum TransferRecord {
-    Metadata { key: String, value: String },
+    Metadata {
+        key: String,
+        value: String,
+    },
     ReportedFact(crate::facts::ReportedRunSnapshot),
     SourceIntent(super::source_observations::SourceIntent),
     /// Fixed current FILE columns after file_id/path; physical IDs are not portable.
-    NativeFile { path: String, values: Vec<serde_json::Value> },
+    NativeFile {
+        path: String,
+        values: Vec<serde_json::Value>,
+    },
     /// Fixed current EVENT columns; the owning file is a logical path.
-    NativeEvent { path: String, values: Vec<serde_json::Value> },
+    NativeEvent {
+        path: String,
+        values: Vec<serde_json::Value>,
+    },
 }
 
 impl TransferRecord {
@@ -203,13 +212,37 @@ impl TransferRecord {
         use crate::events::native_decode::{self, Values};
         match self {
             Self::NativeFile { path, values } => {
-                if path.is_empty() || values.len() != 27 { return Err(StorageError::ScopeChanged); }
-                let ledger = Values(vec![0.into(), values[0].clone(), values[1].clone(), values[2].clone(), values[3].clone(), values[4].clone(), values[5].clone(), values[6].clone(), values[26].clone()]);
+                if path.is_empty() || values.len() != 27 {
+                    return Err(StorageError::ScopeChanged);
+                }
+                let ledger = Values(vec![
+                    0.into(),
+                    values[0].clone(),
+                    values[1].clone(),
+                    values[2].clone(),
+                    values[3].clone(),
+                    values[4].clone(),
+                    values[5].clone(),
+                    values[6].clone(),
+                    values[26].clone(),
+                ]);
                 native_decode::ledger(&ledger).map_err(|_| StorageError::ScopeChanged)?;
+                let mut file = vec![0.into(), serde_json::Value::String(path.clone())];
+                file.extend(values.clone());
+                native_decode::file(&Values(file), native_decode::Children {
+                    events: Vec::new(), extras: Vec::new(), signals: Vec::new(),
+                    usage_by_id: Default::default(), codex_usage_events: Vec::new(),
+                    native_usage_observations: None, source_chunks: None, marker_index: None,
+                    tree_summary: None, handoff_index: None, codex_header: None,
+                    claude_sidecar: None, codex_native_usage: None,
+                }).map_err(|_| StorageError::ScopeChanged)?;
             }
             Self::NativeEvent { path, values } => {
-                if path.is_empty() || values.len() != 27 { return Err(StorageError::ScopeChanged); }
-                native_decode::event(&Values(values.clone())).map_err(|_| StorageError::ScopeChanged)?;
+                if path.is_empty() || values.len() != 27 {
+                    return Err(StorageError::ScopeChanged);
+                }
+                native_decode::event(&Values(values.clone()))
+                    .map_err(|_| StorageError::ScopeChanged)?;
             }
             _ => return Err(StorageError::InvalidArguments),
         }

@@ -36,15 +36,22 @@ pub(super) fn rows(
 }
 
 pub(super) fn transfer_rows(
-    tx: &mut PgTxn<'_>, table: &str, columns: &str, predicate: &str,
+    tx: &mut PgTxn<'_>,
+    table: &str,
+    columns: &str,
+    predicate: &str,
     params: &[&(dyn ToSql + Sync)],
 ) -> Result<Vec<Values>, StorageError> {
     read_rows(tx, table, columns, predicate, params, true)
 }
 
 fn read_rows(
-    tx: &mut PgTxn<'_>, table: &str, columns: &str, predicate: &str,
-    params: &[&(dyn ToSql + Sync)], one_page: bool,
+    tx: &mut PgTxn<'_>,
+    table: &str,
+    columns: &str,
+    predicate: &str,
+    params: &[&(dyn ToSql + Sync)],
+    one_page: bool,
 ) -> Result<Vec<Values>, StorageError> {
     tx.check()?;
     let names = columns.split(',').collect::<Vec<_>>();
@@ -203,7 +210,9 @@ fn read_rows(
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
         decoded.extend(page);
-        if one_page { return Ok(decoded); }
+        if one_page {
+            return Ok(decoded);
+        }
         cursor = next;
     }
 }

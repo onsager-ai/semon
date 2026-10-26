@@ -44,7 +44,7 @@ pub(crate) fn read(config: &StoreConfig) -> Vec<ReportedRunSnapshot> {
     cache.reported_runs().cloned().collect()
 }
 
-fn cache(config: &StoreConfig) -> crate::events::EventCache {
+pub(crate) fn cache(config: &StoreConfig) -> crate::events::EventCache {
     match &config.backend {
         StoreBackend::Sqlite { .. } => crate::events::EventCache::open_semantic(
             super::super::super::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
@@ -268,10 +268,51 @@ fn current_transfer225_empty_authority_completes_without_leaving_incoming() {
     let source = sqlite(&root, "empty-source");
     let target = sqlite(&root, "empty-target");
     let manifest = stage(&source, &target, &[91; 32]);
-    assert!(manifest.categories.iter().all(|category| category.rows == 0));
+    assert!(
+        manifest
+            .categories
+            .iter()
+            .all(|category| category.rows == 0)
+    );
     apply(&target, &manifest);
     assert!(read(&target).is_empty());
     observe(&target, &root.join(".claude.json"), 1, 10);
     assert_eq!(read(&target).len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+pub(crate) fn seed_native(config: &StoreConfig, path: &Path, count: usize, operation: char) {
+    let body = (0..count).map(|i| format!("{}\n", serde_json::json!({"type":"user","uuid":format!("u{i}"),"message":{"role":"user","content":"sanitized"}}))).collect::<String>();
+    std::fs::write(path, body).unwrap();
+    let mut cache = cache(config);
+    cache.ingest(&operation.to_string().repeat(64), path, "claude").unwrap();
+    cache.flush_cold_writes().unwrap();
+}
+
+pub(crate) fn sqlite_core(config: &StoreConfig, path: &Path) -> serde_json::Value {
+    let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+    let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+    let (ledger,index) = store.load_file(path.to_str().unwrap()).unwrap().unwrap();
+    serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras})
+}
+
+#[test]
+fn current_transfer225_native_rows_real_ingest_paged_absent_raw_and_reverse() {
+    let root = root();
+    let source = sqlite(&root,"native-source");
+    let target = sqlite(&root,"native-target");
+    let reverse = sqlite(&root,"native-reverse");
+    let path = root.join("native.jsonl");
+    seed_native(&source,&path,130,'1');
+    let expected = sqlite_core(&source,&path);
+    assert_eq!(expected["events"].as_array().unwrap().len(),130);
+    let manifest = stage(&source,&target,&[95;32]);
+    assert_eq!(manifest.categories.iter().find(|c| c.category==Category::Events).unwrap().rows,130);
+    std::fs::remove_file(&path).unwrap();
+    apply(&target,&manifest);
+    assert_eq!(sqlite_core(&target,&path),expected);
+    let manifest = stage(&target,&reverse,&[96;32]);
+    apply(&reverse,&manifest);
+    assert_eq!(sqlite_core(&reverse,&path),expected);
     std::fs::remove_dir_all(root).unwrap();
 }
