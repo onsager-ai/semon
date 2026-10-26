@@ -206,7 +206,11 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         native_bundle::inject_failure(None);
         let mut pg =
             EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
-        pg.ingest_initial_batch(&requests).unwrap();
+        lose_batch_ack_after_parses(requests.len());
+        assert_eq!(
+            pg.ingest_initial_batch(&requests),
+            Err(crate::storage::StorageError::CommitUncertain)
+        );
         drop(pg);
         // Reconcile durable individual receipts after restart without Raw I/O.
         for case in &cases {
@@ -338,6 +342,18 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         drop(recovered);
         drop(factory);
     }
+}
+
+fn lose_batch_ack_after_parses(remaining: usize) {
+    crate::events::BEFORE_COMMIT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            if remaining == 1 {
+                tests::LOSE_ACK.with(|flag| flag.set(true));
+            } else {
+                lose_batch_ack_after_parses(remaining - 1);
+            }
+        }));
+    });
 }
 
 fn batch_snapshot(
