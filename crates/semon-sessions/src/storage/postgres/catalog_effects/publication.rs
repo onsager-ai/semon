@@ -124,12 +124,6 @@ fn publish_operation(
         .iter()
         .filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    if runtime.len() != 1 {
-        return Err(StorageError::ScopeChanged);
-    }
-    let runtime = *runtime.first().ok_or(StorageError::ScopeChanged)?;
-    let binding = super::super::model_cache::binding(tx)?;
-    let bound = semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?;
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old_epoch = prior.first().map(|row| row.get::<_, i64>(0));
     let old_runtime = prior
@@ -143,6 +137,18 @@ fn publish_operation(
         .map(String::from_utf8)
         .transpose()
         .map_err(|_| StorageError::ScopeChanged)?;
+    // A withdrawal-only request has no rows; it keeps the bound runtime of
+    // the head it replaces rather than inventing one.
+    let bound = match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
+        (Some(runtime), 1, _) => {
+            let binding = super::super::model_cache::binding(tx)?;
+            semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?
+        }
+        (None, 0, true) if expected.is_some() => {
+            old_runtime.clone().ok_or(StorageError::ScopeChanged)?
+        }
+        _ => return Err(StorageError::ScopeChanged),
+    };
     semantic_owner::begin(
         semantic_owner::Observed {
             epoch: old_epoch,
