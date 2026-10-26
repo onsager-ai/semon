@@ -195,6 +195,7 @@ mod tests {
 
     struct Fixture {
         root: PathBuf,
+        config: StoreConfig,
         db: Connection,
     }
     impl Fixture {
@@ -206,35 +207,44 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&root).unwrap();
-            let db = Connection::open(root.join("store.sqlite3")).unwrap();
-            db.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
-            db.execute_batch(crate::events::store::metadata_schema())
+            // The current factory creates the store; the namespace is
+            // admitted and written only through the current qualified writer.
+            let cache = root.join("index.json");
+            drop(
+                crate::events::EventCache::open_scoped(&cache, &crate::Options::default().source)
+                    .unwrap(),
+            );
+            let database = crate::events::EventCache::path(&cache);
+            let epoch = Connection::open(&database)
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap();
-            db.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
-            db.execute_batch(changes::SCHEMA).unwrap();
-            db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION)
+            let config = StoreConfig {
+                backend: StoreBackend::Sqlite { database },
+                namespace: LogicalSourceNamespace::new("authorized-source").unwrap(),
+                expected_stream_epoch: Some(epoch),
+            };
+            config.admit_namespace().unwrap();
+            let db = source_journal::SourceJournal(config.clone())
+                .connection()
                 .unwrap();
             for (key, value) in [
-                ("cache_version", crate::events::CACHE_VERSION.to_string()),
                 (
                     "catalog_version",
                     crate::model::summary::CATALOG_VERSION.to_string(),
                 ),
                 ("catalog_generation", "a".repeat(64)),
             ] {
-                db.execute("INSERT INTO meta VALUES(?1,?2)", (key, value))
-                    .unwrap();
+                db.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (key, value)).unwrap();
             }
-            Self { root, db }
+            Self { root, config, db }
         }
         fn config(&self) -> StoreConfig {
-            StoreConfig {
-                backend: StoreBackend::Sqlite {
-                    database: self.root.join("store.sqlite3"),
-                },
-                namespace: self.namespace(),
-                expected_stream_epoch: None,
-            }
+            self.config.clone()
         }
     }
     impl Drop for Fixture {
@@ -251,11 +261,13 @@ mod tests {
         }
         fn publish(&mut self, key: &str) {
             self.db
-                .execute("INSERT INTO session_catalog VALUES(?1,'metadata')", [key])
+                .execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,repo,metadata) VALUES(semon_namespace(),?1,0,'claude','project','metadata')", [key])
                 .unwrap();
         }
         fn restart(&mut self) {
-            self.db = Connection::open(self.root.join("store.sqlite3")).unwrap();
+            self.db = source_journal::SourceJournal(self.config.clone())
+                .connection()
+                .unwrap();
         }
     }
     #[test]
@@ -290,7 +302,7 @@ mod tests {
             store.compact_catalog_changes(
                 &fixture.namespace(),
                 CatalogReadScope::Current,
-                &"a".repeat(64),
+                fixture.config.expected_stream_epoch.as_deref().unwrap(),
                 0,
                 1
             ),
