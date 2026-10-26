@@ -209,6 +209,7 @@ pub(crate) struct Children {
 
 pub(crate) fn file(row: &Values, c: Children) -> Result<FileIndex, DecodeError> {
     Ok(FileIndex {
+        native_path: None,
         dirty_rows: None,
         native_usage_observations: c.native_usage_observations,
         source_chunks: c.source_chunks,

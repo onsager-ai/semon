@@ -19,7 +19,10 @@ pub(crate) fn initial_batch(
         if !paths.insert(path) {
             return Err("initial index batch repeats a source");
         }
-        let physical = index.native_path.as_deref().unwrap_or_else(|| Path::new(path));
+        let physical = index
+            .native_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(path));
         if physical.to_string_lossy() != path.as_str()
             || ledger.offset != ledger.stat.size
             || super::Stat::of(physical).ok().as_ref() != Some(&ledger.stat)

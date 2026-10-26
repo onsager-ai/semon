@@ -3480,7 +3480,11 @@ fn unsupported_storage_is_observable_at_product_read_entrypoints() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let path = EventCache::path(&fixture.options.cache);
-        let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+        let config = fixture
+            .options
+            .source
+            .config(&fixture.options.cache)
+            .unwrap();
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
         )

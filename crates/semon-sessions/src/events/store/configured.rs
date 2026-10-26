@@ -1772,7 +1772,10 @@ impl Writer {
         // Raw checks precede the DB reservation. The parser qualifies complete
         // records and proofs on its open handle; no Raw I/O runs in the DB tx.
         for (path, _, _, ledger, index) in files {
-            let physical = index.native_path.as_deref().unwrap_or_else(|| Path::new(path));
+            let physical = index
+                .native_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new(path));
             if physical.to_string_lossy() != *path
                 || Stat::of(physical).ok().as_ref() != Some(&ledger.stat)
             {
