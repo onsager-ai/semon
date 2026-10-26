@@ -740,7 +740,9 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 let status = crate::catalog::relative_status(
                     options,
                     &runtime_observations,
-                    recorded.as_ref().map(|source| source as &dyn crate::facts::source_authority::SourceAuthority),
+                    recorded.as_ref().map(|source| {
+                        source as &dyn crate::facts::source_authority::SourceAuthority
+                    }),
                     &row,
                 );
                 missing.other |= status["observation"] == "unavailable";
