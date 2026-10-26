@@ -900,6 +900,13 @@ mod tests {
             } else {
                 value.as_object_mut().unwrap().remove(field);
             }
+            // Corrupt physical metadata through the existing owned writer;
+            // the scoped reader exposes a read-only metadata view.
+            store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
+                store.owner.clone(),
+            )
+            .connection()
+            .unwrap();
             store
                 .connection
                 .execute(
