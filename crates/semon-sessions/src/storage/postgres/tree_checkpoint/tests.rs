@@ -434,9 +434,26 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     // Verify the persisted scalar oracle before any PG connection exists.
-    let stored: String = sqlite.query_row("SELECT value FROM meta WHERE key=?1", [format!("native_tree_summary:{}", path.to_str().unwrap())], |r| r.get(0)).unwrap();
-    let stored: crate::events::tree_rows::TreeSummaryRecord = serde_json::from_str(&stored).unwrap();
-    assert_eq!(serde_json::to_value(&stored.summary).unwrap(), serde_json::to_value(index.tree_summary.as_ref().unwrap().compact(index.native_usage_observations.is_some())).unwrap());
+    let stored: String = sqlite
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{}", path.to_str().unwrap())],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored: crate::events::tree_rows::TreeSummaryRecord =
+        serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        serde_json::to_value(&stored.summary).unwrap(),
+        serde_json::to_value(
+            index
+                .tree_summary
+                .as_ref()
+                .unwrap()
+                .compact(index.native_usage_observations.is_some())
+        )
+        .unwrap()
+    );
     assert!(stored.summary.line_count > 0);
     let mut rows: OracleRows = Vec::new();
     for family in [
@@ -555,23 +572,56 @@ pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
     publish_current(tx, fixture, None)
 }
-fn publish_current(tx: &mut PgTxn<'_>, fixture: &Fixture, previous: Option<&Fixture>) -> Result<(), StorageError> {
+fn publish_current(
+    tx: &mut PgTxn<'_>,
+    fixture: &Fixture,
+    previous: Option<&Fixture>,
+) -> Result<(), StorageError> {
     // Real production Core + Usage + Tree writers; SQLite is closed before PG.
-    let prior = |path: &str| previous.and_then(|f| f.sources.iter().find(|(p, _, _)| p == path).map(|(_, ledger, _)| ledger));
+    let prior = |path: &str| {
+        previous.and_then(|f| {
+            f.sources
+                .iter()
+                .find(|(p, _, _)| p == path)
+                .map(|(_, ledger, _)| ledger)
+        })
+    };
     for (path, ledger, index) in &fixture.sources {
         super::super::native_core::write(tx, path, prior(path), ledger, index, None)?;
     }
     {
         let mut effects = super::super::native_usage::Usage::new(tx)?;
         for (path, ledger, index) in &fixture.sources {
-            crate::events::store::native_usage::algorithm::begin(&mut effects, path, prior(path), ledger, false)?;
-            crate::events::store::native_usage::algorithm::write(&mut effects, path, ledger, index)?;
+            crate::events::store::native_usage::algorithm::begin(
+                &mut effects,
+                path,
+                prior(path),
+                ledger,
+                false,
+            )?;
+            crate::events::store::native_usage::algorithm::write(
+                &mut effects,
+                path,
+                ledger,
+                index,
+            )?;
         }
     }
     for (path, ledger, index) in &fixture.sources {
         let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        let summary = index.tree_summary.as_ref().ok_or(StorageError::Unavailable)?;
-        if !super::super::tree_writer::publish(tx, path, ledger, prior(path), source, summary, index.native_usage_observations.is_some())? {
+        let summary = index
+            .tree_summary
+            .as_ref()
+            .ok_or(StorageError::Unavailable)?;
+        if !super::super::tree_writer::publish(
+            tx,
+            path,
+            ledger,
+            prior(path),
+            source,
+            summary,
+            index.native_usage_observations.is_some(),
+        )? {
             return Err(StorageError::Unavailable);
         }
     }
@@ -1133,7 +1183,13 @@ fn pg_tree_scalar119_real_producers_append_replacement_restart_and_history_bound
         let mut previous = None;
         let mut old = None::<Summary>;
         for data in [&initial, &appended, &replacement] {
-            pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| publish_current(tx, data, previous)).unwrap();
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| publish_current(tx, data, previous),
+            )
+            .unwrap();
             if let Some(mut old) = old.take() {
                 assert!(old.tool_name("missing").is_err());
                 assert!(old.load_shared_usage().is_err());
