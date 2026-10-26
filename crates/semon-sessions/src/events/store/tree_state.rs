@@ -634,7 +634,7 @@ mod namespace_tests {
         for ddl in native_usage::schema(true) {
             db.execute_batch(ddl).unwrap();
         }
-        db.execute_batch(copied_usage_schema(true)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
         db.execute_batch(schema(true)).unwrap();
         let ledger = Ledger {
             stat: Stat {
@@ -807,7 +807,7 @@ mod namespace_tests {
         for ddl in native_usage::schema(true) {
             db.execute_batch(ddl).unwrap();
         }
-        db.execute_batch(copied_usage_schema(true)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
         db.execute_batch(schema(true)).unwrap();
         bind(&db, "witness");
         let ledger = Ledger {
