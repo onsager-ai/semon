@@ -5639,6 +5639,29 @@ mod tests {
     }
 
     #[test]
+    fn native_usage_current_layout_refuses_drift_and_rolled_back_cookie_reuse() {
+        let mut db = Connection::open_in_memory().unwrap();
+        tree_state::register(&db).unwrap();
+        for ddl in authored_storage_ddl() {
+            db.execute_batch(ddl).unwrap();
+        }
+        NativeOwnership::validate_physical(&db).unwrap();
+        let tx = db.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE transient_layout_probe(value INTEGER)")
+            .unwrap();
+        NativeOwnership::validate_physical(&tx).unwrap();
+        tx.rollback().unwrap();
+        // This transaction reuses the rolled-back cookie for different DDL.
+        let tx = db.transaction().unwrap();
+        tx.execute_batch("DROP INDEX session_trace_starts").unwrap();
+        assert!(NativeOwnership::validate_physical(&tx).is_err());
+        tx.rollback().unwrap();
+        NativeOwnership::validate_physical(&db).unwrap();
+        db.execute_batch("DROP INDEX session_trace_starts").unwrap();
+        assert!(NativeOwnership::validate_physical(&db).is_err());
+    }
+
+    #[test]
     fn configured_ingest_restart_uncertain_reply_and_operation_identity() {
         let f = Fixture::new();
         let mut writer = f.config.native_events().unwrap();
