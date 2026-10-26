@@ -36,9 +36,11 @@ Ordinary source-write and enqueue entry points now open the admitted backend and
 its SourceJournal directly. Empty Current publication initializes both search
 coverage scopes through the owned publisher. Retained proof references require
 the namespace-leading Catalog and History families before payload reads or GC.
-The remaining old test initializers (`attempt*`, `qualify_contract`, `init`) still
-need caller ports and removal; the current branch does not yet establish the
-complete fixture and compatibility cleanup gate.
+The old open/qualification/initialization runtime has been removed. Fixtures
+use current admission and the owned reader/writer context; persisted parser
+oracles restore the selected index from the formal backend. Unavailable,
+damaged and unsupported stores are refused without replacement or memory
+fallback. Broad fixture qualification remains subject to exact-revision CI.
 
 Current SQLite remains a supported alternative backend. External Claude/Codex Raw
 formats and their existing event parsers remain supported independently of the

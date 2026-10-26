@@ -283,7 +283,9 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(0o700);
-        builder.create(parent).map_err(|_| StorageError::Unavailable)?;
+        builder
+            .create(parent)
+            .map_err(|_| StorageError::Unavailable)?;
     }
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -302,7 +304,8 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     tree_state::register(&db).map_err(failed)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failed)?;
-    db.pragma_update(None, "locking_mode", "EXCLUSIVE").map_err(failed)?;
+    db.pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .map_err(failed)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -332,6 +335,8 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(StorageError::Unavailable);
     }
+    db.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT).map_err(failed)?;
+    db.pragma_update(None, "synchronous", "NORMAL").map_err(failed)?;
     file.sync_all().map_err(|_| StorageError::CommitUncertain)?;
     Ok(())
 }

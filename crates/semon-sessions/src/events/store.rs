@@ -3813,34 +3813,6 @@ fn is_busy(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Only operational failures may become an in-memory cache. SQL/schema and
-/// persistent value decoding errors must remain observable refusals.
-fn is_unavailable(error: &rusqlite::Error) -> bool {
-    let rusqlite::Error::SqliteFailure(code, _) = error else {
-        return false;
-    };
-    matches!(
-        code.extended_code & 0xff,
-        rusqlite::ffi::SQLITE_BUSY
-            | rusqlite::ffi::SQLITE_LOCKED
-            | rusqlite::ffi::SQLITE_PERM
-            | rusqlite::ffi::SQLITE_READONLY
-            | rusqlite::ffi::SQLITE_IOERR
-            | rusqlite::ffi::SQLITE_FULL
-            | rusqlite::ffi::SQLITE_CANTOPEN
-            | rusqlite::ffi::SQLITE_NOMEM
-            | rusqlite::ffi::SQLITE_INTERRUPT
-    )
-}
-
-/// The file isn't a database, or is damaged.
-fn is_corrupt(error: &rusqlite::Error) -> bool {
-    matches!(
-        error.sqlite_error_code(),
-        Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
-    )
-}
-
 /// A row that doesn't decode: rewritten from the log, not a reason to stop
 /// using the store.
 fn is_data_error(error: &rusqlite::Error) -> bool {
@@ -3999,10 +3971,6 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         reprice::catalog_schema(),
         reprice::file_schema(),
     ]
-}
-
-fn storage_ddl() -> [&'static str; 22] {
-    authored_storage_ddl()
 }
 
 /// Qualify the complete authored current profile without changing the store.
@@ -8436,8 +8404,17 @@ mod tests {
                 let config = options.source.config(&path).unwrap();
                 let owner = configured::NativeOwnership::restore(&config).unwrap();
                 let connection = configured::connection(&config).unwrap();
-                crate::storage::NativeReaderBinding::Semantic(owner.clone()).validate(&connection, &config.namespace).unwrap();
-                SqliteStore { owner, connection, path, selected_runs: Some(Default::default()), semantic_rejection: None, traversal_observation: None }
+                crate::storage::NativeReaderBinding::Semantic(owner.clone())
+                    .validate(&connection, &config.namespace)
+                    .unwrap();
+                SqliteStore {
+                    owner,
+                    connection,
+                    path,
+                    selected_runs: Some(Default::default()),
+                    semantic_rejection: None,
+                    traversal_observation: None,
+                }
             })
             .collect()
     }
@@ -10145,9 +10122,13 @@ mod tests {
                 assert!(!sibling(&path, ".corrupt").exists());
             };
             unchanged();
-            let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+            let source =
+                crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
             if name != "archive" {
-                assert!(open_admitted(&path, &source).is_err(), "{name} must be explicitly refused");
+                assert!(
+                    open_admitted(&path, &source).is_err(),
+                    "{name} must be explicitly refused"
+                );
                 unchanged();
             }
             if name != "archive" {
@@ -10410,7 +10391,10 @@ mod tests {
             }));
         });
         let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
-        assert!(open_admitted(&path, &source).is_err(), "the concurrently committed WAL version must be refused");
+        assert!(
+            open_admitted(&path, &source).is_err(),
+            "the concurrently committed WAL version must be refused"
+        );
         assert_eq!(*captured.borrow(), original);
         assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
         assert!(!wal.borrow().is_empty());

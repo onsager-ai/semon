@@ -8110,16 +8110,13 @@ mod tests {
         );
         let index = scan_file(&rollout, "codex", &mut cache, &mut false).unwrap();
         assert_eq!(index.signals.len(), 5);
-        let mut fresh = EventCache::default();
+        let mut fresh = EventCache::open(&root.join("fresh.json"), &crate::Options::default().source).unwrap();
         let fresh_index = scan_file(&rollout, "codex", &mut fresh, &mut false).unwrap();
         let reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let key = rollout.to_string_lossy();
-        let entry = reopened
-            .files
-            .get(key.as_ref())
-            .expect("the rollout is stored");
+        let (_, persisted) = reopened.store.as_ref().unwrap().load_file(&key).unwrap().expect("the rollout is stored");
         assert_eq!(
-            index_snapshot(entry.index.as_ref().unwrap()),
+            index_snapshot(&persisted),
             index_snapshot(&fresh_index)
         );
         fs::remove_dir_all(root).unwrap();
@@ -8260,6 +8257,7 @@ mod tests {
         assert!(dirty);
         drop(cache);
         let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
+        cache.select_reported_runs(&BTreeSet::from(["run-one".to_owned()])).unwrap();
         assert_eq!(cache.reported_runs().count(), 1);
         let bytes = store_text(&v1);
         for secret in secrets.into_iter().chain([
@@ -8291,7 +8289,8 @@ mod tests {
             .unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
-        let reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
+        let mut reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
+        reopened.select_reported_runs(&BTreeSet::from(["run-one".to_owned(), "run-two".to_owned()])).unwrap();
         let ids: BTreeSet<_> = reopened
             .reported_runs()
             .map(|snapshot| snapshot.last_session_id.as_str())
@@ -8932,7 +8931,7 @@ mod tests {
             .write_all(&FIXTURE.as_bytes()[boundary..])
             .unwrap();
         let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
-        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        let cold = scan_file(&log, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
         assert_eq!(
             codex_fixture_snapshot(&appended),
             codex_fixture_snapshot(&cold)
@@ -9243,7 +9242,7 @@ mod tests {
         let log = root.join("rollout-parser-cases.jsonl");
         let cache_path = root.join("index.json");
         fs::write(&log, FIXTURE).unwrap();
-        let mut cold_cache = EventCache::default();
+        let mut cold_cache = EventCache::open(&root.join("cold.json"), &crate::Options::default().source).unwrap();
         let cold = scan_file(&log, "codex", &mut cold_cache, &mut false).unwrap();
         let cold_debug = codex_fixture_snapshot(&cold);
 
@@ -9540,7 +9539,7 @@ mod tests {
         let reopened_replay = &reopened_final.events[by_id(&reopened_final, "replay-poll-95583")];
         assert_eq!(reopened_replay.poll_target.as_deref(), Some("95583"));
         assert!(reopened_replay.result_source);
-        let mut final_cold_cache = EventCache::default();
+        let mut final_cold_cache = EventCache::open(&root.join("final-cold.json"), &crate::Options::default().source).unwrap();
         let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
         assert_eq!(codex_fixture_snapshot(&final_cold), incremental_debug);
         let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
@@ -9661,7 +9660,7 @@ mod tests {
             }
         }
         assert!(index.yields.is_empty());
-        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        let cold = scan_file(&log, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
         assert_eq!(
             codex_fixture_snapshot(&index),
             codex_fixture_snapshot(&cold)
@@ -9707,7 +9706,7 @@ mod tests {
         );
         assert!(record["payload"]["item"].get("requester").is_none());
         let separate =
-            scan_file(&paginated, "codex", &mut EventCache::default(), &mut false).unwrap();
+            scan_file(&paginated, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
         assert!(separate.events.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -9753,7 +9752,8 @@ mod tests {
             Sha256::digest(path.to_string_lossy().as_bytes())
         );
         for missing in [false, true] {
-            let connection = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+            let config = crate::Options::default().source.config(&cache_path).unwrap();
+            let connection = store::configured::connection(&config).unwrap();
             if missing {
                 connection
                     .execute("DELETE FROM meta WHERE key=?1", [&key])
@@ -9836,7 +9836,8 @@ mod tests {
     /// persisted index must equal.
     fn cold(path: &Path) -> String {
         let root = scratch("cold-current-oracle");
-        let mut cache = EventCache::open(&root.join("index.json"), &crate::Options::default().source).unwrap();
+        let mut cache =
+            EventCache::open(&root.join("index.json"), &crate::Options::default().source).unwrap();
         let index = scan_file(path, "claude", &mut cache, &mut false).unwrap();
         let snapshot = index_snapshot(&index);
         drop(index);
@@ -9849,7 +9850,13 @@ mod tests {
     fn stored(v1: &Path, path: &Path) -> String {
         let cache = EventCache::open(v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_some(), "the store opens");
-        let (_, index) = cache.store.as_ref().unwrap().load_file(&path.to_string_lossy()).unwrap().expect("the file is stored");
+        let (_, index) = cache
+            .store
+            .as_ref()
+            .unwrap()
+            .load_file(&path.to_string_lossy())
+            .unwrap()
+            .expect("the file is stored");
         index_snapshot(&index)
     }
 
