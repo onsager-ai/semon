@@ -100,22 +100,29 @@ pub(crate) struct Context {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LifecycleAuthority {
-    pub(crate) facts: PathBuf,
-    pub(crate) identity: crate::facts::source_authority::Identity,
+    pub(crate) facts: Option<(PathBuf, crate::facts::source_authority::Identity)>,
+    pub(crate) source: crate::storage::HostSource,
     pub(crate) claude_home: PathBuf,
+    pub(crate) claude_json: PathBuf,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) copilot_home: PathBuf,
+    pub(crate) proc_root: PathBuf,
     pub(crate) runtime: String,
 }
 
 impl LifecycleAuthority {
     pub(crate) fn capture(options: &Options) -> io::Result<Self> {
-        let facts = options
-            .facts
-            .clone()
-            .ok_or_else(|| io::Error::other("semantic_affected_owner_local_authority_pending"))?;
+        let facts = options.facts.as_ref().map(|path| {
+            Ok::<_, io::Error>((path.clone(), crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?))
+        }).transpose()?;
         let authority = Self {
-            identity: crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&facts)?)?,
             facts,
+            source: options.source.clone(),
             claude_home: options.claude_home.clone(),
+            claude_json: options.claude_json.clone(),
+            codex_home: options.codex_home.clone(),
+            copilot_home: options.copilot_home.clone(),
+            proc_root: options.proc_root.clone(),
             runtime: crate::native_evidence::query_runtime_generation(options)?,
         };
         if !authority.current()? {
@@ -126,26 +133,42 @@ impl LifecycleAuthority {
         Ok(authority)
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
-        let identity =
-            || crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts)?);
-        if identity()? != self.identity {
-            return Ok(false);
-        }
-        let facts = crate::facts::source_authority::CurrentSources::open(&self.facts)?;
-        if !facts.facts_known() {
-            return Ok(false);
-        }
-        facts.validate()?;
-        // The recorded runtime algorithm consumes Facts and Claude PID records
-        // only. No EventCache path or storage engine is reconstructed here.
-        let options = Options {
-            facts: Some(self.facts.clone()),
-            claude_home: self.claude_home.clone(),
-            ..Options::from_host()?
+        let facts = if let Some((path, identity)) = &self.facts {
+            if crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? != *identity {
+                return Ok(false);
+            }
+            let facts = crate::facts::source_authority::CurrentSources::open(path)?;
+            facts.validate()?;
+            if !facts.facts_known() {
+                return Ok(false);
+            }
+            Some(facts)
+        } else {
+            None
         };
-        let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime
-            && identity()? == self.identity;
-        facts.validate()?;
+        // Both modes recheck the same captured runtime inputs as the producer.
+        // No host configuration, EventCache or storage engine is opened here.
+        let options = Options {
+            source: self.source.clone(),
+            facts: self.facts.as_ref().map(|(path, _)| path.clone()),
+            claude_home: self.claude_home.clone(),
+            claude_json: self.claude_json.clone(),
+            codex_home: self.codex_home.clone(),
+            copilot_home: self.copilot_home.clone(),
+            proc_root: self.proc_root.clone(),
+            cache: PathBuf::new(),
+            all: true,
+            since: std::time::Duration::ZERO,
+            session: None,
+            scan_window: false,
+        };
+        let mut current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime;
+        if let Some((path, identity)) = &self.facts {
+            current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? == *identity;
+        }
+        if let Some(facts) = facts {
+            facts.validate()?;
+        }
         Ok(current)
     }
 }
