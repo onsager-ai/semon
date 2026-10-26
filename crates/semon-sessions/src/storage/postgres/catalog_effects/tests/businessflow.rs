@@ -1371,9 +1371,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         .captured_source_proof_at(&options, &generation, &row.key, &reference)
                         .unwrap();
                     assert_eq!(proof.source, reference);
+                    let physical = crate::events::Stat::of(&source.path).unwrap();
                     assert_eq!(
-                        (proof.dev, proof.ino, proof.size),
-                        (source.dev, source.ino, source.size)
+                        (proof.dev, proof.ino, proof.size, proof.modified_ns, proof.changed_ns),
+                        (physical.dev, physical.ino, physical.size, physical.modified_ns, physical.changed_ns)
                     );
                     let mut changed = reference;
                     changed.prefix_sha256[0] ^= 1;
