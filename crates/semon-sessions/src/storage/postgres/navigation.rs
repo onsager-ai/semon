@@ -67,3 +67,33 @@ pub(crate) fn bookmark_identity(
     })
     .map_err(crate::CatalogIdentityError::from)?
 }
+
+/// Resolve ownership from one leased publication before asking the host for
+/// bytes. Native IDs and canonical keys share the existing navigation index.
+pub(crate) fn query_target(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    key: &str,
+) -> Result<Option<String>, StorageError> {
+    use crate::storage::navigation::NativeNavigationStore;
+    if key.is_empty() || key.len() > 4096 {
+        return Err(StorageError::InvalidArguments);
+    }
+    let generation = configured_generation(config, pool, control)?;
+    snapshot::with_admitted_snapshot(pool, &config.namespace, control, &generation, |snapshot| {
+        if snapshot.catalog(key, true)?.is_some() || snapshot.catalog(key, false)?.is_some() {
+            return Ok(Some(key.to_owned()));
+        }
+        let mut targets = std::collections::BTreeSet::new();
+        for harness in ["claude", "codex", "copilot"] {
+            targets.extend(snapshot.native_resolution(
+                harness, key, crate::CatalogReadScope::RetainedHistory, Some(&generation),
+            )?.keys);
+        }
+        if targets.len() > 1 {
+            return Err(StorageError::Conflict);
+        }
+        Ok(targets.into_iter().next())
+    })
+}
