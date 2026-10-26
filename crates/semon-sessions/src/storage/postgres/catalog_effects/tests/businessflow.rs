@@ -2376,14 +2376,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(claude.len() + codex.len() <= retained.len());
     // The SQLite pre-Guard replay of the same withdrawal: retained-only rows
     // in keyset order and under the harness filter are exactly the oracle's.
-    assert_eq!(
-        scoped_items(&caught, "scope=retained_history&")
+    let withdrawn_rows = |generation: &str| {
+        scoped_items(generation, "scope=retained_history&")
             .iter()
             .filter(|item| item["lifecycle"] == "retained")
             .map(stable)
-            .collect::<Vec<_>>(),
-        oracle_withdrawn
-    );
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(withdrawn_rows(&caught), oracle_withdrawn);
     assert_eq!(
         claude
             .iter()
@@ -2505,6 +2505,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         expected_bodies,
         "old selected bodies after a connected withdrawal and restart"
     );
+    assert_eq!(
+        withdrawn_rows(&caught),
+        oracle_withdrawn,
+        "retained-only rows after restart"
+    );
     // Zero-row publication: Facts no longer list the archived rollout, so
     // its catch-up batch prepares no row. The recorded batch runtime is the
     // lifecycle authority that retires the owner into retained history.
@@ -2550,5 +2555,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         after.len() + codex_keys.len(),
         current.len(),
         "zero-row publication retires only the rollout owner"
+    );
+    // The withdrawn subagents stay Retained, unchanged, in the new generation.
+    let still = withdrawn_rows(&retired);
+    assert!(
+        oracle_withdrawn.iter().all(|row| still.contains(row)),
+        "withdrawn rows after zero-row publication"
     );
 }
