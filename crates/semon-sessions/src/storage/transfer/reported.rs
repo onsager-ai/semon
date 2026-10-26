@@ -57,6 +57,9 @@ pub(crate) struct CaptureState {
     /// Private adapter keyset: SQLite UTF-8 ID or PG digest, plus exact start.
     pub(crate) cursor: Option<(Vec<u8>, i64)>,
     pub(crate) done: bool,
+    pub(crate) native: bool,
+    pub(crate) native_path: Option<String>,
+    pub(crate) native_family: u8,
 }
 impl CaptureState {
     pub(crate) fn progress(&self) -> CaptureProgress {
@@ -148,6 +151,9 @@ pub(crate) fn start_capture(
         checkpoint,
         cursor: None,
         done: false,
+        native: false,
+        native_path: None,
+        native_family: 0,
     };
     tx.put(FREEZE, &encode_bounded(operation, MAX_MANIFEST_BYTES)?)?;
     if let Some(stamp) = stamp {
@@ -257,7 +263,7 @@ pub(crate) fn prepare_apply(
                 || (category.rows != 0
                     && !matches!(
                         category.category,
-                        Category::ReportedFacts | Category::Metadata
+                        Category::ReportedFacts | Category::Metadata | Category::Ledgers | Category::Events
                     ))
         })
     {
@@ -339,6 +345,7 @@ pub(crate) fn prepare_apply(
                 crate::events::reported_rows::decode_stamp(value.as_bytes())
                     .map_err(|_| StorageError::ScopeChanged)?;
             }
+            TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => record.validate_native()?,
             _ => return Err(StorageError::Conflict),
         }
     }

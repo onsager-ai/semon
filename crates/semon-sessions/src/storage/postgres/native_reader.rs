@@ -12,8 +12,8 @@ use tokio_postgres::types::{ToSql, Type};
 
 pub(super) const LEDGER: &str =
     "file_id,dev:u,ino:u,size:u,mtime_ns:x,resume_at:u,head_sha256:x,tail_sha256:x,ctime_ns:x";
-const FILE: &str = "file_id,path,dev:u,ino:u,size:u,mtime_ns:x,resume_at:u,head_sha256:x,tail_sha256:x,entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch,pending,tool_ids,yields,busy,links,codex_tokens,codex_tokens_by_model,rate_limits,codex_native_usage,copilot,ctime_ns:x";
-const EVENT: &str = "extra,seq,k,o:u,b:u,t,id,n,code_mode,code_mode_open,parent,script,y,poll,reply,reply_o:u,reply_b:u,reply_t,reply_e,reply_f,reply_m,item,peer,peer_sock,peer_pid,peer_start,u";
+pub(super) const FILE: &str = "file_id,path,dev:u,ino:u,size:u,mtime_ns:x,resume_at:u,head_sha256:x,tail_sha256:x,entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch,pending,tool_ids,yields,busy,links,codex_tokens,codex_tokens_by_model,rate_limits,codex_native_usage,copilot,ctime_ns:x";
+pub(super) const EVENT: &str = "extra,seq,k,o:u,b:u,t,id,n,code_mode,code_mode_open,parent,script,y,poll,reply,reply_o:u,reply_b:u,reply_t,reply_e,reply_f,reply_m,item,peer,peer_sock,peer_pid,peer_start,u";
 const SIGNAL: &str = "seq,k,o:u,t,at:u,n,v";
 const USAGE: &str = "message_id,model,input:u,cached_input:u,output:u,reasoning_output:u,total:u,model_input:u,model_output:u,model_cache_write:u,model_cache_read:u,billing_input:u,billing_output:u,billing_cache_read:u,billing_cache_write_5m:u,billing_cache_write_1h:u,billing_web_search_requests:u,billing_speed,billing_service_tier,billing_prompt_size:u,billing_timestamp,billing_split_unknown,record_ids";
 const CODEX: &str = "seq,model,input:u,output:u,cache_write:u,cache_read:u,t";
@@ -31,6 +31,20 @@ pub(super) fn rows(
     columns: &str,
     predicate: &str,
     params: &[&(dyn ToSql + Sync)],
+) -> Result<Vec<Values>, StorageError> {
+    read_rows(tx, table, columns, predicate, params, false)
+}
+
+pub(super) fn transfer_rows(
+    tx: &mut PgTxn<'_>, table: &str, columns: &str, predicate: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Vec<Values>, StorageError> {
+    read_rows(tx, table, columns, predicate, params, true)
+}
+
+fn read_rows(
+    tx: &mut PgTxn<'_>, table: &str, columns: &str, predicate: &str,
+    params: &[&(dyn ToSql + Sync)], one_page: bool,
 ) -> Result<Vec<Values>, StorageError> {
     tx.check()?;
     let names = columns.split(',').collect::<Vec<_>>();
@@ -189,6 +203,7 @@ pub(super) fn rows(
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
         decoded.extend(page);
+        if one_page { return Ok(decoded); }
         cursor = next;
     }
 }
