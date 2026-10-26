@@ -7,10 +7,7 @@ use crate::{
     },
     storage::StorageError,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-};
+use std::{cell::RefCell, collections::BTreeSet, io};
 
 pub(super) fn component_paths(
     tx: &mut PgTxn<'_>,
@@ -24,103 +21,31 @@ pub(super) fn component_paths(
     let Some(generation) = model_cache::generation(tx)? else {
         return Ok(Some(Vec::new()));
     };
-    let ns = tx.namespace.as_str().as_bytes();
-    let values=tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY session_key LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-    if values.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-    let mut rows = BTreeMap::new();
-    let mut used = 0usize;
-    for value in values {
-        let key: Vec<u8> = value.get(0);
-        let bytes: Vec<u8> = value
-            .get::<_, Option<Vec<u8>>>(1)
-            .ok_or(StorageError::Busy)?;
-        used = used.saturating_add(bytes.len());
-        if used > 1048576 {
-            return Err(StorageError::Busy);
-        }
-        let row: CatalogRow =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        if row.key.as_bytes() != key {
-            return Err(StorageError::ScopeChanged);
-        }
-        rows.insert(row.key.clone(), row);
-    }
-    struct Lookup {
-        rows: BTreeMap<String, CatalogRow>,
-        links: BTreeMap<String, BTreeSet<String>>,
-    }
-    impl LifecycleStore for Lookup {
-        fn path_owners(&self, path: &str) -> io::Result<Vec<String>> {
-            Ok(self
-                .rows
-                .values()
-                .filter(|r| r.sources.iter().any(|s| s.path.to_str() == Some(path)))
-                .map(|r| r.key.clone())
-                .collect())
-        }
-        fn owner(&self, key: &str) -> io::Result<CatalogRow> {
-            self.rows
-                .get(key)
-                .cloned()
-                .ok_or_else(|| io::Error::other("missing Current source owner"))
-        }
-        fn neighbors(&self, key: &str) -> io::Result<Vec<String>> {
-            Ok(self.links.get(key).into_iter().flatten().cloned().collect())
-        }
-    }
-    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut connect = |a: &str, b: &str| {
-        if a != b && rows.contains_key(a) && rows.contains_key(b) {
-            links.entry(a.to_owned()).or_default().insert(b.to_owned());
-            links.entry(b.to_owned()).or_default().insert(a.to_owned());
-        }
+    let lookup = Lookup {
+        tx: RefCell::new(tx),
+        generation,
     };
-    for row in rows.values() {
-        if let Some(parent) = &row.parent {
-            connect(&row.key, parent);
-        }
-        for other in rows.values() {
-            if row.harness == other.harness
-                && row
-                    .native_ids
-                    .iter()
-                    .any(|id| other.native_ids.contains(id))
-            {
-                connect(&row.key, &other.key);
-            }
-        }
-        let edges = row
-            .query
-            .as_ref()
-            .and_then(|q| q["selected"]["edges"].as_array())
-            .ok_or(StorageError::NamespaceUpgradePending)?;
-        for edge in edges {
-            for field in ["from", "to"] {
-                if let Some(owner) = edge["query"][field].as_str() {
-                    connect(&row.key, owner);
-                }
-            }
-        }
-    }
     let mut seeds = paths.to_vec();
-    for row in rows.values() {
-        if keys.contains(&row.key)
-            || native
-                .iter()
-                .any(|(h, id)| row.harness == *h && row.native_ids.contains(id))
-        {
-            seeds.extend(
-                row.sources
-                    .iter()
-                    .map(|s| s.path.to_string_lossy().into_owned()),
-            );
+    let mut seeded = Vec::new();
+    for key in keys {
+        if lookup.exists(key)? {
+            seeded.push(key.clone());
         }
     }
-    let lookup = Lookup { rows, links };
-    let owners =
-        relation_stage::affected_owners(&lookup, &seeds).map_err(|_| StorageError::Busy)?;
+    for (harness, id) in native {
+        seeded.extend(lookup.native_owners(harness, id)?);
+    }
+    for key in seeded {
+        let row = lookup.owner(&key).map_err(storage)?;
+        seeds.extend(
+            row.sources
+                .iter()
+                .map(|s| s.path.to_string_lossy().into_owned()),
+        );
+    }
+    let owners = relation_stage::affected_owners(&lookup, &seeds).map_err(storage)?;
+    let tx = lookup.tx.into_inner();
+    let ns = tx.namespace.as_str().as_bytes();
     let mut sources = owners
         .values()
         .flat_map(|r| {
@@ -143,6 +68,85 @@ pub(super) fn component_paths(
     }
     tx.check()?;
     Ok(Some(sources.into_iter().collect()))
+}
+
+fn storage(error: io::Error) -> StorageError {
+    error
+        .into_inner()
+        .and_then(|error| error.downcast::<StorageError>().ok())
+        .map_or(StorageError::Busy, |error| *error)
+}
+
+/// Keyed lookups over one physical Current generation. Each call is bounded
+/// by its own page; the shared reducer owns the 64 owner / 1 MiB budget.
+struct Lookup<'t, 'c> {
+    tx: RefCell<&'t mut PgTxn<'c>>,
+    generation: String,
+}
+
+impl Lookup<'_, '_> {
+    fn keys(&self, sql: &str, value: &[u8], extra: &[u8]) -> io::Result<Vec<String>> {
+        let mut tx = self.tx.borrow_mut();
+        tx.check().map_err(io::Error::other)?;
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let rows = tx
+            .driver
+            .query(sql, &[&ns, &self.generation.as_bytes(), &value, &extra])
+            .map_err(sqlstate::error)
+            .map_err(io::Error::other)?;
+        if rows.len() > 64 {
+            return Err(io::Error::other(StorageError::Busy));
+        }
+        rows.iter()
+            .map(|row| String::from_utf8(row.get(0)))
+            .collect::<Result<_, _>>()
+            .map_err(|_| io::Error::other(StorageError::ScopeChanged))
+    }
+    fn exists(&self, key: &str) -> Result<bool, StorageError> {
+        let found = self.keys("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND $4::bytea IS NOT NULL", key.as_bytes(), b"").map_err(storage)?;
+        Ok(!found.is_empty())
+    }
+    fn native_owners(&self, harness: &str, id: &str) -> Result<Vec<String>, StorageError> {
+        self.keys("SELECT DISTINCT r.session_key FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.generation=s.generation AND r.key_digest=s.key_digest WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 ORDER BY r.session_key LIMIT 65", id.as_bytes(), harness.as_bytes()).map_err(storage)
+    }
+}
+
+impl LifecycleStore for Lookup<'_, '_> {
+    fn path_owners(&self, path: &str) -> io::Result<Vec<String>> {
+        self.keys("SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND $4::bytea IS NOT NULL ORDER BY session_key LIMIT 65", path.as_bytes(), b"")
+    }
+    fn owner(&self, key: &str) -> io::Result<CatalogRow> {
+        let mut tx = self.tx.borrow_mut();
+        tx.check().map_err(io::Error::other)?;
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let rows = tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error).map_err(io::Error::other)?;
+        let row = rows
+            .first()
+            .ok_or_else(|| io::Error::other("missing Current source owner"))?;
+        let bytes = row
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        let row: CatalogRow = serde_json::from_slice(&bytes)
+            .map_err(|_| io::Error::other(StorageError::ScopeChanged))?;
+        if row.key != key {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        // Relationship incidence is indexed from the saved selected edges.
+        if row
+            .query
+            .as_ref()
+            .and_then(|q| q["selected"]["edges"].as_array())
+            .is_none()
+        {
+            return Err(io::Error::other(StorageError::NamespaceUpgradePending));
+        }
+        Ok(row)
+    }
+    fn neighbors(&self, key: &str) -> io::Result<Vec<String>> {
+        // Parent/trace incidence in both directions, plus same-harness owners
+        // sharing a native ID. Only Current owners of this generation qualify.
+        self.keys("WITH peers AS (SELECT peer AS k FROM semon_pg_native_catalog_links WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION SELECT session_key FROM semon_pg_native_catalog_links WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND peer_digest=sha256($3::bytea) AND peer=$3 UNION SELECT p.session_key FROM semon_pg_native_catalog_sources o JOIN semon_pg_native_catalog_rows orow ON orow.namespace_digest=o.namespace_digest AND orow.namespace=o.namespace AND orow.generation=o.generation AND orow.key_digest=o.key_digest JOIN semon_pg_native_catalog_sources p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.generation AND p.native_digest=o.native_digest JOIN semon_pg_native_catalog_rows prow ON prow.namespace_digest=p.namespace_digest AND prow.namespace=p.namespace AND prow.generation=p.generation AND prow.key_digest=p.key_digest AND prow.harness=orow.harness WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND $4::bytea IS NOT NULL) SELECT DISTINCT r.session_key FROM peers JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND r.key_digest=sha256(peers.k) AND r.session_key=peers.k WHERE peers.k<>$3 ORDER BY r.session_key LIMIT 65", key.as_bytes(), b"")
+    }
 }
 
 /// Resolve an observed non-log input under the same namespace writer fence.
@@ -180,11 +184,7 @@ pub(super) fn resolve(
             Err(StorageError::Conflict)
         };
     }
-    if super::native_keys::read_meta(tx, format!("raw-write-inflight:{path}").as_bytes(), 16384)?
-        .is_some()
-    {
-        return Ok(Outcome::Conflict);
-    }
+    if super::native_keys::read_meta(tx,format!("raw-write-inflight:{path}").as_bytes(),16384)?.is_some() {return Ok(Outcome::Conflict);}
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
     if active {
         return Ok(Outcome::Conflict);
@@ -234,32 +234,17 @@ fn dependent_paths(
         affected.insert(String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?);
     }
     if let Some(generation) = model_cache::generation(tx)? {
-        let owners=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-        if owners.len() > 64 {
+        // Every Source of a same-harness Current owner of this native ID.
+        let paths=tx.driver.query("SELECT DISTINCT s.source_path FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest IN (SELECT o.key_digest FROM semon_pg_native_catalog_sources o JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace AND r.generation=o.generation AND r.key_digest=o.key_digest WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.native_digest=sha256($3::bytea) AND r.harness=$4) ORDER BY s.source_path LIMIT 65", &[&ns,&generation.as_bytes(),&id.as_bytes(),&harness.as_bytes()]).map_err(sqlstate::error)?;
+        if paths.len() > 64 {
             return Err(StorageError::Busy);
         }
-        let mut used = 0usize;
-        for owner in owners {
-            let bytes: Vec<u8> = owner
-                .get::<_, Option<Vec<u8>>>(0)
-                .ok_or(StorageError::Busy)?;
-            used = used.saturating_add(bytes.len());
-            if used > 1048576 {
-                return Err(StorageError::Busy);
-            }
-            let owner: CatalogRow =
-                serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-            if owner.harness == harness && owner.native_ids.iter().any(|n| n == id) {
-                affected.extend(
-                    owner
-                        .sources
-                        .iter()
-                        .map(|s| s.path.to_string_lossy().into_owned()),
-                );
-            }
+        for row in paths {
+            affected.insert(
+                String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?,
+            );
         }
     }
-
     if affected.len() > 64 {
         return Err(StorageError::Busy);
     }
@@ -332,31 +317,24 @@ pub(super) fn relocation_candidate(
         return Ok(None);
     };
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+    // Codex Current Sources of the same native ID, by the native index.
+    let rows=tx.driver.query("SELECT CASE WHEN sum(octet_length(s.metadata)) OVER ()<=1048576 THEN s.metadata END FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.generation=s.generation AND r.key_digest=s.key_digest WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 ORDER BY s.source_path LIMIT 65", &[&ns,&generation.as_bytes(),&id.as_bytes(),&b"codex".as_slice()]).map_err(sqlstate::error)?;
     if rows.len() > 64 {
         return Err(StorageError::Busy);
     }
     let mut candidates = BTreeSet::new();
-    let mut used = 0usize;
     for row in rows {
         let bytes = row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        used = used.saturating_add(bytes.len());
-        if used > 1048576 {
-            return Err(StorageError::Busy);
-        }
-        let row: CatalogRow =
+        let source: crate::model::summary::CatalogSource =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        for source in row.sources {
-            let Some(old) = source.path.to_str() else {
-                return Err(StorageError::ScopeChanged);
-            };
-            if row.harness == "codex"
-                && source.native_id == id
-                && old != path
-                && relocation_namespace(old).is_some_and(|(r, a)| r == root && a != archived)
-            {
-                candidates.insert(old.to_owned());
-            }
+        let Some(old) = source.path.to_str() else {
+            return Err(StorageError::ScopeChanged);
+        };
+        if source.native_id == id
+            && old != path
+            && relocation_namespace(old).is_some_and(|(r, a)| r == root && a != archived)
+        {
+            candidates.insert(old.to_owned());
         }
     }
     if candidates.is_empty() {
@@ -424,9 +402,7 @@ pub(super) fn relocate(
         return Err(StorageError::Conflict);
     }
     let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if pending {
-        return Err(StorageError::Conflict);
-    }
+    if pending { return Err(StorageError::Conflict); }
     let mut after = prior.clone();
     after.stat = *stat;
     after.stat.size = prior.stat.size.min(stat.size);
@@ -491,421 +467,156 @@ pub(super) fn relocate(
     Ok(true)
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize,serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawIntent {
-    request: Vec<u8>,
-    revision: i64,
-    previous: Option<crate::source_change::AppendEvidence>,
+struct RawIntent { request:Vec<u8>, revision:i64, previous:Option<crate::source_change::AppendEvidence> }
+fn raw_request(tx:&PgTxn<'_>,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<Vec<u8>,StorageError> {
+    if intent.operation.is_empty() || intent.operation.len()>512 || intent.root!=input.root.as_str() || intent.path.len()>4096 {return Err(StorageError::InvalidArguments);}
+    let bytes=serde_json::to_vec(&("raw-source-write-v1",tx.namespace.as_str(),input.root.as_str(),&input.path,intent)).map_err(|_|StorageError::InvalidArguments)?;
+    if bytes.len()>16384 {return Err(StorageError::Busy);} Ok(bytes)
 }
-fn raw_request(
-    tx: &PgTxn<'_>,
-    input: &crate::Input,
-    intent: &crate::source_change::WriteIntent,
-) -> Result<Vec<u8>, StorageError> {
-    if intent.operation.is_empty()
-        || intent.operation.len() > 512
-        || intent.root != input.root.as_str()
-        || intent.path.len() > 4096
-    {
-        return Err(StorageError::InvalidArguments);
-    }
-    let bytes = serde_json::to_vec(&(
-        "raw-source-write-v1",
-        tx.namespace.as_str(),
-        input.root.as_str(),
-        &input.path,
-        intent,
-    ))
-    .map_err(|_| StorageError::InvalidArguments)?;
-    if bytes.len() > 16384 {
-        return Err(StorageError::Busy);
-    }
-    Ok(bytes)
-}
-fn raw_intent_key(intent: &crate::source_change::WriteIntent) -> String {
-    format!("raw-write-intent:{}", intent.operation)
-}
-fn raw_ack_key(intent: &crate::source_change::WriteIntent) -> String {
-    format!("raw-write-ack:{}", intent.operation)
-}
+fn raw_intent_key(intent:&crate::source_change::WriteIntent)->String {format!("raw-write-intent:{}",intent.operation)}
+fn raw_ack_key(intent:&crate::source_change::WriteIntent)->String {format!("raw-write-ack:{}",intent.operation)}
 
-pub(super) fn write_begin(
-    tx: &mut PgTxn<'_>,
-    options: &crate::Options,
-    input: &crate::Input,
-    intent: &crate::source_change::WriteIntent,
-) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StorageError> {
-    #[cfg(test)]
-    let _sql_scope = crate::source_change::SqlLockScope::enter();
-    let request = raw_request(tx, input, intent)?;
-    if input.full_path(options).to_str() != Some(intent.path.as_str()) {
-        return Err(StorageError::InvalidArguments);
-    }
-    let ns = tx.namespace.as_str().as_bytes().to_vec();
+pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<(i64,Option<crate::source_change::AppendEvidence>),StorageError> {
+    #[cfg(test)] let _sql_scope=crate::source_change::SqlLockScope::enter();
+    let request=raw_request(tx,input,intent)?;
+    if input.full_path(options).to_str()!=Some(intent.path.as_str()) {return Err(StorageError::InvalidArguments);}
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if let Some(bytes) =
-        super::native_keys::read_meta(tx, raw_intent_key(intent).as_bytes(), 131072)?
-    {
-        let prior: RawIntent =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        if prior.request != request {
-            return Err(StorageError::Conflict);
-        }
-        return Ok((prior.revision, prior.previous));
+    if let Some(bytes)=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),131072)? {
+        let prior:RawIntent=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+        if prior.request!=request {return Err(StorageError::Conflict);}return Ok((prior.revision,prior.previous));
     }
-    if model_cache::generation(tx)? != intent.head
-        || super::native_reader::ledger(tx, &intent.path)?.map(|(_, l)| l) != intent.ledger
-    {
-        return Err(StorageError::Conflict);
+    if model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
+    let actual=crate::events::Stat::of(&input.full_path(options)).ok();
+    if actual!=intent.before {return Err(StorageError::Conflict);}
+    if let Some(c)=&intent.continuation {
+        let ledger=intent.ledger.as_ref().ok_or(StorageError::ScopeChanged)?;
+        let pinned=super::native_pages::current(tx,&intent.path,ledger)?;
+        let header:crate::events::native_pages::chunks::Header=serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+        if pinned.id.0!=c.proof || header.resume.as_ref()!=Some(&c.state) || c.offset!=ledger.offset || c.prefix!=ledger.prefix || intent.before_hash!=Some(ledger.prefix) {return Err(StorageError::Conflict);}
     }
-    let actual = crate::events::Stat::of(&input.full_path(options)).ok();
-    if actual != intent.before {
-        return Err(StorageError::Conflict);
-    }
-    if let Some(c) = &intent.continuation {
-        let ledger = intent.ledger.as_ref().ok_or(StorageError::ScopeChanged)?;
-        let pinned = super::native_pages::current(tx, &intent.path, ledger)?;
-        let header: crate::events::native_pages::chunks::Header =
-            serde_json::from_str(&pinned.chunks_header).map_err(|_| StorageError::ScopeChanged)?;
-        if pinned.id.0 != c.proof
-            || header.resume.as_ref() != Some(&c.state)
-            || c.offset != ledger.offset
-            || c.prefix != ledger.prefix
-            || intent.before_hash != Some(ledger.prefix)
-        {
-            return Err(StorageError::Conflict);
-        }
-    }
-    let inflight = format!("raw-write-inflight:{}", intent.path);
-    if super::native_keys::read_meta(tx, inflight.as_bytes(), 16384)?.is_some() {
-        return Err(StorageError::Conflict);
-    }
-    let previous = model_cache::append_evidence(tx, &intent.path)?;
+    let inflight=format!("raw-write-inflight:{}",intent.path);
+    if super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.is_some() {return Err(StorageError::Conflict);}
+    let previous=model_cache::append_evidence(tx,&intent.path)?;
     // Existing append evidence can be continued; unknown pending evidence may
     // not be overwritten to manufacture a fresh source write.
     let mutation:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if mutation && previous.is_none() {
-        return Err(StorageError::Conflict);
-    }
-    super::source_journal::invalidate(tx, &intent.path)?;
+    if mutation && previous.is_none() {return Err(StorageError::Conflict);}
+    super::source_journal::invalidate(tx,&intent.path)?;
     let revision:i64=tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if input.root == crate::InputRoot::Claude
-        && input.path.starts_with("sessions/")
-        && let Some(facts) = options
-            .facts
-            .as_ref()
-            .map(|p| crate::read_facts(p))
-            .transpose()
-            .map_err(|_| StorageError::ScopeChanged)?
-    {
-        let evidence = crate::source_change::RuntimeInputEvidence {
-            unaffected: crate::native_evidence::recorded_runtime_fingerprint_excluding(
-                options,
-                &facts,
-                Some(std::path::Path::new(&intent.path)),
-            )
-            .map_err(|_| StorageError::ScopeChanged)?,
-        };
-        let bytes = serde_json::to_vec(&evidence).map_err(|_| StorageError::Unavailable)?;
-        tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
+    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/")
+        && let Some(facts)=options.facts.as_ref().map(|p|crate::read_facts(p)).transpose().map_err(|_|StorageError::ScopeChanged)? {
+            let evidence=crate::source_change::RuntimeInputEvidence{unaffected:crate::native_evidence::recorded_runtime_fingerprint_excluding(options,&facts,Some(std::path::Path::new(&intent.path))).map_err(|_|StorageError::ScopeChanged)?};
+            let bytes=serde_json::to_vec(&evidence).map_err(|_|StorageError::Unavailable)?;
+            tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
     }
-    if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
-        let old = crate::read_regular_at_most(&input.full_path(options), 65536)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v["sessionId"].as_str().map(str::to_owned));
-        if let Some(old) = old {
-            for affected in dependent_paths(tx, "claude", &old)? {
-                super::source_journal::invalidate(tx, &affected)?;
-            }
-        }
+    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+        let old=crate::read_regular_at_most(&input.full_path(options),65536).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v|v["sessionId"].as_str().map(str::to_owned));
+        if let Some(old)=old {for affected in dependent_paths(tx,"claude",&old)? {super::source_journal::invalidate(tx,&affected)?;}}
     }
-    let state = RawIntent {
-        request: request.clone(),
-        revision,
-        previous: previous.clone(),
-    };
-    super::native_keys::put_meta(
-        tx,
-        raw_intent_key(intent).as_bytes(),
-        &serde_json::to_vec(&state).map_err(|_| StorageError::Unavailable)?,
-    )?;
-    super::native_keys::put_meta(tx, inflight.as_bytes(), &request)?;
-    tx.check()?;
-    Ok((revision, previous))
+    let state=RawIntent{request:request.clone(),revision,previous:previous.clone()};
+    super::native_keys::put_meta(tx,raw_intent_key(intent).as_bytes(),&serde_json::to_vec(&state).map_err(|_|StorageError::Unavailable)?)?;
+    super::native_keys::put_meta(tx,inflight.as_bytes(),&request)?;
+    tx.check()?;Ok((revision,previous))
 }
 
-pub(super) fn write_complete(
-    tx: &mut PgTxn<'_>,
-    options: &crate::Options,
-    input: &crate::Input,
-    intent: &crate::source_change::WriteIntent,
-    revision: i64,
-    completion: &crate::source_change::WriteCompletion,
-) -> Result<(), StorageError> {
-    use sha2::{Digest, Sha256};
-    #[cfg(test)]
-    let _sql_scope = crate::source_change::SqlLockScope::enter();
-    let request = raw_request(tx, input, intent)?;
-    let ack = serde_json::to_vec(&(&request, revision, completion))
-        .map_err(|_| StorageError::InvalidArguments)?;
-    if ack.len() > 131072 {
-        return Err(StorageError::Busy);
-    }
-    let ns = tx.namespace.as_str().as_bytes().to_vec();
+pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent,revision:i64,completion:&crate::source_change::WriteCompletion)->Result<(),StorageError> {
+    use sha2::{Digest,Sha256};
+    #[cfg(test)] let _sql_scope=crate::source_change::SqlLockScope::enter();
+    let request=raw_request(tx,input,intent)?;
+    let ack=serde_json::to_vec(&(&request,revision,completion)).map_err(|_|StorageError::InvalidArguments)?;
+    if ack.len()>131072 {return Err(StorageError::Busy);}
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if let Some(prior) = super::native_keys::read_meta(tx, raw_ack_key(intent).as_bytes(), 131072)?
-    {
-        return if prior == ack {
-            Ok(())
-        } else {
-            Err(StorageError::Conflict)
-        };
-    }
-    let stored = super::native_keys::read_meta(tx, raw_intent_key(intent).as_bytes(), 131072)?
-        .ok_or(StorageError::ScopeChanged)?;
-    let state: RawIntent =
-        serde_json::from_slice(&stored).map_err(|_| StorageError::ScopeChanged)?;
-    let inflight = format!("raw-write-inflight:{}", intent.path);
-    if state.request != request
-        || state.revision != revision
-        || super::native_keys::read_meta(tx, inflight.as_bytes(), 16384)?.as_ref() != Some(&request)
-        || model_cache::generation(tx)? != intent.head
-        || super::native_reader::ledger(tx, &intent.path)?.map(|(_, l)| l) != intent.ledger
-    {
-        return Err(StorageError::Conflict);
-    }
+    if let Some(prior)=super::native_keys::read_meta(tx,raw_ack_key(intent).as_bytes(),131072)? {return if prior==ack {Ok(())} else {Err(StorageError::Conflict)};}
+    let stored=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),131072)?.ok_or(StorageError::ScopeChanged)?;
+    let state:RawIntent=serde_json::from_slice(&stored).map_err(|_|StorageError::ScopeChanged)?;
+    let inflight=format!("raw-write-inflight:{}",intent.path);
+    if state.request!=request || state.revision!=revision || super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.as_ref()!=Some(&request) || model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
     let claims=tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?;
-    if claims.first().map(|r| r.get::<_, i64>(0)) != Some(revision) {
-        return Err(StorageError::Conflict);
+    if claims.first().map(|r|r.get::<_,i64>(0))!=Some(revision) {return Err(StorageError::Conflict);}
+    let path=input.full_path(options);
+    if crate::events::Stat::of(&path).ok()!=Some(completion.after) || completion.after.size!=completion.to {return Err(StorageError::ScopeChanged);}
+    if completion.evidence!=crate::source_change::append_plan(intent.generation.clone(),intent.before,state.previous,intent.from,completion.after,completion.to) {return Err(StorageError::ScopeChanged);}
+    if let Some(evidence)=&completion.evidence {
+        let before=intent.before.ok_or(StorageError::ScopeChanged)?;
+        if !evidence.qualifies(&evidence.before,&completion.after) || intent.generation.as_deref()!=Some(evidence.generation.as_str()) || before.size!=intent.from {return Err(StorageError::ScopeChanged);}
     }
-    let path = input.full_path(options);
-    if crate::events::Stat::of(&path).ok() != Some(completion.after)
-        || completion.after.size != completion.to
-    {
-        return Err(StorageError::ScopeChanged);
-    }
-    if completion.evidence
-        != crate::source_change::append_plan(
-            intent.generation.clone(),
-            intent.before,
-            state.previous,
-            intent.from,
-            completion.after,
-            completion.to,
-        )
-    {
-        return Err(StorageError::ScopeChanged);
-    }
-    if let Some(evidence) = &completion.evidence {
-        let before = intent.before.ok_or(StorageError::ScopeChanged)?;
-        if !evidence.qualifies(&evidence.before, &completion.after)
-            || intent.generation.as_deref() != Some(evidence.generation.as_str())
-            || before.size != intent.from
-        {
-            return Err(StorageError::ScopeChanged);
-        }
-    }
-    let runtime = crate::native_evidence::query_runtime_generation(options)
-        .map_err(|_| StorageError::ScopeChanged)?;
-    let facts = options
-        .facts
-        .as_ref()
-        .map(|p| {
-            let facts = crate::read_facts(p).map_err(|_| StorageError::ScopeChanged)?;
-            Ok::<_, StorageError>(format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_vec(&facts).map_err(|_| StorageError::Unavailable)?)
-            ))
-        })
-        .transpose()?;
-    if runtime != completion.runtime || facts != completion.facts {
-        return Err(StorageError::Conflict);
-    }
-    resume_runtime(tx, options, &intent.path)?;
-    if let Some(evidence) = &completion.evidence {
-        let bytes = serde_json::to_vec(evidence).map_err(|_| StorageError::Unavailable)?;
+    let runtime=crate::native_evidence::query_runtime_generation(options).map_err(|_|StorageError::ScopeChanged)?;
+    let facts=options.facts.as_ref().map(|p| {
+        let facts=crate::read_facts(p).map_err(|_|StorageError::ScopeChanged)?;
+        Ok::<_,StorageError>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(|_|StorageError::Unavailable)?)))
+    }).transpose()?;
+    if runtime!=completion.runtime || facts!=completion.facts {return Err(StorageError::Conflict);}
+    resume_runtime(tx,options,&intent.path)?;
+    if let Some(evidence)=&completion.evidence {
+        let bytes=serde_json::to_vec(evidence).map_err(|_|StorageError::Unavailable)?;
         tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
     }
     // Metadata records the qualified interpretation; it never contains Raw body.
-    super::native_keys::put_meta(tx, b"raw-write-runtime", completion.runtime.as_bytes())?;
-    if let Some(facts) = &completion.facts {
-        super::native_keys::put_meta(tx, b"raw-write-facts", facts.as_bytes())?;
-    }
-    super::native_keys::put_meta(tx, raw_ack_key(intent).as_bytes(), &ack)?;
-    super::native_keys::delete_meta(tx, inflight.as_bytes())?;
-    tx.check()?;
-    Ok(())
+    super::native_keys::put_meta(tx,b"raw-write-runtime",completion.runtime.as_bytes())?;
+    if let Some(facts)=&completion.facts {super::native_keys::put_meta(tx,b"raw-write-facts",facts.as_bytes())?;}
+    super::native_keys::put_meta(tx,raw_ack_key(intent).as_bytes(),&ack)?;
+    super::native_keys::delete_meta(tx,inflight.as_bytes())?;
+    tx.check()?;Ok(())
 }
 
-fn facts_request(
-    tx: &PgTxn<'_>,
-    intent: &crate::source_change::FactsIntent,
-) -> Result<Vec<u8>, StorageError> {
-    if intent.operation.is_empty()
-        || intent.operation.len() > 512
-        || intent.path.is_empty()
-        || intent.path.len() > 4096
-    {
-        return Err(StorageError::InvalidArguments);
-    }
-    if intent.wanted.version != 2 || !matches!(intent.before.version, 0 | 2) {
-        return Err(StorageError::ScopeChanged);
-    }
-    let request = serde_json::to_vec(&("facts-source-write-v1", tx.namespace.as_str(), intent))
-        .map_err(|_| StorageError::InvalidArguments)?;
-    if request.len() > 1048576 {
-        return Err(StorageError::Busy);
-    }
-    Ok(request)
+fn facts_request(tx:&PgTxn<'_>,intent:&crate::source_change::FactsIntent)->Result<Vec<u8>,StorageError> {
+    if intent.operation.is_empty()||intent.operation.len()>512||intent.path.is_empty()||intent.path.len()>4096 {return Err(StorageError::InvalidArguments);}
+    if intent.wanted.version!=2 || !matches!(intent.before.version,0|2) {return Err(StorageError::ScopeChanged);}
+    let request=serde_json::to_vec(&("facts-source-write-v1",tx.namespace.as_str(),intent)).map_err(|_|StorageError::InvalidArguments)?;
+    if request.len()>1048576 {return Err(StorageError::Busy);}Ok(request)
 }
-pub(super) fn facts_begin(
-    tx: &mut PgTxn<'_>,
-    intent: &crate::source_change::FactsIntent,
-    actual: &crate::Facts,
-) -> Result<(), StorageError> {
-    let request = facts_request(tx, intent)?;
-    let ns = tx.namespace.as_str().as_bytes().to_vec();
+pub(super) fn facts_begin(tx:&mut PgTxn<'_>,intent:&crate::source_change::FactsIntent,actual:&crate::Facts)->Result<(),StorageError> {
+    let request=facts_request(tx,intent)?;let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    let key = format!("facts-write-intent:{}", intent.operation);
-    if let Some(prior) = super::native_keys::read_meta(tx, key.as_bytes(), 1048576)? {
-        return if prior == request {
-            Ok(())
-        } else {
-            Err(StorageError::Conflict)
-        };
-    }
+    let key=format!("facts-write-intent:{}",intent.operation);
+    if let Some(prior)=super::native_keys::read_meta(tx,key.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
     // Retained active/archive membership needs the shared relocation planner;
     // until that adapter is connected, refuse before the receiver writes Facts.
-    if intent.before.codex_rollouts != intent.wanted.codex_rollouts
-        || intent.before.codex_provisional_rollouts != intent.wanted.codex_provisional_rollouts
-    {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
-    if model_cache::generation(tx)? != intent.head
-        || actual != &intent.before
-        || super::native_keys::read_meta(tx, b"facts-write-inflight", 1048576)?.is_some()
-    {
-        return Err(StorageError::Conflict);
-    }
-    super::native_keys::put_meta(tx, key.as_bytes(), &request)?;
-    super::native_keys::put_meta(tx, b"facts-write-inflight", &request)?;
-    tx.check()
+    if intent.before.codex_rollouts!=intent.wanted.codex_rollouts || intent.before.codex_provisional_rollouts!=intent.wanted.codex_provisional_rollouts {return Err(StorageError::NamespaceUpgradePending);}
+    if model_cache::generation(tx)?!=intent.head || actual!=&intent.before || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.is_some() {return Err(StorageError::Conflict);}
+    super::native_keys::put_meta(tx,key.as_bytes(),&request)?;
+    super::native_keys::put_meta(tx,b"facts-write-inflight",&request)?;tx.check()
 }
-pub(super) fn facts_complete(
-    tx: &mut PgTxn<'_>,
-    options: &crate::Options,
-    intent: &crate::source_change::FactsIntent,
-    actual: &crate::Facts,
-    pids: &[(u32, String)],
-) -> Result<(), StorageError> {
-    let request = facts_request(tx, intent)?;
-    let ns = tx.namespace.as_str().as_bytes().to_vec();
+pub(super) fn facts_complete(tx:&mut PgTxn<'_>,options:&crate::Options,intent:&crate::source_change::FactsIntent,actual:&crate::Facts,pids:&[(u32,String)])->Result<(),StorageError> {
+    let request=facts_request(tx,intent)?;let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    let ack = format!("facts-write-ack:{}", intent.operation);
-    if let Some(prior) = super::native_keys::read_meta(tx, ack.as_bytes(), 1048576)? {
-        return if prior == request {
-            Ok(())
-        } else {
-            Err(StorageError::Conflict)
-        };
-    }
-    if actual != &intent.wanted
-        || model_cache::generation(tx)? != intent.head
-        || super::native_keys::read_meta(
-            tx,
-            format!("facts-write-intent:{}", intent.operation).as_bytes(),
-            1048576,
-        )?
-        .as_ref()
-            != Some(&request)
-        || super::native_keys::read_meta(tx, b"facts-write-inflight", 1048576)?.as_ref()
-            != Some(&request)
-    {
-        return Err(StorageError::Conflict);
-    }
-    let changes = crate::facts::changes(&intent.before, &intent.wanted);
-    let mut affected = BTreeSet::new();
-    for (harness, id) in &changes.native {
-        affected.extend(dependent_paths(tx, harness, id)?);
-    }
-    for pid in &changes.pids {
-        affected.extend(dependent_paths(tx, "runtime:pid", &pid.to_string())?);
-    }
-    for (pid, id) in pids {
-        if changes.pids.contains(pid) {
-            affected.extend(dependent_paths(tx, "claude", id)?);
-        }
-    }
-    if let Some(generation) = model_cache::generation(tx)? {
-        let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len() > 64 {
-            return Err(StorageError::Busy);
-        }
-        let selected = |facts: &crate::Facts| {
-            facts
-                .codex_rollouts
-                .iter()
-                .flatten()
-                .chain(facts.codex_provisional_rollouts.iter().flatten())
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        };
-        let old = selected(&intent.before);
-        let new = selected(&intent.wanted);
+    let ack=format!("facts-write-ack:{}",intent.operation);
+    if let Some(prior)=super::native_keys::read_meta(tx,ack.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
+    if actual!=&intent.wanted || model_cache::generation(tx)?!=intent.head || super::native_keys::read_meta(tx,format!("facts-write-intent:{}",intent.operation).as_bytes(),1048576)?.as_ref()!=Some(&request) || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.as_ref()!=Some(&request) {return Err(StorageError::Conflict);}
+    let changes=crate::facts::changes(&intent.before,&intent.wanted);
+    let mut affected=BTreeSet::new();
+    for (harness,id) in &changes.native {affected.extend(dependent_paths(tx,harness,id)?);}
+    for pid in &changes.pids {affected.extend(dependent_paths(tx,"runtime:pid",&pid.to_string())?);}
+    for (pid,id) in pids {if changes.pids.contains(pid) {affected.extend(dependent_paths(tx,"claude",id)?);}}
+    if let Some(generation)=model_cache::generation(tx)? {
+        let selected=|facts:&crate::Facts|facts.codex_rollouts.iter().flatten().chain(facts.codex_provisional_rollouts.iter().flatten()).cloned().collect::<BTreeSet<_>>();
+        let old=selected(&intent.before);let new=selected(&intent.wanted);
+        let every=intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none();
+        // A global or whole-selection change affects every (Codex) Current Source
+        // and is bounded by this operation's 64 Source budget. Otherwise only the
+        // changed rollout paths are looked up by the Source path index.
+        let targets=if changes.global||every {None} else {Some(old.symmetric_difference(&new).map(|relative|options.codex_home.join(relative).to_string_lossy().into_owned().into_bytes()).collect::<Vec<_>>())};
+        let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) ORDER BY source_path LIMIT 65", &[&ns,&generation.as_bytes(),&targets]).map_err(sqlstate::error)?;
+        if rows.len()>64 {return Err(StorageError::Busy);}
         for row in rows {
-            let bytes = row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-            let row: CatalogRow =
-                serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-            for source in row.sources {
-                let Some(path) = source.path.to_str() else {
-                    return Err(StorageError::ScopeChanged);
-                };
-                let codex = source
-                    .path
-                    .strip_prefix(&options.codex_home)
-                    .ok()
-                    .and_then(|p| p.to_str());
-                let changed_selection = codex.is_some_and(|p| {
-                    old.contains(p) != new.contains(p)
-                        || intent.before.codex_rollouts.is_none()
-                            != intent.wanted.codex_rollouts.is_none()
-                });
-                if changes.global || changed_selection {
-                    affected.insert(path.to_owned());
-                }
-            }
+            let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+            let codex=std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
+            if changes.global||(every&&codex.is_some())||targets.is_some() {affected.insert(path.clone());}
         }
-        for relative in old.symmetric_difference(&new) {
-            if crate::is_input_path("codex", relative) {
-                affected.insert(
-                    options
-                        .codex_home
-                        .join(relative)
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-        }
+        for relative in old.symmetric_difference(&new) {if crate::is_input_path("codex",relative) {affected.insert(options.codex_home.join(relative).to_string_lossy().into_owned());}}
     }
     for cwd in &changes.repos {
         let rows=tx.driver.query("SELECT path FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND cwd=$2 LIMIT 65", &[&ns,&cwd.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len() > 64 {
-            return Err(StorageError::Busy);
-        }
-        for row in rows {
-            affected.insert(String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?);
-        }
+        if rows.len()>64 {return Err(StorageError::Busy);}
+        for row in rows {affected.insert(String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?);}
     }
-    if affected.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-    for path in affected {
-        super::source_journal::invalidate(tx, &path)?;
-    }
+    if affected.len()>64 {return Err(StorageError::Busy);}
+    for path in affected {super::source_journal::invalidate(tx,&path)?;}
     // Completion promises durable Facts and catch-up work, never NativeReady.
-    super::native_keys::put_meta(tx, ack.as_bytes(), &request)?;
-    super::native_keys::delete_meta(tx, b"facts-write-inflight")?;
-    tx.check()
+    super::native_keys::put_meta(tx,ack.as_bytes(),&request)?;
+    super::native_keys::delete_meta(tx,b"facts-write-inflight")?;tx.check()
 }
