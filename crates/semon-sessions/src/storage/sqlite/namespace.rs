@@ -39,7 +39,7 @@ pub(crate) fn require_semantic_admitted(
     })
 }
 
-pub(super) fn require_admitted(
+pub(crate) fn require_admitted(
     db: &Connection,
     namespace: &LogicalSourceNamespace,
 ) -> Result<NamespaceAdmission, StorageError> {

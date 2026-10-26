@@ -1006,14 +1006,15 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
         .map_err(failed)?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             let metadata = if *table == "meta" {
-                // Only native source metadata belongs to the Event writer.
+                // Native source metadata and the admitted SourceJournal's
+                // backfill/recovery cursor belong to the Event writer.
                 // Validate both rows on UPDATE, including the source scope.
                 let rows: &[&str] = match operation {
                     "UPDATE" => &["OLD", "NEW"],
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
             } else {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
