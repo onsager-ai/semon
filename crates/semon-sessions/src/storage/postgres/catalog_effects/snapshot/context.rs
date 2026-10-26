@@ -65,8 +65,10 @@ impl ContextLookup for Snapshot<'_, '_> {
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
         use crate::storage::catalog::CatalogSnapshot;
-        let rows =
-            self.rows(&crate::catalog::Request::parse("limit=64").map_err(|_| io::Error::other(StorageError::InvalidArguments))?)?;
+        let rows = self.rows(
+            &crate::catalog::Request::parse("limit=64")
+                .map_err(|_| io::Error::other(StorageError::InvalidArguments))?,
+        )?;
         let mut known = std::collections::BTreeSet::from([key.to_owned()]);
         loop {
             let before = known.len();
