@@ -488,6 +488,15 @@ fn failed(error: rusqlite::Error) -> StorageError {
         };
         eprintln!("configured SQL failure category={kind}");
     }
+    #[cfg(test)]
+    match &error {
+        rusqlite::Error::QueryReturnedNoRows => eprintln!("configured SQL value=no_rows"),
+        rusqlite::Error::InvalidColumnType(_, _, kind) => {
+            eprintln!("configured SQL value=column_type kind={kind:?}");
+        }
+        rusqlite::Error::InvalidQuery => eprintln!("configured SQL value=invalid_query"),
+        _ => {}
+    }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,

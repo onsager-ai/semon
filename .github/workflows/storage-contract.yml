@@ -66,6 +66,7 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib configured_semantic_domain94_receipt_order_ties_append_and_restart_oracle -- --nocapture > "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
+          cargo test --locked -p semon-sessions --lib default_local_viewer_advertises_a_nonempty_stable_catalog_source -- --nocapture >> "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
           python3 - <<'PYSAFE'
           import os, re
           from pathlib import Path
@@ -73,7 +74,7 @@ jobs:
           lines = []
           for line in (root / 'native-tree-test.log').open():
               line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
-              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'test result:')):
+              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'test result:')):
                   lines.append(line)
           (root / 'native-tree-diagnostic.txt').write_text('\n'.join(lines[:30]))
           PYSAFE

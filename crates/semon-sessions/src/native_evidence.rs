@@ -932,13 +932,22 @@ impl NativeEvidence {
             .transpose()?;
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
-        self.prepare_events(work, now)?;
+        self.prepare_events(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=prepare_events");
+        })?;
         work.tree_repair_pending = work
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_tree_repair(&self.options)?;
-        if self.advance_semantic_stage(work, now, &mut before_build)? {
+            .advance_tree_repair(&self.options).inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=tree_repair");
+            })?;
+        if self.advance_semantic_stage(work, now, &mut before_build).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=stage_resume");
+        })? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
                 if let Some(discovery) = work.cold_catalog.take() {
