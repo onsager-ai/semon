@@ -6144,8 +6144,7 @@ fn tree_reusable(
     let Some(summary) = index.tree_summary.as_ref() else {
         return Ok(false);
     };
-    if json(&record.summary)?
-        != json(&summary.compact(index.native_usage_observations.is_some()))?
+    if json(&record.summary)? != json(&summary.compact(index.native_usage_observations.is_some()))?
     {
         return Ok(false);
     }
@@ -13161,6 +13160,70 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         tree_rows_json_array_encoding_matches_sqlite_edge_values();
         tree_metadata_and_evidence_share_one_snapshot_during_concurrent_commit();
+    }
+
+    #[test]
+    fn recovery_scalar119_sqlite_current_record_refusal_preserves_bytes() {
+        let root = scratch("strict-tree-scalar");
+        let path = root.join("one.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fixture\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"model\":\"claude\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n",
+                "not-json\n"
+            ),
+        )
+        .unwrap();
+        let cache_path = root.join("index.json");
+        let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+        let index = crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        cache.flush_cold_writes().unwrap();
+        drop(cache);
+        let (store, _) = opened(&crate::events::EventCache::path(&cache_path));
+        let path = path.to_str().unwrap();
+        let (_, ledger) = ledger_row(&store.connection, path).unwrap().unwrap();
+        let key = tree_summary_key(path);
+        let original: String = store
+            .connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+            .unwrap();
+        let base: serde_json::Value = serde_json::from_str(&original).unwrap();
+        let read = || {
+            let mut statement = store
+                .connection
+                .prepare(native_metadata_value(&store.connection).unwrap())
+                .unwrap();
+            read_tree_summary(&store.connection, &mut statement, path, &ledger).unwrap()
+        };
+        let actual = read().unwrap();
+        let expected = index.tree_summary.as_ref().unwrap();
+        assert!(expected.line_count > 0);
+        assert!(expected.malformed_lines > 0);
+        assert_eq!(json(&actual.compact(false)).unwrap(), json(&expected.compact(false)).unwrap());
+        let mut invalid = vec!["{".to_owned(), " ".repeat(1048577)];
+        for field in ["version", "parser_version", "ledger", "projection_witness", "interpretation_witness"] {
+            let mut changed = base.clone();
+            changed[field] = serde_json::Value::Null;
+            invalid.push(changed.to_string());
+        }
+        let mut unsupported = base;
+        unsupported["version"] = serde_json::json!(2);
+        invalid.push(unsupported.to_string());
+        for encoded in invalid {
+            store.connection.execute("UPDATE meta SET value=?2 WHERE key=?1", params![key, encoded]).unwrap();
+            assert!(read().is_none());
+            let after: String = store.connection.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0)).unwrap();
+            assert_eq!(after, encoded, "refusal must leave unsupported bytes untouched");
+        }
+        store.connection.execute("UPDATE meta SET value=?2 WHERE key=?1", params![key, original]).unwrap();
+        let failure = format!("native_tree_failure:{path}");
+        store.connection.execute("INSERT INTO meta(key,value) VALUES(?1,'failed')", [&failure]).unwrap();
+        assert!(read().is_none());
+        store.connection.execute("DELETE FROM meta WHERE key=?1", [&failure]).unwrap();
+        assert_eq!(read().unwrap().line_count, expected.line_count);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
