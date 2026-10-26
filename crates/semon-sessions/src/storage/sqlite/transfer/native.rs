@@ -7,7 +7,9 @@ pub(super) fn capture_native(
     tx: &mut Inbox<'_>,
     state: &mut CaptureState,
 ) -> Result<CaptureProgress, StorageError> {
-    if state.native_family >= 32 { return super::catalog::capture(tx, state); }
+    if state.native_family >= 32 {
+        return super::catalog::capture(tx, state);
+    }
     let id = state
         .cursor
         .as_ref()

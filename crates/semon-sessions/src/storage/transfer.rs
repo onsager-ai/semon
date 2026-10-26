@@ -5,12 +5,12 @@
 use super::{StorageError, StoreBackend, StoreConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+pub(crate) mod catalog_rows;
 #[cfg(test)]
 pub(crate) mod inventory;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 pub(crate) mod reported;
-pub(crate) mod catalog_rows;
 pub use catalog_rows::CatalogRowKind;
 pub use native_pages::{NativePageKind, NativeSource};
 pub use native_rows::NativeRowKind;

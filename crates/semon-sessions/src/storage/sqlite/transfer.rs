@@ -1,8 +1,8 @@
 //! Namespace-owned durable transfer transport, separate from native publication.
+mod catalog;
 mod native;
 mod pages;
 mod rows;
-mod catalog;
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,

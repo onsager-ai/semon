@@ -1,8 +1,8 @@
 //! RLS-bound transfer inbox. Uses the ordinary admission/publication lock order.
+mod catalog;
 mod native;
 mod pages;
 mod rows;
-mod catalog;
 use super::{
     PgCancellation, PgPool, model_cache, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -239,7 +239,9 @@ pub(crate) fn apply(
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
                 transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
-                transfer::TransferRecord::NativeSource(_) | transfer::TransferRecord::NativePage { .. } | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx,record)?,
+                transfer::TransferRecord::NativeSource(_)
+                | transfer::TransferRecord::NativePage { .. }
+                | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,
                 transfer::TransferRecord::NativeFile { .. }
                 | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
@@ -257,7 +259,10 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
-        use transfer::reported::tests::{apply, root, seed_native, seed_native_usage, seed_codex_usage, sqlite, sqlite_core, stage};
+        use transfer::reported::tests::{
+            apply, root, seed_codex_usage, seed_native, seed_native_usage, sqlite, sqlite_core,
+            stage,
+        };
         let root = root();
         let source = sqlite(&root, "native-source");
         let reverse = sqlite(&root, "native-reverse");
@@ -266,10 +271,14 @@ mod tests {
         let expected = sqlite_core(&source, &path);
         let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&source).unwrap();
         let sqlite_reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
-        let (expected_ledger, expected_native) = sqlite_reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
-        assert_eq!(expected_native.usage().len(),130);
+        let (expected_ledger, expected_native) = sqlite_reader
+            .load_file(path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected_native.usage().len(), 130);
         let expected_chunks = expected_native.source_chunks.as_ref().unwrap();
-        let expected_launch = serde_json::to_value(expected_native.handoff_index.as_ref().unwrap()).unwrap();
+        let expected_launch =
+            serde_json::to_value(expected_native.handoff_index.as_ref().unwrap()).unwrap();
         drop(sqlite_reader);
         let (pool, _) = super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
@@ -293,19 +302,33 @@ mod tests {
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             // The actual production native reader verifies immutable page roots,
             // chunk payloads and launch fingerprints; no Raw carrier is involved.
-            let (ledger, native) = super::super::native_reader::file(tx,path.to_str().unwrap())?.ok_or(StorageError::ScopeChanged)?;
+            let (ledger, native) = super::super::native_reader::file(tx, path.to_str().unwrap())?
+                .ok_or(StorageError::ScopeChanged)?;
             assert_eq!(ledger, expected_ledger);
-            assert_eq!(serde_json::to_value(&native.events).unwrap(),serde_json::to_value(&expected_native.events).unwrap());
-            assert_eq!(serde_json::to_value(&native.extras).unwrap(),serde_json::to_value(&expected_native.extras).unwrap());
-            assert_eq!(native.usage(),expected_native.usage());
-            assert_eq!(native.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
-            assert_eq!(native.signals,expected_native.signals);
+            assert_eq!(
+                serde_json::to_value(&native.events).unwrap(),
+                serde_json::to_value(&expected_native.events).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&native.extras).unwrap(),
+                serde_json::to_value(&expected_native.extras).unwrap()
+            );
+            assert_eq!(native.usage(), expected_native.usage());
+            assert_eq!(
+                native.native_usage_history_sizes(),
+                expected_native.native_usage_history_sizes()
+            );
+            assert_eq!(native.signals, expected_native.signals);
             let chunks = native.source_chunks.as_ref().unwrap();
-            assert_eq!(chunks.hashes,expected_chunks.hashes);
-            assert_eq!(chunks.fingerprint(),expected_chunks.fingerprint());
-            assert_eq!(serde_json::to_value(native.handoff_index.as_ref().unwrap()).unwrap(),expected_launch);
+            assert_eq!(chunks.hashes, expected_chunks.hashes);
+            assert_eq!(chunks.fingerprint(), expected_chunks.fingerprint());
+            assert_eq!(
+                serde_json::to_value(native.handoff_index.as_ref().unwrap()).unwrap(),
+                expected_launch
+            );
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         // Compare every normalized native row against authoritative SQL through
         // the existing native decoder, rather than trusting the transfer inbox.
         for sequence in 1..=pages {
@@ -335,25 +358,43 @@ mod tests {
         }
         let new_path = root.join("new.jsonl");
         seed_native(&config, &new_path, 3, '3');
-        let usage_path=root.join("new-native-usage.jsonl");
-        seed_codex_usage(&config,&usage_path);
-        let accepted_usage=pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
-            let (_,native)=super::super::native_reader::file(tx,usage_path.to_str().unwrap())?.ok_or(StorageError::ScopeChanged)?;
-            let usage=serde_json::to_value(native.codex_usage()).unwrap();assert!(!usage.as_object().unwrap().is_empty());Ok(usage)
-        }).unwrap();
+        let usage_path = root.join("new-native-usage.jsonl");
+        seed_codex_usage(&config, &usage_path);
+        let accepted_usage = pool
+            .transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                let (_, native) =
+                    super::super::native_reader::file(tx, usage_path.to_str().unwrap())?
+                        .ok_or(StorageError::ScopeChanged)?;
+                let usage = serde_json::to_value(native.codex_usage()).unwrap();
+                assert!(!usage.as_object().unwrap().is_empty());
+                Ok(usage)
+            })
+            .unwrap();
         std::fs::remove_file(&usage_path).unwrap();
         std::fs::remove_file(&new_path).unwrap();
         let manifest = stage(&config, &reverse, &[98; 32]);
         apply(&reverse, &manifest);
         assert_eq!(sqlite_core(&reverse, &path), expected);
-        let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(&reverse).unwrap();
-        let reader=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
-        let (_,restored)=reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
-        assert_eq!(restored.usage(),expected_native.usage());
-        assert_eq!(restored.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
-        assert_eq!(restored.source_chunks.as_ref().unwrap().hashes,expected_chunks.hashes);
-        let (_,restored_usage)=reader.load_file(usage_path.to_str().unwrap()).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(restored_usage.codex_usage()).unwrap(),accepted_usage);
+        let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&reverse).unwrap();
+        let reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (_, restored) = reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(restored.usage(), expected_native.usage());
+        assert_eq!(
+            restored.native_usage_history_sizes(),
+            expected_native.native_usage_history_sizes()
+        );
+        assert_eq!(
+            restored.source_chunks.as_ref().unwrap().hashes,
+            expected_chunks.hashes
+        );
+        let (_, restored_usage) = reader
+            .load_file(usage_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(restored_usage.codex_usage()).unwrap(),
+            accepted_usage
+        );
         drop(reader);
         assert_eq!(
             sqlite_core(&reverse, &new_path)["events"]
