@@ -485,7 +485,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &generation,
             |snapshot| {
-                use crate::storage::catalog::CatalogSnapshot;
                 let request =
                     crate::catalog::Request::parse("scope=retained_history&limit=50").unwrap();
                 let rows = snapshot
@@ -2109,7 +2108,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .filter(|(key, _)| !current_keys.contains(key))
         .map(|(key, _)| key.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(!removed.is_empty(), "connected withdrawal removed no Current session");
+    assert!(
+        !removed.is_empty(),
+        "connected withdrawal removed no Current session"
+    );
     assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
     // Membership and lifecycle are exact; removed rows come from custody.
     let mut expected_retained = current
