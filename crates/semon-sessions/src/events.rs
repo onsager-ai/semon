@@ -3376,22 +3376,25 @@ pub(crate) fn scan_file(
         // Resolve a known deferred representation before journaling ingestion.
         // The projection worker repairs this same committed Ledger; it does
         // not own, complete, or acknowledge a native ingest operation.
+        let mut existing_base = None;
         if let Some(ledger) = &recorded
             && harness != "copilot"
             && ledger.offset > 1024 * 1024
             && ledger.stat == stat
             && let Base::Found(index) = cache.base(&key, ledger)?
-            && index.tree_summary.is_none()
         {
-            cache
-                .store
-                .as_mut()
-                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
-                .queue_tree_repair(&key, ledger, harness)?;
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "native tree projection repair pending",
-            ));
+            if index.tree_summary.is_none() {
+                cache
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+                    .queue_tree_repair(&key, ledger, harness)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native tree projection repair pending",
+                ));
+            }
+            existing_base = Some(index);
         }
         {
             let expected = recorded.as_ref();
@@ -3445,7 +3448,11 @@ pub(crate) fn scan_file(
             && !force_replace
             && (ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file))
         {
-            match cache.base(&key, ledger)? {
+            let restored = match existing_base.take() {
+                Some(index) => Base::Found(index),
+                None => cache.base(&key, ledger)?,
+            };
+            match restored {
                 Base::Found(index) => {
                     cache.require_usage_store(&index)?;
                     trusted_append = trusted_receiver
