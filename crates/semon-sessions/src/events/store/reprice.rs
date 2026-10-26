@@ -35,14 +35,6 @@ pub(super) fn queue_schema() -> &'static str {
     COMPOSITE_QUEUE_SCHEMA
 }
 
-fn queue_sql<'a>(c: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
-    let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pricing_recompute_pending') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    if !composite {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(scoped)
-}
-
 const CATALOG_QUEUE_11: &str = "
 CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
     ON session_catalog(namespace,session_key,pricing_fingerprint);
@@ -148,7 +140,7 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
     }
     let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
         .query_row(
-            progress_sql(&connection)?,
+            PROGRESS_SQL,
             params![TARGET, COMPLETED],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
@@ -157,13 +149,7 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
         && !pending)
 }
 
-fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
-    queue_sql(
-        c,
-        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
-    )
-}
+const PROGRESS_SQL: &str = "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())";
 
 fn step_inner(
     path: &Path,
@@ -188,7 +174,7 @@ fn step_inner(
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (current_target, current_completed, has_pending): (Option<String>, Option<String>, bool) =
-        tx.query_row(progress_sql(&tx)?, params![TARGET, COMPLETED], |row| {
+        tx.query_row(PROGRESS_SQL, params![TARGET, COMPLETED], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
     if current_target.as_deref() == Some(table.fingerprint.as_str())
@@ -275,7 +261,7 @@ fn step_inner(
             made_progress = true;
             if let Some(owner) = work.pending_owner.take() {
                 tx.execute(
-                    queue_sql(&tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2")?,
+                    "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2",
                     params![owner.kind, owner.key],
                 )?;
             }
@@ -303,7 +289,7 @@ fn step_inner(
         work.job = None;
         if let Some(owner) = work.pending_owner.take() {
             tx.execute(
-                queue_sql(&tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2")?,
+                "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2",
                 params![owner.kind, owner.key],
             )?;
         }
@@ -597,16 +583,16 @@ fn catalog_step(
     table: &Arc<EffectiveTable>,
     pending_key: Option<&str>,
 ) -> rusqlite::Result<bool> {
-    if catalog_sql(tx, "0", "1")? == "1" {
+    if "1" == "1" {
         // History/description/overview repricing still has singleton owners.
         // Refuse before reading a payload or mutating a Catalog row; public
         // admission remains closed until those producers are ported together.
         return Err(rusqlite::Error::InvalidQuery);
     }
     let next: Option<(String, Option<String>)> = if let Some(key) = pending_key {
-        tx.query_row(catalog_sql(tx, "SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1 AND pricing_fingerprint IS NOT ?2", "SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND pricing_fingerprint IS NOT ?2")?,params![key,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+        tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND pricing_fingerprint IS NOT ?2",params![key,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
     } else {
-        tx.query_row(catalog_sql(tx, "SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog INDEXED BY session_catalog_pricing_fingerprint WHERE pricing_fingerprint IS NOT ?1 AND session_key>?2 ORDER BY session_key LIMIT 1", "SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog INDEXED BY session_catalog_pricing_fingerprint WHERE namespace=semon_namespace() AND pricing_fingerprint IS NOT ?1 AND session_key>?2 ORDER BY session_key LIMIT 1")?,params![table.fingerprint,work.session_after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+        tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog INDEXED BY session_catalog_pricing_fingerprint WHERE namespace=semon_namespace() AND pricing_fingerprint IS NOT ?1 AND session_key>?2 ORDER BY session_key LIMIT 1",params![table.fingerprint,work.session_after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
     };
     let Some((key, encoded)) = next else {
         if pending_key.is_none() {
@@ -623,7 +609,7 @@ fn catalog_step(
     };
     let mut row: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
     tx.execute(
-        catalog_sql(tx, "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE session_key=?1", "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND session_key=?1")?,
+        "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND session_key=?1",
         params![key, row.cost.pricing_fingerprint],
     )?;
     if row.cost.pricing_fingerprint == table.fingerprint {
@@ -638,7 +624,7 @@ fn catalog_step(
         replace_costs(query, &old, &cost)?;
     }
     tx.execute(
-        catalog_sql(tx, "UPDATE session_catalog SET metadata=?2 WHERE session_key=?1", "UPDATE session_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1")?,
+        "UPDATE session_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
         params![key, json(&row)?],
     )?;
     // Same-generation history publications can share the recomputation. An
@@ -722,7 +708,7 @@ fn catalog_step(
             tx.execute(metadata_increment(tx)?, ["overview_generation"])?;
         }
     }
-    let trace:Option<(String,String)>=tx.query_row(trace_sql(tx, "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2", "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2")?,params![key,crate::retention::source_generation(&row.sources).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let trace:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2",params![key,crate::retention::source_generation(&row.sources).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((encoded, generation)) = trace {
         let mut value: Value = decode_json(0, &encoded)?;
         replace_costs(&mut value, &old, &cost)?;
@@ -738,7 +724,7 @@ fn catalog_step(
             Sha256::digest(json(&(&generation, &value))?.as_bytes())
         );
         tx.execute(
-            trace_sql(tx, "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE session_key=?1", "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1")?,
+            "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
             params![key, json(&value)?, generation],
         )?;
     }
@@ -794,7 +780,7 @@ fn pending_step(
 ) -> rusqlite::Result<bool> {
     if let Some(owner) = work.pending_owner.as_ref() {
         let still_pending: bool = tx.query_row(
-            queue_sql(tx, "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2)", "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2)")?,
+            "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2)",
             params![owner.kind, owner.key],
             |row| row.get(0),
         )?;
@@ -806,7 +792,7 @@ fn pending_step(
     if work.pending_owner.is_none() {
         work.pending_owner = tx
             .query_row(
-                queue_sql(tx, "SELECT owner_kind,owner_key FROM pricing_recompute_pending ORDER BY owner_kind,owner_key LIMIT 1", "SELECT owner_kind,owner_key FROM pricing_recompute_pending WHERE namespace=semon_namespace() ORDER BY owner_kind,owner_key LIMIT 1")?,
+                "SELECT owner_kind,owner_key FROM pricing_recompute_pending WHERE namespace=semon_namespace() ORDER BY owner_kind,owner_key LIMIT 1",
                 [],
                 |row| Ok(PendingOwner { kind: row.get(0)?, key: row.get(1)? }),
             )
@@ -835,7 +821,7 @@ fn pending_step(
             };
             if done {
                 tx.execute(
-                    queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='source' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source' AND owner_key=?1")?,
+                    "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source' AND owner_key=?1",
                     [&key],
                 )?;
                 work.pending_owner = None;
@@ -848,12 +834,12 @@ fn pending_step(
             let changed = catalog_step(tx, work, table, Some(&key))?;
             if changed {
                 tx.execute(
-                    queue_sql(tx, "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1", "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1")?,
+                    "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1",
                     [&key],
                 )?;
             }
             tx.execute(
-                queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1")?,
+                "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1",
                 [&key],
             )?;
             work.pending_owner = None;
@@ -863,7 +849,7 @@ fn pending_step(
             family_owner(tx, &key, &table.fingerprint)?;
             let parent: Option<String> = tx
                 .query_row(
-                    catalog_sql(tx, "SELECT parent_key FROM session_catalog WHERE session_key=?1", "SELECT parent_key FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1")?,
+                    "SELECT parent_key FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                     [&key],
                     |row| row.get(0),
                 )
@@ -871,19 +857,19 @@ fn pending_step(
                 .flatten();
             if let Some(parent) = parent {
                 let exists: bool = tx.query_row(
-                    trace_sql(tx, "SELECT EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)", "SELECT EXISTS(SELECT 1 FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1)")?,
+                    "SELECT EXISTS(SELECT 1 FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1)",
                     [&parent],
                     |r| r.get(0),
                 )?;
                 if exists {
                     tx.execute(
-                        queue_sql(tx, "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1", "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1")?,
+                        "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1",
                         [&parent],
                     )?;
                 }
             }
             tx.execute(
-                queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='family' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='family' AND owner_key=?1")?,
+                "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='family' AND owner_key=?1",
                 [&key],
             )?;
             work.pending_owner = None;
@@ -893,28 +879,8 @@ fn pending_step(
     }
 }
 
-fn catalog_sql<'a>(
-    db: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    if !composite {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(scoped)
-}
-
-fn trace_sql<'a>(db: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
-    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_trace_headers') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    if !composite {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(scoped)
-}
-
 fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
-    let key:Option<String>=tx.query_row(trace_sql(tx, "SELECT session_key FROM session_trace_headers WHERE session_key>?1 ORDER BY session_key LIMIT 1", "SELECT session_key FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key>?1 ORDER BY session_key LIMIT 1")?,[&work.session_after],|r|r.get(0)).optional()?;
+    let key:Option<String>=tx.query_row("SELECT session_key FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key>?1 ORDER BY session_key LIMIT 1",[&work.session_after],|r|r.get(0)).optional()?;
     let Some(key) = key else {
         work.phase = 3;
         return Ok(());
@@ -925,8 +891,8 @@ fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
 
 fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite::Result<()> {
     let witness:Option<(String,String)>=tx.query_row(match (
-        catalog_sql(tx, "0", "1")? == "1",
-        trace_sql(tx, "0", "1")? == "1",
+        "1" == "1",
+        "1" == "1",
     ) {
         (false, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE session_key=?1",
         (true, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE c.namespace=semon_namespace() AND session_key=?1",
@@ -943,7 +909,7 @@ fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite:
     {
         return Ok(());
     }
-    let mut statement=tx.prepare(catalog_sql(tx, "WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.id LIMIT 257) SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.usd') END,CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.pricing_fingerprint') END FROM family JOIN session_catalog ON session_key=id", "WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.id WHERE c.namespace=semon_namespace() LIMIT 257) SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.usd') END,CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.pricing_fingerprint') END FROM family JOIN session_catalog ON session_key=id WHERE namespace=semon_namespace()")?)?;
+    let mut statement=tx.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.id WHERE c.namespace=semon_namespace() LIMIT 257) SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.usd') END,CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.cost.pricing_fingerprint') END FROM family JOIN session_catalog ON session_key=id WHERE namespace=semon_namespace()")?;
     let mut rows = statement.query([&key])?;
     let mut count = 0;
     let mut usd = Some(0.0);
@@ -959,7 +925,7 @@ fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite:
     if count > 256 {
         usd = None
     }
-    let prior:Option<(String,String)>=tx.query_row(trace_sql(tx, "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE session_key=?1", "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1")?,[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let prior:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((encoded, version)) = prior {
         let mut metadata: Value = decode_json(0, &encoded)?;
         let amount = serde_json::to_value(usd).map_err(sql_json)?;
@@ -970,7 +936,7 @@ fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite:
                 Sha256::digest(json(&(&version, &metadata))?.as_bytes())
             );
             tx.execute(
-                trace_sql(tx, "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE session_key=?1", "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1")?,
+                "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
                 params![key, json(&metadata)?, generation],
             )?;
         }
@@ -1248,9 +1214,7 @@ mod tests {
     }
 
     fn foreign_trace_state(db: &Connection) -> Vec<(String, String, String)> {
-        db.prepare(trace_sql(db,
-            "SELECT session_key,generation,metadata FROM session_trace_headers WHERE session_key IN ('session-b','child-b') ORDER BY session_key",
-            "SELECT session_key,generation,metadata FROM session_trace_headers WHERE namespace='b' ORDER BY session_key").unwrap())
+        db.prepare("SELECT session_key,generation,metadata FROM session_trace_headers WHERE namespace='b' ORDER BY session_key")
             .unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
@@ -2088,9 +2052,7 @@ mod tests {
                         let (records, tokens, _) = tree_state::shared_usage(&tx, 1, 1).unwrap();
                         assert_eq!(records["same-message"].len(), 1);
                         assert_eq!(tokens["same-message"].input, amount);
-                        assert_eq!(tx.query_row(queue_sql(&tx,
-                            "SELECT count(*) FROM pricing_recompute_pending WHERE owner_kind='source'",
-                            "SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'").unwrap(), [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                        assert_eq!(tx.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
                         let key = if collide {
                             "same-session".to_owned()
                         } else {
@@ -2117,9 +2079,7 @@ mod tests {
                             )
                             .unwrap();
                         }
-                        tx.execute(trace_sql(&tx,
-                            "INSERT INTO session_trace_headers(session_key,generation,source_generation,metadata) VALUES(?1,'before',?2,'{\"family_usd\":null}')",
-                            "INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')").unwrap(),
+                        tx.execute("INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')",
                             params![key, crate::retention::source_generation(&owner.sources).unwrap()]).unwrap();
                         // Equal child IDs and parent IDs must remain in their Source family.
                         let child = if collide {
@@ -2130,17 +2090,11 @@ mod tests {
                         owner.key = child.clone();
                         owner.parent = Some(key.clone());
                         let child_metadata = json(&owner).unwrap();
-                        tx.execute(catalog_sql(&tx,
-                            "INSERT INTO session_catalog(session_key,last_ms,harness,parent_key,metadata) VALUES(?1,1,'codex',?2,?3)",
-                            "INSERT INTO session_catalog(namespace,session_key,last_ms,harness,parent_key,metadata) VALUES(semon_namespace(),?1,1,'codex',?2,?3)").unwrap(),
+                        tx.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,parent_key,metadata) VALUES(semon_namespace(),?1,1,'codex',?2,?3)",
                             params![child, key, child_metadata]).unwrap();
-                        tx.execute(trace_sql(&tx,
-                            "INSERT INTO session_trace_headers(session_key,generation,source_generation,metadata) VALUES(?1,'before',?2,'{\"family_usd\":null}')",
-                            "INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')").unwrap(),
+                        tx.execute("INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')",
                             params![child, crate::retention::source_generation(&owner.sources).unwrap()]).unwrap();
-                        assert!(tx.query_row(queue_sql(&tx,
-                            "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1)",
-                            "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1)").unwrap(), [key], |r| r.get::<_, bool>(0)).unwrap());
+                        assert!(tx.query_row("SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1)", [key], |r| r.get::<_, bool>(0)).unwrap());
                         tx.commit().unwrap();
                     }
                     bind_fixture(&db, "a");
@@ -2244,9 +2198,7 @@ mod tests {
                             37
                         );
                         family_owner(&tx, family_key, "family-price").unwrap();
-                        let total: f64 = tx.query_row(trace_sql(&tx,
-                            "SELECT json_extract(metadata,'$.family_usd') FROM session_trace_headers WHERE session_key=?1",
-                            "SELECT json_extract(metadata,'$.family_usd') FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1").unwrap(), [family_key], |r| r.get(0)).unwrap();
+                        let total: f64 = tx.query_row("SELECT json_extract(metadata,'$.family_usd') FROM session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1", [family_key], |r| r.get(0)).unwrap();
                         assert_eq!(total, 22.0);
                         clear(&tx, 1).unwrap();
                         assert_eq!(tree_state::shared_usage(&tx, 2, 2).unwrap().0.len(), 0);
@@ -2269,15 +2221,11 @@ mod tests {
                     let mut work = Work::default();
                     // Keep only the source owner to exercise actual pending selection
                     // and deletion without invoking the unqualified Catalog producer.
-                    tx.execute(queue_sql(&tx,
-                        "DELETE FROM pricing_recompute_pending WHERE owner_kind='session'",
-                        "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session'").unwrap(), []).unwrap();
+                    tx.execute("DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session'", []).unwrap();
                     assert!(pending_step(&tx, &mut work, &target).unwrap());
                     assert!(!pending_step(&tx, &mut work, &target).unwrap());
                     let child_key = if collide { "same-child" } else { "child-a" };
-                    tx.execute(queue_sql(&tx,
-                        "INSERT INTO pricing_recompute_pending(owner_kind,owner_key) VALUES('family',?1)",
-                        "INSERT INTO pricing_recompute_pending(namespace,owner_kind,owner_key) VALUES(semon_namespace(),'family',?1)").unwrap(), [child_key]).unwrap();
+                    tx.execute("INSERT INTO pricing_recompute_pending(namespace,owner_kind,owner_key) VALUES(semon_namespace(),'family',?1)", [child_key]).unwrap();
                     let mut family_target = (*target).clone();
                     family_target.fingerprint = "family-price".into();
                     let family_target = Arc::new(family_target);
