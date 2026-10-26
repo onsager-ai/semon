@@ -158,28 +158,9 @@ impl IndexStore for NativeIndex {
         epoch: i64,
         selector: &crate::model::relation_stage::Selector,
     ) -> Result<crate::model::relation_stage::Selection, StoreError> {
-        use crate::model::relation_stage::{Selection, Selector};
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                let context = super::semantic_stage::context(tx, epoch)?;
-                let Selector::NativeKey { native, harness } = selector else {
-                    return super::semantic_stage::select(tx, epoch, selector);
-                };
-                let endpoints = context
-                    .endpoints
-                    .values()
-                    .filter(|endpoint| {
-                        endpoint.row.harness == *harness && endpoint.row.native_ids.contains(native)
-                    })
-                    .collect::<Vec<_>>();
-                Ok(Some(Selection {
-                    count: 1,
-                    key: Some(super::semantic_stage::native_key(
-                        tx, epoch, harness, native,
-                    )?),
-                    endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()),
-                    ..Default::default()
-                }))
+                super::semantic_stage::select(tx, epoch, selector)
             })
             .and_then(|selected| selected.ok_or(StorageError::Conflict))
             .map_err(err)
