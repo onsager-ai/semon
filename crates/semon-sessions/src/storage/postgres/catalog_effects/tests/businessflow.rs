@@ -626,7 +626,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         fs::rename(to, from).unwrap();
     }
     // Capture the ordinary Query's post-withdrawal membership independently,
-    // before the process-wide Guard. Keep the original PG count assertion.
+    // before the process-wide Guard. Query membership includes virtual peers
+    // as well as physical Catalog owners.
     let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
     fs::rename(&copilot, &copilot_parked).unwrap();
     let mut withdrawal_options = options.clone();
@@ -1737,12 +1738,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(
         current["total"].as_u64(),
-        Some((continued.rows.len() - 1) as u64),
+        Some(all_total - 1),
         "PG ids={:?}; SQLite withdrawal total={} ids={:?}; owner keys={:?}",
         current["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
         withdrawal_oracle["total"],
         withdrawal_oracle["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
         continued.rows.iter().map(|row| &row.key).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        current["sessions"].as_array().unwrap().iter().map(|row| &row["id"]).collect::<Vec<_>>(),
+        withdrawal_oracle["sessions"].as_array().unwrap().iter().map(|row| &row["id"]).collect::<Vec<_>>(),
+        "withdrawal preserves the exact SQLite Query order, including virtual peers"
     );
     let removed_key = continued
         .rows
