@@ -1595,6 +1595,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // (e) A connected Source withdrawal commits only its Index intent and the
     // `removed` invalidation. The qualified Current generation stays until the
     // ordinary semantic catch-up publishes; an exact lost-ACK replay is applied.
+    let (mut store, _) =
+        crate::storage::postgres::index_store::open(pool.clone(), namespace.clone(), control.clone())
+            .unwrap();
     let qualified = store.session_catalog_generation().unwrap();
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),

@@ -213,10 +213,10 @@ fn claims(
             .map(|(path, _)| path)
             .collect::<std::collections::BTreeSet<_>>()
             != batch.paths.iter().collect()
-        || !prepared.withdrawals.is_empty()
     {
         return Err(StorageError::Conflict);
     }
+    withdrawals(batch, prepared)?;
     if prepared.rows.iter().any(|row| {
         row.sources.len() > 64
             || row.sources.iter().any(|source| {
@@ -231,6 +231,39 @@ fn claims(
     for (path, expected) in &prepared.claims {
         let rows = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
         if rows.first().map(|row| row.get::<_, i64>(0)) != *expected {
+            return Err(StorageError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+/// The shared producer's Facts-authority withdrawals (a non-current Codex
+/// rollout). The staged model witness binds them from record to publication;
+/// publication claims the path, so its owners leave Current under the same
+/// generation CAS while native rows, history and older proofs stay retained.
+fn withdrawals(batch: &Batch, prepared: &PreparedSources) -> Result<(), StorageError> {
+    if prepared.withdrawals.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for negative in &prepared.withdrawals {
+        let authority = &prepared.withdrawals[0];
+        if !paths.insert(&negative.path)
+            || !batch.paths.contains(&negative.path)
+            || negative.runtime != batch.runtime
+            || negative.facts_path != authority.facts_path
+            || negative.facts_identity != authority.facts_identity
+            || prepared
+                .indexed_sources
+                .iter()
+                .any(|(_, source)| source.path == std::path::Path::new(&negative.path))
+            || prepared
+                .rows
+                .iter()
+                .flat_map(|row| &row.sources)
+                .any(|source| source.path == std::path::Path::new(&negative.path))
+            || !negative.current().unwrap_or(false)
+        {
             return Err(StorageError::Conflict);
         }
     }
