@@ -1,7 +1,7 @@
 //! Backend-neutral public change delivery helpers for the local source binding.
 use crate::{
     CatalogIdentityError, CatalogReadScope, Options,
-    storage::{CatalogChangesRequest, LogicalSourceNamespace, StoreConfig},
+    storage::{CatalogChangesRequest, LogicalSourceNamespace},
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,8 +50,9 @@ pub fn compact_session_catalog_changes(
     if limit == 0 || limit > 256 || acknowledged_through > i64::MAX as u64 {
         return Err(CatalogIdentityError::InvalidArguments);
     }
-    let namespace = LogicalSourceNamespace::new("local")?;
-    let store = StoreConfig::local_metadata(options, namespace.clone()).open_local()?;
+    let config = options.source.config(&options.cache)?;
+    let namespace = config.namespace.clone();
+    let store = config.open()?;
     store
         .compact_catalog_changes(&namespace, scope, stream_epoch, acknowledged_through, limit)
         .map_err(Into::into)
@@ -75,7 +76,7 @@ pub fn session_catalog_changes(
         limit,
     };
     request.validate()?;
-    let store = StoreConfig::local_metadata(options, namespace.clone()).open_local()?;
+    let store = options.source.config(&options.cache)?.open()?;
     store
         .read_snapshot(&namespace)?
         .catalog_changes(&namespace, request)

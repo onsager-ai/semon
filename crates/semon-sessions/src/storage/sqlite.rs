@@ -52,15 +52,11 @@ pub(super) fn failed(error: rusqlite::Error) -> StorageError {
     }
 }
 
-pub(super) struct SqliteMetadataStore(StoreConfig, bool);
+pub(super) struct SqliteMetadataStore(StoreConfig);
 
 impl SqliteMetadataStore {
     pub(super) fn new(config: StoreConfig) -> Self {
-        Self(config, false)
-    }
-
-    pub(super) fn legacy_local(config: StoreConfig) -> Self {
-        Self(config, true)
+        Self(config)
     }
 
     fn admit(
@@ -86,13 +82,7 @@ impl SqliteMetadataStore {
     }
 
     fn check_epoch(&self, db: &Connection) -> Result<(), StorageError> {
-        if self.1 {
-            if namespace::is_bound(db).map_err(failed)? {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-        } else {
-            namespace::require_admitted(db, &self.0.namespace)?;
-        }
+        namespace::require_admitted(db, &self.0.namespace)?;
         if !crate::events::store::current_contract(db).map_err(failed)? {
             return Err(StorageError::Unavailable);
         }
@@ -160,10 +150,8 @@ impl SessionMetadataStore for SqliteMetadataStore {
         let db = self.admit(namespace, false)?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.check_epoch(&db)?;
-        if !self.1 {
-            catalog_namespace::register(&db, namespace)?;
-            catalog_namespace::scope_readers(&db)?;
-        }
+        catalog_namespace::register(&db, namespace)?;
+        catalog_namespace::scope_readers(&db)?;
         Ok(Box::new(Snapshot {
             db,
             namespace: namespace.clone(),
@@ -190,13 +178,8 @@ impl SessionMetadataStore for SqliteMetadataStore {
             return Err(StorageError::ScopeChanged);
         }
         let mut db = self.admit(namespace, true)?;
-        if namespace::is_bound(&db).map_err(failed)? {
-            namespace::require_admitted(&db, namespace)?;
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-        if !self.1 {
-            return Err(StorageError::NamespaceUnadmitted);
-        }
+        namespace::require_admitted(&db, namespace)?;
+        catalog_namespace::register(&db, namespace)?;
         changes::compact(&mut db, scope, stream_epoch, acknowledged_through, limit)
     }
 }
@@ -261,7 +244,7 @@ mod tests {
     }
     impl MetadataFixture for Fixture {
         fn store(&self) -> Box<dyn SessionMetadataStore> {
-            self.config().open_local().unwrap()
+            self.config().open().unwrap()
         }
         fn namespace(&self) -> LogicalSourceNamespace {
             LogicalSourceNamespace::new("authorized-source").unwrap()
@@ -287,7 +270,7 @@ mod tests {
         config.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
             config
-                .open_local()
+                .open()
                 .unwrap()
                 .read_snapshot(&fixture.namespace()),
             Err(StorageError::ScopeChanged)
@@ -297,7 +280,7 @@ mod tests {
         config.backend = StoreBackend::Sqlite {
             database: absent.clone(),
         };
-        let store = config.open_local().unwrap();
+        let store = config.open().unwrap();
         assert!(matches!(
             store.read_snapshot(&fixture.namespace()),
             Err(StorageError::Unavailable)
