@@ -1,0 +1,121 @@
+//! Ordinary source component discovery over one physical Current snapshot.
+use super::{model_cache, sqlstate, txn::PgTxn};
+use crate::{model::{summary::CatalogRow, relation_stage::{self, LifecycleStore}}, storage::StorageError};
+use std::{collections::{BTreeMap, BTreeSet}, io};
+
+pub(super) fn component_paths(tx: &mut PgTxn<'_>, paths: &[String], keys: &[String], native: &[(String,String)]) -> Result<Option<Vec<String>>,StorageError> {
+    if paths.is_empty() || paths.len()>64 || keys.len()>64 || native.len()>64 { return Ok(None); }
+    let Some(generation)=model_cache::generation(tx)? else { return Ok(Some(Vec::new())); };
+    let ns=tx.namespace.as_str().as_bytes();
+    let values=tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY session_key LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+    if values.len()>64 { return Err(StorageError::Busy); }
+    let mut rows=BTreeMap::new();
+    let mut used=0usize;
+    for value in values {
+        let key:Vec<u8>=value.get(0);
+        let bytes:Vec<u8>=value.get::<_,Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        used=used.saturating_add(bytes.len());
+        if used>1048576 { return Err(StorageError::Busy); }
+        let row:CatalogRow=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+        if row.key.as_bytes()!=key { return Err(StorageError::ScopeChanged); }
+        rows.insert(row.key.clone(),row);
+    }
+    struct Lookup { rows:BTreeMap<String,CatalogRow>, links:BTreeMap<String,BTreeSet<String>> }
+    impl LifecycleStore for Lookup {
+        fn path_owners(&self,path:&str)->io::Result<Vec<String>> {
+            Ok(self.rows.values().filter(|r|r.sources.iter().any(|s|s.path.to_str()==Some(path))).map(|r|r.key.clone()).collect())
+        }
+        fn owner(&self,key:&str)->io::Result<CatalogRow> {
+            self.rows.get(key).cloned().ok_or_else(||io::Error::other("missing Current source owner"))
+        }
+        fn neighbors(&self,key:&str)->io::Result<Vec<String>> {
+            Ok(self.links.get(key).into_iter().flatten().cloned().collect())
+        }
+    }
+    let mut links:BTreeMap<String,BTreeSet<String>>=BTreeMap::new();
+    let mut connect=|a:&str,b:&str| {
+        if a!=b && rows.contains_key(a) && rows.contains_key(b) {
+            links.entry(a.to_owned()).or_default().insert(b.to_owned());
+            links.entry(b.to_owned()).or_default().insert(a.to_owned());
+        }
+    };
+    for row in rows.values() {
+        if let Some(parent)=&row.parent { connect(&row.key,parent); }
+        for other in rows.values() {
+            if row.harness==other.harness && row.native_ids.iter().any(|id|other.native_ids.contains(id)) { connect(&row.key,&other.key); }
+        }
+        let edges=row.query.as_ref().and_then(|q|q["selected"]["edges"].as_array()).ok_or(StorageError::NamespaceUpgradePending)?;
+        for edge in edges {
+            for field in ["from","to"] {
+                if let Some(owner)=edge["query"][field].as_str() { connect(&row.key,owner); }
+            }
+        }
+    }
+    let mut seeds=paths.to_vec();
+    for row in rows.values() {
+        if keys.contains(&row.key) || native.iter().any(|(h,id)|row.harness==*h && row.native_ids.contains(id)) {
+            seeds.extend(row.sources.iter().map(|s|s.path.to_string_lossy().into_owned()));
+        }
+    }
+    let lookup=Lookup { rows,links };
+    let owners=relation_stage::affected_owners(&lookup,&seeds).map_err(|_|StorageError::Busy)?;
+    let mut sources=owners.values().flat_map(|r|r.sources.iter().map(|s|s.path.to_string_lossy().into_owned())).collect::<BTreeSet<_>>();
+    // A recorded relocation joins both physical source names into the same
+    // native reconstruction cohort; it never grants authority to either file.
+    for path in paths {
+        let moves=tx.driver.query("SELECT new_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND old_path=$2 UNION SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND new_path=$2 LIMIT 65", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+        for moved in moves {
+            let bytes:Vec<u8>=moved.get(0);
+            sources.insert(String::from_utf8(bytes).map_err(|_|StorageError::ScopeChanged)?);
+        }
+    }
+    if sources.len()>64 { return Ok(None); }
+    tx.check()?;
+    Ok(Some(sources.into_iter().collect()))
+}
+
+/// Resolve an observed non-log input under the same namespace writer fence.
+/// The ordinary API has no explicit OpID: the exact revision and full request
+/// form its durable replay identity, as for ordinary Catalog publication.
+pub(super) fn resolve(tx:&mut PgTxn<'_>, path:&str, revision:i64, native:Option<(&str,&str)>, log:Option<&str>) -> Result<crate::events::Outcome,StorageError> {
+    use sha2::{Digest,Sha256};
+    use crate::events::Outcome;
+    if path.is_empty() || path.len()>4096 || revision<=0 || log.is_some_and(|p|p.is_empty() || p.len()>4096) { return Err(StorageError::InvalidArguments); }
+    let request=serde_json::to_vec(&("resolve-catalog-input-v1",path,revision,native,log)).map_err(|_|StorageError::InvalidArguments)?;
+    if request.len()>1048576 { return Err(StorageError::Busy); }
+    let key=format!("source-resolve-v1:{:x}",Sha256::digest(&request));
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let receipt=tx.driver.query("SELECT value=$3 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND key=$2", &[&ns,&key.as_bytes(),&request]).map_err(sqlstate::error)?;
+    if let Some(row)=receipt.first() { return if row.get::<_,bool>(0) { Ok(Outcome::Written) } else { Err(StorageError::Conflict) }; }
+    let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
+    if active { return Ok(Outcome::Conflict); }
+    let observed=tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    if observed.first().map(|r|r.get::<_,i64>(0))!=Some(revision) { return Ok(Outcome::Conflict); }
+    let mut affected=BTreeSet::new();
+    if let Some((harness,id))=native {
+        let runtime=format!("runtime:native:{harness}");
+        let dependencies=tx.driver.query("SELECT source_path FROM semon_pg_native_native_dependencies WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND harness IN ($2,$3) AND native_id=$4 LIMIT 65", &[&ns,&harness.as_bytes(),&runtime.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
+        if dependencies.len()>64 { return Err(StorageError::Busy); }
+        for row in dependencies { affected.insert(String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?); }
+        if let Some(generation)=model_cache::generation(tx)? {
+            let owners=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+            if owners.len()>64 { return Err(StorageError::Busy); }
+            let mut used=0usize;
+            for owner in owners {
+                let bytes:Vec<u8>=owner.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
+                used=used.saturating_add(bytes.len()); if used>1048576 { return Err(StorageError::Busy); }
+                let owner:CatalogRow=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+                if owner.harness==harness && owner.native_ids.iter().any(|n|n==id) { affected.extend(owner.sources.iter().map(|s|s.path.to_string_lossy().into_owned())); }
+            }
+        }
+    }
+    if let Some(log)=log { affected.insert(log.to_owned()); }
+    if affected.len()>64 { return Err(StorageError::Busy); }
+    for target in affected { super::source_journal::invalidate(tx,&target)?; }
+    if tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns,&path.as_bytes(),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::Conflict); }
+    tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&key.as_bytes(),&request]).map_err(sqlstate::error)?;
+    tx.check()?;
+    Ok(Outcome::Written)
+}
