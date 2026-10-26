@@ -22,6 +22,7 @@ pub enum NativePageKind {
 }
 
 impl NativeSource {
+    #[cfg(feature = "postgres")]
     pub(crate) fn id(
         &self,
         namespace: &str,

@@ -82,10 +82,10 @@ pub(crate) fn capture_state(
     operation: &[u8; 32],
 ) -> Result<Option<CaptureState>, StorageError> {
     let expected = encode_bounded(operation, MAX_MANIFEST_BYTES)?;
-    if let Some(frozen) = tx.get(FREEZE, MAX_MANIFEST_BYTES)? {
-        if frozen != expected {
-            return Err(StorageError::Conflict);
-        }
+    if let Some(frozen) = tx.get(FREEZE, MAX_MANIFEST_BYTES)?
+        && frozen != expected
+    {
+        return Err(StorageError::Conflict);
     }
     tx.get(&key(operation, "capture"), MAX_MANIFEST_BYTES)?
         .map(|bytes| {
@@ -305,10 +305,10 @@ pub(crate) fn prepare_apply(
             return Err(StorageError::Conflict);
         }
         let receipt = tx.get(&key(&id, "applied:0"), MAX_MANIFEST_BYTES)?;
-        if let Some(bytes) = &receipt {
-            if decode_checkpoint(bytes, manifest)? != staged {
-                return Err(StorageError::Conflict);
-            }
+        if let Some(bytes) = &receipt
+            && decode_checkpoint(bytes, manifest)? != staged
+        {
+            return Err(StorageError::Conflict);
         }
         return Ok(ApplyPage {
             checkpoint: staged,
@@ -338,10 +338,11 @@ pub(crate) fn prepare_apply(
         .map(|bytes| decode_checkpoint(&bytes, manifest))
         .transpose()?
         .unwrap_or_else(|| TransferCheckpoint::initial(manifest));
-    if let Some(incoming) = tx.get(INCOMING, MAX_MANIFEST_BYTES)? {
-        if !incoming.is_empty() && incoming != encode_bounded(&id, MAX_MANIFEST_BYTES)? {
-            return Err(StorageError::Conflict);
-        }
+    if let Some(incoming) = tx.get(INCOMING, MAX_MANIFEST_BYTES)?
+        && !incoming.is_empty()
+        && incoming != encode_bounded(&id, MAX_MANIFEST_BYTES)?
+    {
+        return Err(StorageError::Conflict);
     }
     let checkpoint = previous.advance(manifest, &page)?;
     let complete = checkpoint
@@ -410,9 +411,12 @@ pub(crate) fn acknowledge_apply(
     )
 }
 
+type FactsCursor = Option<(Vec<u8>, i64)>;
+type CapturedFacts = (Vec<TransferRecord>, FactsCursor);
+
 pub(crate) fn fit_facts(
     rows: Vec<(Vec<u8>, crate::facts::ReportedRunSnapshot)>,
-) -> Result<(Vec<TransferRecord>, Option<(Vec<u8>, i64)>), StorageError> {
+) -> Result<CapturedFacts, StorageError> {
     let mut records = Vec::new();
     let mut cursor = None;
     let mut bytes = 4096usize;
