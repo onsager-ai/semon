@@ -223,7 +223,10 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
             std::slice::from_ref(&claimed),
         )
     });
-    assert!(matches!(refused, Err(StorageError::NamespaceUpgradePending)));
+    assert!(matches!(
+        refused,
+        Err(StorageError::NamespaceUpgradePending)
+    ));
     let carried = pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
         let carried = super::catalog_effects::carry::unmentioned(
