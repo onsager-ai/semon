@@ -10086,7 +10086,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES('fixture-source','native_fixture_archive_custody','original proof')",
+                    "INSERT INTO meta VALUES('fixture-source','catalog_recovery_reason','original proof')",
                     [],
                 )
                 .unwrap();
@@ -10205,7 +10205,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta VALUES('fixture-source','native_fixture_archive_custody','independent authority')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_recovery_reason','independent authority')",
                 [],
             )
             .unwrap();
