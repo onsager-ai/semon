@@ -289,6 +289,23 @@ impl NativeEvidence {
         }
     }
 
+    pub(crate) fn query_runtime(&self) -> io::Result<String> {
+        #[cfg(feature = "postgres")]
+        if let Some(crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool, control },
+            namespace,
+            ..
+        }) = &self.store_config
+        {
+            return crate::storage::postgres::current_sources::Runtime::open(
+                pool, namespace, control, &self.options,
+            )
+            .map_err(io::Error::other)?
+            .generation(&self.options);
+        }
+        query_runtime_generation(&self.options)
+    }
+
     pub(crate) fn request_metadata_audit_if_idle(&self) {
         let completed = self.audit_completed.load(Ordering::Acquire);
         let _ = self.audit_request.compare_exchange(
@@ -918,6 +935,17 @@ impl NativeEvidence {
     /// Refresh an existing current owner through the shared Catalog producer.
     /// Cold discovery and unsupported role/identity changes still reconcile.
     pub(crate) fn local_query_target(&self, key: &str, now: i64) -> io::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        if let Some(crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool, control },
+            ..
+        }) = &self.store_config
+        {
+            return crate::storage::postgres::navigation::query_target(
+                self.store_config.as_ref().expect("configured source"), pool, control, key,
+            )
+            .map_err(io::Error::other);
+        }
         if let Some(target) = crate::overview_repair::local_query_target(&self.options, key, now)? {
             return Ok(Some(target));
         }

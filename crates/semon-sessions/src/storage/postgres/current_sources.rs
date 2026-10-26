@@ -284,9 +284,9 @@ pub(super) fn withdrawal_current(
 
 /// One request's recorded runtime witness. Rechecks inside a leased read use
 /// only the exact canonical identity and independent runtime-file stamps.
-pub(super) struct Runtime(Option<CurrentSources>);
+pub(crate) struct Runtime(Option<CurrentSources>);
 impl Runtime {
-    pub(super) fn open(
+    pub(crate) fn open(
         pool: &PgPool,
         namespace: &LogicalSourceNamespace,
         control: &PgCancellation,
@@ -301,7 +301,7 @@ impl Runtime {
             .transpose()
             .map(Self)
     }
-    pub(super) fn generation(&self, options: &crate::Options) -> io::Result<String> {
+    pub(crate) fn generation(&self, options: &crate::Options) -> io::Result<String> {
         match &self.0 {
             None => crate::native_evidence::query_runtime_generation(options),
             Some(source) => {

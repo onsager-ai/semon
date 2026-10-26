@@ -2188,6 +2188,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
     let facts_host = body_host(&facts_options, &facts_rows);
+    let factory_options = facts_options.clone();
+    let factory_rows = facts_rows.clone();
+    let factory_namespace = namespace.clone();
+    let facts_readers = move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        assert_eq!(source, factory_namespace.as_str());
+        assert!(factory_rows.iter().any(|row| row.key == key));
+        Ok(Box::new(body_host(&factory_options, &factory_rows)))
+    };
     for row in &facts_rows {
         for tool in ["read_transcript", "get_session"] {
             let args = serde_json::json!({"id":row.key});
@@ -2216,6 +2224,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "configured ordinary Facts selected {tool} {}",
                 row.key
             );
+            assert_eq!(facts_query.call_catalog_at(
+                tool, &args, Some(&facts_readers),
+                crate::SessionSourceReadMode::LocalThenProvider, 1790812805000,
+            ).unwrap(), expected, "ordinary host-routed {tool} {}", row.key);
         }
     }
 
