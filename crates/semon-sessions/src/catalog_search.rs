@@ -290,13 +290,6 @@ pub(crate) fn publish_current_rows_with_store<
     )
 }
 
-#[cfg(test)]
-pub(crate) fn publish_current_rows_original(
-    transaction: &Transaction<'_>,
-    rows: &[&CatalogRow],
-) -> rusqlite::Result<()> {
-    publish_current_rows_original_order(transaction, rows, 64, None)
-}
 
 /// One metadata-search producer; adapters own only physical effects. The phase
 /// callback keeps SQLite's existing performance probes outside the algorithm.
@@ -434,125 +427,6 @@ fn publish_current_rows_effects<
     Ok(())
 }
 
-#[cfg(test)]
-fn publish_current_rows_original_order(
-    transaction: &Transaction<'_>,
-    rows: &[&CatalogRow],
-    owners: usize,
-    #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
-) -> rusqlite::Result<()> {
-    let producer = crate::native_timing::enabled()
-        .then(|| {
-            transaction
-                .path()
-                .map(std::path::Path::new)
-                .map(crate::native_timing::id)
-        })
-        .flatten();
-    let mut measurements = crate::native_timing::Measurements::new(producer.is_some());
-    for rows in rows.chunks(64) {
-        #[cfg(test)]
-        let search_before = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        let started = measurements.start();
-        transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_search_members;")?;
-        for row in rows {
-            transaction
-                .prepare_cached("INSERT INTO catalog_search_members VALUES(?1)")?
-                .execute([&row.key])?;
-        }
-        measurements.record("members", started, rows.len());
-        let started = measurements.start();
-        for row in rows {
-            validate_key(transaction, &row.key)?;
-        }
-        for scope in ["current", "retained_history"] {
-            remove_members(transaction, scope)?;
-        }
-        measurements.record("removal", started, 2);
-        let started = measurements.start();
-        let prepared = rows
-            .iter()
-            .map(|row| prepared_fields(row))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        measurements.record("normalization", started, rows.len());
-        let started = measurements.start();
-        for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
-            for scope in ["current", "retained_history"] {
-                insert_document(transaction, scope, row, encoded, *complete)?;
-            }
-        }
-        measurements.record("documents", started, rows.len() * 2);
-        // The ordering index groups grams, while its primary key groups source
-        // keys. At most 64 source ranges are resident here. Gram-major writes
-        // revisit their bounded primary-key pages while keeping the ordering
-        // index's current leaf hot, instead of cycling through all gram leaves
-        // for each source and repeatedly spilling dirty pages into the WAL.
-        let started = measurements.start();
-        #[cfg(test)]
-        let preparation_started = probe.as_ref().map(|_| std::time::Instant::now());
-        let postings = posting_order(rows, &prepared, owners);
-        #[cfg(test)]
-        let preparation_us = preparation_started
-            .map(|started| started.elapsed().as_micros())
-            .unwrap_or(0);
-        measurements.record("posting_preparation", started, postings.len());
-        #[cfg(test)]
-        let postings_before = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        let started = measurements.start();
-        let mut posting = transaction.prepare_cached("INSERT INTO session_search_memberships(session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?3)")?;
-        for (gram, row) in &postings {
-            posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
-        }
-        // Only the numerical probe releases before its after-posting sample;
-        // the ordinary release/Auto path retains the original lexical lifetime.
-        #[cfg(test)]
-        if probe.is_some() {
-            drop(posting);
-        }
-        #[cfg(test)]
-        let postings_after = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        measurements.record("postings", started, postings.len() * 2);
-        measurements.count("posting_rows", postings.len());
-        let started = measurements.start();
-        for scope in ["current", "retained_history"] {
-            // CROSS JOIN keeps at most 64 members as the outer loop; each inner
-            // lookup uses the existing (scope,source key,gram) primary key.
-            let (column, _) = membership(scope)?;
-            transaction.prepare_cached(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute([scope])?;
-        }
-        measurements.record("counts", started, 2);
-        #[cfg(test)]
-        if let Some(probe) = probe.as_deref_mut() {
-            let counts_after = crate::native_timing::ProbeSample::read(transaction);
-            *probe = Some(crate::native_timing::SearchTraversalProbe {
-                search: search_before.as_ref().unwrap().interval(&counts_after),
-                postings: postings_before
-                    .as_ref()
-                    .unwrap()
-                    .interval(postings_after.as_ref().unwrap()),
-                counts: postings_after.as_ref().unwrap().interval(&counts_after),
-                preparation_us,
-                sampling_us: search_before.as_ref().unwrap().sampling_us()
-                    + postings_before.as_ref().unwrap().sampling_us()
-                    + postings_after.as_ref().unwrap().sampling_us()
-                    + counts_after.sampling_us(),
-                owners: rows.len(),
-                physical_rows: postings.len(),
-                logical_positions: postings.len() * 2,
-            });
-        }
-    }
-    if let Some(producer) = producer {
-        measurements.emit(&producer, "search_rows");
-    }
-    Ok(())
-}
 
 /// Remove only this cohort's old documents and postings. Aggregate shared gram
 /// decrements once, using source-key lookups rather than scanning all members of
