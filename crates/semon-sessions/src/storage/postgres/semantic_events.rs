@@ -59,5 +59,5 @@ pub(super) fn project(tx:&mut PgTxn<'_>, context:&Context)->Result<Vec<Projected
     Ok(output)
 }
 fn matches_source(ledger:&Ledger,source:&CatalogSource)->bool {
-    ledger.stat.dev==source.dev && ledger.stat.ino==source.ino && ledger.stat.size==source.size && ledger.stat.mtime_ns==source.modified_ns && ledger.stat.ctime_ns==source.changed_ns && ledger.offset==source.offset && ledger.prefix==source.prefix_sha256 && ledger.tail==source.tail_sha256
+    ledger.stat.dev==source.dev && ledger.stat.ino==source.ino && ledger.stat.size==source.size && ledger.stat.modified_ns==source.modified_ns && ledger.stat.changed_ns==source.changed_ns && ledger.offset==source.offset && ledger.prefix==source.prefix_sha256 && ledger.tail==source.tail_sha256
 }

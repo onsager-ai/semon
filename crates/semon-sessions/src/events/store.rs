@@ -1964,31 +1964,21 @@ fn resume_runtime_input_tx(
     let Some(evidence) = runtime_input_evidence(tx, path)? else {
         return Ok(());
     };
-    let Some(facts) = options
-        .facts
-        .as_ref()
-        .and_then(|file| crate::read_facts(file).ok())
-    else {
-        return Ok(());
-    };
-    let unaffected = crate::native_evidence::recorded_runtime_fingerprint_excluding(
-        options,
-        &facts,
-        Some(Path::new(path)),
-    )
-    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    if unaffected != evidence.unaffected {
-        return Ok(());
-    }
-    // Dirty the new PID identity before acknowledging the source mutation.
-    if let Some(id) = crate::read_regular_at_most(Path::new(path), 65536)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| value["sessionId"].as_str().map(str::to_owned))
-    {
-        enqueue_native_tx(tx, "claude", &id)?;
+    if let Some(id) = resumed_runtime_native(options,path,&evidence).map_err(|_|rusqlite::Error::InvalidQuery)? {
+        enqueue_native_tx(tx,"claude",&id)?;
     }
     Ok(())
+}
+
+/// The source authority/fingerprint recipe performs native observation only.
+/// Physical adapters own mutation evidence, dependency writes and transaction.
+pub(crate) fn resumed_runtime_native(options:&crate::Options,path:&str,evidence:&crate::source_change::RuntimeInputEvidence)->io::Result<Option<String>> {
+    let Some(facts)=options.facts.as_ref().and_then(|file|crate::read_facts(file).ok()) else { return Ok(None); };
+    let unaffected=crate::native_evidence::recorded_runtime_fingerprint_excluding(options,&facts,Some(Path::new(path)))?;
+    if unaffected!=evidence.unaffected { return Ok(None); }
+    Ok(crate::read_regular_at_most(Path::new(path),65536).ok()
+        .and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value|value["sessionId"].as_str().map(str::to_owned)))
 }
 
 pub(crate) fn begin_source_write(
@@ -3021,6 +3011,11 @@ impl IndexStore for SqliteStore {
         Ok(Some(sources.into_iter().collect()))
     }
 
+    fn resume_runtime_input(&mut self,options:&crate::Options,path:&str)->Result<(),StoreError> {
+        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        resume_runtime_input_tx(&tx,options,path).map_err(failure)?;
+        tx.commit().map_err(failure)
+    }
     fn resolve_catalog_input(
         &mut self,
         path: &str,
