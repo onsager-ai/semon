@@ -2299,7 +2299,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(workspace.status, 200);
     let workspace: serde_json::Value = serde_json::from_slice(&workspace.body).unwrap();
-    assert_eq!(workspace["items"].as_array().unwrap().len(), facts_rows.len());
+    assert_eq!(
+        workspace["items"].as_array().unwrap().len(),
+        facts_rows.len()
+    );
 
     let facts_store =
         crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
