@@ -106,7 +106,15 @@ jobs:
           if-no-files-found: error
       - name: Strict published Tree scalar and deferred interpretation qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-scalar119.log"
+      - name: Retain early scalar diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-scalar119-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-scalar119.log
+          if-no-files-found: error
       - name: Native ownership after source replacement
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture

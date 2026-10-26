@@ -279,7 +279,7 @@ pub(super) fn publish(
         .tx
         .driver
         .execute(
-            "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1",
+            "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
             &[&ns, &failure.as_bytes()],
         )
         .map_err(sqlstate::error)?;
