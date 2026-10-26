@@ -517,12 +517,23 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         }
         for row in backing {
             let id = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
-            super::super::native_pages::open(
+            let pinned = super::super::native_pages::open(
                 tx.0,
                 text(2)?,
                 &ledger,
                 crate::storage::proof_lifetime::ProofGenerationId(id),
             )?;
+            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+            let pages = header.count.div_ceil(1024);
+            let mut width = pages;
+            let mut nodes = 0usize;
+            while width>0 {
+                nodes = nodes.checked_add(width).ok_or(StorageError::ScopeChanged)?;
+                if width==1 {break;}
+                width=width.div_ceil(2);
+            }
+            let counts = tx.0.driver.query_one("SELECT count(*) FILTER(WHERE kind=0),count(*) FILTER(WHERE kind=2) FROM semon_pg_native_page_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&tx.0.namespace.as_str().as_bytes(),&pinned.id.0.as_bytes()]).map_err(sqlstate::error)?;
+            if usize::try_from(counts.get::<_,i64>(0)).ok()!=Some(pages) || usize::try_from(counts.get::<_,i64>(1)).ok()!=Some(nodes) {return Err(StorageError::ScopeChanged);}
         }
         // The selected edge names an original publication and exact Native
         // ledger. Bind only backing generations actually carried above; this
@@ -634,6 +645,7 @@ mod tests {
         let mut retained_ref = false;
         let mut retained_backing = false;
         let mut retained_page = false;
+        let mut checked_tree_forgery = false;
         for sequence in 1..=pages {
             for mut record in source
                 .transfer_inbox()
@@ -646,6 +658,11 @@ mod tests {
                 }
                 if let TransferRecord::NativePage { backing, .. } = &record {
                     retained_page |= backing.is_some();
+                }
+                if !checked_tree_forgery && let TransferRecord::NativePage {kind:transfer::NativePageKind::Tree,payload,..} = &mut record {
+                    *payload=serde_json::to_string(&[0u8;32]).unwrap();
+                    assert!(matches!(transaction(&config,&pool,&control,|tx|super::super::pages::apply(tx,&record)),Err(StorageError::ScopeChanged)));
+                    checked_tree_forgery=true;
                 }
                 if let TransferRecord::CatalogRow {
                     kind: CatalogRowKind::ProofRef,
@@ -679,6 +696,7 @@ mod tests {
             retained_backing && retained_page,
             "retained selected references require original Native backing pages"
         );
+        assert!(checked_tree_forgery,"real backing tree nodes must be checked against their children and original root");
         assert!(
             checked_forgery,
             "real publisher must contribute original selected proof authority"
