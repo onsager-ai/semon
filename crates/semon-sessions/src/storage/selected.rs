@@ -393,7 +393,9 @@ impl PresentationObservations {
         binding: Option<&crate::storage::QueryRuntimeBinding>,
         rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
     ) -> Self {
-        let recorded = options.facts.as_ref()
+        let recorded = options
+            .facts
+            .as_ref()
             .and_then(|path| crate::facts::source_authority::Sources::sqlite(path).ok());
         Self::capture_with_authority(options, binding, rows, recorded)
     }

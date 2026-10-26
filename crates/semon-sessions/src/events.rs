@@ -1749,11 +1749,18 @@ impl EventCache {
     }
 
     pub(crate) fn prepare_facts_authority(&self, options: &crate::Options) -> io::Result<()> {
-        self.store.as_ref().ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
             .prepare_facts_authority(options)
     }
-    pub(crate) fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
-        self.store.as_ref().ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
+    pub(crate) fn facts_authority(
+        &self,
+        path: &Path,
+    ) -> io::Result<crate::facts::source_authority::Sources> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
             .facts_authority(path)
     }
     pub(crate) fn query_runtime_binding(
