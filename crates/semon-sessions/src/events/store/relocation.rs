@@ -408,7 +408,7 @@ mod tests {
         path: &str,
     ) {
         connection.execute(
-            "INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(semon_namespace(),?1,?2,?3,?4,?5)",
             params![key, lifecycle, harness, id, path],
         ).unwrap();
     }
@@ -445,7 +445,12 @@ mod tests {
         let mut baseline = None;
         for unrelated in [0, 256, 2048] {
             let mut connection = Connection::open_in_memory().unwrap();
-            connection.execute_batch(SCHEMA).unwrap();
+            connection.execute_batch(COMPOSITE_CATALOG_SCHEMA).unwrap();
+            crate::storage::sqlite::catalog_namespace::register(
+                &connection,
+                &crate::storage::LogicalSourceNamespace::new("relocation-current").unwrap(),
+            )
+            .unwrap();
             {
                 let transaction = connection.transaction().unwrap();
                 for index in 0..unrelated {
