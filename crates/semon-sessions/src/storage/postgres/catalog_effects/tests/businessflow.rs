@@ -621,6 +621,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
+    // Rename preserves bytes but changes the physical ctime witness. Capture
+    // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
+    // PG must match the same observation, including all proof fields.
+    let expected =
+        crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
+            .unwrap();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
