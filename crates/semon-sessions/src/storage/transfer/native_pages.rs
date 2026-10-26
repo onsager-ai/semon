@@ -68,7 +68,7 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             if header.version != 1
                 || header.parser_version != source.parser_version
                 || header.ledger != source.receipt
-                || header.consumed_offset.is_none()
+                || header.consumed_offset != Some(source.checkpoint)
             {
                 return Err(bad());
             }
