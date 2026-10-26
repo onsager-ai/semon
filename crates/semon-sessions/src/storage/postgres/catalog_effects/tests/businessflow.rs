@@ -69,7 +69,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"id":"start","type":"session.start","timestamp":"2026-10-01T00:00:00Z","data":{"version":1,"copilotVersion":"1.0.91","sessionId":copilot_id,"context":{"cwd":"/synthetic/project"}}}),
         serde_json::json!({"id":"user","type":"user.message","timestamp":"2026-10-01T00:00:01Z","data":{"content":"sanitized copilot input"}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
-    use std::io::Write as _;
     writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"related-spawn","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"}})).unwrap();
     writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
@@ -83,6 +82,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized related codex input"}]}}),
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized related codex reply"}]}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    let claude_parent = options.claude_home.join("projects/project/one.jsonl");
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-agent-call","parentUuid":"a1","timestamp":"2026-10-01T00:00:01Z","message":{"id":"related-agent-call","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"claude-related-spawn","name":"Agent","input":{"description":"sanitized agent task","prompt":"sanitized agent prompt"}}]}})).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"related-agent-result","parentUuid":"related-agent-call","timestamp":"2026-10-01T00:00:02Z","toolUseResult":{"status":"async_launched","agentId":"related154"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude-related-spawn","content":"launched","is_error":false}]}})).unwrap();
+    let claude_agent=options.claude_home.join("projects/project/one/subagents/agent-related154.jsonl");
+    fs::create_dir_all(claude_agent.parent().unwrap()).unwrap();
+    fs::write(&claude_agent,[
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"related-user","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized agent prompt"}}),
+        serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-answer","parentUuid":"related-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
+    ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
+    fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");

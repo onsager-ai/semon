@@ -392,7 +392,7 @@ pub(super) fn select(
     tx: &mut PgTxn<'_>,
     epoch: i64,
     selector: &crate::model::relation_stage::Selector,
-) -> Result<crate::model::relation_stage::Selection, StorageError> {
+) -> Result<Option<crate::model::relation_stage::Selection>, StorageError> {
     use crate::model::relation_stage::{self, Selection, SelectorEndpointRow, SelectorLookup};
     struct Lookup {
         context: Context,
@@ -518,12 +518,16 @@ pub(super) fn select(
     let ns=tx.namespace.as_str().as_bytes();
     let mut hints=Vec::new();
     if let Some(generation)=generation {
-        let values=tx.driver.query("SELECT d.session_key,CASE WHEN octet_length(d.metadata)<=1048576 THEN d.metadata END FROM semon_pg_native_descriptions d JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=d.namespace_digest AND r.namespace=d.namespace AND r.session_key=d.session_key WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND r.generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+        let values=tx.driver.query("SELECT d.session_key,CASE WHEN octet_length(d.metadata)<=1048576 THEN d.metadata END,CASE WHEN octet_length(r.metadata)<=1048576 THEN r.metadata END FROM semon_pg_native_descriptions d JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=d.namespace_digest AND r.namespace=d.namespace AND r.session_key=d.session_key WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND r.generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
         if values.len()>64 { return Err(StorageError::Busy); }
         let mut bytes=0usize;
         for value in values {
             let key=String::from_utf8(value.get(0)).map_err(|_|StorageError::ScopeChanged)?;
             if context.endpoints.contains_key(&key) { continue; }
+            let owner:Vec<u8>=value.get::<_,Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
+            bytes=bytes.saturating_add(owner.len());if bytes>MAX {return Err(StorageError::Busy);}
+            let owner:crate::model::summary::CatalogRow=serde_json::from_slice(&owner).map_err(|_|StorageError::ScopeChanged)?;
+            if owner.harness!="claude" { continue; }
             let raw:Vec<u8>=value.get::<_,Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
             bytes=bytes.saturating_add(raw.len());if bytes>MAX { return Err(StorageError::Busy); }
             let description:serde_json::Value=serde_json::from_slice(&raw).map_err(|_|StorageError::ScopeChanged)?;
@@ -536,7 +540,10 @@ pub(super) fn select(
         let mut stage=load(tx,true)?.ok_or(StorageError::Conflict)?;
         if stage.epoch!=epoch { return Err(StorageError::Conflict); }
         stage.context.replay_owners.extend(lookup.replay);
+        stage.context.replay_owners.sort();stage.context.replay_owners.dedup();
+        if stage.context.replay_owners.len()>64 { return Err(StorageError::Busy); }
         stage.phase=Phase::Indexing;stage.model=None;save(tx,&stage,false)?;
+        return Ok(None);
     }
-    result
+    result.map(Some)
 }

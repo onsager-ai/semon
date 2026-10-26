@@ -180,16 +180,17 @@ impl IndexStore for NativeIndex {
                                 && endpoint.row.native_ids.contains(native)
                         })
                         .collect::<Vec<_>>();
-                    Ok(Selection {
+                    Ok(Some(Selection {
                         count: 1,
                         key: Some(super::semantic_stage::native_key(
                             tx, epoch, harness, native,
                         )?),
                         endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()),
                         ..Default::default()
-                    })
+                    }))
                 },
             )
+            .and_then(|selected| selected.ok_or(StorageError::Conflict))
             .map_err(err)
     }
     fn semantic_replay_page(
