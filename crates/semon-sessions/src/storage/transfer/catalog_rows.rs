@@ -32,6 +32,9 @@ pub enum CatalogRowKind {
     TraceBookmark,
     SearchDocument,
     SearchCount,
+    Dependency,
+    Description,
+    HistoryProgress,
 }
 
 impl CatalogRowKind {
@@ -49,9 +52,14 @@ impl CatalogRowKind {
         Self::TraceBookmark,
         Self::SearchDocument,
         Self::SearchCount,
+        Self::Dependency,
+        Self::Description,
+        Self::HistoryProgress,
     ];
     pub(crate) fn category(self) -> Category {
         match self {
+            Self::Dependency | Self::Description => Category::Metadata,
+            Self::HistoryProgress => Category::CatalogHistory,
             Self::Current => Category::CatalogCurrent,
             Self::History | Self::HistoryOriginal => Category::CatalogHistory,
             Self::Recipe | Self::HistoryRecipe => Category::Recipes,
@@ -68,7 +76,7 @@ impl CatalogRowKind {
             | Self::TraceEdge
             | Self::SearchDocument
             | Self::SearchCount => &[0, 1],
-            Self::TraceBookmark => &[0, 1, 2],
+            Self::TraceBookmark | Self::Dependency => &[0, 1, 2],
             _ => &[0],
         }
     }
@@ -141,6 +149,16 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
         }
         SearchDocument => {
             let _: (String, String, String, bool) = serde_json::from_value(v).map_err(bad)?;
+        }
+        Dependency => {
+            let _: (String, String, String) = serde_json::from_value(v).map_err(bad)?;
+        }
+        Description => {
+            let _: (String, u32, String, String) = serde_json::from_value(v).map_err(bad)?;
+        }
+        HistoryProgress => {
+            let (_, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
+            let _: serde_json::Value = serde_json::from_str(&metadata).map_err(bad)?;
         }
         SearchCount => {
             let _: (String, String, u64) = serde_json::from_value(v).map_err(bad)?;
