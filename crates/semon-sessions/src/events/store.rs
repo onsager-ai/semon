@@ -485,84 +485,6 @@ fn catalog_schema(composite: bool) -> &'static str {
     }
 }
 
-const LEGACY_EVENT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS files (
-    file_id INTEGER PRIMARY KEY,
-    path TEXT NOT NULL UNIQUE,
-    dev INTEGER NOT NULL,
-    ino INTEGER NOT NULL,
-    size INTEGER NOT NULL,
-    mtime_ns BLOB NOT NULL,
-    ctime_ns BLOB,
-    resume_at INTEGER NOT NULL,
-    head_sha256 BLOB NOT NULL,
-    tail_sha256 BLOB NOT NULL,
-    entrypoint TEXT,
-    title TEXT,
-    agent_name TEXT,
-    last_model TEXT,
-    failed INTEGER NOT NULL,
-    first_ms INTEGER,
-    last_ms INTEGER,
-    cwd TEXT,
-    branch TEXT,
-    pending TEXT NOT NULL,
-    tool_ids TEXT NOT NULL,
-    yields TEXT NOT NULL,
-    busy TEXT NOT NULL,
-    links TEXT NOT NULL,
-    codex_tokens TEXT NOT NULL,
-    codex_tokens_by_model TEXT NOT NULL,
-    rate_limits TEXT,
-    codex_native_usage TEXT,
-    codex_pricing_fingerprint TEXT,
-    copilot TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS events (
-    file_id INTEGER NOT NULL,
-    extra INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    k TEXT NOT NULL,
-    o INTEGER NOT NULL,
-    b INTEGER NOT NULL,
-    t INTEGER,
-    id TEXT,
-    n TEXT,
-    code_mode INTEGER NOT NULL,
-    code_mode_open INTEGER NOT NULL,
-    parent INTEGER,
-    script INTEGER NOT NULL,
-    y TEXT,
-    poll INTEGER,
-    reply INTEGER NOT NULL,
-    reply_o INTEGER,
-    reply_b INTEGER,
-    reply_t INTEGER,
-    reply_e INTEGER,
-    reply_f INTEGER,
-    reply_m TEXT,
-    item INTEGER,
-    peer INTEGER NOT NULL,
-    peer_sock TEXT,
-    peer_pid INTEGER,
-    peer_start TEXT,
-    u TEXT,
-    PRIMARY KEY (file_id, extra, seq)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS signals (
-    file_id INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    k TEXT NOT NULL,
-    o INTEGER NOT NULL,
-    t INTEGER,
-    at INTEGER NOT NULL,
-    n TEXT,
-    v INTEGER,
-    PRIMARY KEY (file_id, seq)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS files_cwd ON files(cwd,path);
-";
-
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
@@ -806,88 +728,46 @@ fn copied_usage_sql<'a>(
     Ok(if composite { scoped } else { legacy })
 }
 
-// A writer page has already passed its owner, namespace, schema and epoch
-// admission before this is constructed.  Keep the physical-family choices
-// borrowed by that owner transaction: they are never connection, thread or
-// process caches, and a fresh transaction must qualify them again.
+// The current schema is qualified before constructing the transaction writer.
+// Retain its schema cookie so DDL inside this transaction invalidates the writer.
 struct WriterLayout<'tx, 'connection> {
     transaction: &'tx Transaction<'connection>,
-    core_composite: bool,
-    meta_composite: bool,
-    copied_usage_composite: bool,
-    support_composite: bool,
     schema_version: i64,
 }
 
 impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     fn new(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
-        // Each selector retains its authored validation; use distinct sentinels
-        // only to retain the selected physical statement for this transaction.
-        let core_composite = configured::sql(transaction, "singleton", "composite")? == "composite";
-        let meta_composite =
-            configured::metadata_sql(transaction, "singleton", "composite")? == "composite";
-        let copied_usage_composite =
-            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
-        let support_composite =
-            semantic_stage::support_sql(transaction, "singleton", "composite")? == "composite";
+        configured::sql(transaction, "", "")?;
+        configured::metadata_sql(transaction, "", "")?;
+        copied_usage_sql(transaction, "", "")?;
+        semantic_stage::support_sql(transaction, "", "")?;
         let schema_version =
             transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
             transaction,
-            core_composite,
-            meta_composite,
-            copied_usage_composite,
-            support_composite,
             schema_version,
         })
     }
 
     #[cfg(test)]
     fn copied_usage_only(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
-        let copied_usage_composite =
-            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
-        let schema_version =
-            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        Ok(Self {
-            transaction,
-            core_composite: false,
-            meta_composite: false,
-            copied_usage_composite,
-            support_composite: false,
-            schema_version,
-        })
+        Self::new(transaction)
     }
 
-    fn core<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.core_composite {
-            composite
-        } else {
-            singleton
-        }
+    fn core<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
+        current
     }
 
-    fn meta<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.meta_composite {
-            composite
-        } else {
-            singleton
-        }
+    fn meta<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
+        current
     }
 
-    fn copied_usage<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.copied_usage_composite {
-            composite
-        } else {
-            singleton
-        }
+    fn copied_usage<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
+        current
     }
 
-    fn support<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
-        if self.support_composite {
-            composite
-        } else {
-            singleton
-        }
+    fn support<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
+        current
     }
 
     fn ensure_current(&self) -> rusqlite::Result<()> {
