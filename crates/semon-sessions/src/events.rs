@@ -10527,9 +10527,11 @@ mod tests {
             })
             .collect();
         drop(EventCache::open(&v1, &crate::Options::default().source).unwrap());
+        let first_commit = Arc::new(std::sync::Barrier::new(2));
         let writers: Vec<_> = (0..2)
             .map(|writer| {
                 let (v1, logs) = (v1.clone(), logs.clone());
+                let first_commit = Arc::clone(&first_commit);
                 std::thread::spawn(move || {
                     let mut cache =
                         EventCache::open(&v1, &crate::Options::default().source).unwrap();
@@ -10542,19 +10544,36 @@ mod tests {
                             &[said(&format!("m-{id}"), &["line"]), claude_tool(&id)],
                         );
                         append_lines(&logs[writer], &[claude_result(&id)]);
+                        if round == 0 {
+                            // Both producers have appended. Keep the peer in
+                            // this phase until one new source is durably indexed,
+                            // so progress cannot depend on scheduling luck or
+                            // the final single-threaded catch-up.
+                            first_commit.wait();
+                            if writer == 0 {
+                                let index =
+                                    scan_file(&logs[0], "claude", &mut cache, &mut false).unwrap();
+                                assert!(!index.events.is_empty());
+                                assert_eq!(stored(&v1, &logs[0]), cold(&logs[0]));
+                                scans += 1;
+                            }
+                            first_commit.wait();
+                        }
                         for log in &logs {
                             if let Err(error) = scan_file(log, "claude", &mut cache, &mut false) {
-                                // The configured writer refuses after its bounded
-                                // 100ms wait. Ordinary producers propagate Busy;
-                                // the next existing scan resumes committed rows.
-                                // All other errors remain failures, and the final
-                                // durable oracle below must still match exactly.
-                                assert_eq!(
-                                    error
-                                        .get_ref()
-                                        .and_then(|error| error
+                                // Busy exhausts the bounded writer wait; Conflict
+                                // exhausts the three CAS attempts. The ordinary
+                                // viewer records either error and schedules its
+                                // next check (MachineView::tick/checked).
+                                assert!(
+                                    matches!(
+                                        error.get_ref().and_then(|error| error
                                             .downcast_ref::<crate::storage::StorageError>()),
-                                    Some(&crate::storage::StorageError::Busy),
+                                        Some(
+                                            crate::storage::StorageError::Busy
+                                                | crate::storage::StorageError::Conflict
+                                        )
+                                    ),
                                     "{error:?}: {:?}",
                                     ledger_trace()
                                 );
