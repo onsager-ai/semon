@@ -627,8 +627,16 @@ fn copied_usage_sql<'a>(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let expected = vec![
-            ("files".to_owned(), "namespace".to_owned(), "namespace".to_owned()),
-            ("files".to_owned(), "file_id".to_owned(), "file_id".to_owned()),
+            (
+                "files".to_owned(),
+                "namespace".to_owned(),
+                "namespace".to_owned(),
+            ),
+            (
+                "files".to_owned(),
+                "file_id".to_owned(),
+                "file_id".to_owned(),
+            ),
         ];
         if foreign_keys != expected {
             return Err(rusqlite::Error::InvalidQuery);
@@ -899,15 +907,10 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     if !path.exists() {
         return Ok(false);
     }
-    let binding =
-        crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
-    let connection = binding.connection().map_err(io::Error::other)?;
-    let tx = connection
-        .unchecked_transaction()
-        .map_err(io::Error::other)?;
-    binding
-        .validate(&tx, &binding.config().namespace)
-        .map_err(io::Error::other)?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
+    let tx = db.unchecked_transaction().map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     let pending: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND ((key='catalog_backfill_state' AND value IN ('discovering','draining')) OR (key='catalog_semantic_gc' AND value='1'))) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace())",
         [], |row| row.get(0),

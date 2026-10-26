@@ -7273,17 +7273,8 @@ mod tests {
             // not native transcript content. Derive that bit independently from
             // the qualified baseline; all native slots remain reference values.
             for projection in &mut expected.transcripts {
-                let row = expected
-                    .rows
-                    .iter()
-                    .find(|row| row.key == projection.key)
-                    .unwrap();
-                projection.repair = cache
-                    .session_slots(
-                        row,
-                        prepared.base_generation.as_deref(),
-                        projection.slots.len(),
-                    )
+                projection.repair = expected.rows.iter().find(|row| row.key == projection.key)
+                    .and_then(|row| cache.session_slots(row, prepared.base_generation.as_deref(), projection.slots.len()))
                     .is_none();
             }
             assert_eq!(

@@ -1832,7 +1832,7 @@ mod tests {
             for ddl in native_usage::schema(true) {
                 db.execute_batch(ddl).unwrap();
             }
-            db.execute_batch(copied_usage_schema(composite)).unwrap();
+            db.execute_batch(copied_usage_schema()).unwrap();
             db.execute_batch(tree_state::schema(composite)).unwrap();
             bind_fixture(&db, "a");
             assert_eq!(
@@ -1845,7 +1845,7 @@ mod tests {
                     "DROP TABLE usage_identity; DROP TABLE usage; DROP TABLE codex_usage;",
                 )
                 .unwrap();
-                tx.execute_batch(copied_usage_schema(!composite)).unwrap();
+                tx.execute_batch(copied_usage_schema()).unwrap();
                 assert_eq!(
                     copied_usage_sql(&tx, "legacy", "scoped").unwrap(),
                     if composite { "legacy" } else { "scoped" }
@@ -1858,7 +1858,7 @@ mod tests {
             }
             // Invalidate an already cached decision with a partial family DDL.
             db.execute_batch("DROP TABLE codex_usage;").unwrap();
-            db.execute_batch(copied_usage_schema(!composite)).unwrap();
+            db.execute_batch(copied_usage_schema()).unwrap();
             let tx = db.transaction().unwrap();
             let before: i64 = tx
                 .query_row("SELECT total_changes()", [], |r| r.get(0))
