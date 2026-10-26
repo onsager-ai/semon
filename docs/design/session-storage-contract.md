@@ -14,6 +14,11 @@ This work grants no MAIN, deployment, publication or real-data migration authori
 The WIP PG captured-body port is `StoreConfig::call_captured_query_at`.
 It names one acknowledged immutable publication and requires the request's
 `CatalogReaderFactory`; generation addresses never grant Raw access. The port
+also requires the external Machine key and the request's `SelectedReadControl`.
+It enters that control before metadata/binding SQL and retains it through the
+namespace/canonical-key factory, leased proof rendering and final check. Machine
+labels use the external key independently of namespace storage authorization.
+The port
 uses ordinary Query envelopes and shared body/field rendering with leased Native
 proofs. It accepts a complete (`all=true`) capture and refuses recent-window
 Options. Live Query continues to reject expired runtime context, including PID
