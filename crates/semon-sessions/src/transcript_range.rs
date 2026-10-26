@@ -1217,7 +1217,6 @@ impl SessionSourceReader for Local<'_> {
             if matches!(
                 stage,
                 FailureStage::ProofOpenDb
-                    | FailureStage::HeaderStore
                     | FailureStage::HeaderMissing
                     | FailureStage::HeaderVersion
                     | FailureStage::HeaderParser
@@ -1236,7 +1235,6 @@ impl SessionSourceReader for Local<'_> {
             if !matches!(
                 stage,
                 FailureStage::ProofOpenDb
-                    | FailureStage::HeaderStore
                     | FailureStage::HeaderMissing
                     | FailureStage::HeaderVersion
                     | FailureStage::HeaderParser
