@@ -65,7 +65,7 @@ const SOURCED: &[(&str, &str)] = &[
 /// owner reading a claimed Source is connected to this change: the semantic
 /// producer must republish it, so the request refuses instead of keeping a
 /// stale owner or silently dropping it.
-pub(super) fn unmentioned(
+pub(in crate::storage::postgres) fn unmentioned(
     tx: &mut PgTxn<'_>,
     generation: &str,
     previous: &str,

@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use tokio_postgres::types::ToSql;
 
 pub(super) mod admission;
-mod carry;
+pub(super) mod carry;
 pub(super) mod publication;
 pub(super) mod selected_reader;
 pub(super) mod snapshot;
