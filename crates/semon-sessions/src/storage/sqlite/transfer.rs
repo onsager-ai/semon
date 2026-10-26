@@ -37,7 +37,8 @@ fn transaction<T>(
     let deadline = Instant::now() + Duration::from_secs(2);
     let owner = crate::events::store::configured::NativeOwnership::restore(config)?;
     let mut db = super::source_journal::SourceJournal::owned(owner.clone()).connection()?;
-    db.progress_handler(1000, Some(move || Instant::now() >= deadline)).map_err(failed)?;
+    db.progress_handler(1000, Some(move || Instant::now() >= deadline))
+        .map_err(failed)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -144,7 +145,7 @@ pub(crate) fn materialize_reported(
         if materialization.replayed {
             return Ok(materialization.checkpoint);
         }
-        let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp')", [tx.1], |row| row.get(0)).map_err(failed)?;
+        let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp') OR EXISTS(SELECT 1 FROM files WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_history_catalog WHERE namespace=?1)", [tx.1], |row| row.get(0)).map_err(failed)?;
         if occupied {
             return Err(StorageError::Conflict);
         }
@@ -169,6 +170,40 @@ pub(crate) fn materialize_reported(
 mod tests {
     use super::*;
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
+
+    #[test]
+    fn current_transfer225_reported_source_limits_refuse_without_snapshot_effects() {
+        use transfer::reported::tests::{root, sqlite, observe, read};
+        let root = root();
+        let config = sqlite(&root, "limits");
+        observe(&config, &root.join(".claude.json"), 100, 101);
+        let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+        let db = super::super::source_journal::SourceJournal::owned(owner).connection().unwrap();
+        let mut run = read(&config).pop().unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let mut put = db.prepare(crate::events::store::PUT_RUN_SCOPED).unwrap();
+            for start in 0..64 {
+                run.last_start_time = start;
+                crate::events::store::put_run(&mut put, &run).unwrap();
+            }
+        }
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(read(&config).len(), 65);
+        let inbox = config.transfer_inbox();
+        assert!(matches!(inbox.snapshot_reported_facts(&[8;32]), Err(StorageError::Busy)));
+        let snapshots: i64 = db.query_row("SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_transfer_v1:*'", [config.namespace.as_str()], |row| row.get(0)).unwrap();
+        assert_eq!(snapshots, 0, "row-limit refusal must not persist a partial snapshot");
+        db.execute("DELETE FROM reported_runs WHERE namespace=?1 AND start=100", [config.namespace.as_str()]).unwrap();
+        let manifest = inbox.snapshot_reported_facts(&[8;32]).unwrap();
+        assert_eq!(manifest.categories.iter().find(|c|c.category==transfer::Category::ReportedFacts).unwrap().rows, 64);
+        let saved = inbox.checkpoint(&manifest).unwrap();
+        db.execute("UPDATE reported_runs SET model_usage=?2 WHERE namespace=?1 AND start=0", params![config.namespace.as_str(), "x".repeat(transfer::MAX_PAGE_BYTES)]).unwrap();
+        assert!(matches!(inbox.snapshot_reported_facts(&[9;32]), Err(StorageError::Busy)));
+        assert_eq!(inbox.checkpoint(&manifest).unwrap(), saved, "oversize later source must not damage the earlier immutable capture");
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn current_transfer225_sqlite_current_inventory_and_atomic_checkpoint_failure() {
