@@ -123,10 +123,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     }
     // Drive the SAME ordinary queued producer against durable PG staging.
-    let paths = inputs.iter().map(|input| input.full_path(&options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(&options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     let stage_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
-    assert!(pg.begin_semantic_stage(&(0..65).map(|i| format!("oversize-{i}")).collect::<Vec<_>>(), &stage_runtime).is_err());
-    assert_eq!(pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(), crate::events::Outcome::Written);
+    assert!(
+        pg.begin_semantic_stage(
+            &(0..65).map(|i| format!("oversize-{i}")).collect::<Vec<_>>(),
+            &stage_runtime
+        )
+        .is_err()
+    );
+    assert_eq!(
+        pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
     let mut stages = Vec::new();
     let (published, semantic_batch, semantic_model) = loop {
         let batch = pg.semantic_batch(64).unwrap().unwrap();
@@ -134,25 +146,49 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         // Reopen mid-stage: resume must preserve the exact phase and epoch.
         if batch.phase == crate::model::relation_stage::Phase::Identity {
             drop(pg);
-            pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
-            assert_eq!(pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(), crate::events::Outcome::Written);
+            pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
+                .unwrap();
+            assert_eq!(
+                pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(),
+                crate::events::Outcome::Written
+            );
             let resumed = pg.semantic_batch(64).unwrap().unwrap();
             assert_eq!(resumed.epoch, batch.epoch);
             assert_eq!(resumed.phase, batch.phase);
         }
-        let model = pg.prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000).unwrap();
+        let model = pg
+            .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000)
+            .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let mut mismatched = batch.clone();
-            mismatched.context.companions.push("altered full context".into());
-            assert!(pg.publish_semantic_catalog(&mismatched, model.prepared()).is_err());
-            let ack = pg.publish_semantic_catalog(&batch, model.prepared()).unwrap();
-            assert_eq!(pg.publish_semantic_catalog(&batch, model.prepared()).unwrap(), ack);
+            mismatched
+                .context
+                .companions
+                .push("altered full context".into());
+            assert!(
+                pg.publish_semantic_catalog(&mismatched, model.prepared())
+                    .is_err()
+            );
+            let ack = pg
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
+            assert_eq!(
+                pg.publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap(),
+                ack
+            );
             break (ack, batch, model);
         }
     };
     assert_eq!(stages.len(), 4);
-    assert_eq!(producer_rows(&semantic_model.prepared().rows), producer_rows(&oracle.rows));
-    assert_eq!(pg.finish_semantic_stage(semantic_batch.epoch).unwrap(), crate::events::Outcome::Written);
+    assert_eq!(
+        producer_rows(&semantic_model.prepared().rows),
+        producer_rows(&oracle.rows)
+    );
+    assert_eq!(
+        pg.finish_semantic_stage(semantic_batch.epoch).unwrap(),
+        crate::events::Outcome::Written
+    );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
     // A lost response retries the identical full request, even though its
@@ -196,21 +232,52 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
     let query_store = super::super::snapshot::query::QueryCatalog {
-        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
-        generation: generation.clone(), options: options.clone(),
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: options.clone(),
     };
-    let mut query = crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())])));
-    let query_list = query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &query_store).unwrap();
-    assert_eq!(query_list["total"].as_u64(), Some(prepared.rows.len() as u64));
-    super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {
-        for row in &prepared.rows {
-            let observation = snapshot.transcript_observation(&row.key, &generation, false).map_err(|_| StorageError::Unavailable)?.unwrap();
-            assert!(observation["total"].as_u64().is_some());
-            let details = snapshot.selected_details(&row.key, &row.sources, &mut |_| serde_json::json!({"observation":"unavailable"})).map_err(|_| StorageError::Unavailable)?;
-            assert!(details.is_some());
-        }
-        Ok(())
-    }).unwrap();
+    let mut query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
+    ));
+    let query_list = query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812802000,
+            &query_store,
+        )
+        .unwrap();
+    assert_eq!(
+        query_list["total"].as_u64(),
+        Some(prepared.rows.len() as u64)
+    );
+    super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            for row in &prepared.rows {
+                let observation = snapshot
+                    .transcript_observation(&row.key, &generation, false)
+                    .map_err(|_| StorageError::Unavailable)?
+                    .unwrap();
+                assert!(observation["total"].as_u64().is_some());
+                let details = snapshot
+                    .selected_details(
+                        &row.key,
+                        &row.sources,
+                        &mut |_| serde_json::json!({"observation":"unavailable"}),
+                    )
+                    .map_err(|_| StorageError::Unavailable)?;
+                assert!(details.is_some());
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
     // Only the request-owned host can grant fixture bytes. The PG reader adds
     // persisted native proof verification to the ordinary scalar-field parser.
     struct Host {
