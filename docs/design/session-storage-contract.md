@@ -226,6 +226,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `storage/postgres/semantic_events.rs` | direct | Private PG event projection reuses the ordinary qualifier through its existing rusqlite result type; error-type decoupling remains required. It reads PG native rows and does not open SQLite. Full backend qualification remains incomplete. |
 | `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
+| `storage/transfer/reported.rs` | direct | Test-only admitted SQLite context for authoritative Facts round trips; production SQL stays in adapters. Full transfer qualification remains incomplete. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |

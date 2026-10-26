@@ -108,6 +108,7 @@
     "storage/postgres/semantic_events.rs",
     "storage/postgres/tree_checkpoint/tests.rs",
     "storage/postgres/tree_writer/tests.rs",
+    "storage/transfer/reported.rs",
     "test_hooks.rs",
     "transcript_range.rs",
     "viewer.rs"
