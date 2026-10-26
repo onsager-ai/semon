@@ -35,6 +35,12 @@ pub enum CatalogRowKind {
     Dependency,
     Description,
     HistoryProgress,
+    PublicationReceipt,
+    PresentationRoot,
+    ProofGeneration,
+    Presentation,
+    ProofSource,
+    ProofRef,
 }
 
 impl CatalogRowKind {
@@ -55,9 +61,19 @@ impl CatalogRowKind {
         Self::Dependency,
         Self::Description,
         Self::HistoryProgress,
+        Self::PublicationReceipt,
+        Self::PresentationRoot,
+        Self::ProofGeneration,
+        Self::Presentation,
+        Self::ProofSource,
+        Self::ProofRef,
     ];
     pub(crate) fn category(self) -> Category {
         match self {
+            Self::PublicationReceipt => Category::Operations,
+            Self::PresentationRoot | Self::ProofRef => Category::ProofReferences,
+            Self::ProofGeneration | Self::ProofSource => Category::Proofs,
+            Self::Presentation => Category::Metadata,
             Self::Dependency | Self::Description => Category::Metadata,
             Self::HistoryProgress => Category::CatalogHistory,
             Self::Current => Category::CatalogCurrent,
@@ -70,6 +86,10 @@ impl CatalogRowKind {
     }
     pub(crate) fn keys(self) -> &'static [usize] {
         match self {
+            Self::ProofGeneration | Self::Presentation => &[0, 1],
+            Self::ProofSource | Self::ProofRef => &[0, 1, 2],
+            Self::PublicationReceipt => &[1],
+            Self::PresentationRoot => &[3],
             Self::Slot
             | Self::HistorySlot
             | Self::TraceTurn
@@ -79,6 +99,19 @@ impl CatalogRowKind {
             Self::TraceBookmark | Self::Dependency => &[0, 1, 2],
             _ => &[0],
         }
+    }
+
+    pub(crate) fn namespace_owned(self) -> bool {
+        matches!(
+            self,
+            Self::Description
+                | Self::PublicationReceipt
+                | Self::PresentationRoot
+                | Self::ProofGeneration
+                | Self::Presentation
+                | Self::ProofSource
+                | Self::ProofRef
+        )
     }
 }
 
@@ -98,6 +131,71 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
     let bad = |_| StorageError::ScopeChanged;
     use CatalogRowKind::*;
     match kind {
+        PublicationReceipt => {
+            let (publication, epoch, admission, base, revision, proof, claims, metadata): (
+                String,
+                i64,
+                i64,
+                Option<String>,
+                i64,
+                String,
+                String,
+                String,
+            ) = serde_json::from_value(v).map_err(bad)?;
+            if epoch <= 0
+                || admission <= 0
+                || revision < 0
+                || !hex_digest(&publication)
+                || !hex_digest(&proof)
+                || base.as_deref().is_some_and(|s| !hex_digest(s))
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            let _: Vec<(String, Option<i64>)> = serde_json::from_str(&claims).map_err(bad)?;
+            let _: Vec<String> = serde_json::from_str(&metadata).map_err(bad)?;
+        }
+        PresentationRoot => {
+            let (publication, base, manifest, digest): (String, String, String, String) =
+                serde_json::from_value(v).map_err(bad)?;
+            if !hex_digest(&publication) || !hex_digest(&base) || manifest.len() > MAX_PAGE_BYTES {
+                return Err(StorageError::ScopeChanged);
+            }
+            super::super::proof_codec::verify_presentation_digest(&base, &manifest, &digest)?;
+        }
+        ProofGeneration => {
+            let (_, _, publication, proof, admission, _, metadata, slots, _): (
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                String,
+                String,
+                String,
+            ) = serde_json::from_value(v).map_err(bad)?;
+            if !hex_digest(&publication) || !hex_digest(&proof) || admission <= 0 {
+                return Err(StorageError::ScopeChanged);
+            }
+            let _: crate::model::summary::CatalogRow =
+                serde_json::from_str(&metadata).map_err(bad)?;
+            let _: Option<Vec<crate::slot_projection::SavedSlot>> =
+                serde_json::from_str(&slots).map_err(bad)?;
+        }
+        Presentation => {
+            let (_, _, metadata): (String, String, String) =
+                serde_json::from_value(v).map_err(bad)?;
+            let _: serde_json::Value = serde_json::from_str(&metadata).map_err(bad)?;
+        }
+        ProofSource => {
+            let _: (String, String, String, String) = serde_json::from_value(v).map_err(bad)?;
+        }
+        ProofRef => {
+            let (_, kind, _): (String, String, String) = serde_json::from_value(v).map_err(bad)?;
+            if !["current", "history"].contains(&kind.as_str()) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
         Current | History => {
             let (key, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
             let row: crate::model::summary::CatalogRow =
@@ -163,6 +261,75 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
         SearchCount => {
             let _: (String, String, u64) = serde_json::from_value(v).map_err(bad)?;
         }
+    }
+    Ok(())
+}
+
+fn hex_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub(crate) fn proof_generation(
+    namespace: &str,
+    values: &[serde_json::Value],
+) -> Result<super::super::proof_codec::GenerationRecord, StorageError> {
+    use super::super::{
+        proof_codec::{self, ExpectedGeneration, GenerationRecord},
+        proof_lifetime::ProofGenerationId,
+    };
+    let (id, session_key, publication, proof, admission, stream, metadata, slots, prefix): (
+        String,
+        String,
+        String,
+        String,
+        u64,
+        String,
+        String,
+        String,
+        String,
+    ) = serde_json::from_value(serde_json::Value::Array(values.to_vec()))
+        .map_err(|_| StorageError::ScopeChanged)?;
+    let id = ProofGenerationId(id);
+    let record = GenerationRecord {
+        namespace: namespace.to_owned(),
+        id: id.clone(),
+        session_key,
+        publication: publication.clone(),
+        proof: proof.clone(),
+        admission,
+        stream: stream.clone(),
+        metadata,
+        slots,
+        prefix: prefix.clone(),
+    };
+    let (record, _) = proof_codec::decode_generation(
+        record,
+        ExpectedGeneration {
+            namespace,
+            id: &id,
+            admission,
+            stream: &stream,
+            proof: &proof,
+            publication: &publication,
+            prefix: &prefix,
+        },
+    )?;
+    Ok(record)
+}
+
+pub(crate) fn verify_source_edge(
+    metadata: &str,
+    path: &str,
+    ledger: &str,
+) -> Result<(), StorageError> {
+    let row: crate::model::summary::CatalogRow =
+        serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+    if !row.sources.iter().any(|source| {
+        source.path.to_str() == Some(path)
+            && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source))
+                == ledger
+    }) {
+        return Err(StorageError::ScopeChanged);
     }
     Ok(())
 }
