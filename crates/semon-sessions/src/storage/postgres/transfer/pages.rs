@@ -7,6 +7,7 @@ fn kind(kind:NativePageKind)->i16 {match kind {NativePageKind::Chunks=>0,NativeP
 
 pub(super) fn capture(tx:&mut Inbox<'_,'_>,state:&mut CaptureState)->Result<transfer::CaptureProgress,StorageError> {
     let ns=tx.0.namespace.as_str().as_bytes().to_vec();
+    if state.native_family>=8 { return super::rows::capture(tx,state); }
     let path=state.native_path.clone().ok_or(StorageError::ScopeChanged)?;
     if state.native_family==3 {
         let row=tx.0.driver.query_one("SELECT s.source_id,s.receipt,s.checkpoint::text,s.parser_version,s.usage_ready,g.generation,CASE WHEN octet_length(g.chunks_header)<=1048576 THEN g.chunks_header END,CASE WHEN octet_length(g.launch_header)<=1048576 THEN g.launch_header END,g.launch_header IS NULL FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) JOIN semon_pg_native_page_current p ON p.namespace=c.namespace AND p.namespace_digest=c.namespace_digest AND p.source_path=c.source_path JOIN semon_pg_native_page_generations g ON g.namespace=p.namespace AND g.namespace_digest=p.namespace_digest AND g.generation=p.generation AND g.source_id=s.source_id WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND c.source_path=$2",&[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
@@ -33,7 +34,7 @@ pub(super) fn capture(tx:&mut Inbox<'_,'_>,state:&mut CaptureState)->Result<tran
             let key=format!("{prefix}{path}");if state.native_key.as_ref().is_some_and(|old|key<=*old){continue;}
             if let Some(value)=tx.get(&key,transfer::MAX_PAGE_BYTES)? {records.push(TransferRecord::NativeMetadata{path:path.clone(),key,value:String::from_utf8(value).map_err(|_|StorageError::ScopeChanged)?});}
         }
-        if records.is_empty(){state.native_family=0;state.native_key=None;}else{native_pages::append(tx,state,Category::NativeHeaders,records)?;}
+        if records.is_empty(){state.native_family=8;state.native_key=None;}else{native_pages::append(tx,state,Category::NativeHeaders,records)?;}
     }
     transfer::reported::save_capture(tx,state)?;Ok(state.progress())
 }

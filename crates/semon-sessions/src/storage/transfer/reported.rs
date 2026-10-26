@@ -274,6 +274,7 @@ pub(crate) fn prepare_apply(
                             | Category::PageGenerations
                             | Category::PageBlobs
                             | Category::NativeHeaders
+                            | Category::Usage
                     ))
         })
     {
@@ -361,6 +362,7 @@ pub(crate) fn prepare_apply(
                 crate::events::reported_rows::decode_stamp(value.as_bytes())
                     .map_err(|_| StorageError::ScopeChanged)?;
             }
+            TransferRecord::NativeRow { .. } => native_rows::validate(record)?,
             TransferRecord::NativeSource(_) | TransferRecord::NativePage { .. } | TransferRecord::NativeMetadata { .. } => native_pages::validate(record)?,
             TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
                 record.validate_native()?
