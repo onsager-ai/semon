@@ -958,6 +958,8 @@ const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, 
      api_duration, tool_duration, lines_added, lines_removed, model_usage, capture_at) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
+const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
+
 /// The SQLite [`IndexStore`]: one connection, used by one
 /// [`super::EventCache`].
 struct SqliteStore {
@@ -2148,9 +2150,7 @@ pub(super) fn read_selected(
         }
         loaded.files.push((path, ledger, index));
     }
-    let mut runs = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
-    ))?;
+    let mut runs = connection.prepare(&reported_select_sql(connection, true)?)?;
     for id in native_ids {
         let mut rows = runs.query([id])?;
         while let Some(row) = rows.next()? {
@@ -4845,16 +4845,19 @@ impl SqliteStore {
         runs: &[ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> rusqlite::Result<Option<Vec<ReportedRunSnapshot>>> {
+        let rows = super::reported_rows::plan(runs)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !current(&transaction)? {
             return Ok(None);
         }
+        validate_prior_reported(&transaction, &rows)?;
         {
             let mut put = transaction.prepare(PUT_RUN)?;
-            for run in runs {
-                put_run(&mut put, run)?;
+            for row in rows {
+                put_run(&mut put, &row.run)?;
             }
         }
         transaction.execute(
@@ -6788,9 +6791,7 @@ fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
 }
 
 fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id, start"
-    ))?;
+    let mut statement = connection.prepare(&reported_select_sql(connection, false)?)?;
     let mut rows = statement.query([])?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next()? {
@@ -6803,9 +6804,7 @@ fn read_runs_selected(
     connection: &Connection,
     ids: &std::collections::BTreeSet<String>,
 ) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
-    ))?;
+    let mut statement = connection.prepare(&reported_select_sql(connection, true)?)?;
     let mut runs = Vec::new();
     for id in ids {
         let mut rows = statement.query([id])?;
@@ -6816,8 +6815,43 @@ fn read_runs_selected(
     Ok(runs)
 }
 
+fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Result<String> {
+    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    Ok(if selected {
+        format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 ORDER BY start")
+    } else if scope.is_empty() {
+        format!("SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start")
+    } else {
+        format!(
+            "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start"
+        )
+    })
+}
+
+fn validate_prior_reported(
+    connection: &Connection,
+    rows: &[super::reported_rows::ReportedRow],
+) -> rusqlite::Result<()> {
+    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 AND start=?2"
+    ))?;
+    for row in rows {
+        let mut prior =
+            statement.query(params![row.run.last_session_id, row.run.last_start_time])?;
+        if let Some(prior) = prior.next()? {
+            read_run(prior)?;
+        }
+    }
+    let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
+    if let Some(stamp) = stamp {
+        from_json::<ReportedFileStamp>(0, &stamp)?;
+    }
+    Ok(())
+}
+
 fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
-    Ok(ReportedRunSnapshot {
+    let run = ReportedRunSnapshot {
         last_session_id: row.get(0)?,
         last_start_time: row.get(1)?,
         last_cost: row.get(2)?,
@@ -6828,7 +6862,16 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
         last_lines_removed: row.get::<_, Option<i64>>(7)?.map(uint),
         last_model_usage: from_json(8, &row.get::<_, String>(8)?)?,
         capture_at: row.get(9)?,
-    })
+    };
+    super::reported_rows::ReportedRow::new(&run)
+        .map(|row| row.run)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
 }
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -7493,6 +7536,8 @@ fn put_usage(
 }
 
 fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite::Result<()> {
+    let row = super::reported_rows::ReportedRow::new(run)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let ReportedRunSnapshot {
         last_session_id,
         last_start_time,
@@ -7502,7 +7547,7 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
         last_tool_duration,
         last_lines_added,
         last_lines_removed,
-        last_model_usage,
+        last_model_usage: _,
         capture_at,
     } = run;
     statement.execute(params![
@@ -7514,7 +7559,7 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
         last_tool_duration.map(int),
         last_lines_added.map(int),
         last_lines_removed.map(int),
-        json(last_model_usage)?,
+        row.model_usage,
         capture_at,
     ])?;
     Ok(())

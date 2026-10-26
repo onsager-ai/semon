@@ -2,6 +2,9 @@ name: Native storage contract
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    branches:
+      - task/479-pg-facts-20261026
 permissions:
   contents: read
 concurrency:
@@ -61,6 +64,8 @@ jobs:
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         run: |
+          cargo test --locked -p semon-sessions --lib reported_rows -- --nocapture
+          cargo test --locked -p semon-sessions --lib reported_runs -- --nocapture
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::recovery_ -- --nocapture

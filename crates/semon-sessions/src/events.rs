@@ -32,6 +32,7 @@ pub(crate) mod native_aux;
 pub(crate) mod native_commit;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
+pub(crate) mod reported_rows;
 pub(crate) mod store;
 pub(crate) mod tree_rows;
 pub(crate) use store::open_regular;
@@ -1433,6 +1434,7 @@ pub(crate) struct EventCache {
 const REOPEN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReportedFileStamp {
     dev: u64,
     ino: u64,
@@ -1723,9 +1725,11 @@ impl EventCache {
         let source_journal = capability.journal();
         let observation_namespace = source_journal.namespace().to_owned();
         let observation_path = Some(source_journal.database_path().clone());
-        let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
+        let (store, claude_json_stamp) =
+            crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
         let mut cache = Self {
             store: Some(store),
+            claude_json_stamp,
             source_observations: Some(Box::new(source_journal)),
             observation_namespace,
             observation_path,
