@@ -19,6 +19,22 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
+SQLite semantic catch-up accepts a removed path only with its durable ordinary
+producer removal invalidation and no remaining live ledger. An exact index
+retained by the ordinary removal writer remains historical custody; staging
+captures and rechecks its ledger without making it a live source. Index preparation
+observes physical absence under its existing Source locks before recording it;
+the write transaction consumes that observation with the exact claim/ledger CAS.
+Each later reduction and publication rechecks the persisted evidence and exact
+claim/ledger, without filesystem I/O under the SQL write lock.
+This completes the existing staged path and retains outgoing owners through the
+ordinary custody publication; it does not fabricate a Facts admission withdrawal.
+The ordinary SQLite metadata audit records physically absent, ledgered sources
+through the existing removal writer after its physical observations, retaining
+its Source locks and read snapshot through the ledger comparison and write.
+PostgreSQL staging likewise consumes prepared physical absence with durable
+removal evidence; an unledgered missing path alone cannot authorize retirement.
+
 Pending slot outcomes record the absence of a final native result, separately
 from a recorded result with unknown exit status. Recipes never store live flags
 or elapsed runtime. A current read may display an active call only when qualified
