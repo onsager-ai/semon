@@ -432,6 +432,15 @@ fn failed(error: rusqlite::Error) -> StorageError {
         std::panic::Location::caller(),
         error.sqlite_error_code()
     );
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
+        if (message.starts_with("no such ") || message.starts_with("private native"))
+            && message.len() < 160
+            && message.bytes().all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
+        {
+            eprintln!("configured SQL contract failure: {message}");
+        }
+    }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,
@@ -3432,15 +3441,25 @@ mod tests {
         };
         assert!(!super::super::catalog_work_pending(&repair_options).unwrap());
         assert!(super::super::catalog_work_pending(&foreign_options).unwrap());
-        assert!(super::super::catalog_dependents(&repair_options, &[]).unwrap().is_empty());
+        assert!(
+            super::super::catalog_dependents(&repair_options, &[])
+                .unwrap()
+                .is_empty()
+        );
         let ledger = expected.as_ref().unwrap();
-        assert!(super::super::verify_relocation_prefix(
-            &repair_options,
-            &f.raw,
-            &ledger.stat,
-            ledger.offset,
-            &format!("{:x}", sha2::digest::generic_array::GenericArray::from(ledger.prefix)),
-        ).unwrap());
+        assert!(
+            super::super::verify_relocation_prefix(
+                &repair_options,
+                &f.raw,
+                &ledger.stat,
+                ledger.offset,
+                &format!(
+                    "{:x}",
+                    sha2::digest::generic_array::GenericArray::from(ledger.prefix)
+                ),
+            )
+            .unwrap()
+        );
         let write_options = crate::Options {
             codex_home: f.root.clone(),
             ..repair_options.clone()
@@ -3450,10 +3469,21 @@ mod tests {
             path: f.raw.file_name().unwrap().to_str().unwrap().to_owned(),
         };
         let (write_revision, _) = super::super::begin_source_write(&write_options, &input).unwrap();
-        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, Some(write_revision));
+        assert_eq!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            Some(write_revision)
+        );
         super::super::complete_source_write(&write_options, &input, write_revision, None).unwrap();
-        assert!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1.unwrap() > write_revision);
-        assert_eq!(isolated.catalog_claims(&[key.clone()]).unwrap(), foreign_claim);
+        assert!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+                .1
+                .unwrap()
+                > write_revision
+        );
+        assert_eq!(
+            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            foreign_claim
+        );
         restarted
             .store
             .as_mut()
@@ -7233,38 +7263,13 @@ mod tests {
                 serde_json::to_value(&expected.relationships.relations).unwrap(),
                 "every relation field"
             );
-            for (actual, reference) in prepared.transcripts.iter().zip(&expected.transcripts) {
-                let actual =
-                    serde_json::to_value((&actual.key, &actual.slots, actual.repair)).unwrap();
-                let reference =
-                    serde_json::to_value((&reference.key, &reference.slots, reference.repair))
-                        .unwrap();
-                if actual != reference {
-                    // Only structural differences are logged; source bytes and
-                    // native field values remain out of CI diagnostics.
-                    let slots = actual[1].as_array().unwrap();
-                    let expected_slots = reference[1].as_array().unwrap();
-                    eprintln!(
-                        "native oracle transcript: key_equal={} repair_equal={} slots={}/{}",
-                        actual[0] == reference[0],
-                        actual[2] == reference[2],
-                        slots.len(),
-                        expected_slots.len()
-                    );
-                    for (slot, expected_slot) in slots.iter().zip(expected_slots) {
-                        let fields: Vec<_> = slot
-                            .as_object()
-                            .unwrap()
-                            .iter()
-                            .filter_map(|(field, value)| {
-                                (expected_slot.get(field) != Some(value)).then_some(field.as_str())
-                            })
-                            .collect();
-                        if !fields.is_empty() {
-                            eprintln!("native oracle slot differs: fields={fields:?}");
-                        }
-                    }
-                }
+            // The native reference has its own publication history. The repair
+            // bit describes optional reuse in THIS source's Current baseline,
+            // not native transcript content. Derive that bit independently from
+            // the qualified baseline; all native slots remain reference values.
+            for projection in &mut expected.transcripts {
+                let row = expected.rows.iter().find(|row| row.key == projection.key).unwrap();
+                projection.repair = cache.session_slots(row, prepared.base_generation.as_deref(), projection.slots.len()).is_none();
             }
             assert_eq!(
                 serde_json::to_value(

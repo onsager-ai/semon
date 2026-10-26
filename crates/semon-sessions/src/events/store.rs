@@ -967,10 +967,15 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     if !path.exists() {
         return Ok(false);
     }
-    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let binding =
+        crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
     let connection = binding.connection().map_err(io::Error::other)?;
-    let tx = connection.unchecked_transaction().map_err(io::Error::other)?;
-    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(io::Error::other)?;
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(io::Error::other)?;
     let pending: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND ((key='catalog_backfill_state' AND value IN ('discovering','draining')) OR (key='catalog_semantic_gc' AND value='1'))) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace())",
         [], |row| row.get(0),
@@ -1162,10 +1167,13 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let binding =
+        crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
     let db = binding.connection().map_err(io::Error::other)?;
     let tx = db.unchecked_transaction().map_err(io::Error::other)?;
-    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(io::Error::other)?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=tx.prepare("SELECT d.source_path FROM main.catalog_native_dependencies d WHERE d.namespace=semon_namespace() AND harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=d.namespace AND s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
     let expanded = selectors.iter().flat_map(|(harness, id)| {
@@ -1182,9 +1190,7 @@ pub(crate) fn catalog_dependents(
                 "SELECT DISTINCT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=semon_namespace() AND e.extra=0 AND e.k='xsm' AND e.id=?1 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
                 "SELECT DISTINCT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=semon_namespace() AND e.extra=0 AND e.k='tool' AND e.n='SendMessage' AND e.reply=1 AND e.reply_m=?1 AND (e.reply_f & ?2)=0 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
             ] {
-                let mut messages = tx
-                    .prepare_cached(sql)
-                    .map_err(io::Error::other)?;
+                let mut messages = tx.prepare_cached(sql).map_err(io::Error::other)?;
                 messages
                     .raw_bind_parameter(1, &id)
                     .map_err(io::Error::other)?;
@@ -1236,12 +1242,14 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let binding =
+        crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
     let db = binding.connection().map_err(io::Error::other)?;
     let tx = db.unchecked_transaction().map_err(io::Error::other)?;
-    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
-    if let Some((_, ledger)) =
-        ledger_row(&tx, &path.to_string_lossy()).map_err(io::Error::other)?
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(io::Error::other)?;
+    if let Some((_, ledger)) = ledger_row(&tx, &path.to_string_lossy()).map_err(io::Error::other)?
         && ledger.stat == *stat
         && ledger.offset == length
     {
@@ -1285,7 +1293,8 @@ pub(crate) fn complete_relocation(
     )
     .map_err(io::Error::other)?;
     invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
-    invalidate_bound_catalog_source(&tx, &evidence.from_path, "changed").map_err(io::Error::other)?;
+    invalidate_bound_catalog_source(&tx, &evidence.from_path, "changed")
+        .map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
 }
 
@@ -6568,8 +6577,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
-        let mut statement =
-            transaction.prepare_cached(configured::PUT_FILE)?;
+        let mut statement = transaction.prepare_cached(configured::PUT_FILE)?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -6678,8 +6686,7 @@ fn write_file_with_usage_deletes<'tx>(
 
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
-    let mut put = transaction
-        .prepare_cached(COMPOSITE_PUT_CODEX_USAGE)?;
+    let mut put = transaction.prepare_cached(COMPOSITE_PUT_CODEX_USAGE)?;
     row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
@@ -6777,8 +6784,7 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     layout.ensure_current()?;
     let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
-    let mut put =
-        transaction.prepare_cached(COMPOSITE_PUT_USAGE)?;
+    let mut put = transaction.prepare_cached(COMPOSITE_PUT_USAGE)?;
     let mut put_identity = transaction.prepare_cached(
         "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)",
     )?;

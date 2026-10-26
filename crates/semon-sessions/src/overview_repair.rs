@@ -302,21 +302,39 @@ fn transaction<'a>(
     Ok(tx)
 }
 
-fn writer_connection(options: &Options) -> io::Result<(crate::events::store::configured::NativeOwnership, Connection)> {
+fn writer_connection(
+    options: &Options,
+) -> io::Result<(
+    crate::events::store::configured::NativeOwnership,
+    Connection,
+)> {
     let config = options.source.config(&options.cache).map_err(failure)?;
-    let owner = crate::events::store::configured::NativeOwnership::restore(&config).map_err(failure)?;
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone()).connection().map_err(failure)?;
-    db.create_scalar_function("semon_semantic_publisher", 0,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-        |_| Ok(1_i64)).map_err(failure)?;
+    let owner =
+        crate::events::store::configured::NativeOwnership::restore(&config).map_err(failure)?;
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+        .connection()
+        .map_err(failure)?;
+    db.create_scalar_function(
+        "semon_semantic_publisher",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
+    .map_err(failure)?;
     crate::selected_read::install(&db)?;
     db.busy_timeout(Duration::ZERO).map_err(failure)?;
     Ok((owner, db))
 }
 
-fn validate_writer(tx: &rusqlite::Transaction<'_>, owner: &crate::events::store::configured::NativeOwnership) -> io::Result<()> {
+fn validate_writer(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &crate::events::store::configured::NativeOwnership,
+) -> io::Result<()> {
     let binding = crate::storage::NativeReaderBinding::Semantic(owner.clone());
-    binding.validate(tx, &owner.config().namespace).map_err(failure)?;
+    binding
+        .validate(tx, &owner.config().namespace)
+        .map_err(failure)?;
     Ok(())
 }
 

@@ -25,24 +25,17 @@ impl Relationships for Writer<'_, '_, '_> {
         self.relationship_rows_before = self
             .relationship_started
             .map(|_| self.transaction.total_changes());
-        let (singleton, composite) = match group {
-            RelationshipGroup::Lineage => (
-                "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
-                "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
-            ),
-            RelationshipGroup::Semantic => (
-                "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
-                "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
-            ),
+        self.layout.ensure_current()?;
+        let sql = match group {
+            RelationshipGroup::Lineage => "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
+            RelationshipGroup::Semantic => "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
         };
-        self.transaction
-            .execute(self.layout.support(singleton, composite), [path])?;
+        self.transaction.execute(sql, [path])?;
         Ok(())
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> rusqlite::Result<()> {
-        self.transaction.execute(self.layout.support(
-            "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",
-            "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)"), params![path,harness,id])?;
+        self.layout.ensure_current()?;
+        self.transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)", params![path,harness,id])?;
         Ok(())
     }
     fn finished(&mut self, group: RelationshipGroup) -> rusqlite::Result<()> {
@@ -165,10 +158,7 @@ impl Effects for Writer<'_, '_, '_> {
         let measurements = &mut *self.measurements;
         let started = measurements.start();
         transaction.execute(
-            self.layout.meta(
-                "DELETE FROM meta WHERE key=?1",
-                "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
-            ),
+            "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
             [archive_index_key(path)],
         )?;
         measurements.record("archive_metadata", started, 1);
@@ -202,9 +192,7 @@ impl Effects for Writer<'_, '_, '_> {
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
         transaction.execute(
-        self.layout.support(
-            "DELETE FROM session_source_mutations WHERE source_path=?1",
-            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1"),
+        "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
         [path],
     )?;
         measurements.record("mutation_retirement", started, 1);
