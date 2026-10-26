@@ -9912,7 +9912,7 @@ mod tests {
                 "original nullable/versioned header remains exact"
             );
             assert_eq!(
-                crate::history_projection::qualified(&batch.connection, &history).unwrap(),
+                crate::history_projection::qualified(&batch.connection, &history, false).unwrap(),
                 !unsupported,
                 "unsupported custody must not gain completion authority"
             );
@@ -10115,7 +10115,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(history.harness, "codex");
-            assert!(crate::history_projection::qualified(&store.connection, &history).unwrap());
+            assert!(crate::history_projection::qualified(&store.connection, &history, false).unwrap());
             assert_eq!(
                 store
                     .connection
@@ -10229,7 +10229,7 @@ mod tests {
             .unwrap();
         let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).unwrap();
         assert_eq!(history.sources, old.sources);
-        assert!(crate::history_projection::qualified(&batch.connection, &history).unwrap());
+        assert!(crate::history_projection::qualified(&batch.connection, &history, false).unwrap());
         let recipes = catalog_recipes(&batch.connection, "session_history_slots", &old.key)
             .into_iter()
             .map(|(_, text)| text)
