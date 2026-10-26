@@ -3381,24 +3381,23 @@ pub(crate) fn scan_file(
         let mut base = None;
         if let Some(ledger) = &recorded
             && !force_replace
+            && (ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file))
         {
-            if ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file) {
-                match cache.base(&key, ledger)? {
-                    Base::Found(index) => {
-                        cache.require_usage_store(&index)?;
-                        trusted_append = trusted_receiver
-                            && index
-                                .source_chunks
-                                .as_ref()
-                                .is_some_and(|chunks| chunks.resume.is_some());
-                        if ledger.stat == stat || trusted_append || ledger.resumes(&stat, &mut file)
-                        {
-                            base = Some(index);
-                        }
+            match cache.base(&key, ledger)? {
+                Base::Found(index) => {
+                    cache.require_usage_store(&index)?;
+                    trusted_append = trusted_receiver
+                        && index
+                            .source_chunks
+                            .as_ref()
+                            .is_some_and(|chunks| chunks.resume.is_some());
+                    if ledger.stat == stat || trusted_append || ledger.resumes(&stat, &mut file)
+                    {
+                        base = Some(index);
                     }
-                    Base::Moved if !last => continue,
-                    Base::Moved | Base::Unreadable => {}
                 }
+                Base::Moved if !last => continue,
+                Base::Moved | Base::Unreadable => {}
             }
         }
         cache.scan_measurements.record("ledger_base", started, 1);

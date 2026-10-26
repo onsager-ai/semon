@@ -3713,10 +3713,10 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(repair_sources, ["source-a"]);
-        let revision = restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+        let revision = restarted.catalog_claims(std::slice::from_ref(&key)).unwrap()[0]
             .1
             .unwrap();
-        let foreign_claim = isolated.catalog_claims(&[key.clone()]).unwrap();
+        let foreign_claim = isolated.catalog_claims(std::slice::from_ref(&key)).unwrap();
         assert_eq!(
             restarted
                 .store
@@ -3727,7 +3727,7 @@ mod tests {
             Outcome::Conflict
         );
         assert_eq!(
-            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            restarted.catalog_claims(std::slice::from_ref(&key)).unwrap()[0].1,
             Some(revision)
         );
         assert_eq!(
@@ -3739,9 +3739,9 @@ mod tests {
                 .unwrap(),
             Outcome::Written
         );
-        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, None);
+        assert_eq!(restarted.catalog_claims(std::slice::from_ref(&key)).unwrap()[0].1, None);
         assert_eq!(
-            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            isolated.catalog_claims(std::slice::from_ref(&key)).unwrap(),
             foreign_claim
         );
         let repair_options = crate::Options {
@@ -3784,18 +3784,18 @@ mod tests {
         };
         let (write_revision, _) = super::super::begin_source_write(&write_options, &input).unwrap();
         assert_eq!(
-            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            restarted.catalog_claims(std::slice::from_ref(&key)).unwrap()[0].1,
             Some(write_revision)
         );
         super::super::complete_source_write(&write_options, &input, write_revision, None).unwrap();
         assert!(
-            restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+            restarted.catalog_claims(std::slice::from_ref(&key)).unwrap()[0]
                 .1
                 .unwrap()
                 > write_revision
         );
         assert_eq!(
-            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            isolated.catalog_claims(std::slice::from_ref(&key)).unwrap(),
             foreign_claim
         );
         restarted
