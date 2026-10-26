@@ -3317,6 +3317,10 @@ impl SqliteStore {
                 let search =
                     crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source)
                         .map_err(StoreError::Configured)?;
+                // Empty Current is a real publication too. No row batch will
+                // initialize its two namespace-owned coverage records.
+                crate::storage::catalog::SearchPublicationStore::begin(&search, &[])
+                    .map_err(failure)?;
                 #[allow(unused_mut)]
                 let mut refresh = |encoded: &[String]| -> Result<(), StoreError> {
                     let refreshed = encoded
@@ -11907,10 +11911,9 @@ fn current_test_store(
         namespace: namespace.clone(),
         expected_stream_epoch: Some("a".repeat(64)),
     };
-    if !path.exists() {
-        config.create_native_store().unwrap();
-    }
-    let owner = configured::NativeOwnership::admit(&config).unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
+    drop(EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
+    let owner = configured::NativeOwnership::restore(&config).unwrap();
     let connection = configured::connection(&config).unwrap();
     crate::storage::NativeReaderBinding::Semantic(owner.clone())
         .validate(&connection, namespace)
