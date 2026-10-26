@@ -3243,11 +3243,13 @@ pub(crate) fn scan_file(
     // in prepare_file before any Raw parsing or publication decision. Explicit
     // ingest retains its caller's identity; staged model readers remain reads.
     let host_operation = if cache.host_source.is_some() && cache.event_operation.is_none() {
-        Some(crate::storage::source_observations::SourceOperation::capture(
-            &cache.observation_namespace,
-            "native_ingest",
-            path.as_os_str().as_encoded_bytes(),
-        ))
+        Some(
+            crate::storage::source_observations::SourceOperation::capture(
+                &cache.observation_namespace,
+                "native_ingest",
+                path.as_os_str().as_encoded_bytes(),
+            ),
+        )
     } else {
         None
     };
@@ -3333,14 +3335,20 @@ pub(crate) fn scan_file(
                 .prepare_file(
                     &key,
                     expected.as_ref(),
-                    operation.as_deref().or(cache.event_operation.as_deref()).ok_or_else(|| {
-                        io::Error::other(crate::storage::StorageError::InvalidArguments)
-                    })?,
+                    operation
+                        .as_deref()
+                        .or(cache.event_operation.as_deref())
+                        .ok_or_else(|| {
+                            io::Error::other(crate::storage::StorageError::InvalidArguments)
+                        })?,
                     harness,
                 );
             match prepared {
                 Err(StoreError::Configured(crate::storage::StorageError::Conflict))
-                    if host_operation.is_some() && !last => continue,
+                    if host_operation.is_some() && !last =>
+                {
+                    continue;
+                }
                 result => result.map_err(store_io_error)?,
             }
             expected
@@ -3431,7 +3439,13 @@ pub(crate) fn scan_file(
             {
                 let ledger = ledger.clone();
                 let index = Arc::clone(index);
-                cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
+                if cache.commit(&key, Some(&ledger), None, &ledger, &index)? {
+                    trace("conflict");
+                    if last {
+                        return Err(io::Error::other(crate::storage::StorageError::Conflict));
+                    }
+                    continue;
+                }
             }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
@@ -3747,6 +3761,9 @@ pub(crate) fn scan_file(
             &index,
         )? {
             trace("conflict");
+            if last {
+                return Err(io::Error::other(crate::storage::StorageError::Conflict));
+            }
             continue;
         }
         if bounded && !cache.unpersisted.contains(&key) {
@@ -10460,9 +10477,8 @@ mod tests {
         for writer in writers {
             writer.join().unwrap();
         }
-        // A change that lost every retry stays in memory until its file
-        // changes again; a new process catches the store up by resuming from
-        // its rows, so any row written twice or lost shows below.
+        // A fresh process resumes from committed rows. Any row written twice
+        // or lost under the concurrent writers shows in the persisted oracle.
         let mut last = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         for log in &logs {
             scan_file(log, "claude", &mut last, &mut false).unwrap();
