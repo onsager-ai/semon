@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
-        use transfer::reported::tests::{apply, root, seed_native, seed_native_usage, sqlite, sqlite_core, stage};
+        use transfer::reported::tests::{apply, root, seed_native, seed_native_usage, seed_codex_usage, sqlite, sqlite_core, stage};
         let root = root();
         let source = sqlite(&root, "native-source");
         let reverse = sqlite(&root, "native-reverse");
@@ -332,6 +332,13 @@ mod tests {
         }
         let new_path = root.join("new.jsonl");
         seed_native(&config, &new_path, 3, '3');
+        let usage_path=root.join("new-native-usage.jsonl");
+        seed_codex_usage(&config,&usage_path);
+        let accepted_usage=pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
+            let (_,native)=super::super::native_reader::file(tx,usage_path.to_str().unwrap())?.ok_or(StorageError::ScopeChanged)?;
+            let usage=serde_json::to_value(native.codex_usage()).unwrap();assert!(!usage.as_object().unwrap().is_empty());Ok(usage)
+        }).unwrap();
+        std::fs::remove_file(&usage_path).unwrap();
         std::fs::remove_file(&new_path).unwrap();
         let manifest = stage(&config, &reverse, &[98; 32]);
         apply(&reverse, &manifest);
@@ -342,6 +349,8 @@ mod tests {
         assert_eq!(restored.usage(),expected_native.usage());
         assert_eq!(restored.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
         assert_eq!(restored.source_chunks.as_ref().unwrap().hashes,expected_chunks.hashes);
+        let (_,restored_usage)=reader.load_file(usage_path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(restored_usage.codex_usage()).unwrap(),accepted_usage);
         drop(reader);
         assert_eq!(
             sqlite_core(&reverse, &new_path)["events"]
