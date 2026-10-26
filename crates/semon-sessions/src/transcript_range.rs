@@ -5,6 +5,7 @@ use crate::{
     events::EventCache,
     model::summary::CatalogSource,
     slot_projection::{SavedSlot, VERSION},
+    storage::catalog::CatalogSnapshot,
     viewer::{ViewerReply, decoded, query_value},
 };
 use rusqlite::OptionalExtension;
@@ -150,15 +151,18 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
                 ));
             }
         }
-        let mut db = crate::events::store::local_reader(options)?;
+        let binding = crate::storage::local_navigation_binding(options, source_key)?;
+        let mut db = binding.connection()?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
+        crate::events::store::require_current(&tx)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)?;
         let identity = match catalog::catalog_selection_in_snapshot(
             options,
             source_key,
             &key,
             crate::CatalogReadScope::RetainedHistory,
-            &tx,
+            &snapshot,
         ) {
             Ok(Some((identity, _))) => identity,
             Ok(None) => {
@@ -173,7 +177,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
         };
         let generation: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -181,7 +185,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
         if generation.as_deref() != Some(identity.generation.as_str()) {
             return Ok(stale(ProjectionFence::CatalogPublication));
         }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let history = snapshot.history_catalog(&key)?.is_some();
         let (table, header) = if history {
             ("session_history_slots", "session_history_projections")
         } else {
@@ -189,7 +193,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
         };
         let projection: Option<(String, u32)> = tx
             .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                &format!("SELECT generation,version FROM main.{header} WHERE namespace=semon_namespace() AND session_key=?1"),
                 [&key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -198,7 +202,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
             return Ok(unavailable());
         };
         let projection = entry_generation(&projection);
-        let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
+        let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
         tx.commit()?;
         Ok(reply(
             200,
@@ -265,15 +269,18 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
             return Ok(invalid_arguments());
         }
-        let mut db = crate::events::store::local_reader(options)?;
+        let binding = crate::storage::local_navigation_binding(options, source_key)?;
+        let mut db = binding.connection()?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
+        crate::events::store::require_current(&tx)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)?;
         let (identity, session) = match catalog::catalog_selection_in_snapshot(
             options,
             source_key,
             &key,
             crate::CatalogReadScope::RetainedHistory,
-            &tx,
+            &snapshot,
         ) {
             Ok(Some(selected)) => selected,
             Ok(None) => {
@@ -288,7 +295,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         };
         let catalog_generation: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -296,7 +303,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
             return Ok(stale(ProjectionFence::CatalogPublication));
         }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let history = snapshot.history_catalog(&key)?.is_some();
         let header = if history {
             "session_history_projections"
         } else {
@@ -309,7 +316,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         };
         let projection: Option<(String, u32)> = tx
             .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                &format!("SELECT generation,version FROM main.{header} WHERE namespace=semon_namespace() AND session_key=?1"),
                 [&key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -344,7 +351,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
             }));
         }
         let total: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
+            &format!("SELECT count(*) FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1 AND {predicate}"),
             [&key],
             |row| row.get(0),
         )?;
@@ -352,7 +359,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if after > total {
             return Ok(invalid_arguments());
         }
-        let mut statement = tx.prepare(&format!("SELECT slot FROM {slots} WHERE session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
+        let mut statement = tx.prepare(&format!("SELECT slot FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
         let entries: Vec<Value> = statement
             .query_map(
                 rusqlite::params![key, i64::try_from(limit)?, i64::try_from(after)?],
@@ -413,9 +420,17 @@ pub(crate) fn observation(
     history: bool,
     qualified: bool,
 ) -> rusqlite::Result<Option<Value>> {
+    // An admitted reader sees only its own namespace's projections.
+    let scope = if qualified {
+        "namespace=semon_namespace() AND "
+    } else {
+        ""
+    };
     let published: Option<String> = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            &format!(
+                "SELECT value FROM main.meta WHERE {scope}key='slot_projection_catalog_generation'"
+            ),
             [],
             |row| row.get(0),
         )
@@ -423,12 +438,6 @@ pub(crate) fn observation(
     if published.as_deref() != Some(catalog_generation) {
         return Ok(None);
     }
-    // An admitted reader sees only its own namespace's projections.
-    let scope = if qualified {
-        "namespace=semon_namespace() AND "
-    } else {
-        ""
-    };
     let history = if !history {
         false
     } else if qualified {
@@ -660,10 +669,12 @@ fn read_inner(
         lease.finish_selected(control)?;
         return result;
     }
-    let mut connection = crate::events::store::local_reader(options)?;
+    let binding = crate::storage::local_navigation_binding(options, source_key)?;
+    let mut connection = binding.connection()?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &transaction)?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "transcript_before_snapshot");
     let selected = catalog::catalog_selection_in_snapshot(
@@ -675,7 +686,7 @@ fn read_inner(
         } else {
             crate::CatalogReadScope::Current
         },
-        &transaction,
+        &snapshot,
     );
     let (identity, session) = match selected {
         Ok(Some(selected)) => selected,
@@ -709,9 +720,10 @@ fn read_inner(
     if let Some(hook) = AFTER_SELECTION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
+    // Every projection read below stays inside the admitted namespace.
     let catalog_generation: Option<String> = transaction
         .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -722,11 +734,15 @@ fn read_inner(
     if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
         return Ok(stale(ProjectionFence::CatalogPublication));
     }
-    let history_projection =
-        history && crate::history_projection::catalog(&transaction, &key)?.is_some();
+    let history_row = if history {
+        snapshot.history_catalog(&key)?
+    } else {
+        None
+    };
+    let history_projection = history_row.is_some();
     let history_incomplete = history_projection
         && transaction.query_row(
-            "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
+            "SELECT incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1",
             [&key],
             |row| row.get::<_, bool>(0),
         )?;
@@ -742,7 +758,7 @@ fn read_inner(
     };
     let projection: Option<(String, u32, i64)> = transaction
         .query_row(
-            &format!("SELECT generation,version,total FROM {header_table} WHERE session_key=?1"),
+            &format!("SELECT generation,version,total FROM main.{header_table} WHERE namespace=semon_namespace() AND session_key=?1"),
             [&key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -777,7 +793,7 @@ fn read_inner(
     let end = first.saturating_add(limit).min(total);
     let start = first.saturating_sub(1);
     let mut statement = transaction.prepare(
-        &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {slot_table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
+        &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{slot_table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
     let texts: Vec<String> = statement
         .query_map(
             rusqlite::params![
@@ -796,18 +812,17 @@ fn read_inner(
     if slots.len() != end.saturating_add(1).min(total) - start {
         return Ok(unavailable());
     }
-    let row_text: String = if history_projection {
-        crate::history_projection::catalog(&transaction, &key)?.ok_or_else(invalid)?
-    } else {
-        transaction.query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+    let row_text: String = match history_row {
+        Some(metadata) => metadata,
+        None => transaction.query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
             [&key],
             |row| row.get(0),
-        )?
+        )?,
     };
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
-    let context = crate::causal_trace::range_context(
-        &transaction,
+    let context = crate::storage::selected::range_context(
+        &crate::storage::sqlite::selected::Context::owned(&transaction),
         &key,
         &slots[first - start..end - start],
         &row.sources,

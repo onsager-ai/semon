@@ -326,7 +326,7 @@ impl CatalogSnapshot for Transaction<'_> {
         crate::history_projection::catalog(self, key).map_err(io::Error::other)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        crate::history_projection::qualified(self, row).map_err(io::Error::other)
+        crate::history_projection::qualified(self, row, false).map_err(io::Error::other)
     }
     fn selected_details(
         &self,
@@ -348,7 +348,19 @@ impl CatalogSnapshot for Transaction<'_> {
     }
 }
 
-struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+pub(crate) struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+
+/// Bound Home/Query readers select through the same admitted snapshot as
+/// Catalog pages. Only the current namespace schema is readable.
+pub(crate) fn admitted_snapshot<'a, 'b>(
+    binding: &crate::storage::NativeReaderBinding,
+    transaction: &'a Transaction<'b>,
+) -> Result<AdmittedSnapshot<'a, 'b>, crate::storage::StorageError> {
+    if !binding.validate(transaction, &binding.config().namespace)? {
+        return Err(crate::storage::StorageError::NamespaceUpgradePending);
+    }
+    Ok(AdmittedSnapshot(transaction, true))
+}
 
 fn require_ported_helper(qualified: bool) -> io::Result<()> {
     if qualified {
@@ -363,7 +375,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         Ok(())
     }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
-        self.0.publication_value(key)
+        if !self.1 {
+            return self.0.publication_value(key);
+        }
+        let sql = "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1";
+        let tx = self.0;
+        tx.query_row(sql, [key], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         rows(self.0, request, self.1).map_err(io::Error::other)
@@ -401,8 +420,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         }
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        require_ported_helper(self.1)?;
-        self.0.history_qualified(row)
+        crate::history_projection::qualified(self.0, row, self.1).map_err(io::Error::other)
     }
     fn selected_details(
         &self,

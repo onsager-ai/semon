@@ -3475,7 +3475,13 @@ fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
     ] {
         let reply = core.respond("GET", path, query, None);
         if reply.status != 200 {
-            eprintln!("native diagnostic route={path} status={}", reply.status);
+            let code = serde_json::from_slice::<Value>(&reply.body)
+                .ok()
+                .and_then(|body| body["error"]["code"].as_str().map(str::to_owned));
+            eprintln!(
+                "native diagnostic route={path} status={} code={code:?}",
+                reply.status
+            );
         }
         assert_eq!(
             reply.status,
