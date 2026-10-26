@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use tokio_postgres::types::ToSql;
 
-mod snapshot;
+pub(super) mod snapshot;
 
 const MAX: usize = 1024 * 1024;
 
@@ -412,8 +412,8 @@ pub(super) fn stage(
     Ok(())
 }
 
-mod search;
 pub(super) mod history;
+mod search;
 
 #[cfg(test)]
 mod tests;

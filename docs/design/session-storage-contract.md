@@ -1766,3 +1766,37 @@ independent SQLite phase also captures persisted closed tool IDs, compared with
 PG alongside the complete scalar and open dimensions. Unrelated-history checks
 cover 0/256/2048 rows; their decoded-row counter is a bounded-read assertion, not
 a claim about allocator peak, SQL planner cost, or full backend qualification.
+
+## Borrowed immutable Catalog reads (Worker131, incomplete)
+
+The private `postgres::catalog_effects::snapshot::with_generation` callback owns
+one real repeatable-read transaction. `catalog`, `recipe` and `selected` read
+namespace-qualified immutable Current or retained-owner generations. Recipe
+windows use the indexed slot interval, at most 64 rows and 1 MiB measured in SQL
+before retrieval. The full total remains in the header; long recipes are paged,
+not rejected or materialized. `selected` compares the typed Catalog source
+vector with the recipe source-generation witness. A dangling retained owner,
+malformed metadata, unsupported header or changed source witness refuses.
+
+These physical observations are not an admitted CatalogSnapshot or ReaderLease.
+The generation argument is an immutable address, not authority. The caller still
+needs store/source/runtime/epoch/claim and native page/Usage proof admission,
+transactional reference ownership, head CAS/ACK and operation reconciliation.
+Navigation, complete list/search/selected-presentation ports and the admitted
+publisher remain unimplemented. No backend selector is opened; qualification
+stays zero. No table, schema version or old-format reader is added.
+
+`pg_catalog131_borrowed_snapshot_real_producer_mvcc_and_source_witness` uses the
+real SQLite producer oracle before PG, holds the borrowed snapshot across a
+second-connection commit, checks Current/recipe bytes, namespace isolation,
+cancellation and source-witness refusal. The existing
+`pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners` also
+checks the borrowed retained reader. These are scoped physical tests; effective
+whole-backend no-SQLite instrumentation and complete admission qualification
+remain required. PostgreSQL CI runs the `pg_catalog131` group; Storage CI checks
+formatting/default conformance but does not have a PostgreSQL service.
+
+The scalar119 interpretation-drift fixture now uses `native_keys::put_meta`.
+Its former `(namespace_digest,key)` conflict target was obsolete after the
+current NativeMeta physical key became `(namespace_digest,key_digest)`; strict
+scalar validation remains unchanged.
