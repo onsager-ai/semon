@@ -1291,6 +1291,52 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies
     );
+    // Captured content uses its admitted immutable generation and independent
+    // host/proof authority. It is not an old live Query runtime context.
+    let captured_bodies = |pool: &crate::storage::postgres::PgPool| {
+        super::super::snapshot::with_admitted_snapshot(
+            pool, &namespace, &control, &generation, |snapshot| {
+                let context = prepared.rows.iter().map(|row| {
+                    snapshot.catalog(&row.key, false)?.ok_or(StorageError::ScopeChanged)
+                }).collect::<Result<Vec<_>, _>>()?;
+                let mut sources = Vec::new();
+                for row in &context {
+                    for source in &row.sources {
+                        if sources.iter().any(|(old, _): &(&crate::model::summary::CatalogSource, crate::SessionSourceRef)| old.path == source.path) {
+                            continue;
+                        }
+                        sources.push((source, crate::SessionSourceRef {
+                            root: row.harness.clone(),
+                            path: crate::catalog::source_relative(&options, &row.harness, source).ok_or(StorageError::ScopeChanged)?,
+                            native_id: source.native_id.clone(), offset: source.offset,
+                            prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256,
+                        }));
+                    }
+                }
+                let records = super::super::selected_reader::SelectedRecords {
+                    tx: &snapshot.tx, generation: &generation, host: &retained_host, sources,
+                    pins: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                    bytes_left: std::sync::Mutex::new(64 * 1024 * 1024),
+                };
+                let mut result = std::collections::BTreeMap::new();
+                for row in &context {
+                    let (_, header, _) = snapshot.selected(&row.key, false, 0, 1)?.ok_or(StorageError::ScopeChanged)?;
+                    let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
+                    let observation = serde_json::from_value(row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"].clone()).map_err(|_| StorageError::ScopeChanged)?;
+                    let page = super::super::snapshot::query::PgPage { snapshot, key: &row.key, history: false, records: &records };
+                    let mut body = crate::query::transcript::render_page(&options, &row.key, row, &observation, total, false, total, 100, 1790812802000, &page).map_err(|_| StorageError::ScopeChanged)?;
+                    let summary = crate::query::transcript::render_session(&options, &row.key, &context, &records, 1790812802000,
+                        &|turn| snapshot.query_first_slot(&row.key, turn, false).map(|(_, slot)| slot).map_err(|_| crate::QueryError::new("unavailable", "Captured slot unavailable")),
+                        &|_| Ok(true), &|_| Ok(true), &|_| Ok(true)).map_err(|_| StorageError::ScopeChanged)?;
+                    body["window_start"] = serde_json::Value::Null;
+                    result.insert(row.key.clone(), serde_json::json!({"body":body,"fields":{"now":1790812802000i64,"session":summary,"window_start":null}}));
+                }
+                records.finish().map_err(|_| StorageError::ScopeChanged)?;
+                Ok(result)
+            },
+        ).unwrap()
+    };
+    assert_eq!(captured_bodies(&pool), expected_bodies);
     struct DeniedHost;
     impl crate::SessionSourceReader for DeniedHost {
         fn read_range(
@@ -2201,6 +2247,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         expected_field,
         "the retained native field proof survives an independent runtime mutation"
     );
+    for tool in ["read_transcript", "get_session"] {
+        assert_eq!(query.call_bound_selected_at(tool, &serde_json::json!({"id":prepared.rows[0].key}), 1790812802000, &query_store, &retained_host).unwrap_err().code, "unavailable", "a stale live runtime context must refuse");
+    }
+    assert_eq!(captured_bodies(&pool), expected_bodies);
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
     let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded).unwrap();
@@ -2734,7 +2784,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Some(successor.as_str())
     );
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
+        captured_bodies(&pool),
         expected_bodies,
         "old selected bodies after incremental publication and restart"
     );
@@ -2791,11 +2841,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(listed["total"].as_u64(), Some(expected), "older cohort");
     }
     assert_eq!(
-        read_bodies(
-            &mut query,
-            &cold_store(&generation, &options),
-            &retained_host
-        ),
+        captured_bodies(&cold),
         expected_bodies,
         "old selected bodies through a fresh Pool"
     );
@@ -3304,7 +3350,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Some(caught.as_str())
     );
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
+        captured_bodies(&pool),
         expected_bodies,
         "old selected bodies after a connected withdrawal and restart"
     );
