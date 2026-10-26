@@ -1072,7 +1072,6 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
     if fences.len() != 3 {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let composite = "namespace" == "namespace";
     for name in fences {
         let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
             ("INSERT", &["NEW"])
@@ -1086,11 +1085,9 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
         let mut predicate = "semon_source_backfill_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_namespaces WHERE namespace=semon_namespace())".to_owned();
         for row in rows {
             predicate.push_str(&format!(" OR {row}.key NOT IN ('catalog_backfill_state','catalog_completeness','search_backfill_complete','catalog_recovery_reason')"));
-            if composite {
-                predicate.push_str(&format!(
-                    " OR {row}.namespace IS NOT semon_meta_scope({row}.key)"
-                ));
-            }
+            predicate.push_str(&format!(
+                " OR {row}.namespace IS NOT semon_meta_scope({row}.key)"
+            ));
         }
         let quoted = name.replace('"', "\"\"");
         db.execute_batch(&format!("DROP TRIGGER \"{quoted}\"; CREATE TRIGGER \"{quoted}\" BEFORE {action} ON meta WHEN {predicate} BEGIN SELECT RAISE(ABORT,'source backfill metadata refused'); END;")).map_err(failed)?;
