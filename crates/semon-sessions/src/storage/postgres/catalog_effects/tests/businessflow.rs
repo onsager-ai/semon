@@ -135,6 +135,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
         serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
+    // Current upstream copy/resume semantics: the shared UUIDs retain one
+    // native send, while the resumed file contributes its own new turn.
+    let copied_records = [
+        serde_json::json!({"type":"user","sessionId":"copy203-original","uuid":"copy203-user","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"sanitized copy203 input"}}),
+        serde_json::json!({"type":"assistant","sessionId":"copy203-original","uuid":"copy203-send","parentUuid":"copy203-user","timestamp":"2026-10-01T00:00:01Z","message":{"id":"copy203-send","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"copy203-call","name":"SendMessage","input":{"to":"sanitized external203","message":"sanitized external203 request"}}]}}),
+        serde_json::json!({"type":"user","sessionId":"copy203-original","uuid":"copy203-result","parentUuid":"copy203-send","timestamp":"2026-10-01T00:00:01Z","toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"copy203-call","content":"sent","is_error":false}]}}),
+    ];
+    let original = options.claude_home.join("projects/project/copy203-original.jsonl");
+    let resumed = options.claude_home.join("projects/project/copy203-resumed.jsonl");
+    let mut old = copied_records.to_vec();
+    old.push(serde_json::json!({"type":"continued-in","continuedInSessionId":"copy203-resumed","sessionId":"copy203-original","timestamp":"2026-10-01T00:00:02Z"}));
+    let mut copy = copied_records.to_vec();
+    copy.push(serde_json::json!({"type":"user","sessionId":"copy203-resumed","uuid":"copy203-new","parentUuid":"copy203-result","timestamp":"2026-10-01T00:00:03Z","message":{"role":"user","content":"sanitized resumed203 input"}}));
+    for (path, records) in [(original, old), (resumed, copy)] {
+        fs::write(path, records.iter().map(|record| format!("{record}\n")).collect::<String>()).unwrap();
+    }
     // Larger indexed history with a fixed small receiver append below.
     let padding = format!(
         "{}\n",
@@ -452,6 +468,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
     assert_eq!(prepared.rows.len(), oracle.rows.len());
     assert_eq!(producer_rows(&prepared.rows), producer_rows(&oracle.rows));
+    let copied = prepared.rows.iter().find(|row| row.native_ids.iter().any(|id| id == "copy203-resumed")).unwrap();
+    assert!(copied.native_ids.iter().any(|id| id == "copy203-original"));
+    assert_eq!(copied.sources.len(), 2);
+    assert!(copied.query.as_ref().unwrap()["rows"].as_object().unwrap().values().any(|row| row["summary"]["kind"] == "stub"), "missing external recipient description");
     assert!(
         serde_json::to_string(&prepared.rows)
             .unwrap()
