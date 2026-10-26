@@ -366,12 +366,11 @@ impl NativeEvidence {
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
-            work.events = Some(
-                match &self.store_config {
-                    Some(config) => EventCache::open_configured(config).map_err(io::Error::other),
-                    None => EventCache::open_scoped(&self.options.cache, &self.options.source).map_err(io::Error::other),
-                }?,
-            );
+            work.events = Some(match &self.store_config {
+                Some(config) => EventCache::open_configured(config).map_err(io::Error::other),
+                None => EventCache::open_scoped(&self.options.cache, &self.options.source)
+                    .map_err(io::Error::other),
+            }?);
         }
         let cache = work.events.as_mut().expect("event cache initialized");
         // The index commits each file's change as it reads it: nothing is
