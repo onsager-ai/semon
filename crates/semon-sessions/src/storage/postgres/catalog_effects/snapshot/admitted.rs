@@ -31,6 +31,12 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             "catalog_version" => Some(crate::model::summary::CATALOG_VERSION.to_string()),
             // Completeness is not inferred from successful metadata staging.
             "catalog_completeness" => Some("partial".into()),
+            // Search counts/documents/memberships are effects of the same
+            // admitted generation operation; carried owners included.
+            "search_version" => Some(crate::catalog_search::VERSION.to_string()),
+            "search_generation_current" | "search_generation_retained_history" => {
+                Some(self.generation.clone())
+            }
             _ => None,
         })
     }
@@ -148,6 +154,14 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let run = |sql: &str, args: &[&(dyn tokio_postgres::types::ToSql + Sync)]| {
             tx.driver.query(sql, args).map_err(sqlstate::error).map_err(failed)
         };
+        // Withdrawal does not yet carry a removed owner's retained search
+        // document into the successor; a missing one is pending, never a miss.
+        if history {
+            let missing = run("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS (SELECT 1 FROM semon_pg_native_catalog_search_documents d WHERE d.namespace_digest=o.namespace_digest AND d.namespace=o.namespace AND d.generation=$2 AND d.scope=$3 AND d.key_digest=o.key_digest))", &[&ns, &generation, &scope])?;
+            if missing.first().is_none_or(|row| row.get::<_, bool>(0)) {
+                return unavailable();
+            }
+        }
         let selection = crate::catalog_search::select(
             query,
             |text| {
