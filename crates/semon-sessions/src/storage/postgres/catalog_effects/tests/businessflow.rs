@@ -199,7 +199,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
         generation: generation.clone(), options: options.clone(),
     };
-    let mut query = crate::Query::with_machines(vec![(namespace.as_str().into(), options.clone())]);
+    let mut query = crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())])));
     let query_list = query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &query_store).unwrap();
     assert_eq!(query_list["total"].as_u64(), Some(prepared.rows.len() as u64));
     super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {

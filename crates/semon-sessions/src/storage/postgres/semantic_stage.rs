@@ -56,7 +56,13 @@ fn load(tx: &mut PgTxn<'_>, active: bool) -> Result<Option<Stage>, StorageError>
     if stage.epoch != row.get::<_, i64>(0) || stage.active != row.get::<_, bool>(3) {
         return Err(StorageError::ScopeChanged);
     }
-    if model_cache::binding(tx)?.witness(&stage.runtime).map_err(|_| StorageError::ScopeChanged)? != stage.binding { return Err(StorageError::Conflict); }
+    if model_cache::binding(tx)?
+        .witness(&stage.runtime)
+        .map_err(|_| StorageError::ScopeChanged)?
+        != stage.binding
+    {
+        return Err(StorageError::Conflict);
+    }
     Ok(Some(stage))
 }
 
@@ -97,7 +103,9 @@ pub(super) fn begin(
     }
     let revision = lock(tx)?;
     let files = super::native_reader::file_ledgers(tx)?;
-    if files.len() > 64 || files.iter().any(|(path, _)| !paths.contains(path)) { return Err(StorageError::NamespaceUpgradePending); }
+    if files.len() > 64 || files.iter().any(|(path, _)| !paths.contains(path)) {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
     let generation = model_cache::generation(tx)?;
     if let Some(stage) = load(tx, true)? {
         if held.is_some_and(|epoch| epoch != stage.epoch)
@@ -115,7 +123,9 @@ pub(super) fn begin(
     let epoch = load(tx, false)?.map_or(Ok(1), |stage| {
         stage.epoch.checked_add(1).ok_or(StorageError::ScopeChanged)
     })?;
-    let binding = model_cache::binding(tx)?.witness(runtime).map_err(|_| StorageError::ScopeChanged)?;
+    let binding = model_cache::binding(tx)?
+        .witness(runtime)
+        .map_err(|_| StorageError::ScopeChanged)?;
     save(
         tx,
         &Stage {
@@ -172,7 +182,8 @@ fn checked(tx: &mut PgTxn<'_>, batch: &Batch) -> Result<Stage, StorageError> {
         || stage.runtime != batch.runtime
         || stage.generation != batch.base_generation
         || stage.revision != batch.source_revision
-        || serde_json::to_vec(&stage.context).map_err(|_| StorageError::ScopeChanged)? != serde_json::to_vec(&batch.context).map_err(|_| StorageError::ScopeChanged)?
+        || serde_json::to_vec(&stage.context).map_err(|_| StorageError::ScopeChanged)?
+            != serde_json::to_vec(&batch.context).map_err(|_| StorageError::ScopeChanged)?
         || model_cache::generation(tx)? != stage.generation
     {
         return Err(StorageError::Conflict);
@@ -197,7 +208,17 @@ fn claims(
     {
         return Err(StorageError::Conflict);
     }
-    if prepared.rows.iter().any(|row| row.sources.len() > 64 || row.sources.iter().any(|source| !batch.paths.iter().any(|path| std::path::Path::new(path) == source.path))) { return Err(StorageError::ScopeChanged); }
+    if prepared.rows.iter().any(|row| {
+        row.sources.len() > 64
+            || row.sources.iter().any(|source| {
+                !batch
+                    .paths
+                    .iter()
+                    .any(|path| std::path::Path::new(path) == source.path)
+            })
+    }) {
+        return Err(StorageError::ScopeChanged);
+    }
     for (path, expected) in &prepared.claims {
         let rows = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
         if rows.first().map(|row| row.get::<_, i64>(0)) != *expected {
@@ -228,20 +249,43 @@ pub(super) fn record(
         return Ok(Outcome::Written);
     }
     if batch.phase == Phase::Indexing {
-        let observed = prepared.indexed_sources.iter().map(|(harness, source)| (harness.clone(), source.native_id.clone())).collect::<std::collections::BTreeSet<_>>();
-        if prepared.indexed_sources.len() != batch.paths.len() || prepared.indexed_sources.iter().map(|(_, source)| source.path.to_string_lossy().into_owned()).collect::<std::collections::BTreeSet<_>>() != batch.paths.iter().cloned().collect() { return Err(StorageError::Conflict); }
+        let observed = prepared
+            .indexed_sources
+            .iter()
+            .map(|(harness, source)| (harness.clone(), source.native_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        if prepared.indexed_sources.len() != batch.paths.len()
+            || prepared
+                .indexed_sources
+                .iter()
+                .map(|(_, source)| source.path.to_string_lossy().into_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+                != batch.paths.iter().cloned().collect()
+        {
+            return Err(StorageError::Conflict);
+        }
         let mut keys = std::collections::BTreeSet::new();
         for (harness, native) in &observed {
-            let collision = observed.iter().any(|(other, id)| id == native && other != harness);
-            let mut key = if collision { format!("{harness}:{native}") } else { native.clone() };
+            let collision = observed
+                .iter()
+                .any(|(other, id)| id == native && other != harness);
+            let mut key = if collision {
+                format!("{harness}:{native}")
+            } else {
+                native.clone()
+            };
             let mut probes = 0;
             while collision && (observed.iter().any(|(_, id)| id == &key) || keys.contains(&key)) {
                 probes += 1;
-                if probes > 64 || key.len() > 65536 { return Err(StorageError::Busy); }
+                if probes > 64 || key.len() > 65536 {
+                    return Err(StorageError::Busy);
+                }
                 key.insert(0, ':');
             }
             keys.insert(key.clone());
-            stage.identities.push((harness.clone(), native.clone(), key));
+            stage
+                .identities
+                .push((harness.clone(), native.clone(), key));
         }
     }
     stage.context = prepared.relationships.clone();
@@ -324,8 +368,20 @@ pub(super) fn context(tx: &mut PgTxn<'_>, epoch: i64) -> Result<Context, Storage
     Ok(stage.context)
 }
 
-pub(super) fn native_key(tx: &mut PgTxn<'_>, epoch: i64, harness: &str, native: &str) -> Result<String, StorageError> {
+pub(super) fn native_key(
+    tx: &mut PgTxn<'_>,
+    epoch: i64,
+    harness: &str,
+    native: &str,
+) -> Result<String, StorageError> {
     let stage = load(tx, true)?.ok_or(StorageError::Conflict)?;
-    if stage.epoch != epoch || stage.generation != model_cache::generation(tx)? { return Err(StorageError::Conflict); }
-    stage.identities.iter().find(|(h, n, _)| h == harness && n == native).map(|(_, _, key)| key.clone()).ok_or(StorageError::ScopeChanged)
+    if stage.epoch != epoch || stage.generation != model_cache::generation(tx)? {
+        return Err(StorageError::Conflict);
+    }
+    stage
+        .identities
+        .iter()
+        .find(|(h, n, _)| h == harness && n == native)
+        .map(|(_, _, key)| key.clone())
+        .ok_or(StorageError::ScopeChanged)
 }
