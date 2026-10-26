@@ -1,5 +1,6 @@
 //! Private current native physical contract, consumed by schema installation
 //! and every transaction admission. This does not expose a native IndexStore.
+use super::super::native_keys;
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -12,6 +13,51 @@ struct Table {
 }
 
 const TABLES: &[Table] = &[
+    Table {
+        name: "catalog_trace_headers",
+        columns: "generation bytea,key_digest bytea,session_key bytea,trace_generation bytea,source_generation bytea,metadata bytea",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_trace_turns",
+        columns: "generation bytea,key_digest bytea,session_key bytea,turn_digest bytea,turn_id bytea,start_id bytea?,metadata bytea",
+        key: "generation,key_digest,turn_digest",
+    },
+    Table {
+        name: "catalog_trace_edges",
+        columns: "generation bytea,key_digest bytea,session_key bytea,edge_digest bytea,edge_id bytea,metadata bytea",
+        key: "generation,key_digest,edge_digest",
+    },
+    Table {
+        name: "catalog_trace_bookmarks",
+        columns: "generation bytea,key_digest bytea,session_key bytea,target_digest bytea,target bytea,edge_digest bytea,edge_id bytea",
+        key: "generation,key_digest,target_digest,edge_digest",
+    },
+    Table {
+        name: "catalog_rows",
+        columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_sources",
+        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea",
+        key: "generation,key_digest,path_digest",
+    },
+    Table {
+        name: "catalog_dependencies",
+        columns: "generation bytea,path_digest bytea,source_path bytea,harness_digest bytea,harness bytea,native_digest bytea,native_id bytea",
+        key: "generation,path_digest,harness_digest,native_digest",
+    },
+    Table {
+        name: "catalog_recipe_headers",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea,version bigint,total bigint",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_recipe_rows",
+        columns: "generation bytea,key_digest bytea,session_key bytea,slot bigint,metadata bytea",
+        key: "generation,key_digest,slot",
+    },
     Table {
         name: "page_blobs",
         columns: "digest bytea,payload bytea",
@@ -85,7 +131,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "meta",
         columns: "key bytea,value bytea",
-        key: "key",
+        key: "key_digest",
     },
     Table {
         name: "native_dependencies",
@@ -215,8 +261,8 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         "new_path,old_path",
         false,
     ),
-    ("files_path", "files", "path", true),
-    ("files_cwd", "files", "cwd,path", false),
+    ("files_path", "files", "path_digest", true),
+    ("files_cwd", "files", "cwd_digest,path_digest", false),
     (
         "usage_peers",
         "usage_identity",
@@ -266,17 +312,19 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v5");
+    hash.update(b"semon-private-native-v6");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value.as_bytes());
         }
+        hash.update(format!("{:?}", native_keys::generated(table.name)));
     }
     for index in INDEXES {
         hash.update(format!("{index:?}"));
     }
     hash.update(POLICY);
+    hash.update(native_keys::MATCH_BODY);
     for body in super::super::native_usage_identity::contract() {
         hash.update((body.len() as u64).to_be_bytes());
         hash.update(body.as_bytes());
@@ -285,6 +333,7 @@ fn contract_hash() -> Vec<u8> {
 }
 
 pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    tx.driver.batch_execute(&format!("CREATE FUNCTION semon_pg_native_key_matches(stored bytea,digest bytea,expected bytea) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS '{}';", native_keys::MATCH_BODY.replace('\'', "''"))).map_err(sqlstate::error)?;
     tx.driver.batch_execute("ALTER TABLE semon_pg_schema ADD COLUMN native_contract bytea NOT NULL DEFAULT ''::bytea").map_err(sqlstate::error)?;
     tx.driver
         .execute(
@@ -303,6 +352,12 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             }
             ddl.push(',');
         }
+        for (column, expression, nullable) in native_keys::generated(table.name) {
+            let null = if *nullable { "" } else { " NOT NULL" };
+            ddl.push_str(&format!(
+                "{column} bytea GENERATED ALWAYS AS ({expression}) STORED{null},"
+            ));
+        }
         ddl.push_str(&format!("PRIMARY KEY(namespace_digest,{})); ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; ALTER TABLE {name} FORCE ROW LEVEL SECURITY; CREATE POLICY native_namespace ON {name} USING ({POLICY}) WITH CHECK ({POLICY});", table.key));
     }
     for (name, table, columns, unique) in INDEXES {
@@ -314,6 +369,16 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    let function = tx.driver.query("SELECT p.prosrc,p.prosecdef,p.proisstrict AND p.provolatile='i' AND p.prokind='f' AND p.prorettype='boolean'::regtype AND p.proargtypes='17 17 17'::oidvector AND l.lanname='plpgsql',p.proconfig FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.pronamespace=current_schema()::regnamespace AND p.proname='semon_pg_native_key_matches'", &[]).map_err(sqlstate::error)?;
+    if function.len() != 1
+        || function[0].get::<_, String>(0) != native_keys::MATCH_BODY
+        || function[0].get::<_, bool>(1)
+        || !function[0].get::<_, bool>(2)
+        || function[0].get::<_, Option<Vec<String>>>(3)
+            != Some(vec!["search_path=pg_catalog".into()])
+    {
+        return Err(StorageError::ScopeChanged);
+    }
     let row = tx
         .driver
         .query_one("SELECT native_contract FROM semon_pg_schema", &[])
@@ -332,7 +397,8 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ARRAY(SELECT a.attname::text FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.num WHERE k.conrelid=c.oid AND k.contype='p' ORDER BY x.ord),
         ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || pg_get_expr(p.polwithcheck,p.polrelid) FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
         (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attname='namespace_digest' AND a.attgenerated='s'),
-        ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname)
+        ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname),
+        ARRAY(SELECT a.attname::text || ':' || pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attgenerated='s' ORDER BY a.attname)
         FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relname LIKE 'semon_pg_%' AND c.relname<>'semon_pg_schema' AND c.relname NOT IN ('semon_pg_store_owner','semon_pg_store_state','semon_pg_store_operations') AND c.relkind NOT IN ('i','I','S') ORDER BY c.relname", &[]).map_err(sqlstate::error)?;
     if rows.len() != TABLES.len() + FOUNDATION.len() {
         return Err(StorageError::ScopeChanged);
@@ -357,6 +423,20 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             "namespace_digest bytea".to_owned(),
         ];
         columns.extend(table.columns.split(',').map(str::to_owned));
+        columns.extend(
+            native_keys::generated(table.name)
+                .iter()
+                .map(|(name, _, nullable)| {
+                    format!("{name} bytea{}", if *nullable { "?" } else { "" })
+                }),
+        );
+        let mut generated = vec!["namespace_digest:sha256(namespace)".to_owned()];
+        generated.extend(
+            native_keys::generated(table.name)
+                .iter()
+                .map(|(name, expression, _)| format!("{name}:{expression}")),
+        );
+        generated.sort();
         let keys = if table.key.is_empty() {
             "namespace_digest".to_owned()
         } else {
@@ -403,6 +483,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             || row.get::<_, Vec<String>>(4) != vec![policy]
             || row.get::<_, Option<String>>(5).as_deref() != Some("sha256(namespace)")
             || row.get::<_, Vec<String>>(6) != indexes
+            || row.get::<_, Vec<String>>(7) != generated
         {
             return Err(StorageError::ScopeChanged);
         }
