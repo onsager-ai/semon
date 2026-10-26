@@ -172,6 +172,7 @@ fn checked(tx: &mut PgTxn<'_>, batch: &Batch) -> Result<Stage, StorageError> {
         || stage.runtime != batch.runtime
         || stage.generation != batch.base_generation
         || stage.revision != batch.source_revision
+        || serde_json::to_vec(&stage.context).map_err(|_| StorageError::ScopeChanged)? != serde_json::to_vec(&batch.context).map_err(|_| StorageError::ScopeChanged)?
         || model_cache::generation(tx)? != stage.generation
     {
         return Err(StorageError::Conflict);
@@ -196,6 +197,7 @@ fn claims(
     {
         return Err(StorageError::Conflict);
     }
+    if prepared.rows.iter().any(|row| row.sources.len() > 64 || row.sources.iter().any(|source| !batch.paths.iter().any(|path| std::path::Path::new(path) == source.path))) { return Err(StorageError::ScopeChanged); }
     for (path, expected) in &prepared.claims {
         let rows = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
         if rows.first().map(|row| row.get::<_, i64>(0)) != *expected {
@@ -227,7 +229,7 @@ pub(super) fn record(
     }
     if batch.phase == Phase::Indexing {
         let observed = prepared.indexed_sources.iter().map(|(harness, source)| (harness.clone(), source.native_id.clone())).collect::<std::collections::BTreeSet<_>>();
-        if prepared.indexed_sources.len() != batch.paths.len() { return Err(StorageError::Conflict); }
+        if prepared.indexed_sources.len() != batch.paths.len() || prepared.indexed_sources.iter().map(|(_, source)| source.path.to_string_lossy().into_owned()).collect::<std::collections::BTreeSet<_>>() != batch.paths.iter().cloned().collect() { return Err(StorageError::Conflict); }
         let mut keys = std::collections::BTreeSet::new();
         for (harness, native) in &observed {
             let collision = observed.iter().any(|(other, id)| id == native && other != harness);

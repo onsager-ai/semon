@@ -1,7 +1,10 @@
 //! Private Query injection over an acknowledged generation. It deliberately
 //! refuses cohorts requiring retained-history merge until that route is ported.
 use super::*;
-use crate::{Options, QueryError, storage::query::{Part, QueryCatalogStore}};
+use crate::{
+    Options, QueryError,
+    storage::query::{Part, QueryCatalogStore},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::storage::postgres) struct QueryCatalog {
@@ -15,9 +18,17 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
 impl QueryCatalogStore for QueryCatalog {
-    fn read_cohort(&self, namespace: &LogicalSourceNamespace, _: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
-        if namespace != &self.namespace || !self.options.all { return Err(unavailable(StorageError::NamespaceUpgradePending)); }
-        let runtime = crate::native_evidence::query_runtime_generation(&self.options).map_err(|error| QueryError::io(&error))?;
+    fn read_cohort(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        _: i64,
+        bytes_left: &mut usize,
+    ) -> Result<Part, QueryError> {
+        if namespace != &self.namespace || !self.options.all {
+            return Err(unavailable(StorageError::NamespaceUpgradePending));
+        }
+        let runtime = crate::native_evidence::query_runtime_generation(&self.options)
+            .map_err(|error| QueryError::io(&error))?;
         with_admitted_generation(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             use crate::storage::catalog::CatalogSnapshot;
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
@@ -67,20 +78,57 @@ impl QueryCatalogStore for QueryCatalog {
             Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns })
         }).map_err(unavailable)
     }
-    fn has_search_slots(&self, namespace: &LogicalSourceNamespace, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
-        if namespace != &self.namespace { return Err(unavailable(StorageError::ScopeChanged)); }
-        with_generation(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
-            let Some((header, slots)) = snapshot.recipe(key, false, 0, 64)? else { return Ok(false); };
-            if header.3 > 64 { return Err(StorageError::Busy); }
-            for slot in slots {
-                let slot: serde_json::Value = serde_json::from_str(&slot).map_err(|_| StorageError::ScopeChanged)?;
-                if since.is_none_or(|since| slot["t"].as_i64().is_some_and(|time| time >= since)) { return Ok(true); }
-            }
-            Ok(false)
-        }).map_err(unavailable)
+    fn has_search_slots(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        key: &str,
+        since: Option<i64>,
+    ) -> Result<bool, QueryError> {
+        if namespace != &self.namespace {
+            return Err(unavailable(StorageError::ScopeChanged));
+        }
+        with_generation(
+            &self.pool,
+            namespace,
+            &self.control,
+            &self.generation,
+            |snapshot| {
+                let Some((header, slots)) = snapshot.recipe(key, false, 0, 64)? else {
+                    return Ok(false);
+                };
+                if header.3 > 64 {
+                    return Err(StorageError::Busy);
+                }
+                for slot in slots {
+                    let slot: serde_json::Value =
+                        serde_json::from_str(&slot).map_err(|_| StorageError::ScopeChanged)?;
+                    if since
+                        .is_none_or(|since| slot["t"].as_i64().is_some_and(|time| time >= since))
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            },
+        )
+        .map_err(unavailable)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
-        if namespace != &self.namespace || part.generation != self.generation || crate::native_evidence::query_runtime_generation(&self.options).map_err(|error| QueryError::io(&error))? != part.runtime { return Err(unavailable(StorageError::ScopeChanged)); }
-        with_admitted_generation(&self.pool, namespace, &self.control, &self.generation, |_| Ok(())).map_err(unavailable)
+        if namespace != &self.namespace
+            || part.generation != self.generation
+            || crate::native_evidence::query_runtime_generation(&self.options)
+                .map_err(|error| QueryError::io(&error))?
+                != part.runtime
+        {
+            return Err(unavailable(StorageError::ScopeChanged));
+        }
+        with_admitted_generation(
+            &self.pool,
+            namespace,
+            &self.control,
+            &self.generation,
+            |_| Ok(()),
+        )
+        .map_err(unavailable)
     }
 }

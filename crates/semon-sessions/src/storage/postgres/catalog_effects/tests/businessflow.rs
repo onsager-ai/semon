@@ -154,7 +154,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // A lost response retries the identical full request, even though its
     // expected head and acknowledged claims have advanced.
     assert_eq!(
-        pg.publish_partial_catalog_fenced(&prepared)
+        pg.publish_semantic_catalog(&semantic_batch, semantic_model.prepared())
             .unwrap()
             .1
             .as_deref(),
