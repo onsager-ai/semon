@@ -166,14 +166,11 @@ pub(crate) fn read_page(
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    if !binding.validate(&transaction, &binding.config().namespace)? {
-        return Err(crate::storage::StorageError::NamespaceUpgradePending.into());
-    }
     let reply = crate::catalog::read_page_snapshot(
         options,
         machine,
         request,
-        &AdmittedSnapshot(&transaction),
+        &admitted_snapshot(binding, &transaction)?,
     )?;
     transaction.commit()?;
     Ok(reply)
@@ -191,18 +188,12 @@ pub(crate) fn history_identity(
     let tx = db
         .transaction()
         .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
-    if !binding
-        .validate(&tx, &binding.config().namespace)
-        .map_err(crate::CatalogIdentityError::from)?
-    {
-        return Err(crate::CatalogIdentityError::Unavailable);
-    }
     let selected = crate::catalog::catalog_selection_in_snapshot(
         options,
         source,
         key,
         CatalogReadScope::RetainedHistory,
-        &AdmittedSnapshot(&tx),
+        &admitted_snapshot(binding, &tx).map_err(crate::CatalogIdentityError::from)?,
     )?;
     tx.commit()
         .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
@@ -282,7 +273,10 @@ pub(crate) fn source_proof_observation(
     }))
 }
 
-pub(crate) struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>);
+pub(crate) struct AdmittedSnapshot<'a, 'b>(
+    &'a Transaction<'b>,
+    Option<crate::storage::QueryRuntimeBinding>,
+);
 
 /// Bound Home/Query readers select through the same admitted snapshot as
 /// Catalog pages. Only the current namespace schema is readable.
@@ -293,10 +287,13 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
     if !binding.validate(transaction, &binding.config().namespace)? {
         return Err(crate::storage::StorageError::NamespaceUpgradePending);
     }
-    Ok(AdmittedSnapshot(transaction))
+    Ok(AdmittedSnapshot(transaction, binding.runtime_binding()?))
 }
 
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
+    fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
+        self.1.clone()
+    }
     fn facts_authority<'a>(
         &'a self,
         path: &std::path::Path,
