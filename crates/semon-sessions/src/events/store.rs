@@ -690,11 +690,21 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    _runtime: &str,
+    runtime: &str,
 ) -> io::Result<Option<String>> {
-    let journal = host_journal(options).map_err(io::Error::other)?;
+    let config = options
+        .source
+        .config(&options.cache)
+        .map_err(io::Error::other)?;
+    let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
+    let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
+        .runtime_binding()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
+    let observations =
+        crate::native_evidence::RuntimeObservations::bound(&runtime_binding, runtime)?;
+    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let db = journal.connection().map_err(io::Error::other)?;
-    let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -927,8 +937,7 @@ pub(crate) fn verify_relocation_prefix(
                 sha2::digest::generic_array::GenericArray::from(ledger.prefix)
             ) == expected);
         }
-        let mut file = crate::sealed::LogFile::open(path)?;
-        let (prefix, _) = super::consumed_hashes(&mut file, length)?;
+        let prefix = crate::source_change::bytes_hash(path, length, || Ok(()))?;
         return Ok(format!(
             "{:x}",
             sha2::digest::generic_array::GenericArray::from(prefix)
@@ -950,8 +959,8 @@ pub(crate) fn verify_relocation_prefix(
             sha2::digest::generic_array::GenericArray::from(ledger.prefix)
         ) == expected);
     }
-    let mut file = crate::sealed::LogFile::open(path)?;
-    let (prefix, _) = super::consumed_hashes(&mut file, length)?;
+    drop(tx);
+    let prefix = crate::source_change::bytes_hash(path, length, || Ok(()))?;
     Ok(format!(
         "{:x}",
         sha2::digest::generic_array::GenericArray::from(prefix)
@@ -1045,9 +1054,8 @@ pub(crate) fn prioritize_projection_sources(
 
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
-/// Callers qualify `tx` before this page: the admitted SourceJournal through
-/// its owner/namespace/epoch validation, the unbound store through
-/// `require_current_sql`, which refuses every namespace-bound store.
+/// The admitted SourceJournal qualifies `tx` through its current physical
+/// contract and owner/namespace/epoch validation before this page.
 pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     let after: Option<String> = tx
         .query_row(

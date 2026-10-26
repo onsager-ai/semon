@@ -99,7 +99,6 @@
     "received.rs",
     "retention.rs",
     "selected_read.rs",
-    "source_change.rs",
     "storage.rs",
     "storage/postgres/native_bundle/tests.rs",
     "storage/postgres/native_core/tests.rs",

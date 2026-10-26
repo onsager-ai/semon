@@ -430,7 +430,7 @@ fn sql_json(error: serde_json::Error) -> rusqlite::Error {
 }
 
 /// Reprice only exact retained source generations and complete retained token
-/// facts. Over-budget/legacy/incomplete owners keep their older fingerprint.
+/// facts. Over-budget or incomplete owners keep their older fingerprint.
 fn retained_cost(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
@@ -579,11 +579,11 @@ fn catalog_step(
         return Ok(false);
     };
     let mut row: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
-    tx.execute(
-        "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND session_key=?1",
-        params![key, row.cost.pricing_fingerprint],
-    )?;
     if row.cost.pricing_fingerprint == table.fingerprint {
+        tx.execute(
+            "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+            params![key, table.fingerprint],
+        )?;
         return Ok(false);
     }
     let Some(cost) = retained_cost(tx, &row, table)? else {
@@ -595,8 +595,8 @@ fn catalog_step(
         replace_costs(query, &old, &cost)?;
     }
     tx.execute(
-        "UPDATE session_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
-        params![key, json(&row)?],
+        "UPDATE session_catalog SET metadata=?2,pricing_fingerprint=?3 WHERE namespace=semon_namespace() AND session_key=?1",
+        params![key, json(&row)?, row.cost.pricing_fingerprint],
     )?;
     // Same-generation history publications can share the recomputation. An
     // older/different history cohort remains at its original price fingerprint.
@@ -2132,16 +2132,21 @@ mod tests {
                                 .query_row("SELECT total_changes()", [], |r| r.get(0))
                                 .unwrap();
                             let decodes = REPRICE_PAYLOAD_DECODES.with(|count| count.get());
-                            assert!(matches!(
-                                catalog_step(&tx, &mut Work::default(), &target, Some(family_key)),
-                                Err(rusqlite::Error::InvalidQuery)
-                            ));
+                            // The current Catalog consumer qualifies this
+                            // namespace's exact retained facts. These facts are
+                            // not at the target price yet, so it preserves the
+                            // owner without a write rather than refusing every
+                            // Catalog operation before reading its evidence.
+                            assert!(
+                                !catalog_step(&tx, &mut Work::default(), &target, Some(family_key))
+                                    .unwrap()
+                            );
                             assert_eq!(
                                 tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
                                     .unwrap(),
                                 before
                             );
-                            assert_eq!(REPRICE_PAYLOAD_DECODES.with(|count| count.get()), decodes);
+                            assert!(REPRICE_PAYLOAD_DECODES.with(|count| count.get()) > decodes);
                         }
                         assert!(source_step(&tx, &mut Work::default(), &target, Some(1)).unwrap());
                         let mut appended = FileIndex::default();
