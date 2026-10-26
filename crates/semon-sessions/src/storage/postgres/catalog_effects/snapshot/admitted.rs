@@ -152,12 +152,18 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let history = query.scope == crate::CatalogReadScope::RetainedHistory;
         let scope = crate::catalog_search::scope_key(query.scope).as_bytes();
         let run = |sql: &str, args: &[&(dyn tokio_postgres::types::ToSql + Sync)]| {
-            tx.driver.query(sql, args).map_err(sqlstate::error).map_err(failed)
+            tx.driver
+                .query(sql, args)
+                .map_err(sqlstate::error)
+                .map_err(failed)
         };
         // Every history owner carries its retained search document; a missing
         // one is a broken projection, refused rather than read as a miss.
         if history {
-            let missing = run("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS (SELECT 1 FROM semon_pg_native_catalog_search_documents d WHERE d.namespace_digest=o.namespace_digest AND d.namespace=o.namespace AND d.generation=$2 AND d.scope=$3 AND d.key_digest=o.key_digest))", &[&ns, &generation, &scope])?;
+            let missing = run(
+                "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS (SELECT 1 FROM semon_pg_native_catalog_search_documents d WHERE d.namespace_digest=o.namespace_digest AND d.namespace=o.namespace AND d.generation=$2 AND d.scope=$3 AND d.key_digest=o.key_digest))",
+                &[&ns, &generation, &scope],
+            )?;
             if missing.first().is_none_or(|row| row.get::<_, bool>(0)) {
                 return unavailable();
             }
@@ -166,7 +172,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             query,
             |text| {
                 crate::catalog_search::anchor_with(text, |gram| {
-                    let rows = run("SELECT members FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND gram=$4", &[&ns, &generation, &scope, &gram.as_bytes()])?;
+                    let rows = run(
+                        "SELECT members FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND gram=$4",
+                        &[&ns, &generation, &scope, &gram.as_bytes()],
+                    )?;
                     Ok(rows.first().map(|row| row.get::<_, i64>(0)))
                 })
             },
@@ -203,8 +212,13 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                     .collect()
             },
             |key, budget| {
-                let rows = run("SELECT octet_length(fields)::bigint,CASE WHEN octet_length(fields)<=$5 THEN fields END FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND key_digest=sha256($4::bytea) AND session_key=$4 AND complete", &[&ns, &generation, &scope, &key.as_bytes(), &(budget as i64)])?;
-                let row = rows.first().ok_or_else(|| failed(StorageError::ScopeChanged))?;
+                let rows = run(
+                    "SELECT octet_length(fields)::bigint,CASE WHEN octet_length(fields)<=$5 THEN fields END FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND key_digest=sha256($4::bytea) AND session_key=$4 AND complete",
+                    &[&ns, &generation, &scope, &key.as_bytes(), &(budget as i64)],
+                )?;
+                let row = rows
+                    .first()
+                    .ok_or_else(|| failed(StorageError::ScopeChanged))?;
                 let fields = row
                     .get::<_, Option<Vec<u8>>>(1)
                     .map(String::from_utf8)
