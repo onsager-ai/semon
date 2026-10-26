@@ -590,11 +590,17 @@ impl IndexStore for NativeIndex {
             .map_err(err)
     }
     fn resolve_catalog_input(
-        &mut self, path: &str, revision: i64, native: Option<(&str,&str)>, log: Option<&str>,
+        &mut self,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::source_lifecycle::resolve(tx,path,revision,native,log)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::source_lifecycle::resolve(tx, path, revision, native, log)
+            })
+            .map_err(err)
     }
     fn relocate_codex(
         &mut self,
@@ -627,11 +633,19 @@ impl IndexStore for NativeIndex {
         }).map_err(err)
     }
     fn catalog_component_paths(
-        &self, paths: &[String], keys: &[String], native_parents: &[(String,String)],
+        &self,
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
-            super::source_lifecycle::component_paths(tx,paths,keys,native_parents)
-        }).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::source_lifecycle::component_paths(tx, paths, keys, native_parents),
+            )
+            .map_err(err)
     }
     fn query_runtime_binding(
         &self,

@@ -238,11 +238,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
     let component = pg.catalog_component_paths(
-        &[codex.to_string_lossy().into_owned()], &[], &[("codex".into(), codex_id.into())]
-    ).unwrap().unwrap();
-    assert!(component.contains(&codex.to_string_lossy().into_owned()));
-    assert!(component.contains(&child.to_string_lossy().into_owned()));
-
+        &[inputs.iter().find(|input| input.full_path(&options)==codex).unwrap().clone()],
+        &[], &[("codex".into(), codex_id.into())], &options,
+    ).unwrap().unwrap().into_iter().map(|input|input.full_path(&options)).collect::<Vec<_>>();
+    assert!(component.contains(&codex));
+    assert!(component.contains(&child));
     // A lost response retries the identical full request, even though its
     // expected head and acknowledged claims have advanced.
     assert_eq!(
