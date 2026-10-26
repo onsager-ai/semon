@@ -11,6 +11,41 @@ pub(crate) struct Navigation {
     pub(crate) control: PgCancellation,
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn captured_source_proof(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    options: &crate::Options,
+    generation: &str,
+    key: &str,
+    reference: &crate::SessionSourceRef,
+) -> Result<crate::SessionSourceProof, StorageError> {
+    if key.is_empty() || key.len() > 4096 || !crate::is_input_path(&reference.root, &reference.path) {
+        return Err(StorageError::InvalidArguments);
+    }
+    let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), control)?;
+    snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
+        let history = snapshot.catalog(key, true)?.is_some();
+        let (row, _, _) = snapshot.selected(key, history, 0, 1)?.ok_or(StorageError::ScopeChanged)?;
+        let source = row.sources.iter().find(|source| {
+            row.harness == reference.root
+                && crate::catalog::source_relative(options, &row.harness, source).as_deref() == Some(reference.path.as_str())
+                && source.native_id == reference.native_id
+                && source.offset == reference.offset
+                && source.prefix_sha256 == reference.prefix_sha256
+                && source.tail_sha256 == reference.tail_sha256
+        }).ok_or(StorageError::ScopeChanged)?;
+        let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        super::catalog_effects::selected_reader::source_proof(&mut tx, generation, source)?;
+        Ok(crate::SessionSourceProof {
+            source: reference.clone(), dev: source.dev, ino: source.ino, size: source.size,
+            modified_ns: source.modified_ns, changed_ns: source.changed_ns,
+            freshness: crate::CatalogFreshness { state: "retained".into() },
+        })
+    })
+}
+
 pub(crate) fn source_proof_observation(
     config: &StoreConfig,
     pool: &PgPool,
