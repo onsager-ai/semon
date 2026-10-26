@@ -170,7 +170,7 @@ impl IndexStore for NativeIndex {
                 |tx| {
                     let context = super::semantic_stage::context(tx, epoch)?;
                     let Selector::NativeKey { native, harness } = selector else {
-                        return Err(StorageError::NamespaceUpgradePending);
+                        return super::semantic_stage::select(tx, epoch, selector);
                     };
                     let endpoints = context
                         .endpoints
