@@ -59,7 +59,9 @@ impl Writer<'_, '_> {
         let ns = self.tx.namespace.as_str().as_bytes();
         if let Some(value) = value {
             let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
-            if changed != 1 { return Err(StorageError::ScopeChanged); }
+            if changed != 1 {
+                return Err(StorageError::ScopeChanged);
+            }
         } else {
             self.tx
                 .driver
@@ -97,7 +99,8 @@ impl Effects for Writer<'_, '_> {
             let old = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
             let key = format!("native_catalog_relocation:{old}");
             let value = self.tx.driver.query("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace_digest=sha256($1) AND namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
-            let encoded = value.first()
+            let encoded = value
+                .first()
                 .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
                 .map(String::from_utf8)
                 .transpose()
@@ -129,7 +132,9 @@ impl Effects for Writer<'_, '_> {
             input.ledger,
             input.changes.is_some(),
         )?;
-        for (key, advanced) in relocations { self.metadata(&key, advanced)?; }
+        for (key, advanced) in relocations {
+            self.metadata(&key, advanced)?;
+        }
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE begin_complete");
         self.boundary()
