@@ -182,7 +182,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 1790812802000,
             )
             .unwrap()
-            .expect("SQLite ordinary body");
+            .unwrap_or_else(|| panic!("SQLite body missing: {} {}", row.harness, row.key));
             assert!(
                 body.to_string().contains("sanitized"),
                 "ordinary body missing for {} {} {:?}",
