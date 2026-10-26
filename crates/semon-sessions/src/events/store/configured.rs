@@ -1625,7 +1625,11 @@ impl Writer {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
+        #[cfg(test)]
+        let reserved = std::time::Instant::now();
         self.validate(&tx)?;
+        #[cfg(test)]
+        let validated = reserved.elapsed();
         if ledger_row(&tx, path)
             .map_err(failed)?
             .as_ref()
@@ -1657,6 +1661,10 @@ impl Writer {
             tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
         }
         let id = operation_id.to_owned();
+        #[cfg(test)]
+        if reserved.elapsed() >= Duration::from_millis(50) {
+            eprintln!("configured_reservation stage=intent validation_us={} total_us={}", validated.as_micros(), reserved.elapsed().as_micros());
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         self.intents
             .insert(path.to_owned(), Intent { id, base, revision });
@@ -1691,7 +1699,11 @@ impl Writer {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
+        #[cfg(test)]
+        let reserved = std::time::Instant::now();
         self.validate(&tx)?;
+        #[cfg(test)]
+        let validated = reserved.elapsed();
         let mut work = Vec::new();
         for (path, expected, _, ledger, _) in files {
             let intent = self
@@ -1766,6 +1778,10 @@ impl Writer {
         }
         #[cfg(test)]
         effect("completion").map_err(failed)?;
+        #[cfg(test)]
+        if reserved.elapsed() >= Duration::from_millis(50) {
+            eprintln!("configured_reservation stage=ledger validation_us={} total_us={}", validated.as_micros(), reserved.elapsed().as_micros());
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if effect("commit_reply").is_err() {
