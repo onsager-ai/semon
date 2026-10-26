@@ -754,6 +754,9 @@ impl NativeOwnership {
                         "session_catalog_invalidations",
                         "catalog_backfill_sources",
                         "pricing_recompute_pending",
+                        // prepare_owned installs their namespace/writer guards.
+                        "source_observation_intents",
+                        "source_observation_receipts",
                     ]
                     .contains(&table.as_str())
                 {
