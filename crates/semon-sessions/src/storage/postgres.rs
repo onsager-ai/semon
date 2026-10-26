@@ -3,10 +3,13 @@
 //! Credentials, connect deadlines and TLS (including cancellation TLS) belong to
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
+pub(crate) mod index_store;
 mod native_bundle;
 mod native_commit;
 mod native_core;
+mod native_ingest;
 mod native_pages;
+mod native_reader;
 mod native_usage;
 mod native_usage_identity;
 mod operations;
@@ -39,6 +42,9 @@ fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_ingest_tests;
 
 #[cfg(test)]
 mod proxy_test;
