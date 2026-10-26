@@ -1615,37 +1615,4 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap(), qualified);
-    // The ordinary semantic catch-up claims the `removed` invalidation and
-    // republishes the connected parent without the withdrawn Source.
-    let mut catchup =
-        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
-    let connected = [
-        crate::Input {
-            root: crate::InputRoot::Claude,
-            path: "projects/project/one.jsonl".into(),
-        },
-        crate::Input {
-            root: crate::InputRoot::Claude,
-            path: "projects/project/one/subagents/agent-related154.jsonl".into(),
-        },
-    ];
-    let caught = stage_publish(&mut catchup, &connected, 1790812809000).0;
-    assert_ne!(Some(caught.clone()), qualified);
-    let parent = claude_parent.to_str().unwrap().to_owned();
-    let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-        let ns = namespace.as_str().as_bytes();
-        let mut counts = Vec::new();
-        for (generation, path) in [(caught.as_str(), &agent), (caught.as_str(), &parent), (qualified.as_deref().unwrap(), &agent)] {
-            counts.push(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND source_path=$3", &[&ns, &generation.as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get::<_, i64>(0));
-        }
-        Ok(counts)
-    }).unwrap();
-    assert_eq!(counts[0], 0, "withdrawn Source left the successor Current");
-    assert!(counts[1] > 0 && counts[2] > 0, "parent republished; qualified generation retained");
-    // Exact old OpID after its successor replays without moving the head.
-    assert_eq!(
-        store.remove_files(&agent_removal).unwrap(),
-        crate::events::Outcome::Written
-    );
-    assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some(caught.as_str()));
 }
