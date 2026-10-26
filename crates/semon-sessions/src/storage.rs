@@ -28,6 +28,11 @@ pub(crate) fn read_local_catalog_page(
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
     let binding = local_reader_binding(options)?;
+    #[cfg(feature = "postgres")]
+    if let StoreBackend::Postgres { pool, control } = &binding.config().backend {
+        return postgres::catalog_page(binding.config(), pool, control, options, source_key, request)
+            .map_err(Into::into);
+    }
     sqlite::catalog::read_page(&binding, options, source_key, request)
 }
 
@@ -37,7 +42,28 @@ pub(crate) fn source_proof_observation(
     absolute: &str,
 ) -> Result<Option<catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let binding = local_reader_binding(options)?;
+    #[cfg(feature = "postgres")]
+    if let StoreBackend::Postgres { pool, control } = &binding.config().backend {
+        return postgres::navigation::source_proof_observation(binding.config(), pool, control, root, absolute)
+            .map_err(Into::into);
+    }
     sqlite::catalog::source_proof_observation(&binding, options, root, absolute)
+}
+
+pub(crate) fn facts_authority(
+    _options: &crate::Options,
+    path: &std::path::Path,
+) -> std::io::Result<crate::facts::source_authority::Sources> {
+    #[cfg(feature = "postgres")]
+    if let Some(config) = _options.source.selected_store() {
+        if let StoreBackend::Postgres { pool, control } = &config.backend {
+            postgres::require_configured(config, pool, control).map_err(std::io::Error::other)?;
+            return postgres::current_sources::CurrentSources::open(
+                pool.clone(), config.namespace.clone(), control.clone(), path,
+            ).map(crate::facts::source_authority::Sources::Postgres).map_err(std::io::Error::other);
+        }
+    }
+    crate::facts::source_authority::Sources::sqlite(path)
 }
 
 pub(crate) fn local_query_catalog(
