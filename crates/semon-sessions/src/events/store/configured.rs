@@ -1008,6 +1008,32 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn catalog_generation(&self) -> Result<Option<String>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        db.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'", [self.config.namespace.as_str()], |r|r.get(0)).optional().map_err(failure)
+    }
+
+    pub(crate) fn publish_catalog(
+        &self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        closed: bool,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        let owner = self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?;
+        let connection = connection(&self.config).map_err(StoreError::Configured)?;
+        connection.create_scalar_function("semon_semantic_publisher", 0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |_|Ok(1i64)).map_err(failure)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection, discovery, path: database.clone(), selected_runs: None, semantic_rejection: None,
+            #[cfg(test)] traversal_observation: None,
+        };
+        store.publish_catalog_owned(publication, expected, claims, closed, None, super::CatalogWriter::Auto, Some(owner))
+    }
+
     pub(crate) fn relocate_codex(
         &self,
         path: &str,

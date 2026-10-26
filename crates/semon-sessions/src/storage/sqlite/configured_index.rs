@@ -129,12 +129,7 @@ impl IndexStore for ConfiguredIndex {
             .map_err(StoreError::Configured)
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
-        if let Some(stage) = &self.semantic {
-            return stage.generation();
-        }
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.catalog_generation()
     }
     fn session_slots(
         &self,
@@ -146,32 +141,28 @@ impl IndexStore for ConfiguredIndex {
     }
     fn publish_session_catalog_fenced(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.publish_catalog(publication, expected_generation, None, false)
     }
     fn publish_partial_catalog(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
-        _claims: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.publish_catalog(publication, expected_generation, Some(claims), false)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
-        _claims: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.publish_catalog(publication, expected_generation, Some(claims), true).map(|result| {
+            if result.0 == Outcome::Conflict { None } else { Some(result) }
+        })
     }
     fn resolve_catalog_input(
         &mut self,

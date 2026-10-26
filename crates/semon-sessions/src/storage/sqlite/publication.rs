@@ -30,7 +30,7 @@ impl<'a> CurrentWriter<'a> {
             namespace: None,
         }
     }
-    pub(super) fn admitted(
+    pub(crate) fn admitted(
         db: &'a rusqlite::Connection,
         source: &'a super::semantic::AdmittedSource,
     ) -> Result<Self, StorageError> {
@@ -142,7 +142,7 @@ impl<'a> SlotWriter<'a> {
             namespace: None,
         }
     }
-    pub(super) fn admitted(
+    pub(crate) fn admitted(
         db: &'a rusqlite::Connection,
         source: &'a super::semantic::AdmittedSource,
     ) -> Result<Self, StorageError> {
