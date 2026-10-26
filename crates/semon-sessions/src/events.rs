@@ -10567,8 +10567,10 @@ mod tests {
                                 // next check (MachineView::tick/checked).
                                 assert!(
                                     matches!(
-                                        error.get_ref().and_then(|error| error
-                                            .downcast_ref::<crate::storage::StorageError>()),
+                                        error
+                                            .get_ref()
+                                            .and_then(|error| error
+                                                .downcast_ref::<crate::storage::StorageError>()),
                                         Some(
                                             crate::storage::StorageError::Busy
                                                 | crate::storage::StorageError::Conflict
