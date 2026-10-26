@@ -34,6 +34,32 @@ fn metadata(tx: &Inbox<'_>, key: &str) -> Result<Option<String>, StorageError> {
     value.map(|v| v.ok_or(StorageError::Busy)).transpose()
 }
 
+pub(super) fn verify_backing(tx: &Inbox<'_>, row: &str, path: &str, digest: &str) -> Result<(),StorageError> {
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(row).map_err(|_|StorageError::ScopeChanged)?;
+    let source = row.sources.iter().find(|source|source.path.to_str()==Some(path) && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source))==digest).ok_or(StorageError::ScopeChanged)?;
+    let receipt=crate::events::store::header_ledger(&crate::source_carrier::ledger(source));
+    let current=metadata(tx,&format!("{}header",prefix(path,NativePageKind::Chunks)))?.ok_or(StorageError::ScopeChanged)?;
+    let current_header: crate::events::native_pages::chunks::Header=serde_json::from_str(&current).map_err(|_|StorageError::ScopeChanged)?;
+    let backing=(current_header.ledger!=receipt).then_some(digest);
+    let encoded=metadata(tx,&format!("{}header",backing_prefix(path,NativePageKind::Chunks,backing)))?.ok_or(StorageError::ScopeChanged)?;
+    let header: crate::events::native_pages::chunks::Header=serde_json::from_str(&encoded).map_err(|_|StorageError::ScopeChanged)?;
+    if header.ledger!=receipt || header.consumed_offset!=Some(source.offset) || header.version!=1 || header.parser_version!=crate::events::CACHE_VERSION {return Err(StorageError::ScopeChanged);}
+    let pages=header.count.div_ceil(1024);
+    let mut nodes=0usize;
+    let mut width=pages;
+    while width>0 {
+        nodes=nodes.checked_add(width).ok_or(StorageError::ScopeChanged)?;
+        if width==1 {break;}
+        width=width.div_ceil(2);
+    }
+    for (kind,length,expected) in [(NativePageKind::Chunks,10,pages),(NativePageKind::Tree,14,nodes)] {
+        let prefix=backing_prefix(path,kind,backing);
+        let count:i64=tx.0.query_row("SELECT count(*) FROM meta WHERE namespace=?1 AND key>=?2 AND key<?3 AND length(key)=length(?2)+?4",params![tx.1,prefix,format!("{prefix}~"),length],|r|r.get(0)).map_err(failed)?;
+        if usize::try_from(count).ok()!=Some(expected) {return Err(StorageError::ScopeChanged);}
+    }
+    Ok(())
+}
+
 pub(super) fn capture(
     tx: &mut Inbox<'_>,
     state: &mut CaptureState,
@@ -352,13 +378,27 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             payload,
         } => {
             if *kind == NativePageKind::Tree {
-                let header = metadata(tx,&format!("{}header",backing_prefix(path,NativePageKind::Chunks,backing.as_deref())))?.ok_or(StorageError::ScopeChanged)?;
-                native_pages::verify_tree_node(&header,key,payload,|kind,key| {
-                    metadata(tx,&format!("{}{key}",backing_prefix(path,kind,backing.as_deref())))?.ok_or(StorageError::ScopeChanged)
+                let header = metadata(
+                    tx,
+                    &format!(
+                        "{}header",
+                        backing_prefix(path, NativePageKind::Chunks, backing.as_deref())
+                    ),
+                )?
+                .ok_or(StorageError::ScopeChanged)?;
+                native_pages::verify_tree_node(&header, key, payload, |kind, key| {
+                    metadata(
+                        tx,
+                        &format!("{}{key}", backing_prefix(path, kind, backing.as_deref())),
+                    )?
+                    .ok_or(StorageError::ScopeChanged)
                 })?;
             }
-            tx.put(&format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())),payload.as_bytes())?;
-        },
+            tx.put(
+                &format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())),
+                payload.as_bytes(),
+            )?;
+        }
         TransferRecord::NativeMetadata { key, value, .. } => tx.put(key, value.as_bytes())?,
         _ => return Err(StorageError::InvalidArguments),
     }
