@@ -20,7 +20,9 @@ native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
 SQLite semantic catch-up accepts a removed path only with its durable ordinary
-producer removal invalidation and no remaining live ledger. Index preparation
+producer removal invalidation and no remaining live ledger. An exact index
+retained by the ordinary removal writer remains historical custody; staging
+captures and rechecks its ledger without making it a live source. Index preparation
 observes physical absence under its existing Source locks before recording it;
 the write transaction consumes that observation with the exact claim/ledger CAS.
 Each later reduction and publication rechecks the persisted evidence and exact

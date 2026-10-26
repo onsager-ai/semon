@@ -708,18 +708,13 @@ pub(crate) fn audit_catalog_sources(
     let machine = crate::facts::MachineFacts::of(options);
     // Observe Raw metadata in a read snapshot. Acquire the write lock only
     // after all physical observations, when consuming the exact ledgers below.
-    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Deferred)
-        .map_err(io::Error::other)?;
+    let tx =
+        Transaction::new_unchecked(&db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let mut changed = std::collections::BTreeSet::new();
     let mut removed = Vec::new();
     let mut source_locks = Vec::new();
     for input in discovered {
-        source_locks.push(crate::source_change::SourceLock::acquire(
-            options,
-            input.full_path(options).to_string_lossy().as_ref(),
-            false,
-        )?);
         if input.root == crate::InputRoot::Codex
             && !machine.codex_rollout_is_current(options, &input.full_path(options))
         {
@@ -4113,6 +4108,16 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
     encoded
         .map(|value| decode_archive_marker(&value.ok_or(rusqlite::Error::InvalidQuery)?))
         .transpose()
+}
+
+/// A retained index is historical custody, rather than a live Source ledger.
+/// Share the exact retention predicate used by the ordinary removal writer.
+pub(crate) fn archive_ledger_retained(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<bool> {
+    Ok(archived_index(connection, path)?.is_some_and(|record| record.matches(ledger)))
 }
 
 fn decode_archive_marker(value: &str) -> rusqlite::Result<ArchivedIndex> {
@@ -11079,7 +11084,7 @@ pub(crate) fn remove_files_tx(
     for (path, expected) in files {
         match (ledger_row(transaction, path), expected) {
             (Ok(Some((_, found))), Some(expected)) if found == *expected => {
-                if archived_index(transaction, path)?.is_some_and(|record| record.matches(&found)) {
+                if archive_ledger_retained(transaction, path, &found)? {
                     // Explicit archive retention does not make this source
                     // current. Complete catalog observation still retires
                     // its membership; only the existing event rows survive.
