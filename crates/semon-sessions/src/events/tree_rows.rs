@@ -116,7 +116,8 @@ pub(crate) mod witness {
     }
 
     /// Incremental canonical Tree witness writer.  A physical reader begins a
-    /// family, then supplies one persisted row at a time in its binary order.
+    /// family, then supplies one persisted row at a time in its address order
+    /// (labels retain their bounded fixed-label order).
     /// SQLite may pass its already-canonical `json_array` value directly;
     /// typed backends use the typed helpers, which serialize to the same bytes.
     pub(crate) struct Writer(Sha256);

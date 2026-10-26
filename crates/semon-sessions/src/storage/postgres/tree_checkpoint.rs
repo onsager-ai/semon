@@ -22,6 +22,8 @@ use std::{collections::BTreeMap, fmt, io};
 #[cfg(test)]
 thread_local! { static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+pub(super) const TOOL_NAME_LENGTH_SQL: &str = "SELECT coalesce(octet_length(name),0)::bigint FROM semon_pg_native_tree_tools WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND tool_id_digest=sha256(convert_to('tree.tool','UTF8') || $3::bytea) AND semon_pg_native_key_matches(tool_id,sha256($3::bytea),$3) LIMIT 1";
+
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     pool: PgPool,
@@ -260,7 +262,7 @@ impl Snapshot {
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
         self.with(|tx| {
             tx.check()?;
-            let lengths = tx.driver.query("SELECT coalesce(octet_length(name),0)::bigint FROM semon_pg_native_tree_tools WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND tool_id_digest=sha256(convert_to('tree.tool','UTF8') || $3::bytea) AND semon_pg_native_key_matches(tool_id,sha256($3::bytea),$3) LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
+            let lengths = tx.driver.query(TOOL_NAME_LENGTH_SQL, &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
             let Some(length) = lengths.first() else { return Ok(None); };
             selected_read::charge(64, usize::try_from(length.get::<_, i64>(0)).map_err(|_| StorageError::Unavailable)?).map_err(budget)?;
             let row = tx.driver.query_one("SELECT name FROM semon_pg_native_tree_tools WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND tool_id_digest=sha256(convert_to('tree.tool','UTF8') || $3::bytea) AND semon_pg_native_key_matches(tool_id,sha256($3::bytea),$3)", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
