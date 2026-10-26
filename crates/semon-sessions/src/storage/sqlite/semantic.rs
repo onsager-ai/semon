@@ -1192,6 +1192,13 @@ fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
 }
 
 impl Stage {
+    /// Fixture access to the real admitted producer, with its ordinary roles
+    /// and namespace guards. Opening the Stage performs the production checks.
+    #[cfg(test)]
+    pub(crate) fn into_test_connection(self) -> Connection {
+        self.db
+    }
+
     pub(crate) fn publish(
         &mut self,
         batch: &Batch,
