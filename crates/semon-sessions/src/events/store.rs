@@ -2034,19 +2034,27 @@ pub(crate) fn local_reader(options: &crate::Options) -> io::Result<Connection> {
         .map_err(io::Error::other)
 }
 
-/// Held legacy-fixture tests only; the current runtime has no unbound reader.
+/// Admitted reader binding for the fixture namespace of an existing store.
 #[cfg(test)]
-pub(crate) fn focused_unbound_connection(path: &Path) -> io::Result<Connection> {
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+pub(crate) fn fixture_reader_binding(path: &Path) -> io::Result<crate::storage::NativeReaderBinding> {
+    let epoch: String = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|db| {
+            db.query_row(
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |row| row.get(0),
+            )
+        })
         .map_err(io::Error::other)?;
-    let read = db.unchecked_transaction().map_err(io::Error::other)?;
-    match qualify_contract(&read).map_err(io::Error::other)? {
-        Init::Ready => {}
-        Init::Unsupported(reason) => return Err(io::Error::other(reason)),
-        _ => return Err(io::Error::other("session index is not initialized")),
-    }
-    read.commit().map_err(io::Error::other)?;
-    Ok(db)
+    Ok(crate::storage::NativeReaderBinding::Admitted(
+        crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.to_owned(),
+            },
+            namespace: fixture_namespace(),
+            expected_stream_epoch: Some(epoch),
+        },
+    ))
 }
 
 /// The single logical source bound by SqliteStore fixtures.
@@ -4540,22 +4548,10 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
             .map_err(io::Error::other)?;
         return Ok(());
     }
-    // The current runtime has no unbound reader; only held legacy-fixture
-    // tests still qualify an unbound connection until they are retired.
-    #[cfg(not(test))]
-    {
-        Err(io::Error::other(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        ))
-    }
-    #[cfg(test)]
-    {
-        match qualify_contract(connection).map_err(io::Error::other)? {
-            Init::Ready => Ok(()),
-            Init::Unsupported(reason) => Err(io::Error::other(reason)),
-            _ => Err(io::Error::other("session index is not initialized")),
-        }
-    }
+    // The current runtime has no unbound reader.
+    Err(io::Error::other(
+        crate::storage::StorageError::NamespaceUpgradePending,
+    ))
 }
 
 /// A writer qualifies the fixed-size current contract in its own transaction
@@ -6563,14 +6559,24 @@ mod tests {
     }
 
     fn source_journal(path: &Path) -> Result<Box<dyn SourceObservationStore>, StoreError> {
-        crate::storage::sqlite::source_journal::open(&crate::storage::StoreConfig {
+        let epoch: String = Connection::open(path)
+            .and_then(|db| {
+                db.query_row(
+                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .map_err(|error| StoreError::Failed(error.to_string()))?;
+        let config = crate::storage::StoreConfig {
             backend: crate::storage::StoreBackend::Sqlite {
                 database: path.to_owned(),
             },
             namespace: fixture_namespace(),
-            expected_stream_epoch: None,
-        })
-        .map_err(StoreError::Configured)
+            expected_stream_epoch: Some(epoch),
+        };
+        config.admit_namespace().map_err(StoreError::Configured)?;
+        crate::storage::sqlite::source_journal::open(&config).map_err(StoreError::Configured)
     }
 
     impl TestSourceObservations for SqliteStore {
@@ -11352,9 +11358,9 @@ mod tests {
                     SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err(),
                     "selected {name}"
                 );
-                assert!(focused_unbound_connection(&path).is_err(), "focused {name}");
+                assert!(fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).is_err(), "focused {name}");
             } else {
-                let db = focused_unbound_connection(&path).unwrap();
+                let db = fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).unwrap();
                 assert!(archived_index(&db, "original").is_err());
             }
             unchanged();
@@ -11450,7 +11456,7 @@ mod tests {
             }
         }
         assert!(SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err());
-        assert!(focused_unbound_connection(&path).is_err());
+        assert!(fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).is_err());
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }
@@ -11495,7 +11501,7 @@ mod tests {
         store
             .write_one("original", None, None, &ledger(1), &full())
             .unwrap();
-        let reader = focused_unbound_connection(&path).unwrap();
+        let reader = fixture_reader_binding(&path).and_then(|binding| focused_connection(&binding)).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         assert_eq!(
             reader
