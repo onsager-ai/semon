@@ -978,12 +978,12 @@ pub(crate) enum StoreError {
     /// Explicit backend errors never detach a configured producer or fork it
     /// into an in-memory/unbound writer.
     Configured(crate::storage::StorageError),
-    /// Another process held the store past its wait: this change stays in
-    /// memory and is written with the file's next one.
+    /// Another process held the store past its bounded wait. The configured
+    /// producer propagates Busy without publishing an in-memory replacement.
     Busy(String),
-    /// A row didn't decode: its file is read from the log again.
+    /// A stored row did not decode under the current contract.
     Data(String),
-    /// The store can't be used any more: the rest of the run is in memory.
+    /// The store is unavailable; a configured producer refuses the operation.
     Failed(String),
 }
 
@@ -1008,8 +1008,8 @@ pub(crate) enum Outcome {
     /// A bounded original-custody checkpoint committed. Current publication and
     /// its durable source claims remain pending for the next producer step.
     Deferred,
-    /// Another version of Semon rebuilt the store for its own parser or
-    /// schema. Nothing was written.
+    /// The captured store or parser contract is no longer current. Nothing
+    /// was written.
     Stale,
 }
 
@@ -1438,8 +1438,8 @@ struct CachedFile {
     index: Option<Arc<FileIndex>>,
 }
 
-/// The event index: every file's [`FileIndex`] in memory, written through
-/// to an [`IndexStore`] file by file when one could be opened.
+/// The admitted event index: selected [`FileIndex`] values in memory, written
+/// through the explicitly owned [`IndexStore`].
 #[derive(Default)]
 pub(crate) struct EventCache {
     files: BTreeMap<String, CachedFile>,
