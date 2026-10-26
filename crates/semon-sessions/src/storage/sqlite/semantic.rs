@@ -543,49 +543,27 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
 /// use only the fixed DML below, and drop before that TX ends. No page runs DDL.
 struct FrontierLayout<'tx> {
     db: &'tx Connection,
-    header_scoped: bool,
-    support_scoped: bool,
 }
 impl<'tx> FrontierLayout<'tx> {
     fn bind(tx: &'tx rusqlite::Transaction<'_>) -> rusqlite::Result<Self> {
         let db: &Connection = tx;
-        Ok(Self {
-            db,
-            header_scoped: "namespace" == "namespace",
-            support_scoped: crate::events::store::semantic_stage::support_sql(db, "", "namespace")?
-                == "namespace",
-        })
-    }
-    fn support<'a>(&self, singleton: &'a str, scoped: &'a str) -> &'a str {
-        if self.support_scoped {
-            scoped
-        } else {
-            singleton
-        }
+        Ok(Self { db })
     }
     fn frontier<'a>(&'a self, ns: &'a str) -> ScopedNativeFrontier<'a> {
-        ScopedNativeFrontier {
-            db: self.db,
-            ns,
-            layout: self,
-        }
+        ScopedNativeFrontier { db: self.db, ns }
     }
 }
 
 struct ScopedNativeFrontier<'a> {
     db: &'a Connection,
     ns: &'a str,
-    layout: &'a FrontierLayout<'a>,
 }
 impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFrontier<'_> {
     fn needed_native(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources own WHERE own.namespace=?1 AND own.harness=?2 AND own.native_id=?3 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=own.source_path))",params![self.ns,harness,id],|r|r.get(0))
     }
     fn needed_dependency(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
-        let sql = self.layout.support(
-            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))",
-            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE d.namespace=?1 AND d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))",
-        );
+        let sql = "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE d.namespace=?1 AND d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))";
         self.db
             .query_row(sql, params![self.ns, harness, id], |r| r.get(0))
     }
@@ -621,32 +599,15 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
         } else {
             "semantic_codex_header_native"
         };
-        let header_scoped = self.layout.header_scoped;
-        let support_scoped = self.layout.support_scoped;
-        let owner = if header_scoped {
-            ""
-        } else {
-            "JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0"
-        };
-        let guard = if header_scoped {
-            "m.namespace=?1 AND"
-        } else {
-            ""
-        };
-        let dependencies = if support_scoped {
-            "d.namespace=?1 AND"
-        } else {
-            "EXISTS(SELECT 1 FROM storage_event_tables dependency_owner WHERE dependency_owner.namespace=?1 AND dependency_owner.table_name='catalog_native_dependencies' AND dependency_owner.qualification=0) AND"
-        };
         let qualification = if qualified {
             format!(
-                "AND NOT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE {dependencies} d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?2 AND d.harness='semantic-{dependency}:codex')"
+                "AND NOT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE d.namespace=?1 AND d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?2 AND d.harness='semantic-{dependency}:codex')"
             )
         } else {
             String::new()
         };
         let sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM main.meta m INDEXED BY {index} {owner} WHERE {guard} m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})"
+            "SELECT EXISTS(SELECT 1 FROM main.meta m INDEXED BY {index} WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})"
         );
         self.db.query_row(&sql, params![self.ns, id], |r| r.get(0))
     }
@@ -684,7 +645,7 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
             // only the authored current statement. Charge the real entry check.
             crate::events::store::configured::validate_statement_layout(c).unwrap();
         } else {
-            crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
+            crate::events::store::semantic_stage::validate_support(c).unwrap();
         }
         c.progress_handler(0, None::<fn() -> bool>).unwrap();
         let elapsed = started.elapsed();
@@ -876,10 +837,7 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             "native" => {
                 // Both are authored current profiles. The singleton family is
                 // read only through its admitted physical owner, never unscoped.
-                layout.support(
-                    "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4",
-                    "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
-                )
+                "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
             "receipt" => {
                 "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='xsm' AND e.id=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
@@ -888,29 +846,15 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
                 "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='tool' AND e.n='SendMessage' AND e.reply_m=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
             }
             "dependency" => {
-                layout.support(
-                    "SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness=?5 AND d.source_path>?3 GROUP BY d.source_path ORDER BY d.source_path LIMIT ?4",
-                    "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4")
+                "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
             "claudeid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND substr(path,length(rtrim(path,replace(path,'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
             "copilotid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
             "nativeall" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
-            "headerid" => {
-                if layout.header_scoped {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
-                } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
-                }
-            }
-            "headerparent" => {
-                if layout.header_scoped {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
-                } else {
-                    "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0 WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
-                }
-            }
+            "headerid" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+            "headerparent" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
         };
         let mut q = c.prepare(sql).map_err(error)?;

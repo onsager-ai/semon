@@ -328,9 +328,9 @@ fn source_step(
     }
     if work.job.is_none() {
         let next: Option<(i64, String, i64, Option<String>)> = if let Some(id) = pending_id {
-            tx.query_row(native_usage::sql(tx, "SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3", "SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(namespace,source_id) JOIN files f ON f.namespace=n.namespace AND f.path=n.source_path WHERE s.namespace=semon_namespace() AND s.source_id=?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3")?,params![id,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
+            tx.query_row("SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(namespace,source_id) JOIN files f ON f.namespace=n.namespace AND f.path=n.source_path WHERE s.namespace=semon_namespace() AND s.source_id=?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3",params![id,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
         } else {
-            tx.query_row(native_usage::sql(tx, "SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM files f INDEXED BY files_codex_pricing_fingerprint JOIN native_usage_current n ON n.source_path=f.path JOIN native_usage_sources s USING(source_id) WHERE f.codex_native_usage IS NOT NULL AND f.file_id>?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3 ORDER BY f.file_id LIMIT 1", "SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM files f INDEXED BY files_codex_pricing_fingerprint JOIN native_usage_current n ON n.namespace=f.namespace AND n.source_path=f.path JOIN native_usage_sources s ON s.namespace=n.namespace AND s.source_id=n.source_id WHERE f.namespace=semon_namespace() AND f.codex_native_usage IS NOT NULL AND f.file_id>?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3 ORDER BY f.file_id LIMIT 1")?,params![work.file_after,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
+            tx.query_row("SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM files f INDEXED BY files_codex_pricing_fingerprint JOIN native_usage_current n ON n.namespace=f.namespace AND n.source_path=f.path JOIN native_usage_sources s ON s.namespace=n.namespace AND s.source_id=n.source_id WHERE f.namespace=semon_namespace() AND f.codex_native_usage IS NOT NULL AND f.file_id>?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3 ORDER BY f.file_id LIMIT 1",params![work.file_after,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
         };
         let Some((id, receipt, file_id, encoded)) = next else {
             if pending_id.is_none() {
@@ -348,7 +348,7 @@ fn source_step(
         let root: Value = decode_json(0, &encoded)?;
         let fingerprint = root["cost"]["pricing_fingerprint"].as_str();
         tx.execute(
-            native_usage::sql(tx, "UPDATE files SET codex_pricing_fingerprint=?2 WHERE path=(SELECT source_path FROM native_usage_current WHERE source_id=?1)", "UPDATE files SET codex_pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND path=(SELECT source_path FROM native_usage_current WHERE namespace=semon_namespace() AND source_id=?1)")?,
+            "UPDATE files SET codex_pricing_fingerprint=?2 WHERE namespace=semon_namespace() AND path=(SELECT source_path FROM native_usage_current WHERE namespace=semon_namespace() AND source_id=?1)",
             params![id, fingerprint],
         )?;
         if root["projection_version"] != 1 {
@@ -364,7 +364,7 @@ fn source_step(
     }
     let job = work.job.as_mut().expect("source selected");
     job.cost.bind_table(Arc::clone(table));
-    let current: Option<(String,String)>=tx.query_row(native_usage::sql(tx, "SELECT s.receipt,f.codex_native_usage FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND octet_length(f.codex_native_usage)<=1048576", "SELECT s.receipt,f.codex_native_usage FROM native_usage_sources s JOIN native_usage_current n USING(namespace,source_id) JOIN files f ON f.namespace=n.namespace AND f.path=n.source_path WHERE s.namespace=semon_namespace() AND s.source_id=?1 AND octet_length(f.codex_native_usage)<=1048576")?,[job.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let current: Option<(String,String)>=tx.query_row("SELECT s.receipt,f.codex_native_usage FROM native_usage_sources s JOIN native_usage_current n USING(namespace,source_id) JOIN files f ON f.namespace=n.namespace AND f.path=n.source_path WHERE s.namespace=semon_namespace() AND s.source_id=?1 AND octet_length(f.codex_native_usage)<=1048576",[job.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((receipt, encoded)) = current else {
         work.job = None;
         return Ok(pending_id.is_none());
@@ -376,7 +376,7 @@ fn source_step(
         work.job = None;
         return Ok(pending_id.is_none());
     }
-    let mut statement=tx.prepare(native_usage::sql(tx, "SELECT native_offset,CASE WHEN octet_length(payload)<=8192 THEN payload ELSE NULL END FROM native_usage_facts WHERE source_id=?1 AND native_offset>?2 AND model_outcome='accepted' ORDER BY native_offset LIMIT ?3", "SELECT native_offset,CASE WHEN octet_length(payload)<=8192 THEN payload ELSE NULL END FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset>?2 AND model_outcome='accepted' ORDER BY native_offset LIMIT ?3")?)?;
+    let mut statement=tx.prepare("SELECT native_offset,CASE WHEN octet_length(payload)<=8192 THEN payload ELSE NULL END FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset>?2 AND model_outcome='accepted' ORDER BY native_offset LIMIT ?3")?;
     let rows = statement.query_map(params![job.id, job.offset, BATCH as i64], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
     })?;
@@ -408,7 +408,7 @@ fn source_step(
         return Ok(true);
     }
     let mut expected = BTreeMap::new();
-    let mut models=tx.prepare(native_usage::sql(tx, "SELECT dimension,CASE WHEN octet_length(value)<=8192 THEN value ELSE NULL END FROM native_usage_dimensions WHERE source_id=?1 AND kind='model' ORDER BY dimension LIMIT 4097", "SELECT dimension,CASE WHEN octet_length(value)<=8192 THEN value ELSE NULL END FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 AND kind='model' ORDER BY dimension LIMIT 4097")?)?;
+    let mut models=tx.prepare("SELECT dimension,CASE WHEN octet_length(value)<=8192 THEN value ELSE NULL END FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 AND kind='model' ORDER BY dimension LIMIT 4097")?;
     for row in models.query_map([job.id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })? {
@@ -432,7 +432,7 @@ fn source_step(
     }
     // Replace all derived dimensions together. The native totals/receipts and
     // every original fact remain byte-for-byte unchanged.
-    tx.execute(native_usage::sql(tx, "DELETE FROM native_usage_dimensions WHERE source_id=?1 AND kind IN ('cost_model','cost_day')", "DELETE FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 AND kind IN ('cost_model','cost_day')")?,[job.id])?;
+    tx.execute("DELETE FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 AND kind IN ('cost_model','cost_day')",[job.id])?;
     for (model, value) in &job.cost.models {
         put_dimension(tx, job.id, "cost_model", model, value)?;
     }
@@ -444,7 +444,7 @@ fn source_step(
     cost.by_day.clear();
     cost.unpriced_models.clear();
     root["cost"] = serde_json::to_value(cost).map_err(sql_json)?;
-    tx.execute(native_usage::sql(tx, "UPDATE files SET codex_native_usage=?2 WHERE path=(SELECT source_path FROM native_usage_current WHERE source_id=?1)", "UPDATE files SET codex_native_usage=?2 WHERE namespace=semon_namespace() AND path=(SELECT source_path FROM native_usage_current WHERE namespace=semon_namespace() AND source_id=?1)")?,params![job.id,json(&root)?])?;
+    tx.execute("UPDATE files SET codex_native_usage=?2 WHERE namespace=semon_namespace() AND path=(SELECT source_path FROM native_usage_current WHERE namespace=semon_namespace() AND source_id=?1)",params![job.id,json(&root)?])?;
     work.job = None;
     Ok(true)
 }
@@ -457,11 +457,7 @@ fn put_dimension<T: Serialize>(
     value: &T,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        native_usage::sql(
-            tx,
-            "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4)",
-            "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4)",
-        )?,
+        "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4)",
         params![id, kind, key, json(value)?],
     )?;
     Ok(())
@@ -506,9 +502,9 @@ fn retained_cost(
             return Ok(None);
         }
         if row.harness == "claude" {
-            let mut statement=tx.prepare(&format!("SELECT {USAGE_COLUMNS} FROM usage WHERE {}file_id=?1 AND octet_length(record_ids)<=65536 AND length(COALESCE(model,''))<=512 LIMIT ?2", copied_usage_sql(tx, "", "namespace=semon_namespace() AND ")?))?;
+            let mut statement=tx.prepare(&format!("SELECT {USAGE_COLUMNS} FROM usage WHERE {}file_id=?1 AND octet_length(record_ids)<=65536 AND length(COALESCE(model,''))<=512 LIMIT ?2", "namespace=semon_namespace() AND "))?;
             let total: i64 = tx.query_row(
-                copied_usage_sql(tx, "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE file_id=?1 LIMIT ?2)", "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE namespace=semon_namespace() AND file_id=?1 LIMIT ?2)")?,
+                "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE namespace=semon_namespace() AND file_id=?1 LIMIT ?2)",
                 params![file_id, (MAX_FACTS + 1) as i64],
                 |r| r.get(0),
             )?;
@@ -532,10 +528,10 @@ fn retained_cost(
             }
             facts += loaded;
         } else {
-            let encoded:Option<String>=tx.query_row(configured::sql(tx, "SELECT CASE WHEN octet_length(codex_native_usage)<=1048576 THEN codex_native_usage ELSE NULL END FROM files WHERE file_id=?1", "SELECT CASE WHEN octet_length(codex_native_usage)<=1048576 THEN codex_native_usage ELSE NULL END FROM files WHERE namespace=semon_namespace() AND file_id=?1")?,[file_id],|r|r.get(0))?;
+            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(codex_native_usage)<=1048576 THEN codex_native_usage ELSE NULL END FROM files WHERE namespace=semon_namespace() AND file_id=?1",[file_id],|r|r.get(0))?;
             if let Some(encoded) = encoded {
                 if let Some((id, _)) = native_usage::source(tx, path)? {
-                    let count:i64=tx.query_row(native_usage::sql(tx, "SELECT COUNT(*) FROM (SELECT 1 FROM native_usage_dimensions WHERE source_id=?1 LIMIT 4097)", "SELECT COUNT(*) FROM (SELECT 1 FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 LIMIT 4097)")?,[id],|r|r.get(0))?;
+                    let count:i64=tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 LIMIT 4097)",[id],|r|r.get(0))?;
                     if count > MAX_FACTS as i64 {
                         return Ok(None);
                     }
@@ -552,7 +548,7 @@ fn retained_cost(
                 }
                 build.merge(&cost);
             } else {
-                let mut statement=tx.prepare(copied_usage_sql(tx, "SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE file_id=?1 ORDER BY seq LIMIT ?2", "SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 ORDER BY seq LIMIT ?2")?)?;
+                let mut statement=tx.prepare("SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 ORDER BY seq LIMIT ?2")?;
                 let mut rows = statement.query(params![file_id, (MAX_FACTS + 1) as i64])?;
                 while let Some(r) = rows.next()? {
                     facts += 1;
@@ -825,7 +821,7 @@ fn pending_step(
         "source" => {
             let id: Option<i64> = tx
                 .query_row(
-                    native_usage::sql(tx, "SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(source_id) WHERE c.source_path=?1 AND s.parser_version=?2 AND s.usage_ready=1", "SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2 AND s.usage_ready=1")?,
+                    "SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2 AND s.usage_ready=1",
                     params![key, CACHE_VERSION],
                     |row| row.get(0),
                 )

@@ -370,7 +370,6 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 "
     };
 }
-const CATALOG_SCHEMA: &str = catalog_ddl!();
 macro_rules! slot_ddl {
     () => {
         "
@@ -476,14 +475,6 @@ CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sou
 CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(namespace,lifecycle, source_path, session_key);
 ";
 
-fn catalog_schema(composite: bool) -> &'static str {
-    if composite {
-        COMPOSITE_CATALOG_SCHEMA
-    } else {
-        CATALOG_SCHEMA
-    }
-}
-
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
@@ -576,11 +567,7 @@ fn copied_usage_schema() -> &'static str {
     COMPOSITE_COPIED_USAGE_SCHEMA
 }
 
-fn copied_usage_sql<'a>(
-    c: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
+fn validate_copied_usage(c: &Connection) -> rusqlite::Result<()> {
     let version: i64 = c.pragma_query_value(None, "schema_version", |r| r.get(0))?;
     let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_copied_usage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
     if cached {
@@ -588,7 +575,7 @@ fn copied_usage_sql<'a>(
             .prepare_cached("SELECT semon_copied_usage_layout(?1)")?
             .query_row([version], |r| r.get(0))?;
         if layout == Some(true) {
-            return Ok(scoped);
+            return Ok(());
         }
     }
     // These tables are one atomic physical family, independent of files and
@@ -653,7 +640,7 @@ fn copied_usage_sql<'a>(
     // Do not cache an uncommitted schema cookie: rollback can reuse it for
     // a different DDL transaction. Existing committed decisions remain usable.
     if !c.is_autocommit() {
-        return Ok(scoped);
+        return Ok(());
     }
     c.create_scalar_function(
         "semon_copied_usage_layout",
@@ -665,7 +652,7 @@ fn copied_usage_sql<'a>(
             Ok((observed == version).then_some(true))
         },
     )?;
-    Ok(scoped)
+    Ok(())
 }
 
 // The current schema is qualified before constructing the transaction writer.
@@ -678,8 +665,8 @@ struct WriterLayout<'tx, 'connection> {
 impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     fn new(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
         configured::validate_statement_layout(transaction)?;
-        copied_usage_sql(transaction, "", "")?;
-        semantic_stage::support_sql(transaction, "", "")?;
+        validate_copied_usage(transaction)?;
+        semantic_stage::validate_support(transaction)?;
         let schema_version =
             transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         Ok(Self {
@@ -705,18 +692,6 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     }
 }
 
-fn child_predicate(c: &Connection, table: &str) -> rusqlite::Result<&'static str> {
-    match table {
-        "usage_identity" | "usage" | "codex_usage" => {
-            copied_usage_sql(c, "", "namespace=semon_namespace() AND ")
-        }
-        "native_tree_copied_identities" => {
-            tree_state::sql(c, "", "namespace=semon_namespace() AND ")
-        }
-        _ => configured::predicate(c),
-    }
-}
-
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
 const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
@@ -727,15 +702,6 @@ const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, rea
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
      billing_timestamp, billing_split_unknown, record_ids";
-
-const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, model, input, \
-     cached_input, output, reasoning_output, total, model_input, model_output, \
-     model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
-     billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
-     billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
-     billing_split_unknown, record_ids) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24)";
 
 const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file_id, message_id, model, input, \
      cached_input, output, reasoning_output, total, model_input, model_output, \
@@ -1794,9 +1760,7 @@ fn runtime_input_evidence(
     connection: &Connection,
     path: &str,
 ) -> rusqlite::Result<Option<crate::source_change::RuntimeInputEvidence>> {
-    let text: Option<Option<String>> = connection.query_row(semantic_stage::support_sql(connection,
-        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",
-        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?, [path], |row| row.get(0)).optional()?;
+    let text: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1", [path], |row| row.get(0)).optional()?;
     Ok(text
         .flatten()
         .and_then(|text| {
@@ -1975,9 +1939,7 @@ fn read_append_evidence(
     connection: &Connection,
     path: &str,
 ) -> rusqlite::Result<Option<crate::source_change::AppendEvidence>> {
-    let text: Option<Option<String>> = connection.query_row(semantic_stage::support_sql(connection,
-        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",
-        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,[path],|row|row.get(0)).optional()?;
+    let text: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",[path],|row|row.get(0)).optional()?;
     Ok(text
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok()))
@@ -4420,8 +4382,8 @@ impl SqliteStore {
         // Validate/cache the committed layout before the first writer
         // transaction. A transaction may reuse this cookie but must not cache
         // transient DDL whose schema cookie can be reused after rollback.
-        copied_usage_sql(&connection, "", "").map_err(classify)?;
-        semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
+        validate_copied_usage(&connection).map_err(classify)?;
+        semantic_stage::validate_support(&connection).map_err(classify)?;
         let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
@@ -4512,8 +4474,8 @@ impl SqliteStore {
         crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
             .map_err(|error| Unopened::Other(error.to_string()))?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
-        copied_usage_sql(&connection, "", "").map_err(classify)?;
-        semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
+        validate_copied_usage(&connection).map_err(classify)?;
+        semantic_stage::validate_support(&connection).map_err(classify)?;
         let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
@@ -5172,7 +5134,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     if !matches!(found, Init::Ready) {
         return Ok(found);
     }
-    copied_usage_sql(connection, "", "")?;
+    validate_copied_usage(connection)?;
     let unsupported_archive: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
         [CACHE_VERSION],
@@ -5192,7 +5154,7 @@ fn authored_storage_ddl() -> [&'static str; 22] {
     let [usage, repair] = native_usage::schema();
     [
         crate::storage::sqlite::publication::SLOT_SCHEMA,
-        catalog_schema(true),
+        COMPOSITE_CATALOG_SCHEMA,
         semantic_stage::support_schema(),
         metadata_schema(),
         configured::CORE_SCHEMA,
@@ -5427,23 +5389,14 @@ fn current_file_count(
     sources: &BTreeMap<String, &crate::model::summary::CatalogSource>,
 ) -> rusqlite::Result<i64> {
     let mut count: i64 = connection.query_row(
-        configured::sql(
-            connection,
-            "SELECT count(*) FROM files",
-            "SELECT count(*) FROM files WHERE namespace=semon_namespace()",
-        )?,
+        "SELECT count(*) FROM files WHERE namespace=semon_namespace()",
         [],
         |row| row.get(0),
     )?;
     let mut statement = connection.prepare(
-        configured::sql(connection,
-            "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
-         CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
-         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.namespace=semon_namespace() AND m.key GLOB ?2",
-            "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
+        "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
          CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
          FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE f.namespace=semon_namespace() AND m.namespace=semon_namespace() AND m.key GLOB ?2",
-        )?,
     )?;
     let mut rows = statement.query(["archive_event_index:", "archive_event_index:*"])?;
     while let Some(row) = rows.next()? {
@@ -5752,9 +5705,7 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
         }
         values.push(value.flatten());
     }
-    let pricing: Option<String> = connection.query_row(configured::sql(connection,
-        "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
-        "SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1")?,
+    let pricing: Option<String> = connection.query_row("SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1",
         [path], |r| {
             crate::selected_read::row(r, 64)?;
             r.get(0)
@@ -6149,9 +6100,7 @@ pub(crate) fn ledger_row(
 ) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .prepare_cached(
-            configured::sql(connection,
-                "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns FROM files WHERE path=?1",
-                "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns FROM files WHERE namespace=semon_namespace() AND path=?1")?,
+            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns FROM files WHERE namespace=semon_namespace() AND path=?1",
         )?
         .query_row(
             [path],
@@ -6184,19 +6133,19 @@ impl<'c> Readers<'c> {
             connection,
             events: connection.prepare(&format!(
                 "SELECT {EVENT_COLUMNS} FROM events WHERE {}file_id = ?1 ORDER BY extra, seq",
-                configured::predicate(connection)?
+                "namespace=semon_namespace() AND "
             ))?,
             signals: connection.prepare(&format!(
                 "SELECT {SIGNAL_COLUMNS} FROM signals WHERE {}file_id = ?1 ORDER BY seq",
-                configured::predicate(connection)?
+                "namespace=semon_namespace() AND "
             ))?,
             usage: connection.prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage WHERE {}file_id = ?1",
-                copied_usage_sql(connection, "", "namespace=semon_namespace() AND ")?
+                "namespace=semon_namespace() AND "
             ))?,
             codex_usage: connection.prepare(&format!(
                 "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE {}file_id = ?1 ORDER BY seq",
-                copied_usage_sql(connection, "", "namespace=semon_namespace() AND ")?
+                "namespace=semon_namespace() AND "
             ))?,
             codex_header: connection.prepare(native_metadata_value(connection)?)?,
             claude_sidecar: connection.prepare(native_metadata_value(connection)?)?,
@@ -6353,7 +6302,7 @@ fn read_runs_selected(
 }
 
 fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Result<String> {
-    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    let scope = "namespace=semon_namespace() AND ";
     Ok(if selected {
         format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 ORDER BY start")
     } else if scope.is_empty() {
@@ -6369,7 +6318,7 @@ fn validate_prior_reported(
     connection: &Connection,
     rows: &[super::reported_rows::ReportedRow],
 ) -> rusqlite::Result<()> {
-    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    let scope = "namespace=semon_namespace() AND ";
     let mut statement = connection.prepare(&format!(
         "SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 AND start=?2"
     ))?;
@@ -6441,12 +6390,12 @@ fn clear_preserving_tree(
     file_id: i64,
     preserve_tree: bool,
 ) -> rusqlite::Result<()> {
-    copied_usage_sql(transaction, "", "")?;
+    validate_copied_usage(transaction)?;
     for table in ["events", "signals"] {
         transaction.execute(
             &format!(
                 "DELETE FROM {table} WHERE {}file_id=?1",
-                configured::predicate(transaction)?
+                "namespace=semon_namespace() AND "
             ),
             [file_id],
         )?;
@@ -6460,18 +6409,14 @@ fn clear_preserving_tree(
         transaction.execute(
             &format!(
                 "DELETE FROM {table} WHERE {}file_id = ?1",
-                child_predicate(transaction, table)?
+                "namespace=semon_namespace() AND "
             ),
             [file_id],
         )?;
     }
     if !preserve_tree {
         transaction.execute(
-            tree_state::sql(
-                transaction,
-                "DELETE FROM native_tree_headers WHERE file_id=?1",
-                "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1",
-            )?,
+            "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1",
             [file_id],
         )?;
     }
@@ -7349,16 +7294,16 @@ mod tests {
                         0
                     ))
                     .unwrap(),
-                Some(false)
+                Some(true)
             );
             let tx = store.connection.transaction().unwrap();
             assert_eq!(
-                copied_usage_sql(&tx, "singleton", "scoped").unwrap(),
+                "scoped",
                 "singleton"
             );
             tx.execute_batch("DROP INDEX usage_identity_peers;")
                 .unwrap();
-            assert!(copied_usage_sql(&tx, "singleton", "scoped").is_err());
+            assert!(validate_copied_usage(&tx).is_err());
             tx.rollback().unwrap();
             assert_eq!(
                 store
@@ -7370,12 +7315,9 @@ mod tests {
                         0
                     ))
                     .unwrap(),
-                Some(false)
+                Some(true)
             );
-            assert_eq!(
-                copied_usage_sql(&store.connection, "singleton", "scoped").unwrap(),
-                "singleton"
-            );
+            validate_copied_usage(&store.connection).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -11382,7 +11324,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn usage_delete_fixture(composite: bool) -> Connection {
+    fn usage_delete_fixture() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
         db.create_scalar_function(
@@ -11392,11 +11334,9 @@ mod tests {
             |_| Ok("selected".to_owned()),
         )
         .unwrap();
-        db.execute_batch(if composite {
-            "CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,PRIMARY KEY(namespace,file_id)) STRICT, WITHOUT ROWID; INSERT INTO files VALUES('selected',1),('selected',2),('foreign',1);"
-        } else {
-            "CREATE TABLE files(file_id INTEGER PRIMARY KEY); INSERT INTO files VALUES(1),(2);"
-        })
+        db.execute_batch(
+            "CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,PRIMARY KEY(namespace,file_id)) STRICT, WITHOUT ROWID; INSERT INTO files VALUES('selected',1),('selected',2),('foreign',1);",
+        )
         .unwrap();
         db.execute_batch(copied_usage_schema()).unwrap();
         let seed = ["a", "b", "c", "z"]
@@ -11415,25 +11355,23 @@ mod tests {
             usage: seed.keys().cloned().collect(),
             ..Default::default()
         };
-        if composite {
-            db.create_scalar_function(
-                "semon_namespace",
-                0,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |_| Ok("foreign".to_owned()),
-            )
-            .unwrap();
-            let tx = db.unchecked_transaction().unwrap();
-            write_copied_usage_rows(&tx, 1, &changes, &seed, &mut Default::default()).unwrap();
-            tx.commit().unwrap();
-            db.create_scalar_function(
-                "semon_namespace",
-                0,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |_| Ok("selected".to_owned()),
-            )
-            .unwrap();
-        }
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok("foreign".to_owned()),
+        )
+        .unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        write_copied_usage_rows(&tx, 1, &changes, &seed, &mut Default::default()).unwrap();
+        tx.commit().unwrap();
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok("selected".to_owned()),
+        )
+        .unwrap();
         let tx = db.unchecked_transaction().unwrap();
         write_copied_usage_rows(&tx, 1, &changes, &seed, &mut Default::default()).unwrap();
         write_copied_usage_rows(&tx, 2, &changes, &seed, &mut Default::default()).unwrap();
@@ -11465,134 +11403,96 @@ mod tests {
 
     #[test]
     fn usage_delete_reuse_matches_rowwise_order_and_preserves_foreign_rows() {
-        for composite in [true] {
-            let db = usage_delete_fixture(composite);
-            let reference = usage_delete_fixture(composite);
-            let changes = super::super::DirtyRows {
-                usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
-                ..Default::default()
-            };
-            let desired = BTreeMap::from([(
-                "b".to_owned(),
-                MessageUsage {
-                    record_ids: BTreeSet::from(["new-b".to_owned(), "other-b".to_owned()]),
-                    ..MessageUsage::default()
-                },
-            )]);
-            let before = usage_delete_snapshot(&db);
-            let tx = db.unchecked_transaction().unwrap();
-            let changed_before = tx.total_changes();
-            assert_eq!(
-                write_copied_usage_rows(
-                    &tx,
-                    1,
-                    &Default::default(),
-                    &desired,
-                    &mut Default::default(),
-                )
-                .unwrap(),
-                UsageDeleteWork::default()
-            );
-            assert_eq!(tx.total_changes(), changed_before);
-            assert_eq!(usage_delete_snapshot(&tx), before);
-            let work = write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default())
-                .unwrap();
-            assert_eq!(
-                work,
-                UsageDeleteWork {
-                    identity_prepares: 1,
-                    identity_executions: 4,
-                    usage_prepares: 1,
-                    usage_executions: 3,
-                }
-            );
-            tx.commit().unwrap();
-            // Frozen rowwise reference: each deletion gets its own prepare;
-            // compare complete values and the actual trigger event order.
-            let tx = reference.unchecked_transaction().unwrap();
-            let mut put = tx
-                .prepare(copied_usage_sql(&tx, PUT_USAGE, COMPOSITE_PUT_USAGE).unwrap())
-                .unwrap();
-            let mut identity = tx.prepare(copied_usage_sql(&tx, "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)").unwrap()).unwrap();
-            for id in &changes.usage {
-                tx.execute(copied_usage_sql(&tx, "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2", "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2").unwrap(), params![1, id]).unwrap();
-                if let Some(usage) = desired.get(id) {
-                    put_usage(&mut put, 1, id, usage).unwrap();
-                    for uuid in &usage.record_ids {
-                        identity.execute(params![1, id, uuid]).unwrap();
-                    }
-                } else {
-                    tx.execute(copied_usage_sql(&tx, "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2", "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2").unwrap(), params![1, id]).unwrap();
-                }
+        let db = usage_delete_fixture();
+        let reference = usage_delete_fixture();
+        let changes = super::super::DirtyRows {
+            usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
+            ..Default::default()
+        };
+        let desired = BTreeMap::from([(
+            "b".to_owned(),
+            MessageUsage {
+                record_ids: BTreeSet::from(["new-b".to_owned(), "other-b".to_owned()]),
+                ..MessageUsage::default()
+            },
+        )]);
+        let before = usage_delete_snapshot(&db);
+        let tx = db.unchecked_transaction().unwrap();
+        let changed_before = tx.total_changes();
+        assert_eq!(
+            write_copied_usage_rows(
+                &tx,
+                1,
+                &Default::default(),
+                &desired,
+                &mut Default::default(),
+            )
+            .unwrap(),
+            UsageDeleteWork::default()
+        );
+        assert_eq!(tx.total_changes(), changed_before);
+        assert_eq!(usage_delete_snapshot(&tx), before);
+        let work = write_copied_usage_rows(&tx, 1, &changes, &desired, &mut Default::default())
+            .unwrap();
+        assert_eq!(
+            work,
+            UsageDeleteWork {
+                identity_prepares: 1,
+                identity_executions: 4,
+                usage_prepares: 1,
+                usage_executions: 3,
             }
-            drop((put, identity));
-            tx.commit().unwrap();
-            assert_eq!(
-                usage_delete_snapshot(&db),
-                usage_delete_snapshot(&reference)
-            );
-            if composite {
-                let foreign: i64 = db
-                    .query_row(
-                        "SELECT count(*) FROM usage WHERE namespace='foreign'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(foreign, 4);
+        );
+        tx.commit().unwrap();
+        // Frozen rowwise reference: each deletion gets its own prepare;
+        // compare complete values and the actual trigger event order.
+        let tx = reference.unchecked_transaction().unwrap();
+        let mut put = tx
+            .prepare(COMPOSITE_PUT_USAGE)
+            .unwrap();
+        let mut identity = tx.prepare("INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)").unwrap();
+        for id in &changes.usage {
+            tx.execute("DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2", params![1, id]).unwrap();
+            if let Some(usage) = desired.get(id) {
+                put_usage(&mut put, 1, id, usage).unwrap();
+                for uuid in &usage.record_ids {
+                    identity.execute(params![1, id, uuid]).unwrap();
+                }
+            } else {
+                tx.execute("DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2", params![1, id]).unwrap();
             }
         }
+        drop((put, identity));
+        tx.commit().unwrap();
+        assert_eq!(
+            usage_delete_snapshot(&db),
+            usage_delete_snapshot(&reference)
+        );
+        let foreign: i64 = db
+            .query_row(
+                "SELECT count(*) FROM usage WHERE namespace='foreign'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(foreign, 4);
     }
 
     #[test]
     fn usage_delete_statements_are_transaction_owned_and_recheck_on_reuse() {
-        for composite in [true] {
-            let db = usage_delete_fixture(composite);
-            let changes = super::super::DirtyRows {
-                usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
-                ..Default::default()
-            };
-            let before = usage_delete_snapshot(&db);
-            let tx = db.unchecked_transaction().unwrap();
-            let layout = WriterLayout::copied_usage_only(&tx).unwrap();
-            let mut deletes = UsageDeletes::default();
-            tx.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
-            for _ in 0..2 {
-                tx.execute_batch("SAVEPOINT usage_attempt").unwrap();
-                let error = write_copied_usage_rows_with_deletes(
-                    &tx,
-                    1,
-                    &changes,
-                    &BTreeMap::new(),
-                    &mut Default::default(),
-                    &layout,
-                    &mut deletes,
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("last usage delete"));
-                tx.execute_batch("ROLLBACK TO usage_attempt; RELEASE usage_attempt")
-                    .unwrap();
-                assert_eq!(usage_delete_snapshot(&tx), before);
-            }
-            tx.execute_batch("DROP TRIGGER fail_last; SAVEPOINT malformed; DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(file_id);").unwrap();
-            let changed_before = tx.total_changes();
-            assert!(
-                write_copied_usage_rows_with_deletes(
-                    &tx,
-                    1,
-                    &changes,
-                    &BTreeMap::new(),
-                    &mut Default::default(),
-                    &layout,
-                    &mut deletes,
-                )
-                .is_err()
-            );
-            assert_eq!(tx.total_changes(), changed_before);
-            tx.execute_batch("ROLLBACK TO malformed; RELEASE malformed")
-                .unwrap();
-            // Reuse after ABORT and DDL rollback retains no failed bindings.
-            let work = write_copied_usage_rows_with_deletes(
+        let db = usage_delete_fixture();
+        let changes = super::super::DirtyRows {
+            usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
+            ..Default::default()
+        };
+        let before = usage_delete_snapshot(&db);
+        let tx = db.unchecked_transaction().unwrap();
+        let layout = WriterLayout::copied_usage_only(&tx).unwrap();
+        let mut deletes = UsageDeletes::default();
+        tx.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
+        for _ in 0..2 {
+            tx.execute_batch("SAVEPOINT usage_attempt").unwrap();
+            let error = write_copied_usage_rows_with_deletes(
                 &tx,
                 1,
                 &changes,
@@ -11601,101 +11501,112 @@ mod tests {
                 &layout,
                 &mut deletes,
             )
-            .unwrap();
-            assert_eq!(work.identity_prepares + work.usage_prepares, 0);
-            drop(deletes);
-            let mut deletes = UsageDeletes::default();
-            // Sixty-four calls model a maximum cold transaction: two authored
-            // prepares total, versus 64 * (4 + 4) rowwise prepares.
-            for call in 0..64 {
-                let work = write_copied_usage_rows_with_deletes(
-                    &tx,
-                    1 + call % 2,
-                    &changes,
-                    &BTreeMap::new(),
-                    &mut Default::default(),
-                    &layout,
-                    &mut deletes,
-                )
+            .unwrap_err();
+            assert!(error.to_string().contains("last usage delete"));
+            tx.execute_batch("ROLLBACK TO usage_attempt; RELEASE usage_attempt")
                 .unwrap();
-                assert_eq!(
-                    work,
-                    UsageDeleteWork {
-                        identity_prepares: usize::from(call == 0),
-                        identity_executions: 4,
-                        usage_prepares: usize::from(call == 0),
-                        usage_executions: 4,
-                    }
-                );
-            }
-            drop(deletes);
-            tx.rollback().unwrap();
-            assert_eq!(usage_delete_snapshot(&db), before);
-            // A new transaction constructs new statements, even after rollback.
+            assert_eq!(usage_delete_snapshot(&tx), before);
+        }
+        tx.execute_batch("DROP TRIGGER fail_last; SAVEPOINT malformed; DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(file_id);").unwrap();
+        let changed_before = tx.total_changes();
+        assert!(
+            write_copied_usage_rows_with_deletes(
+                &tx,
+                1,
+                &changes,
+                &BTreeMap::new(),
+                &mut Default::default(),
+                &layout,
+                &mut deletes,
+            )
+            .is_err()
+        );
+        assert_eq!(tx.total_changes(), changed_before);
+        tx.execute_batch("ROLLBACK TO malformed; RELEASE malformed")
+            .unwrap();
+        // Reuse after ABORT and DDL rollback retains no failed bindings.
+        let work = write_copied_usage_rows_with_deletes(
+            &tx,
+            1,
+            &changes,
+            &BTreeMap::new(),
+            &mut Default::default(),
+            &layout,
+            &mut deletes,
+        )
+        .unwrap();
+        assert_eq!(work.identity_prepares + work.usage_prepares, 0);
+        drop(deletes);
+        let mut deletes = UsageDeletes::default();
+        // Sixty-four calls model a maximum cold transaction: two authored
+        // prepares total, versus 64 * (4 + 4) rowwise prepares.
+        for call in 0..64 {
+            let work = write_copied_usage_rows_with_deletes(
+                &tx,
+                1 + call % 2,
+                &changes,
+                &BTreeMap::new(),
+                &mut Default::default(),
+                &layout,
+                &mut deletes,
+            )
+            .unwrap();
+            assert_eq!(
+                work,
+                UsageDeleteWork {
+                    identity_prepares: usize::from(call == 0),
+                    identity_executions: 4,
+                    usage_prepares: usize::from(call == 0),
+                    usage_executions: 4,
+                }
+            );
+        }
+        drop(deletes);
+        tx.rollback().unwrap();
+        assert_eq!(usage_delete_snapshot(&db), before);
+        // A new transaction constructs new statements, even after rollback.
+        let tx = db.unchecked_transaction().unwrap();
+        let work = write_copied_usage_rows(
+            &tx,
+            1,
+            &changes,
+            &BTreeMap::new(),
+            &mut Default::default(),
+        )
+        .unwrap();
+        assert_eq!(work.identity_prepares + work.usage_prepares, 2);
+        tx.rollback().unwrap();
+    }
+
+    #[test]
+    fn usage_delete_reuse_rolls_back_and_requalifies_ddl_and_aba() {
+        let db = usage_delete_fixture();
+        let changes = super::super::DirtyRows {
+            usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
+            ..Default::default()
+        };
+        let before = usage_delete_snapshot(&db);
+        db.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
+        for _ in 0..2 {
             let tx = db.unchecked_transaction().unwrap();
-            let work = write_copied_usage_rows(
+            let error = write_copied_usage_rows(
                 &tx,
                 1,
                 &changes,
                 &BTreeMap::new(),
                 &mut Default::default(),
             )
-            .unwrap();
-            assert_eq!(work.identity_prepares + work.usage_prepares, 2);
+            .unwrap_err();
+            assert!(error.to_string().contains("last usage delete"));
             tx.rollback().unwrap();
+            assert_eq!(usage_delete_snapshot(&db), before);
         }
-    }
-
-    #[test]
-    fn usage_delete_reuse_rolls_back_and_requalifies_ddl_and_aba() {
-        for composite in [true] {
-            let db = usage_delete_fixture(composite);
-            let changes = super::super::DirtyRows {
-                usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
-                ..Default::default()
-            };
-            let before = usage_delete_snapshot(&db);
-            db.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
-            for _ in 0..2 {
-                let tx = db.unchecked_transaction().unwrap();
-                let error = write_copied_usage_rows(
-                    &tx,
-                    1,
-                    &changes,
-                    &BTreeMap::new(),
-                    &mut Default::default(),
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("last usage delete"));
-                tx.rollback().unwrap();
-                assert_eq!(usage_delete_snapshot(&db), before);
-            }
-            db.execute_batch("DROP TRIGGER fail_last").unwrap();
-            // Same-version malformed current family must refuse before DML.
-            // Rollback restores its cookie; a later DDL can reuse that cookie.
-            for commit in [false, true] {
-                let tx = db.unchecked_transaction().unwrap();
-                tx.execute_batch("DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(file_id);").unwrap();
-                let changed_before = tx.total_changes();
-                assert!(
-                    write_copied_usage_rows(
-                        &tx,
-                        1,
-                        &changes,
-                        &BTreeMap::new(),
-                        &mut Default::default(),
-                    )
-                    .is_err()
-                );
-                assert_eq!(tx.total_changes(), changed_before);
-                if commit {
-                    tx.commit().unwrap();
-                } else {
-                    tx.rollback().unwrap();
-                }
-                assert_eq!(usage_delete_snapshot(&db), before);
-            }
+        db.execute_batch("DROP TRIGGER fail_last").unwrap();
+        // Same-version malformed current family must refuse before DML.
+        // Rollback restores its cookie; a later DDL can reuse that cookie.
+        for commit in [false, true] {
             let tx = db.unchecked_transaction().unwrap();
+            tx.execute_batch("DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(file_id);").unwrap();
             let changed_before = tx.total_changes();
             assert!(
                 write_copied_usage_rows(
@@ -11708,28 +11619,43 @@ mod tests {
                 .is_err()
             );
             assert_eq!(tx.total_changes(), changed_before);
-            tx.rollback().unwrap();
-            db.execute_batch(if composite {
-                "DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(namespace,message_id,record_uuid,file_id);"
+            if commit {
+                tx.commit().unwrap();
             } else {
-                "DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(message_id,record_uuid,file_id);"
-            })
-            .unwrap();
-            let tx = db.unchecked_transaction().unwrap();
-            assert_eq!(
-                write_copied_usage_rows(
-                    &tx,
-                    1,
-                    &changes,
-                    &BTreeMap::new(),
-                    &mut Default::default(),
-                )
-                .unwrap()
-                .identity_prepares,
-                1
-            );
-            tx.commit().unwrap();
+                tx.rollback().unwrap();
+            }
+            assert_eq!(usage_delete_snapshot(&db), before);
         }
+        let tx = db.unchecked_transaction().unwrap();
+        let changed_before = tx.total_changes();
+        assert!(
+            write_copied_usage_rows(
+                &tx,
+                1,
+                &changes,
+                &BTreeMap::new(),
+                &mut Default::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(tx.total_changes(), changed_before);
+        tx.rollback().unwrap();
+        db.execute_batch("DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(namespace,message_id,record_uuid,file_id);")
+        .unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        assert_eq!(
+            write_copied_usage_rows(
+                &tx,
+                1,
+                &changes,
+                &BTreeMap::new(),
+                &mut Default::default(),
+            )
+            .unwrap()
+            .identity_prepares,
+            1
+        );
+        tx.commit().unwrap();
     }
 
     #[test]
@@ -13009,7 +12935,7 @@ pub(crate) fn remove_files_tx(
     files: &[(String, Option<Ledger>)],
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
-    copied_usage_sql(transaction, "", "")?;
+    validate_copied_usage(transaction)?;
     for (path, expected) in files {
         match (ledger_row(transaction, path), expected) {
             (Ok(Some((_, found))), Some(expected)) if found == *expected => {
@@ -13051,22 +12977,18 @@ pub(crate) fn remove_files_tx(
                 &format!(
                     "DELETE FROM {table} WHERE {}file_id IN \
                          (SELECT file_id FROM files WHERE {}path = ?1)",
-                    child_predicate(transaction, table)?,
-                    configured::predicate(transaction)?
+                    "namespace=semon_namespace() AND ",
+                    "namespace=semon_namespace() AND "
                 ),
                 [path],
             )?;
         }
         transaction.execute(
-                tree_state::sql(transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
+                "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
                 [path],
             )?;
         transaction.execute(
-            configured::sql(
-                transaction,
-                "DELETE FROM files WHERE path = ?1",
-                "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
-            )?,
+            "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
             [path],
         )?;
         transaction.execute("DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;

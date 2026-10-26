@@ -3,22 +3,13 @@
 use super::*;
 use std::io::{BufRead, BufReader, Read};
 
-pub(in crate::events::store) fn sql<'a>(
-    c: &Connection,
-    legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_tree_repairs') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    Ok(if composite { scoped } else { legacy })
-}
-
 const RECORDS: usize = 512;
 const BYTES: u64 = 1024 * 1024;
 const RECORD_MAX: u64 = 32 * 1024 * 1024;
 
 pub(in crate::events::store) fn pending(c: &Connection) -> rusqlite::Result<bool> {
     c.query_row(
-        sql(c, "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE state IN ('ready','running'))", "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running'))")?,
+        "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running'))",
         [],
         |r| r.get(0),
     )
@@ -157,7 +148,7 @@ fn prepare(
             .flatten();
         let known = if let Some(observation) = &observation {
             store.connection.query_row(
-                tree_state::sql(&store.connection, "SELECT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE projection_id=?1 AND identity=?2)", "SELECT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1 AND identity=?2)").map_err(sql_error)?,
+                "SELECT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1 AND identity=?2)",
                 params![projection_id, observation.identity],
                 |r| r.get::<_, bool>(0),
             ).map_err(sql_error)?
@@ -171,7 +162,7 @@ fn prepare(
         {
             let tree = batch.index.tree_summary.as_mut().expect("tree initialized");
             if !tree.usage_by_id.contains_key(message_id) {
-                let encoded:Option<String>=store.connection.query_row(tree_state::sql(&store.connection, "SELECT tokens FROM native_tree_usage_work WHERE projection_id=?1 AND message_id=?2", "SELECT tokens FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2").map_err(sql_error)?,params![projection_id,message_id],|r|r.get(0)).optional().map_err(sql_error)?;
+                let encoded:Option<String>=store.connection.query_row("SELECT tokens FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2",params![projection_id,message_id],|r|r.get(0)).optional().map_err(sql_error)?;
                 if let Some(encoded) = encoded {
                     tree.usage_by_id.insert(
                         message_id.into(),
@@ -270,7 +261,7 @@ fn progress(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let actual: (String, i64, Option<i64>) = tx.query_row(
-        sql(&tx, "SELECT receipt,cursor,projection_id FROM native_tree_repairs WHERE source_path=?1", "SELECT receipt,cursor,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1")?,
+        "SELECT receipt,cursor,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1",
         [expected.path],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
@@ -295,7 +286,7 @@ pub(in crate::events::store) fn advance(
     }
     let binding =
         crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
-    let selected: Option<PendingSource> = store.connection.query_row(sql(&store.connection, "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1", "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1").map_err(sql_error)?,[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+    let selected: Option<PendingSource> = store.connection.query_row("SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
     let Some((path, receipt, id, cursor, model, tree, projection_id)) = selected else {
         return Ok((pending(&store.connection).map_err(sql_error)?, None));
     };
@@ -312,7 +303,7 @@ pub(in crate::events::store) fn advance(
             },
             |tx| {
                 tx.execute(
-                    sql(tx, "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1", "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=semon_namespace() AND source_path=?1")?,
+                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=semon_namespace() AND source_path=?1",
                     [&path],
                 )?;
                 Ok(())
@@ -329,9 +320,9 @@ pub(in crate::events::store) fn advance(
         progress(&mut store.connection, owner, Checkpoint {path:&path,receipt:&receipt,cursor,projection_id}, |tx| {
             if ledger_row(tx,&path)?.map(|(_,l)|l).as_ref()!=Some(&ledger) {return Err(rusqlite::Error::InvalidQuery);}
             if same_incarnation {
-                tx.execute(sql(tx, "UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE source_path=?1", "UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE namespace=semon_namespace() AND source_path=?1")?,params![path,header_ledger(&ledger)])?;
+                tx.execute("UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE namespace=semon_namespace() AND source_path=?1",params![path,header_ledger(&ledger)])?;
             } else {
-                tx.execute(sql(tx, "UPDATE native_tree_repairs SET receipt=?2,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE source_path=?1", "UPDATE native_tree_repairs SET receipt=?2,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE namespace=semon_namespace() AND source_path=?1")?,params![path,header_ledger(&ledger)])?;
+                tx.execute("UPDATE native_tree_repairs SET receipt=?2,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE namespace=semon_namespace() AND source_path=?1",params![path,header_ledger(&ledger)])?;
             }
             Ok(())
         }).map_err(sql_error)?;
@@ -352,7 +343,7 @@ pub(in crate::events::store) fn advance(
                     return Err(rusqlite::Error::InvalidQuery);
                 }
                 tx.execute(
-                    sql(tx, "UPDATE native_tree_repairs SET state='done' WHERE source_path=?1", "UPDATE native_tree_repairs SET state='done' WHERE namespace=semon_namespace() AND source_path=?1")?,
+                    "UPDATE native_tree_repairs SET state='done' WHERE namespace=semon_namespace() AND source_path=?1",
                     [&path],
                 )?;
                 Ok(())
@@ -374,7 +365,7 @@ pub(in crate::events::store) fn advance(
             },
             |tx| {
                 tx.execute(
-                    sql(tx, "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1", "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=semon_namespace() AND source_path=?1")?,
+                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=semon_namespace() AND source_path=?1",
                     [&path],
                 )?;
                 Ok(())
@@ -397,7 +388,7 @@ pub(in crate::events::store) fn advance(
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let claimed:(Option<i64>,i64,Option<i64>,String)=tx.query_row(sql(&tx, "SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE source_path=?1", "SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1").map_err(sql_error)?,[&path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?;
+        let claimed:(Option<i64>,i64,Option<i64>,String)=tx.query_row("SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?;
         if claimed != (id, cursor as i64, projection_id, receipt.clone()) {
             return Err(io::ErrorKind::WouldBlock.into());
         }
@@ -414,7 +405,7 @@ pub(in crate::events::store) fn advance(
             Some(id) => id,
             None => tree_state::new_generation(&tx, id, &ledger).map_err(sql_error)?,
         };
-        tx.execute(sql(&tx, "UPDATE native_tree_repairs SET source_id=?2,projection_id=?3,state='running' WHERE source_path=?1", "UPDATE native_tree_repairs SET source_id=?2,projection_id=?3,state='running' WHERE namespace=semon_namespace() AND source_path=?1").map_err(sql_error)?,params![path,id,projection_id]).map_err(sql_error)?;
+        tx.execute("UPDATE native_tree_repairs SET source_id=?2,projection_id=?3,state='running' WHERE namespace=semon_namespace() AND source_path=?1",params![path,id,projection_id]).map_err(sql_error)?;
         tx.commit().map_err(sql_error)?;
         (id, projection_id)
     };
@@ -458,7 +449,7 @@ pub(in crate::events::store) fn advance(
                 },
                 |tx| {
                     tx.execute(
-                        sql(tx, "UPDATE native_tree_repairs SET state=?2 WHERE source_path=?1", "UPDATE native_tree_repairs SET state=?2 WHERE namespace=semon_namespace() AND source_path=?1")?,
+                        "UPDATE native_tree_repairs SET state=?2 WHERE namespace=semon_namespace() AND source_path=?1",
                         params![path, reason],
                     )?;
                     Ok(())
@@ -482,14 +473,14 @@ pub(in crate::events::store) fn advance(
     {
         return Err(io::ErrorKind::WouldBlock.into());
     }
-    let actual: (i64,i64,i64) = tx.query_row(sql(&tx, "SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE source_path=?1 AND receipt=?2", "SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1 AND receipt=?2").map_err(sql_error)?,params![path,receipt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql_error)?;
+    let actual: (i64,i64,i64) = tx.query_row("SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND source_path=?1 AND receipt=?2",params![path,receipt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql_error)?;
     if actual != (id, cursor as i64, projection_id) {
         return Err(io::ErrorKind::WouldBlock.into());
     }
     if let Some(observations) = &batch.index.native_usage_observations {
         for observation in observations {
             tx.prepare_cached(
-                tree_state::sql(&tx, "INSERT INTO native_tree_codex_work VALUES(?1,?2) ON CONFLICT DO NOTHING", "INSERT INTO native_tree_codex_work VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING").map_err(sql_error)?,
+                "INSERT INTO native_tree_codex_work VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
             )
             .map_err(sql_error)?
             .execute(params![projection_id, observation.identity])
@@ -499,11 +490,11 @@ pub(in crate::events::store) fn advance(
     let tree = batch.index.tree_summary.as_ref().expect("tree initialized");
     tree_state::write_values(&tx, projection_id, tree).map_err(sql_error)?;
     for (message, tokens) in &tree.usage_by_id {
-        tx.prepare_cached(tree_state::sql(&tx, "INSERT INTO native_tree_usage_work VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET tokens=excluded.tokens", "INSERT INTO native_tree_usage_work VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET tokens=excluded.tokens").map_err(sql_error)?).map_err(sql_error)?.execute(params![projection_id,message,json(tokens).map_err(sql_error)?]).map_err(sql_error)?;
+        tx.prepare_cached("INSERT INTO native_tree_usage_work VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET tokens=excluded.tokens").map_err(sql_error)?.execute(params![projection_id,message,json(tokens).map_err(sql_error)?]).map_err(sql_error)?;
     }
     let tree_root = tree.compact(true);
     tx.execute(
-        tree_state::sql(&tx, "UPDATE native_tree_generations SET work_pending=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET work_pending=1 WHERE namespace=semon_namespace() AND projection_id=?1").map_err(sql_error)?,
+        "UPDATE native_tree_generations SET work_pending=1 WHERE namespace=semon_namespace() AND projection_id=?1",
         [projection_id],
     )
     .map_err(sql_error)?;
@@ -520,9 +511,7 @@ pub(in crate::events::store) fn advance(
             |r| r.get(0),
         )
         .map_err(sql_error)?;
-    tx.execute(sql(&tx,
-        "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE source_path=?1",
-        "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE namespace=semon_namespace() AND source_path=?1").map_err(sql_error)?,
+    tx.execute("UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE namespace=semon_namespace() AND source_path=?1",
         params![path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"},clock]).map_err(sql_error)?;
     if complete {
         tree_state::bind_generation(&tx, &path, &ledger, projection_id).map_err(sql_error)?;

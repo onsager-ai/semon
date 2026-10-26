@@ -141,20 +141,6 @@ impl Drop for WriterShapeProbe {
     }
 }
 
-/// Statement selection has one current contract. Physical checks belong to
-/// the admitted open and transaction-writer boundaries, never each statement.
-pub(super) fn sql<'a>(
-    _db: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    Ok(scoped)
-}
-
-pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
-    sql(db, "", "namespace=semon_namespace() AND ")
-}
-
 /// Entry qualification retained by current open/admission and WriterLayout.
 /// Its schema-cookie guard detects controlled DDL after writer construction.
 pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
@@ -496,8 +482,8 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
         |_| Ok(1_i64),
     )
     .map_err(failed)?;
-    copied_usage_sql(&db, "", "").map_err(failed)?;
-    semantic_stage::support_sql(&db, "", "").map_err(failed)?;
+    validate_copied_usage(&db).map_err(failed)?;
+    semantic_stage::validate_support(&db).map_err(failed)?;
     Ok(db)
 }
 
@@ -566,15 +552,8 @@ impl NativeOwnership {
         validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
-        if "composite" != "composite"
-            || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
-                != "composite"
-            || copied_usage_sql(db, "singleton", "composite").map_err(failed)? != "composite"
-            || native_usage::sql(db, "singleton", "composite").map_err(failed)? != "composite"
-            || tree_state::sql(db, "singleton", "composite").map_err(failed)? != "composite"
-        {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
+        validate_copied_usage(db).map_err(failed)?;
+        semantic_stage::validate_support(db).map_err(failed)?;
         Ok(())
     }
 
@@ -863,7 +842,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
     SourceJournal(config.clone()).validate(db)?;
     validate_core(db)?;
-    semantic_stage::support_sql(db, "", "").map_err(failed)?;
+    semantic_stage::validate_support(db).map_err(failed)?;
     validate_event_metadata(db)?;
     let ready: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations' AND type='table')", [], |r| r.get(0)).map_err(failed)?;
     if !ready {
@@ -1662,7 +1641,7 @@ impl Writer {
                 } else if *expected == Some(*ledger) && !preserve_tree {
                     // A repaired summary may arrive as an empty append delta.
                     // Retire the bad header so write() cannot reuse its generation.
-                    tx.execute(tree_state::sql(&tx, "DELETE FROM native_tree_headers WHERE file_id=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1").map_err(failed)?, [id])
+                    tx.execute("DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1", [id])
                         .map_err(failed)?;
                 }
             }
@@ -5587,26 +5566,17 @@ mod tests {
         for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
-        assert_eq!(
-            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
-            "single"
-        );
+        semantic_stage::validate_support(&db).unwrap();
         let tx = db.transaction().unwrap();
         tx.execute_batch("DROP TABLE session_source_mutations; CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;").unwrap();
-        assert!(semantic_stage::support_sql(&tx, "single", "scoped").is_err());
+        assert!(semantic_stage::validate_support(&tx).is_err());
         tx.rollback().unwrap();
-        assert_eq!(
-            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
-            "single"
-        );
+        semantic_stage::validate_support(&db).unwrap();
         let tx = db.transaction().unwrap();
         tx.execute_batch("DROP INDEX catalog_native_dependency; CREATE INDEX catalog_native_dependency ON catalog_native_dependencies(native_id,source_path);").unwrap();
-        assert!(semantic_stage::support_sql(&tx, "single", "scoped").is_err());
+        assert!(semantic_stage::validate_support(&tx).is_err());
         tx.rollback().unwrap();
-        assert_eq!(
-            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
-            "single"
-        );
+        semantic_stage::validate_support(&db).unwrap();
     }
 
     #[test]
