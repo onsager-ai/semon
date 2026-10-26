@@ -1089,19 +1089,25 @@ mod generation_tests {
         let root = std::env::temp_dir().join(format!(
             "semon-trace-publication-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
         let database = root.join("trace.sqlite3");
         let config = crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite { database: database.clone() },
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: database.clone(),
+            },
             namespace: crate::storage::LogicalSourceNamespace::new("trace-publication").unwrap(),
             expected_stream_epoch: Some("a".repeat(64)),
         };
         config.create_native_store().unwrap();
         let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
         let mut connection = Connection::open(database).unwrap();
-        crate::storage::sqlite::catalog_namespace::register(&connection, &config.namespace).unwrap();
+        crate::storage::sqlite::catalog_namespace::register(&connection, &config.namespace)
+            .unwrap();
         let tx = connection.transaction().unwrap();
         publish_owned(&tx, &owner, &row, &projection).unwrap();
         tx.commit().unwrap();
@@ -1281,8 +1287,10 @@ mod relative_tests {
         )
         .unwrap();
         crate::storage::sqlite::catalog_namespace::register(
-            &db, &crate::storage::LogicalSourceNamespace::new("relatives").unwrap()
-        ).unwrap();
+            &db,
+            &crate::storage::LogicalSourceNamespace::new("relatives").unwrap(),
+        )
+        .unwrap();
         for (key, parent, last) in [
             ("root", None, Some(10)),
             ("child", Some("root"), Some(20)),

@@ -3081,7 +3081,7 @@ impl SqliteStore {
                                     &transaction,
                                     row,
                                     &mut overview_measurements,
-                                    Some(owner),
+                                    owner,
                                 )
                                 .map_err(failure)?;
                             } else {
@@ -3089,7 +3089,7 @@ impl SqliteStore {
                                     &transaction,
                                     row,
                                     &mut overview_measurements,
-                                    Some(owner),
+                                    owner,
                                 )
                                 .map_err(failure)?;
                             }
@@ -3143,7 +3143,7 @@ impl SqliteStore {
                                     &transaction,
                                     row,
                                     &mut overview_measurements,
-                                    Some(owner),
+                                    owner,
                                 )
                                 .map_err(failure)?;
                             } else {
@@ -3151,7 +3151,7 @@ impl SqliteStore {
                                     &transaction,
                                     row,
                                     &mut overview_measurements,
-                                    Some(owner),
+                                    owner,
                                 )
                                 .map_err(failure)?;
                             }

@@ -139,8 +139,7 @@ impl TracePublicationStore for TraceWriter<'_> {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
     fn matches_header(&self, key: &str, generation: &str, source: &str) -> rusqlite::Result<bool> {
-        let sql =
-            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=?1 AND session_key=?2 AND generation=?3 AND source_generation=?4)";
+        let sql = "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=?1 AND session_key=?2 AND generation=?3 AND source_generation=?4)";
         self.db
             .query_row(sql, params![self.namespace, key, generation, source], |r| {
                 r.get(0)
@@ -153,8 +152,7 @@ impl TracePublicationStore for TraceWriter<'_> {
         source: &str,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
-        let sql =
-            "INSERT INTO main.session_trace_headers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation";
+        let sql = "INSERT INTO main.session_trace_headers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, generation, source, metadata])
@@ -181,24 +179,21 @@ impl TracePublicationStore for TraceWriter<'_> {
         start: Option<&str>,
         metadata: &str,
     ) -> rusqlite::Result<()> {
-        let sql =
-            "INSERT INTO main.session_trace_turns VALUES(?1,?2,?3,?4,?5)";
+        let sql = "INSERT INTO main.session_trace_turns VALUES(?1,?2,?3,?4,?5)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, id, start, metadata])?;
         Ok(())
     }
     fn edge(&self, key: &str, id: Option<&str>, metadata: &str) -> rusqlite::Result<()> {
-        let sql =
-            "INSERT INTO main.session_trace_edges VALUES(?1,?2,?3,?4)";
+        let sql = "INSERT INTO main.session_trace_edges VALUES(?1,?2,?3,?4)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, id, metadata])?;
         Ok(())
     }
     fn bookmark(&self, key: &str, target: &str, edge: &str) -> rusqlite::Result<()> {
-        let sql =
-            "INSERT INTO main.session_trace_bookmarks VALUES(?1,?2,?3,?4)";
+        let sql = "INSERT INTO main.session_trace_bookmarks VALUES(?1,?2,?3,?4)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, target, key, edge])?;
@@ -217,10 +212,7 @@ mod tests {
         validate(&db).unwrap();
         let tx = db.transaction().unwrap();
         for namespace in ["a", "b"] {
-            let writer = TraceWriter {
-                db: &tx,
-                namespace,
-            };
+            let writer = TraceWriter { db: &tx, namespace };
             assert!(writer.header("same", namespace, "source", "{}").unwrap());
             writer
                 .turn("same", Some("turn"), Some("edge"), "{\"last\":1}")
