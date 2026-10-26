@@ -54,8 +54,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let cursor_key = request.cursor.as_ref().map(|v| v.key.as_bytes());
         let inclusive = request.cursor.as_ref().is_some_and(|v| v.inclusive);
         let limit = request.limit as i64 + 1;
-        let rows = tx.driver.query(
-            "WITH page AS MATERIALIZED (
+        let rows = tx
+            .driver
+            .query(
+                "WITH page AS MATERIALIZED (
                 SELECT session_key,metadata,last_ms,harness,repo,model
                 FROM semon_pg_native_catalog_rows
                 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
@@ -69,17 +71,31 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
              ) SELECT session_key,
                  CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
                  last_ms,harness,repo,model FROM page ORDER BY last_ms DESC,session_key",
-            &[&ns, &self.generation.as_bytes(), &sid, &harness, &repo, &model,
-              &cursor_last, &cursor_key, &inclusive, &limit],
-        ).map_err(sqlstate::error).map_err(failed)?;
+                &[
+                    &ns,
+                    &self.generation.as_bytes(),
+                    &sid,
+                    &harness,
+                    &repo,
+                    &model,
+                    &cursor_last,
+                    &cursor_key,
+                    &inclusive,
+                    &limit,
+                ],
+            )
+            .map_err(sqlstate::error)
+            .map_err(failed)?;
         let mut output = Vec::new();
         for row in rows {
             let key: Vec<u8> = row.get(0);
-            let bytes: Vec<u8> = row.get::<_, Option<Vec<u8>>>(1)
+            let bytes: Vec<u8> = row
+                .get::<_, Option<Vec<u8>>>(1)
                 .ok_or_else(|| failed(StorageError::Busy))?;
             crate::selected_read::charge(64, bytes.len())?;
             let value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if value.key.as_bytes() != key || value.sources.len() > 64
+            if value.key.as_bytes() != key
+                || value.sources.len() > 64
                 || value.last.unwrap_or(0) != row.get::<_, i64>(2)
                 || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3)
                 || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4)
