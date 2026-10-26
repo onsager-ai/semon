@@ -180,7 +180,7 @@ impl QueryCatalogStore for QueryCatalog {
                     bytes_left: std::sync::Mutex::new(64 * 1024 * 1024),
                 };
                 if args["_session"] == true {
-                    let summary = crate::query::transcript::render_session(
+                    let mut summary = crate::query::transcript::render_session(
                         &self.options,
                         key,
                         &context,
@@ -207,6 +207,9 @@ impl QueryCatalogStore for QueryCatalog {
                         },
                     )
                     .map_err(|_| StorageError::Unavailable)?;
+                    if let Some(machine) = args["_machine_alias"].as_str() {
+                        summary["machine"] = serde_json::json!(machine);
+                    }
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
                     if runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|_| StorageError::Unavailable)? != runtime
                     {
