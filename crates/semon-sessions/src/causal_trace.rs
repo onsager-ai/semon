@@ -11,23 +11,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS session_trace_turns(session_key TEXT NOT NULL,turn_id TEXT NOT NULL,start_id TEXT,metadata TEXT NOT NULL,PRIMARY KEY(session_key,turn_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_starts ON session_trace_turns(session_key,start_id,turn_id);
-CREATE TABLE IF NOT EXISTS session_trace_edges(session_key TEXT NOT NULL,edge_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(session_key,edge_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_edge_identity ON session_trace_edges(edge_id,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_from ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_to ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_query_at ON session_trace_edges(json_extract(metadata,'$.at'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_query_done ON session_trace_edges(json_extract(metadata,'$.done'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_query_status ON session_trace_edges(json_extract(metadata,'$.status'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_turn_query_at ON session_trace_turns(session_key,json_extract(metadata,'$.at'),turn_id);
-CREATE INDEX IF NOT EXISTS session_trace_turn_query_last ON session_trace_turns(session_key,turn_id) WHERE json_extract(metadata,'$.last')=1;
-CREATE TABLE IF NOT EXISTS session_trace_bookmarks(target TEXT NOT NULL,session_key TEXT NOT NULL,edge_id TEXT NOT NULL,PRIMARY KEY(target,session_key,edge_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmarks(session_key);
-";
-
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     query: Option<crate::query_projection::Projection>,
@@ -240,19 +223,6 @@ pub(crate) fn family_costs<'a>(
     }
     costs
 }
-pub(crate) fn publish(
-    tx: &Transaction<'_>,
-    row: &crate::model::summary::CatalogRow,
-    projection: &Projection,
-) -> rusqlite::Result<()> {
-    publish_measured(
-        tx,
-        row,
-        projection,
-        &mut crate::native_timing::Measurements::default(),
-    )
-}
-
 fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
     serde_json::to_vec(&(
         session,
@@ -261,29 +231,6 @@ fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
         &projection.bookmarks,
     ))
     .expect("owned trace projection")
-}
-
-pub(crate) fn publish_measured(
-    tx: &Transaction<'_>,
-    row: &crate::model::summary::CatalogRow,
-    projection: &Projection,
-    measurements: &mut crate::native_timing::Measurements,
-) -> rusqlite::Result<()> {
-    let total_started = measurements.start();
-    let record = publication_record(row, projection, measurements)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
-        query.publish(tx, row, summary, &record.0)?;
-    }
-    publish_record(
-        &crate::storage::sqlite::trace::TraceWriter::unbound(tx),
-        row,
-        projection,
-        record,
-        measurements,
-    )?;
-    measurements.record("trace_total_inclusive", total_started, 1);
-    Ok(())
 }
 
 pub(crate) fn publish_owned(
@@ -455,7 +402,7 @@ pub(crate) fn selected_details(
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Option<Value>> {
     crate::storage::selected::selected_details(
-        &crate::storage::sqlite::selected::Context::local(tx),
+        &crate::storage::sqlite::selected::Context::owned(tx),
         key,
         sources,
         relative_status,
@@ -470,7 +417,7 @@ fn selected_family(
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Value> {
     crate::storage::selected::selected_family(
-        &crate::storage::sqlite::selected::Context::local(tx),
+        &crate::storage::sqlite::selected::Context::owned(tx),
         key,
         relative_status,
     )
@@ -484,7 +431,7 @@ pub(crate) fn range_context(
     sources: &[crate::model::summary::CatalogSource],
 ) -> rusqlite::Result<Value> {
     crate::storage::selected::range_context(
-        &crate::storage::sqlite::selected::Context::local(tx),
+        &crate::storage::sqlite::selected::Context::owned(tx),
         key,
         slots,
         sources,
@@ -1117,7 +1064,7 @@ mod generation_tests {
     }
 
     #[test]
-    fn publication_keeps_legacy_digest_and_unchanged_relationship_rows() {
+    fn publication_keeps_digest_and_unchanged_relationship_rows() {
         let projection = populated_projection();
         let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "key":"owner", "name":"fixture", "harness":"codex", "kind":"session",
@@ -1139,15 +1086,28 @@ mod generation_tests {
                 .map(crate::overview::content_generation)
         );
         let expected = format!("{:x}", Sha256::digest(legacy_bytes(&session, &projection)));
-        // This publisher uses only its trace schema, without Event Index/WAL initialization.
-        let mut connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "semon-trace-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let database = root.join("trace.sqlite3");
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite { database: database.clone() },
+            namespace: crate::storage::LogicalSourceNamespace::new("trace-publication").unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        config.create_native_store().unwrap();
+        let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let mut connection = Connection::open(database).unwrap();
+        crate::storage::sqlite::catalog_namespace::register(&connection, &config.namespace).unwrap();
         let tx = connection.transaction().unwrap();
-        publish(&tx, &row, &projection).unwrap();
+        publish_owned(&tx, &owner, &row, &projection).unwrap();
         tx.commit().unwrap();
         let saved: (String, String) = connection
             .query_row(
-                "SELECT generation,metadata FROM session_trace_headers WHERE session_key='owner'",
+                "SELECT generation,metadata FROM session_trace_headers WHERE namespace='trace-publication' AND session_key='owner'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1162,7 +1122,7 @@ mod generation_tests {
             .query_row("SELECT total_changes()", [], |row| row.get(0))
             .unwrap();
         let tx = connection.transaction().unwrap();
-        publish(&tx, &row, &projection).unwrap();
+        publish_owned(&tx, &owner, &row, &projection).unwrap();
         tx.commit().unwrap();
         assert_eq!(
             connection
@@ -1170,6 +1130,8 @@ mod generation_tests {
                 .unwrap(),
             changes
         );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1314,10 +1276,13 @@ mod relative_tests {
     fn selected_relatives_keep_activity_times_from_their_published_metadata() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,parent_key TEXT,harness TEXT,metadata TEXT,lifecycle TEXT DEFAULT 'current');
-             CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);",
+            "CREATE TABLE session_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,parent_key TEXT,harness TEXT,metadata TEXT,lifecycle TEXT DEFAULT 'current',PRIMARY KEY(namespace,session_key));
+             CREATE TABLE session_history_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT,PRIMARY KEY(namespace,session_key));",
         )
         .unwrap();
+        crate::storage::sqlite::catalog_namespace::register(
+            &db, &crate::storage::LogicalSourceNamespace::new("relatives").unwrap()
+        ).unwrap();
         for (key, parent, last) in [
             ("root", None, Some(10)),
             ("child", Some("root"), Some(20)),
@@ -1326,7 +1291,7 @@ mod relative_tests {
             let metadata =
                 json!({"name":key,"kind":"session","parent":parent,"last":last,"cost":{"usd":1}});
             db.execute(
-                "INSERT INTO session_catalog(session_key,parent_key,harness,metadata) VALUES(?1,?2,'claude',?3)",
+                "INSERT INTO session_catalog(namespace,session_key,parent_key,harness,metadata) VALUES('relatives',?1,?2,'claude',?3)",
                 params![key, parent, metadata.to_string()],
             )
             .unwrap();
@@ -1334,7 +1299,7 @@ mod relative_tests {
         let saved =
             json!({"name":"child","kind":"session","parent":"root","last":25,"cost":{"usd":1}});
         db.execute(
-            "INSERT INTO session_history_catalog VALUES('child',?1)",
+            "INSERT INTO session_history_catalog VALUES('relatives','child',?1)",
             [saved.to_string()],
         )
         .unwrap();

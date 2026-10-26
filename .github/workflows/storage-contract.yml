@@ -67,7 +67,7 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           result=0
-          for group in configured::tests::current_recovery:: current_history_custody:: catalog_namespace::current_navigation_tests:: sqlite::navigation::tests:: source_journal::tests:: catalog_search::sqlite_tests:: native_usage_ events::store::summary_tests:: source_chunks::tests::; do
+          for group in configured::tests::current_recovery:: current_history_custody:: catalog_namespace::current_navigation_tests:: sqlite::navigation::tests:: source_journal::tests:: catalog_search::sqlite_tests:: native_usage_ events::store::summary_tests:: source_chunks::tests:: causal_trace::; do
             group_result=0
             cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/current-owner-group.log" 2>&1 || group_result=$?
             if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/current-owner-group.log"; then

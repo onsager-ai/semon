@@ -5,21 +5,14 @@ use std::io;
 
 pub(crate) struct Context<'a> {
     db: &'a Connection,
-    owned: bool,
 }
 impl<'a> Context<'a> {
-    pub(crate) fn local(db: &'a Connection) -> Self {
-        Self { db, owned: false }
-    }
     pub(crate) fn owned(db: &'a Connection) -> Self {
-        Self { db, owned: true }
+        Self { db }
     }
     // Only authored statements below enter this adapter-local scope helper.
     // No SQL text or callback is exposed through the metadata port.
     fn sql(&self, sql: &str) -> String {
-        if !self.owned {
-            return sql.to_owned();
-        }
         let mut sql = sql.to_owned();
         for table in [
             "session_trace_headers",
