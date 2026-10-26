@@ -1112,7 +1112,7 @@ fn pg_native_keys132_tree_warm_generated_and_index_drift_refuse_before_callback(
         "DROP INDEX semon_pg_native_tree_repair_queue; CREATE INDEX semon_pg_native_tree_repair_queue ON semon_pg_native_tree_repairs(namespace_digest,last_attempt,state,source_path_digest)",
         "ALTER TABLE semon_pg_native_tree_usage_models NO FORCE ROW LEVEL SECURITY",
     ] {
-        let (pool, factory) = fixture(|_| {});
+        let (pool, _) = fixture(|_| {});
         let namespace = ns("keys132-drift");
         pool.transaction(
             &namespace,
@@ -1121,7 +1121,10 @@ fn pg_native_keys132_tree_warm_generated_and_index_drift_refuse_before_callback(
             |_| Ok(()),
         )
         .unwrap();
-        factory.client().batch_execute(alteration).unwrap();
+        pool.controlled_schema_change(&PgCancellation::default(), |tx| {
+            tx.driver.batch_execute(alteration).map_err(sqlstate::error)
+        })
+        .unwrap();
         let mut entered = false;
         assert!(
             pool.transaction(
