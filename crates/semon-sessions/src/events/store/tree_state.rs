@@ -21,17 +21,22 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
  source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
- projection_id INTEGER NOT NULL,model TEXT NOT NULL,PRIMARY KEY(projection_id,model)
+ projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
+ PRIMARY KEY(projection_id,model)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(projection_id,label)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(projection_id,tool_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(projection_id,message_id)
@@ -83,9 +88,11 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
  PRIMARY KEY(namespace,projection_id,model),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(namespace,projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,label),
@@ -93,10 +100,12 @@ CREATE TABLE IF NOT EXISTS native_tree_labels (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(namespace,projection_id,tool_id),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(namespace,projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,message_id),
@@ -124,6 +133,22 @@ END;
 
 pub(super) fn schema(composite: bool) -> &'static str {
     if composite { COMPOSITE_SCHEMA } else { SCHEMA }
+}
+
+pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    c.create_scalar_function(
+        "semon_tree_digest",
+        2,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let domain: String = context.get(0)?;
+            let key: String = context.get(1)?;
+            Ok(crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec())
+        },
+    )
 }
 
 pub(super) fn sql<'a>(
@@ -498,10 +523,8 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    // Keep the physical SQLite query and its admission charge identical to the
-    // original witness.  `row` inspects the one encoded json_array cell before
-    // `get` allocates it; the shared writer then frames that canonical value
-    // while the cursor is still streaming.
+    // The stored digest indexes stream the current authenticated order. `row`
+    // admits each encoded cell before allocation; no dimension is collected.
     let mut writer = crate::events::tree_rows::witness::Writer::new();
     for (family, (plain, scoped)) in [
         (
@@ -509,12 +532,12 @@ pub(super) fn witness(
             "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
         ),
         (
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
         ),
         (
-            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id_digest",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id_digest",
         ),
     ]
     .into_iter()

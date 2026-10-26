@@ -17,6 +17,19 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("cwd_digest", "sha256(cwd)", true),
         ],
         "meta" => &[("key_digest", "sha256(key)", false)],
+        // Namespace is the leading fixed-width PK component. Keeping it out
+        // of the second component gives both engines the same witness order
+        // when a current logical source is moved between physical stores.
+        "tree_models" => &[(
+            "model_digest",
+            "sha256((convert_to('tree.model'::text, 'UTF8'::name) || model))",
+            false,
+        )],
+        "tree_tools" => &[(
+            "tool_id_digest",
+            "sha256((convert_to('tree.tool'::text, 'UTF8'::name) || tool_id))",
+            false,
+        )],
         "tree_headers" | "tree_repairs" => &[(
             "source_path_digest",
             "semon_pg_native_digest(namespace, source_path, 'tree.path'::text)",
