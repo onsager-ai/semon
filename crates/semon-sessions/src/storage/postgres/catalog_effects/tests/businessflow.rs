@@ -34,7 +34,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     // Producer parity precedes the process-wide rejection phase. No model
     // output from the oracle is supplied to the PG producer.
-    let mut oracle = build_oracle(true);
+    let mut oracle = build_oracle(true, false);
     let namespace = ns("vertical140\0🦀");
     let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
     let options = Options {

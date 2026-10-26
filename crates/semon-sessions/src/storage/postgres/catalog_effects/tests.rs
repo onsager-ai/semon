@@ -1,12 +1,10 @@
 use super::*;
 use crate::{
     Options,
-    storage::{
-        postgres::{
-            PgCancellation,
-            tests::{fixture, ns},
-            txn::TxnKind,
-        },
+    storage::postgres::{
+        PgCancellation,
+        tests::{fixture, ns},
+        txn::TxnKind,
     },
 };
 use std::{fs, time::Duration};
@@ -52,7 +50,7 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     }
     // Actual parser/model and ordinary SQLite producers finish FIRST. Keep only
     // this test's sanitized Raw fixture so PG ingests the identical observation.
-    let data = build_oracle(true);
+    let data = build_oracle(true, false);
     use crate::storage::native_events::NativeEventStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static OPENS: AtomicUsize = AtomicUsize::new(0);
@@ -350,10 +348,10 @@ struct Input {
     slots: Vec<Vec<u8>>,
     trace: Vec<Vec<Vec<u8>>>,
     search: Vec<Vec<u8>>,
-    original: Vec<Vec<u8>>,
-    original_slots: Vec<Vec<u8>>,
-    composite: Vec<Vec<u8>>,
-    composite_slots: Vec<Vec<u8>>,
+    original: Option<Vec<Vec<u8>>>,
+    original_slots: Option<Vec<Vec<u8>>>,
+    composite: Option<Vec<Vec<u8>>>,
+    composite_slots: Option<Vec<Vec<u8>>>,
 }
 impl Input {
     fn publication(&self) -> crate::slot_projection::Publication<'_> {
@@ -368,10 +366,10 @@ impl Input {
 // producers. Close and remove the fixture before any PG work starts. This is
 // scoped producer parity, not complete backend no-SQLite instrumentation.
 fn oracle() -> Input {
-    build_oracle(false)
+    build_oracle(false, true)
 }
 
-fn build_oracle(keep_raw: bool) -> Input {
+fn build_oracle(keep_raw: bool, history: bool) -> Input {
     let root = std::env::temp_dir().join(format!(
         "pg124-{}-{}",
         std::process::id(),
@@ -435,8 +433,12 @@ fn build_oracle(keep_raw: bool) -> Input {
             .map(|r| r.unwrap().into_bytes())
             .collect::<Vec<_>>()
     };
-    let metadata = read("SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
-    let slots = read("SELECT metadata FROM session_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
+    let metadata = read(
+        "SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
+    );
+    let slots = read(
+        "SELECT metadata FROM session_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
+    );
     let search = read(
         "SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents WHERE namespace=semon_namespace() ORDER BY read_scope,session_key",
     );
@@ -448,6 +450,27 @@ fn build_oracle(keep_raw: bool) -> Input {
     .iter()
     .map(|sql| read(sql))
     .collect();
+    // The vertical and native-binding scenarios consume only Current. Keep
+    // the separately asserted custody scenario in oracle(), so a custody
+    // constructor refusal does not prevent qualification of ordinary ingest.
+    if !history {
+        assert!(!slots.is_empty());
+        drop(cache);
+        drop(connection);
+        return Input {
+            root,
+            rows: prepared.rows,
+            projections: prepared.transcripts,
+            metadata,
+            slots,
+            trace,
+            search,
+            original: None,
+            original_slots: None,
+            composite: None,
+            composite_slots: None,
+        };
+    }
     let mut missing = prepared.rows.clone();
     for row in &mut missing {
         row.sources.clear();
@@ -472,9 +495,12 @@ fn build_oracle(keep_raw: bool) -> Input {
         )
         .unwrap();
     assert!(missing_generation.is_some());
-    let composite = read("SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
-    let composite_slots =
-        read("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
+    let composite = read(
+        "SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
+    );
+    let composite_slots = read(
+        "SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
+    );
     let restored_generation = cache
         .publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
@@ -485,9 +511,12 @@ fn build_oracle(keep_raw: bool) -> Input {
         )
         .unwrap();
     assert!(restored_generation.is_some());
-    let original = read("SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
-    let original_slots =
-        read("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
+    let original = read(
+        "SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
+    );
+    let original_slots = read(
+        "SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
+    );
     assert!(!slots.is_empty());
     drop(cache);
     drop(connection);
@@ -502,10 +531,10 @@ fn build_oracle(keep_raw: bool) -> Input {
         slots,
         trace,
         search,
-        original,
-        original_slots,
-        composite,
-        composite_slots,
+        original: Some(original),
+        original_slots: Some(original_slots),
+        composite: Some(composite),
+        composite_slots: Some(composite_slots),
     }
 }
 
@@ -561,9 +590,9 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
         .unwrap();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
-            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.composite);
+            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.composite.as_ref().expect("custody oracle"));
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
-            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.composite_slots);
+            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.composite_slots.as_ref().expect("custody oracle"));
             Ok(())
         }).unwrap();
         super::snapshot::with_generation(
@@ -578,7 +607,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                         .ok_or(StorageError::ScopeChanged)?;
                     assert_eq!(
                         serde_json::to_vec(&retained).unwrap(),
-                        data.composite[index]
+                        data.composite.as_ref().expect("custody oracle")[index]
                     );
                     let (_, slots) = view
                         .recipe(&current.key, true, 0, 64)?
@@ -588,7 +617,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                             .iter()
                             .map(|s| s.as_bytes().to_vec())
                             .collect::<Vec<_>>(),
-                        data.composite_slots
+                        *data.composite_slots.as_ref().expect("custody oracle")
                     );
                 }
                 Ok(())
@@ -679,9 +708,9 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
             .unwrap();
     reopened.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
-        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.original);
+        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.original.as_ref().expect("custody oracle"));
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
-        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.original_slots);
+        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.original_slots.as_ref().expect("custody oracle"));
         Ok(())
     }).unwrap();
 }

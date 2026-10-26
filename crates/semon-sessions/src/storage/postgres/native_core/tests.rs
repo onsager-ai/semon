@@ -83,7 +83,9 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
     drop(cache);
     let config = source.config(cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let ledger = ledger(&db, path.to_str().unwrap());
     let rows = FAMILIES
         .iter()
@@ -93,7 +95,11 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
             } else {
                 family
             };
-            let mut stmt = db.prepare(&format!("SELECT * FROM {table} WHERE namespace=semon_namespace()")).unwrap();
+            let mut stmt = db
+                .prepare(&format!(
+                    "SELECT * FROM {table} WHERE namespace=semon_namespace()"
+                ))
+                .unwrap();
             let names = stmt
                 .column_names()
                 .into_iter()
@@ -233,9 +239,13 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
     let oracle = phase(&cache, &path, "claude");
     let config = fixture_host_source().config(&cache).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let metadata = db
-        .prepare("SELECT key,value FROM meta WHERE namespace=semon_namespace() AND length(key)>2704")
+        .prepare(
+            "SELECT key,value FROM meta WHERE namespace=semon_namespace() AND length(key)>2704",
+        )
         .unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .unwrap()

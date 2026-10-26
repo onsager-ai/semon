@@ -54,7 +54,9 @@ fn pg_native_copied_identity_real_parser_sqlite_oracle_restart_rollback_and_ack(
     drop(cache);
     let config = source.config(&cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let rows = sqlite.prepare("SELECT file_id,message_id,record_uuid FROM usage_identity WHERE namespace=semon_namespace() ORDER BY file_id,message_id,record_uuid").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<Vec<IdentityRow>>>().unwrap();
     assert_eq!(
         rows.len(),
@@ -131,7 +133,10 @@ fn pg_native_copied_identity_real_parser_sqlite_oracle_restart_rollback_and_ack(
     .unwrap();
     for row in rows.iter().take(2) {
         sqlite
-            .execute("DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1", [row.0])
+            .execute(
+                "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1",
+                [row.0],
+            )
             .unwrap();
         let expected = sqlite_copied(&sqlite);
         pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -251,7 +256,9 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     drop(cache);
     let config = source.config(&cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let projection: i64 = sqlite
         .query_row(
             "SELECT projection_id FROM native_tree_labels WHERE namespace=semon_namespace() ORDER BY projection_id LIMIT 1",
