@@ -237,14 +237,18 @@ impl Query {
         store: &dyn crate::storage::query::QueryCatalogStore,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        if self.sources.machines.len() != 1 || !matches!(tool, "list_sessions" | "read_transcript" | "get_session") {
+        if self.sources.machines.len() != 1
+            || !matches!(tool, "list_sessions" | "read_transcript" | "get_session")
+        {
             return Err(QueryError::new(
                 "namespace_upgrade_pending",
                 "Admitted Query selector is not qualified",
             ));
         }
-        if matches!(tool,"read_transcript"|"get_session") {
-            return Err(unavailable("Selected Query requires an authorized Raw reader"));
+        if matches!(tool, "read_transcript" | "get_session") {
+            return Err(unavailable(
+                "Selected Query requires an authorized Raw reader",
+            ));
         }
         self.execute_catalog_store_at(
             tool,
@@ -259,17 +263,28 @@ impl Query {
     /// Host authorization is explicit and separate from Catalog admission.
     #[allow(dead_code)]
     pub(crate) fn call_bound_selected_at(
-        &mut self, tool: &str, args: &Value, now: i64,
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
         store: &dyn crate::storage::query::QueryCatalogStore,
         host: &dyn crate::SessionSourceReader,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        if self.sources.is_retired() || self.sources.machines.len() != 1 || !matches!(tool,"read_transcript"|"get_session") {
+        if self.sources.is_retired()
+            || self.sources.machines.len() != 1
+            || !matches!(tool, "read_transcript" | "get_session")
+        {
             return Err(unavailable("Admitted selected Query tool unavailable"));
         }
-        let mut selected_args=args.clone();
-        selected_args["_session"]=serde_json::Value::Bool(tool=="get_session");
-        store.selected_body(args["id"].as_str().expect("validated selected id"), &selected_args, now, host)
+        let mut selected_args = args.clone();
+        selected_args["_session"] = serde_json::Value::Bool(tool == "get_session");
+        store.selected_body(
+            args["id"].as_str().expect("validated selected id"),
+            &selected_args,
+            now,
+            host,
+        )
     }
 
     fn execute_catalog_store_at(

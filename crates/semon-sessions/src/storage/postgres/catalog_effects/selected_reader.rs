@@ -118,20 +118,45 @@ pub(in crate::storage::postgres) struct SelectedRecords<'a> {
 }
 impl SelectedRecords<'_> {
     fn reference(&self, path: &std::path::Path) -> io::Result<&SessionSourceRef> {
-        self.sources.iter().find(|(source, _)| source.path == path).map(|(_, reference)| reference).ok_or_else(|| io::Error::other(StorageError::ScopeChanged))
+        self.sources
+            .iter()
+            .find(|(source, _)| source.path == path)
+            .map(|(_, reference)| reference)
+            .ok_or_else(|| io::Error::other(StorageError::ScopeChanged))
     }
-    pub fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<serde_json::Value>,u64)> {
+    pub fn read(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+    ) -> io::Result<(Option<serde_json::Value>, u64)> {
         let reference = self.reference(path)?;
         let part = self.read_range(reference, None, offset, 1)?;
         crate::source_reader::read_native_record(self, reference, &part.generation, offset)
     }
-    pub fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(serde_json::Value,u64)> {
+    pub fn prompt(
+        &self,
+        file: &crate::model::SlotFile,
+        offset: u64,
+    ) -> Option<(serde_json::Value, u64)> {
         let reference = self.reference(&file.path).ok()?;
-        file.prompts.record_from(&mut SelectedFile { reader: self, reference, position: offset }, offset)
+        file.prompts.record_from(
+            &mut SelectedFile {
+                reader: self,
+                reference,
+                position: offset,
+            },
+            offset,
+        )
     }
     pub fn finish(&self) -> io::Result<()> {
         for (_, reference) in &self.sources {
-            if self.pins.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?.contains_key(&format!("{}:{}",reference.root,reference.path)) && reference.offset > 0 {
+            if self
+                .pins
+                .lock()
+                .map_err(|_| io::Error::other(StorageError::Unavailable))?
+                .contains_key(&format!("{}:{}", reference.root, reference.path))
+                && reference.offset > 0
+            {
                 self.read_range(reference, None, reference.offset - 1, 1)?;
             }
         }
@@ -139,28 +164,65 @@ impl SelectedRecords<'_> {
     }
 }
 impl SessionSourceReader for SelectedRecords<'_> {
-    fn read_range(&self, reference: &SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> io::Result<SessionSourceRange> {
-        let (source, saved) = self.sources.iter().find(|(_, saved)| saved == reference).ok_or_else(||io::Error::other(StorageError::ScopeChanged))?;
+    fn read_range(
+        &self,
+        reference: &SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<SessionSourceRange> {
+        let (source, saved) = self
+            .sources
+            .iter()
+            .find(|(_, saved)| saved == reference)
+            .ok_or_else(|| io::Error::other(StorageError::ScopeChanged))?;
         let key = format!("{}:{}", reference.root, reference.path);
-        let mut pins = self.pins.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?;
+        let mut pins = self
+            .pins
+            .lock()
+            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
         let pin = pins.get(&key).map(String::as_str);
-        if expected.zip(pin).is_some_and(|(a,b)|a!=b) { return Err(io::Error::other(StorageError::ScopeChanged)); }
-        let reader = Reader { pool:self.pool, namespace:self.namespace, control:self.control, generation:self.generation, source, reference:saved, host:self.host };
+        if expected.zip(pin).is_some_and(|(a, b)| a != b) {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        let reader = Reader {
+            pool: self.pool,
+            namespace: self.namespace,
+            control: self.control,
+            generation: self.generation,
+            source,
+            reference: saved,
+            host: self.host,
+        };
         let part = reader.read_range(reference, pin.or(expected), offset, max)?;
-        let mut left = self.bytes_left.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?;
-        *left = left.checked_sub(part.bytes.len()).ok_or_else(||io::Error::other(StorageError::Busy))?;
-        pins.entry(key).or_insert_with(||part.generation.clone());
+        let mut left = self
+            .bytes_left
+            .lock()
+            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        *left = left
+            .checked_sub(part.bytes.len())
+            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        pins.entry(key).or_insert_with(|| part.generation.clone());
         Ok(part)
     }
 }
 struct SelectedFile<'a, 'b> {
-    reader: &'a SelectedRecords<'b>, reference: &'a SessionSourceRef, position: u64,
+    reader: &'a SelectedRecords<'b>,
+    reference: &'a SessionSourceRef,
+    position: u64,
 }
 impl std::io::Read for SelectedFile<'_, '_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let max = buffer.len().min(crate::source_reader::SESSION_SOURCE_CHUNK_MAX).min(self.reference.offset.saturating_sub(self.position) as usize);
-        if max == 0 { return Ok(0); }
-        let part = self.reader.read_range(self.reference, None, self.position, max)?;
+        let max = buffer
+            .len()
+            .min(crate::source_reader::SESSION_SOURCE_CHUNK_MAX)
+            .min(self.reference.offset.saturating_sub(self.position) as usize);
+        if max == 0 {
+            return Ok(0);
+        }
+        let part = self
+            .reader
+            .read_range(self.reference, None, self.position, max)?;
         buffer[..part.bytes.len()].copy_from_slice(&part.bytes);
         self.position += part.bytes.len() as u64;
         Ok(part.bytes.len())
@@ -172,20 +234,48 @@ impl std::io::Seek for SelectedFile<'_, '_> {
             std::io::SeekFrom::Start(at) => Some(at),
             std::io::SeekFrom::Current(at) => self.position.checked_add_signed(at),
             std::io::SeekFrom::End(at) => self.reference.offset.checked_add_signed(at),
-        }.filter(|at| *at <= self.reference.offset).ok_or_else(||io::Error::other(StorageError::InvalidArguments))?;
+        }
+        .filter(|at| *at <= self.reference.offset)
+        .ok_or_else(|| io::Error::other(StorageError::InvalidArguments))?;
         self.position = position;
         Ok(position)
     }
 }
 
 impl crate::query::transcript::QueryRecords for SelectedRecords<'_> {
-    fn reader(&self)->&dyn SessionSourceReader { self }
-    fn source_ref(&self,path:&std::path::Path)->Option<&SessionSourceRef> { self.reference(path).ok() }
-    fn record_bytes(&self,path:&std::path::Path,offset:u64,max:u64)->io::Result<Option<Vec<u8>>> {
-        let reference=self.reference(path)?;
-        if offset>=reference.offset {return Ok(None);}
-        let bound=usize::try_from(max).map_err(io::Error::other)?.min(crate::tx::LINE_MAX as usize);
-        crate::source_reader::read_record_bytes_bounded(self,reference,offset,bound,&mut (bound.saturating_add(1))).map(Some)
+    fn reader(&self) -> &dyn SessionSourceReader {
+        self
     }
-    fn prompt(&self,file:&crate::model::SlotFile,offset:u64)->Option<(serde_json::Value,u64)> { self.prompt(file,offset) }
+    fn source_ref(&self, path: &std::path::Path) -> Option<&SessionSourceRef> {
+        self.reference(path).ok()
+    }
+    fn record_bytes(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        max: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let reference = self.reference(path)?;
+        if offset >= reference.offset {
+            return Ok(None);
+        }
+        let bound = usize::try_from(max)
+            .map_err(io::Error::other)?
+            .min(crate::tx::LINE_MAX as usize);
+        crate::source_reader::read_record_bytes_bounded(
+            self,
+            reference,
+            offset,
+            bound,
+            &mut (bound.saturating_add(1)),
+        )
+        .map(Some)
+    }
+    fn prompt(
+        &self,
+        file: &crate::model::SlotFile,
+        offset: u64,
+    ) -> Option<(serde_json::Value, u64)> {
+        self.prompt(file, offset)
+    }
 }

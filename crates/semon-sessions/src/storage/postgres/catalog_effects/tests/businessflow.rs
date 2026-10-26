@@ -1,5 +1,5 @@
 //! The ordinary native model must run after PG ingest, not be copied from the
-//! SQLite oracle. Full admitted publication/selected qualification is separate.
+//! SQLite oracle, admitted publication and lease-bound Query bodies/fields.
 use super::*;
 use crate::events::EventCache;
 use crate::storage::native_events::NativeEventStore;
@@ -74,7 +74,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     sqlite_options.cache = oracle.root.join("oracle-all140");
     let mut sqlite = EventCache::open_scoped(&sqlite_options.cache).unwrap();
     let expected =
-        crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000).unwrap();
+        crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
+            .unwrap();
     assert_eq!(
         expected
             .rows
@@ -84,12 +85,37 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         std::collections::BTreeSet::from(["claude", "codex", "copilot"])
     );
     sqlite.publish_partial_catalog_fenced(&expected).unwrap();
-    let expected_bodies = expected.rows.iter().map(|row| {
-        let body = crate::query::transcript::read(&sqlite_options,&row.key,&serde_json::json!({"id":row.key,"limit":100}),None,crate::SessionSourceReadMode::LocalThenProvider,1790812802000).unwrap().expect("SQLite ordinary body");
-        assert!(body.to_string().contains("sanitized"));
-        let session=crate::query::transcript::session(&sqlite_options,&row.key,&serde_json::json!({"id":row.key}),None,crate::SessionSourceReadMode::LocalThenProvider,1790812802000).unwrap().expect("SQLite ordinary session fields");
-        (row.key.clone(),serde_json::json!({"body":body,"fields":session}))
-    }).collect::<std::collections::BTreeMap<_,_>>();
+    let expected_bodies = expected
+        .rows
+        .iter()
+        .map(|row| {
+            let body = crate::query::transcript::read(
+                &sqlite_options,
+                &row.key,
+                &serde_json::json!({"id":row.key,"limit":100}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                1790812802000,
+            )
+            .unwrap()
+            .expect("SQLite ordinary body");
+            assert!(body.to_string().contains("sanitized"));
+            let session = crate::query::transcript::session(
+                &sqlite_options,
+                &row.key,
+                &serde_json::json!({"id":row.key}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                1790812802000,
+            )
+            .unwrap()
+            .expect("SQLite ordinary session fields");
+            (
+                row.key.clone(),
+                serde_json::json!({"body":body,"fields":session}),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -287,30 +313,115 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .unwrap();
-    struct BodyHost(std::collections::BTreeMap<(String,String), (crate::SessionSourceRef,std::sync::Arc<[u8]>)>);
+    struct BodyHost(
+        std::collections::BTreeMap<
+            (String, String),
+            (crate::SessionSourceRef, std::sync::Arc<[u8]>),
+        >,
+    );
     impl crate::SessionSourceReader for BodyHost {
-        fn read_range(&self, reference:&crate::SessionSourceRef, expected:Option<&str>, offset:u64, max:usize)->std::io::Result<crate::SessionSourceRange> {
-            let (saved,bytes) = self.0.get(&(reference.root.clone(),reference.path.clone())).ok_or_else(||std::io::Error::other("host denied"))?;
-            if saved!=reference || expected.is_some_and(|pin|pin!="body-fixture") || max>crate::source_reader::SESSION_SOURCE_CHUNK_MAX { return Err(std::io::Error::other("host denied")); }
+        fn read_range(
+            &self,
+            reference: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            let (saved, bytes) = self
+                .0
+                .get(&(reference.root.clone(), reference.path.clone()))
+                .ok_or_else(|| std::io::Error::other("host denied"))?;
+            if saved != reference
+                || expected.is_some_and(|pin| pin != "body-fixture")
+                || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
+            {
+                return Err(std::io::Error::other("host denied"));
+            }
             let start = usize::try_from(offset).map_err(std::io::Error::other)?;
             let end = bytes.len().min(start.saturating_add(max));
-            Ok(crate::SessionSourceRange { generation:"body-fixture".into(), length:bytes.len() as u64, offset, bytes:std::sync::Arc::from(bytes.get(start..end).ok_or_else(||std::io::Error::other("host range"))?), cached:false })
+            Ok(crate::SessionSourceRange {
+                generation: "body-fixture".into(),
+                length: bytes.len() as u64,
+                offset,
+                bytes: std::sync::Arc::from(
+                    bytes
+                        .get(start..end)
+                        .ok_or_else(|| std::io::Error::other("host range"))?,
+                ),
+                cached: false,
+            })
         }
     }
-    let body_host = |rows:&[CatalogRow]| BodyHost(rows.iter().flat_map(|row| row.sources.iter().map(|source| {
-        let path = crate::catalog::source_relative(&options,&row.harness,source).unwrap();
-        let reference = crate::SessionSourceRef { root:row.harness.clone(),path:path.clone(),native_id:source.native_id.clone(),offset:source.offset,prefix_sha256:source.prefix_sha256,tail_sha256:source.tail_sha256 };
-        ((row.harness.clone(),path),(reference,std::sync::Arc::from(fs::read(&source.path).unwrap())))
-    })).collect());
-    let retained_host = body_host(&prepared.rows);
-    let read_bodies = |query:&mut crate::Query,store:&super::super::snapshot::query::QueryCatalog,host:&BodyHost| {
-        prepared.rows.iter().map(|row| {
-            let body = query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":row.key,"limit":100}),1790812802000,store,host).unwrap();
-            let fields=query.call_bound_selected_at("get_session",&serde_json::json!({"id":row.key}),1790812802000,store,host).unwrap();
-            (row.key.clone(),serde_json::json!({"body":body,"fields":fields}))
-        }).collect::<std::collections::BTreeMap<_,_>>()
+    let body_host = |rows: &[CatalogRow]| {
+        BodyHost(
+            rows.iter()
+                .flat_map(|row| {
+                    row.sources.iter().map(|source| {
+                        let path = crate::catalog::source_relative(&options, &row.harness, source)
+                            .unwrap();
+                        let reference = crate::SessionSourceRef {
+                            root: row.harness.clone(),
+                            path: path.clone(),
+                            native_id: source.native_id.clone(),
+                            offset: source.offset,
+                            prefix_sha256: source.prefix_sha256,
+                            tail_sha256: source.tail_sha256,
+                        };
+                        (
+                            (row.harness.clone(), path),
+                            (
+                                reference,
+                                std::sync::Arc::from(fs::read(&source.path).unwrap()),
+                            ),
+                        )
+                    })
+                })
+                .collect(),
+        )
     };
-    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies);
+    let retained_host = body_host(&prepared.rows);
+    let read_bodies = |query: &mut crate::Query,
+                       store: &super::super::snapshot::query::QueryCatalog,
+                       host: &BodyHost| {
+        prepared
+            .rows
+            .iter()
+            .map(|row| {
+                let body = query
+                    .call_bound_selected_at(
+                        "read_transcript",
+                        &serde_json::json!({"id":row.key,"limit":100}),
+                        1790812802000,
+                        store,
+                        host,
+                    )
+                    .unwrap();
+                let fields = query
+                    .call_bound_selected_at(
+                        "get_session",
+                        &serde_json::json!({"id":row.key}),
+                        1790812802000,
+                        store,
+                        host,
+                    )
+                    .unwrap();
+                (
+                    row.key.clone(),
+                    serde_json::json!({"body":body,"fields":fields}),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies
+    );
+    struct DeniedHost;
+    impl crate::SessionSourceReader for DeniedHost {
+        fn read_range(&self,_:&crate::SessionSourceRef,_:Option<&str>,_:u64,_:usize)->std::io::Result<crate::SessionSourceRange> {Err(std::io::Error::other("host denied"))}
+    }
+    assert!(query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":prepared.rows[0].key}),1790812802000,&query_store,&DeniedHost).is_err(),"Catalog metadata must not grant Raw or return blank success");
+
     // Only the request-owned host can grant fixture bytes. The PG reader adds
     // persisted native proof verification to the ordinary scalar-field parser.
     struct Host {
@@ -432,9 +543,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     for (input, original) in inputs.iter().zip(&raw) {
         assert_eq!(&fs::read(input.full_path(&options)).unwrap(), original);
     }
-    let restarted_store = super::super::snapshot::query::QueryCatalog { pool:pool.clone(), namespace:namespace.clone(), control:control.clone(), generation:generation.clone(), options:options.clone() };
-    let mut restarted_query = crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(),options.clone())])));
-    assert_eq!(read_bodies(&mut restarted_query,&restarted_store,&retained_host),expected_bodies);
+    let restarted_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: options.clone(),
+    };
+    let mut restarted_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
+    ));
+    assert_eq!(
+        read_bodies(&mut restarted_query, &restarted_store, &retained_host),
+        expected_bodies
+    );
     use std::io::Write;
     let path = inputs[0].full_path(&options);
     let append = format!(
@@ -469,21 +591,41 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         receipt.consumed_bytes
     );
     let append_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
-    resumed.begin_semantic_stage(&paths,&append_runtime).unwrap();
+    resumed
+        .begin_semantic_stage(&paths, &append_runtime)
+        .unwrap();
     let continued_generation = loop {
         let batch = resumed.semantic_batch(64).unwrap().unwrap();
-        let model = resumed.prepare_semantic_model_batch(&options,&inputs,&batch,1790812803000).unwrap();
+        let model = resumed
+            .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812803000)
+            .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
-            let ack = resumed.publish_semantic_catalog(&batch,model.prepared()).unwrap();
+            let ack = resumed
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
             resumed.finish_semantic_stage(batch.epoch).unwrap();
             break ack.1.unwrap();
         }
     };
-    let next_store = super::super::snapshot::query::QueryCatalog { pool:pool.clone(), namespace:namespace.clone(), control:control.clone(), generation:continued_generation.clone(), options:options.clone() };
+    let next_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: continued_generation.clone(),
+        options: options.clone(),
+    };
     let next_host = body_host(&continued.rows);
-    let next_bodies = read_bodies(&mut restarted_query,&next_store,&next_host);
-    assert!(next_bodies.values().any(|body|body.to_string().contains("sanitized continuation")));
-    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies,"old authorized body must survive successor publication");
+    let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
+    assert!(
+        next_bodies
+            .values()
+            .any(|body| body.to_string().contains("sanitized continuation"))
+    );
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies,
+        "old authorized body must survive successor publication"
+    );
     assert_ne!(continued_generation, generation);
     assert_eq!(
         read_selected(),

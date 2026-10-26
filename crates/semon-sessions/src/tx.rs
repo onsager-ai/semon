@@ -2036,7 +2036,10 @@ pub(crate) fn render_at(
 fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
     let file = file?;
     if let Some(provider) = lines.prompt_provider.as_mut() {
-        let (record, bytes) = provider(file, offset)?;
+        let Some((record, bytes)) = provider(file, offset) else {
+            lines.failures += 1;
+            return None;
+        };
         lines.bytes += bytes;
         return Some(Rc::new(record));
     }

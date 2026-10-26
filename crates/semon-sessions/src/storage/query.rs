@@ -38,8 +38,17 @@ pub(crate) struct Part {
 }
 
 pub(crate) trait QueryCatalogStore {
-    fn selected_body(&self, _key: &str, _args: &Value, _now: i64, _host: &dyn crate::SessionSourceReader) -> Result<Value, QueryError> {
-        Err(QueryError::new("unavailable", "Selected body requires a qualified reader"))
+    fn selected_body(
+        &self,
+        _key: &str,
+        _args: &Value,
+        _now: i64,
+        _host: &dyn crate::SessionSourceReader,
+    ) -> Result<Value, QueryError> {
+        Err(QueryError::new(
+            "unavailable",
+            "Selected body requires a qualified reader",
+        ))
     }
 
     fn read_cohort(

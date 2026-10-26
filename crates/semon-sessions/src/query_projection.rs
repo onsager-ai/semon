@@ -72,11 +72,16 @@ impl Projection {
     }
     /// Content-free selected recipes, persisted with the same Catalog witness.
     pub(crate) fn selected_recipe(&self, summary: &Summary) -> Value {
-        let edges: Vec<_> = self.edges.iter().map(|edge| {
-            let mut edge = edge.clone();
-            edge["query_content"] = summary.query_recipe(edge["id"].as_str().expect("edge identity"));
-            edge
-        }).collect();
+        let edges: Vec<_> = self
+            .edges
+            .iter()
+            .map(|edge| {
+                let mut edge = edge.clone();
+                edge["query_content"] =
+                    summary.query_recipe(edge["id"].as_str().expect("edge identity"));
+                edge
+            })
+            .collect();
         json!({"session":self.session,"turns":self.turns,"edges":edges})
     }
 
