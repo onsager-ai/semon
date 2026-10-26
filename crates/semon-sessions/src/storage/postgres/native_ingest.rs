@@ -205,3 +205,30 @@ pub(super) fn commit(
         Err(e) => Err(e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_native126_request_keeps_complete_long_path_and_namespace() {
+        let namespace = super::super::tests::ns("native130-long-request");
+        let path = "p".repeat(8192);
+        let id = "1".repeat(64);
+        let digest = request(&namespace, &path, "claude", &id).unwrap();
+        assert_ne!(
+            digest,
+            request(&namespace, &format!("{path}x"), "claude", &id).unwrap()
+        );
+        assert_ne!(
+            digest,
+            request(
+                &super::super::tests::ns("native130-other"),
+                &path,
+                "claude",
+                &id
+            )
+            .unwrap()
+        );
+    }
+}
