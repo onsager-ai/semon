@@ -125,6 +125,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Drive the SAME ordinary queued producer against durable PG staging.
     let paths = inputs.iter().map(|input| input.full_path(&options).to_string_lossy().into_owned()).collect::<Vec<_>>();
     let stage_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    assert!(pg.begin_semantic_stage(&(0..65).map(|i| format!("oversize-{i}")).collect::<Vec<_>>(), &stage_runtime).is_err());
     assert_eq!(pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(), crate::events::Outcome::Written);
     let mut stages = Vec::new();
     let (published, semantic_batch, semantic_model) = loop {
@@ -141,6 +142,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
         let model = pg.prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000).unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let mut mismatched = batch.clone();
+            mismatched.context.companions.push("altered full context".into());
+            assert!(pg.publish_semantic_catalog(&mismatched, model.prepared()).is_err());
             let ack = pg.publish_semantic_catalog(&batch, model.prepared()).unwrap();
             assert_eq!(pg.publish_semantic_catalog(&batch, model.prepared()).unwrap(), ack);
             break (ack, batch, model);
