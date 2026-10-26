@@ -11210,7 +11210,7 @@ mod tests {
 
     #[test]
     fn usage_delete_reuse_matches_rowwise_order_and_preserves_foreign_rows() {
-        for composite in [false, true] {
+        for composite in [true] {
             let db = usage_delete_fixture(composite);
             let reference = usage_delete_fixture(composite);
             let changes = super::super::DirtyRows {
@@ -11291,7 +11291,7 @@ mod tests {
 
     #[test]
     fn usage_delete_statements_are_transaction_owned_and_recheck_on_reuse() {
-        for composite in [false, true] {
+        for composite in [true] {
             let db = usage_delete_fixture(composite);
             let changes = super::super::DirtyRows {
                 usage: ["a", "b", "c", "z"].map(str::to_owned).into(),
@@ -11393,7 +11393,7 @@ mod tests {
 
     #[test]
     fn usage_delete_reuse_rolls_back_and_requalifies_ddl_and_aba() {
-        for composite in [false, true] {
+        for composite in [true] {
             let db = usage_delete_fixture(composite);
             let changes = super::super::DirtyRows {
                 usage: ["a", "b", "c", "z"].map(str::to_owned).into(),

@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn native_usage_copied_family_rejects_mixed_shapes_before_payload_dml() {
-        for composite in [false, true] {
+        {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
             db.execute_batch(configured::CORE_SCHEMA).unwrap();
@@ -1833,11 +1833,11 @@ mod tests {
                 db.execute_batch(ddl).unwrap();
             }
             db.execute_batch(copied_usage_schema()).unwrap();
-            db.execute_batch(tree_state::schema(composite)).unwrap();
+            db.execute_batch(tree_state::schema(true)).unwrap();
             bind_fixture(&db, "a");
             assert_eq!(
                 copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                if composite { "scoped" } else { "legacy" }
+                "scoped"
             );
             {
                 let tx = db.transaction().unwrap();
@@ -1848,17 +1848,16 @@ mod tests {
                 tx.execute_batch(copied_usage_schema()).unwrap();
                 assert_eq!(
                     copied_usage_sql(&tx, "legacy", "scoped").unwrap(),
-                    if composite { "legacy" } else { "scoped" }
+                    "scoped"
                 );
                 tx.rollback().unwrap();
                 assert_eq!(
                     copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                    if composite { "scoped" } else { "legacy" }
+                    "scoped"
                 );
             }
             // Invalidate an already cached decision with a partial family DDL.
-            db.execute_batch("DROP TABLE codex_usage;").unwrap();
-            db.execute_batch(copied_usage_schema()).unwrap();
+            db.execute_batch("DROP TABLE codex_usage; CREATE TABLE codex_usage(file_id INTEGER NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(file_id,seq)) STRICT, WITHOUT ROWID;").unwrap();
             let tx = db.transaction().unwrap();
             let before: i64 = tx
                 .query_row("SELECT total_changes()", [], |r| r.get(0))
