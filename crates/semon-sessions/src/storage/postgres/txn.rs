@@ -55,7 +55,11 @@ impl PgPool {
         if namespace.as_str().is_empty() || namespace.as_str().len() > 4096 {
             return Err(StorageError::InvalidArguments);
         }
-        if self.source_binding.as_ref().is_some_and(|binding| &binding.namespace != namespace) {
+        if self
+            .source_binding
+            .as_ref()
+            .is_some_and(|binding| &binding.namespace != namespace)
+        {
             return Err(StorageError::NamespaceMismatch);
         }
         let mut lease = self.acquire(control)?;
@@ -83,7 +87,9 @@ impl PgPool {
                 .batch_execute(match kind {
                     TxnKind::ReadSnapshot => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
                     // Future effects require explicit locks/fences/unique keys.
-                    TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer => "BEGIN ISOLATION LEVEL READ COMMITTED",
+                    TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer => {
+                        "BEGIN ISOLATION LEVEL READ COMMITTED"
+                    }
                 })
                 .map_err(sqlstate::error)?;
             phase = Phase::InTxn;
@@ -125,16 +131,22 @@ impl PgPool {
                 }
                 if matches!(kind, TxnKind::ReadSnapshot) {
                     let incoming:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='native_transfer_v1:incoming' AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
-                    if incoming { return Err(StorageError::NamespaceUpgradePending); }
+                    if incoming {
+                        return Err(StorageError::NamespaceUpgradePending);
+                    }
                 }
                 if matches!(kind, TxnKind::Write) {
                     let blocked:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key IN ('native_transfer_v1:source-freeze','native_transfer_v1:incoming') AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
-                    if blocked { return Err(StorageError::ScopeChanged); }
+                    if blocked {
+                        return Err(StorageError::ScopeChanged);
+                    }
                 }
             }
             if let Some(expected) = &self.source_binding {
                 let actual = super::model_cache::binding(&mut tx)?;
-                if actual.admission != expected.admission || actual.stream_epoch != expected.stream_epoch {
+                if actual.admission != expected.admission
+                    || actual.stream_epoch != expected.stream_epoch
+                {
                     return Err(StorageError::ScopeChanged);
                 }
             }

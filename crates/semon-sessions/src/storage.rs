@@ -349,7 +349,11 @@ impl StoreConfig {
             StoreBackend::Postgres { pool, control } => {
                 postgres::require_configured(self, pool, control)?;
                 Ok(Box::new(postgres::PgSourceJournal::configured(
-                    pool.bind_source(&self.namespace, self.expected_stream_epoch.as_deref(), control)?,
+                    pool.bind_source(
+                        &self.namespace,
+                        self.expected_stream_epoch.as_deref(),
+                        control,
+                    )?,
                     self.namespace.clone(),
                     control.clone(),
                 )))
@@ -390,7 +394,9 @@ impl StoreConfig {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::namespace::admit(self),
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { pool, control } => postgres::namespace::admit(self, pool, control),
+            StoreBackend::Postgres { pool, control } => {
+                postgres::namespace::admit(self, pool, control)
+            }
         }
     }
 
@@ -401,7 +407,9 @@ impl StoreConfig {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::namespace::unenroll(self, admission),
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { pool, control } => postgres::namespace::unenroll(self, pool, control, admission),
+            StoreBackend::Postgres { pool, control } => {
+                postgres::namespace::unenroll(self, pool, control, admission)
+            }
         }
     }
 

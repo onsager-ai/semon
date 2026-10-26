@@ -14,7 +14,9 @@ pub(super) fn initialize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 }
 
 pub(super) fn binding(tx: &mut PgTxn<'_>) -> Result<QueryRuntimeBinding, StorageError> {
-    if super::native_keys::read_meta(tx, b"source-unenrolled", 1)?.is_some_and(|value| !value.is_empty()) {
+    if super::native_keys::read_meta(tx, b"source-unenrolled", 1)?
+        .is_some_and(|value| !value.is_empty())
+    {
         return Err(StorageError::NamespaceUnadmitted);
     }
     raw_binding(tx)

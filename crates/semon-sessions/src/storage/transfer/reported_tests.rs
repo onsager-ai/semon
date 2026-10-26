@@ -1,4 +1,5 @@
     use super::*;
+    use crate::ReportedRunSnapshot;
     use std::{
         collections::BTreeSet,
         path::{Path, PathBuf},
