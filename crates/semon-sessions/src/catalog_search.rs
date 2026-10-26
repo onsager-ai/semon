@@ -728,7 +728,7 @@ fn read_filtered(
             "SELECT octet_length(metadata),CASE WHEN octet_length(metadata)<=?2 THEN metadata ELSE NULL END,last_ms,harness,repo,lifecycle FROM {table}session_catalog WHERE {ns}session_key=?1 AND lifecycle='current'"
         ),
         crate::CatalogReadScope::RetainedHistory => format!(
-            "SELECT octet_length(COALESCE(history.metadata,catalog.metadata)),CASE WHEN octet_length(COALESCE(history.metadata,catalog.metadata))<=?2 THEN COALESCE(history.metadata,catalog.metadata) ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM {table}session_catalog AS catalog LEFT JOIN {table}session_history_catalog AS history USING({using}session_key) WHERE {ns}session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
+            "SELECT octet_length(CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END),CASE WHEN octet_length(CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END)<=?2 THEN CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM {table}session_catalog AS catalog LEFT JOIN {table}session_history_catalog AS history USING({using}session_key) WHERE {ns}session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
         ),
     };
     let mut metadata = connection.prepare(&metadata_sql)?;
@@ -1529,13 +1529,15 @@ mod sqlite_tests {
     }
 
     #[test]
-    fn retained_search_reads_current_metadata_before_a_history_copy_exists() {
+    fn retained_search_keeps_current_metadata_authority_with_or_without_history() {
         let mut connection = database();
         let transaction = connection.transaction().unwrap();
         put(&transaction, &row("current", "Harbor queue"));
-        transaction
-            .execute("DELETE FROM main.session_history_catalog", [])
-            .unwrap();
+        // Original custody can remain Retained while the same composite key
+        // has a new Current projection. Search must validate the metadata
+        // that produced its Current postings, before page presentation adds
+        // the independently preserved history source context.
+        transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained')", []).unwrap();
         transaction.commit().unwrap();
         let query = || Query {
             scope: CatalogReadScope::RetainedHistory,
@@ -1550,7 +1552,15 @@ mod sqlite_tests {
         let found = read(&connection, query()).unwrap();
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].key, "current");
+        assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Current);
         assert!(!found.report.partial);
+        connection
+            .execute("DELETE FROM main.session_history_catalog", [])
+            .unwrap();
+        let found = read(&connection, query()).unwrap();
+        assert_eq!(found.rows.len(), 1);
+        assert_eq!(found.rows[0].key, "current");
+        assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Current);
         // An absent retained source is not a readable current fallback.
         connection
             .execute("UPDATE main.session_catalog SET lifecycle='retained'", [])
