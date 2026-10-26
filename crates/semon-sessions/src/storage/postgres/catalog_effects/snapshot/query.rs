@@ -40,22 +40,28 @@ impl QueryCatalogStore for QueryCatalog {
             &self.control,
             &self.generation,
             |snapshot| {
-                // A withdrawn key reads its proof-owned retained recipe; the
-                // body itself still comes only from Raw Source bytes.
-                let history = snapshot.catalog(key, false)?.is_none();
+                // The retained composite wins for the same owner, as in the
+                // SQLite Query reader; Current membership remains independent.
+                // Bodies still come only from authorized Raw Source bytes.
+                let history = snapshot.owner(key)?.is_some();
                 let (row, header, _) = snapshot
                     .selected(key, history, 0, 1)?
                     .ok_or(StorageError::ScopeChanged)?;
-                let binding = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
-                let observations = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-                    .map_err(|_| StorageError::ScopeChanged)?;
+                let binding = snapshot
+                    .runtime_binding()
+                    .ok_or(StorageError::ScopeChanged)?;
+                let observations =
+                    crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+                        .map_err(|_| StorageError::ScopeChanged)?;
                 let expected = observations.expected(&row);
                 if !crate::model::summary::query_observation_matches(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
                     &row.sources,
                     true,
                     expected.as_deref(),
-                ).map_err(|_| StorageError::ScopeChanged)? {
+                )
+                .map_err(|_| StorageError::ScopeChanged)?
+                {
                     return Err(StorageError::ScopeChanged);
                 }
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
@@ -86,10 +92,12 @@ impl QueryCatalogStore for QueryCatalog {
                         return Err(StorageError::Busy);
                     }
                     for owner in keys {
-                        if owner != key
-                            && let Some(row) = snapshot.catalog(&owner, false)?
-                        {
-                            context.push(row);
+                        if owner != key {
+                            if let Some(row) = snapshot.catalog(&owner, true)? {
+                                context.push(row);
+                            } else if let Some(row) = snapshot.catalog(&owner, false)? {
+                                context.push(row);
+                            }
                         }
                     }
                 }
@@ -150,7 +158,9 @@ impl QueryCatalogStore for QueryCatalog {
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
                     if crate::native_evidence::query_runtime_generation(&self.options)
-                        .map_err(|_| StorageError::Unavailable)? != runtime {
+                        .map_err(|_| StorageError::Unavailable)?
+                        != runtime
+                    {
                         return Err(StorageError::ScopeChanged);
                     }
                     return Ok(serde_json::json!({"now":now,"session":summary}));
@@ -192,7 +202,9 @@ impl QueryCatalogStore for QueryCatalog {
                 .map_err(|_| StorageError::Unavailable)?;
                 records.finish().map_err(|_| StorageError::ScopeChanged)?;
                 if crate::native_evidence::query_runtime_generation(&self.options)
-                    .map_err(|_| StorageError::Unavailable)? != runtime {
+                    .map_err(|_| StorageError::Unavailable)?
+                    != runtime
+                {
                     return Err(StorageError::ScopeChanged);
                 }
                 Ok(answer)
@@ -426,9 +438,9 @@ impl QueryCatalogStore for QueryCatalog {
                     for slot in &slots {
                         let slot: serde_json::Value =
                             serde_json::from_str(slot).map_err(|_| StorageError::ScopeChanged)?;
-                        if since
-                            .is_none_or(|since| slot["t"].as_i64().is_some_and(|time| time >= since))
-                        {
+                        if since.is_none_or(|since| {
+                            slot["t"].as_i64().is_some_and(|time| time >= since)
+                        }) {
                             return Ok(true);
                         }
                     }
