@@ -7,7 +7,7 @@ use crate::{
     slot_projection::{SavedSlot, VERSION},
     viewer::{ViewerReply, decoded, query_value},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -150,10 +150,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
                 ));
             }
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let mut db = crate::events::store::local_reader(options)?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
         let identity = match catalog::catalog_selection_in_snapshot(
@@ -268,10 +265,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
             return Ok(invalid_arguments());
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let mut db = crate::events::store::local_reader(options)?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
         let (identity, session) = match catalog::catalog_selection_in_snapshot(
@@ -647,10 +641,7 @@ fn read_inner(
         lease.finish_selected(control)?;
         return result;
     }
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let mut connection = crate::events::store::local_reader(options)?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;

@@ -6,7 +6,7 @@ use crate::{
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -638,11 +638,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             .facts
             .as_ref()
             .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|_| 503u16)?;
+        let mut db = crate::events::store::local_reader(options).map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
         let tx = db.transaction().map_err(|_| 503u16)?;
