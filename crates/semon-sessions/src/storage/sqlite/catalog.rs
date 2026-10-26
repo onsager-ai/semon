@@ -221,12 +221,10 @@ pub(crate) fn source_proof_observation(
 ) -> Result<Option<crate::storage::catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    let qualified = binding.validate(&transaction, &binding.config().namespace)?;
-    let sql = if qualified {
-        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
-    } else {
-        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
-    };
+    if !binding.validate(&transaction, &binding.config().namespace)? {
+        return Err(io::Error::other("namespace reader unqualified").into());
+    }
+    let sql = "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1";
     let encoded: Option<(String, Option<String>)> = transaction
         .query_row(sql, [absolute], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?;
@@ -258,7 +256,7 @@ pub(crate) fn source_proof_observation(
         Option<[u8; 16]>,
     );
     let revision: Option<Revision> = transaction.query_row(
-        "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
+        "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM main.files WHERE namespace=semon_namespace() AND path=?1",
         [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
     ).optional()?;
     if revision
@@ -276,7 +274,7 @@ pub(crate) fn source_proof_observation(
         return Err(io::Error::other("source ledger changed").into());
     }
     let generation: String = transaction.query_row(
-        "SELECT value FROM meta WHERE key='catalog_generation'",
+        "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
         [],
         |row| row.get(0),
     )?;
