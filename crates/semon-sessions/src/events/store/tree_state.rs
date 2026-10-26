@@ -146,7 +146,6 @@ pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
 
 #[derive(Clone)]
 pub(crate) struct Snapshot {
-    db: PathBuf,
     path: String,
     ledger: Ledger,
     file_id: i64,
@@ -210,19 +209,17 @@ impl Snapshot {
         &self,
         read: impl FnOnce(&Connection, i64, i64) -> rusqlite::Result<T>,
     ) -> io::Result<T> {
-        let c = match &self.configured {
-            Some(config) => configured::connection(config).map_err(io::Error::other)?,
-            None => Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(io::Error::other)?,
-        };
+        let config = self.configured.as_ref().ok_or_else(|| {
+            io::Error::other("Tree checkpoint requires an admitted Source binding")
+        })?;
+        let binding = crate::storage::NativeReaderBinding::Semantic(
+            configured::NativeOwnership::restore(config).map_err(io::Error::other)?,
+        );
+        let c = binding.connection().map_err(io::Error::other)?;
         let tx = c.unchecked_transaction().map_err(io::Error::other)?;
-        let admitted = match &self.configured {
-            Some(config) => {
-                configured::validate(&tx, config).map_err(io::Error::other)?;
-                true
-            }
-            None => current(&tx).map_err(io::Error::other)?,
-        };
+        let admitted = binding
+            .validate(&tx, &config.namespace)
+            .map_err(io::Error::other)?;
         if !admitted
             || ledger_row(&tx, &self.path)
                 .map_err(io::Error::other)?
@@ -441,7 +438,6 @@ pub(super) fn restore(
     )?;
     if !db.is_empty() {
         summary.stored = Some(TreeCheckpoint::Sqlite(Snapshot {
-            db: db.into(),
             path: path.into(),
             ledger: ledger.clone(),
             file_id: id,
