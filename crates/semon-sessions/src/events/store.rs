@@ -3360,18 +3360,6 @@ impl SqliteStore {
                             if let Some(sample) = sample.as_mut() {
                                 sample.stage("member_insert", &transaction);
                             }
-                            #[cfg(test)]
-                            let changed = {
-                                usize::from(
-                                    crate::storage::catalog::CurrentPublicationStore::current(
-                                        &current_effects,
-                                        row,
-                                        metadata,
-                                    )
-                                    .map_err(failure)?,
-                                )
-                            };
-                            #[cfg(not(test))]
                             let changed = usize::from(
                                 crate::storage::catalog::CurrentPublicationStore::current(
                                     &current_effects,
@@ -3413,16 +3401,6 @@ impl SqliteStore {
                         if changed || previous_version.as_deref() != Some(&version) {
                             #[cfg(test)]
                             let started = metadata_measurements.start();
-                            #[cfg(test)]
-                            {
-                                crate::storage::catalog::publish_current_sources_measured(
-                                    &current_effects,
-                                    row,
-                                    &mut metadata_measurements,
-                                )
-                                .map_err(failure)?;
-                            }
-                            #[cfg(not(test))]
                             crate::storage::catalog::publish_current_sources_measured(
                                 &current_effects,
                                 row,
@@ -3650,11 +3628,6 @@ impl SqliteStore {
                 crate::storage::sqlite::publication::SlotWriter::unbound(&transaction)
             };
             if let Some(projections) = publication.transcripts {
-                #[cfg(test)]
-                {
-                    crate::storage::catalog::publish_slot_rows(&slot_effects, rows, projections)?;
-                }
-                #[cfg(not(test))]
                 crate::storage::catalog::publish_slot_rows(&slot_effects, rows, projections)?;
                 if claims.is_none() {
                     transaction.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
