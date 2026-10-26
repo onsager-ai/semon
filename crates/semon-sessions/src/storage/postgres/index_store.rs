@@ -96,50 +96,143 @@ impl NativeIndex {
 }
 
 impl IndexStore for NativeIndex {
-    fn begin_semantic_stage(&mut self, paths: &[String], runtime: &str, _: bool) -> Result<Outcome, StoreError> {
-        let (outcome, epoch) = self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::begin(tx, paths, runtime, self.semantic_epoch)).map_err(err)?;
+    fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+        _: bool,
+    ) -> Result<Outcome, StoreError> {
+        let (outcome, epoch) = self
+            .pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::semantic_stage::begin(tx, paths, runtime, self.semantic_epoch)
+            })
+            .map_err(err)?;
         self.semantic_epoch = Some(epoch);
         Ok(outcome)
     }
-    fn semantic_batch(&mut self, limit: usize) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| super::semantic_stage::next(tx, limit)).map_err(err)
+    fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::semantic_stage::next(tx, limit),
+            )
+            .map_err(err)
     }
-    fn record_semantic_batch(&mut self, batch: &crate::model::relation_stage::Batch, prepared: &crate::model::PreparedSources) -> Result<Outcome, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::record(tx, batch, prepared)).map_err(err)
+    fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Outcome, StoreError> {
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::semantic_stage::record(tx, batch, prepared)
+            })
+            .map_err(err)
     }
-    fn publish_semantic_catalog(&mut self, batch: &crate::model::relation_stage::Batch, prepared: &crate::model::PreparedSources) -> Result<(Outcome, Option<String>), StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::publish(tx, batch, prepared)).map_err(err)
+    fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::semantic_stage::publish(tx, batch, prepared)
+            })
+            .map_err(err)
     }
     fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
-        let outcome = self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::finish(tx, epoch)).map_err(err)?;
+        let outcome = self
+            .pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::semantic_stage::finish(tx, epoch)
+            })
+            .map_err(err)?;
         self.semantic_epoch = None;
         Ok(outcome)
     }
-    fn semantic_select(&mut self, epoch: i64, selector: &crate::model::relation_stage::Selector) -> Result<crate::model::relation_stage::Selection, StoreError> {
-        use crate::model::relation_stage::{Selector, Selection};
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
-            let context = super::semantic_stage::context(tx, epoch)?;
-            let Selector::NativeKey { native, harness } = selector else { return Err(StorageError::NamespaceUpgradePending); };
-            let endpoints = context.endpoints.values().filter(|endpoint| endpoint.row.harness == *harness && endpoint.row.native_ids.contains(native)).collect::<Vec<_>>();
-            Ok(Selection { count: endpoints.len(), endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()), ..Default::default() })
-        }).map_err(err)
+    fn semantic_select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        use crate::model::relation_stage::{Selection, Selector};
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| {
+                    let context = super::semantic_stage::context(tx, epoch)?;
+                    let Selector::NativeKey { native, harness } = selector else {
+                        return Err(StorageError::NamespaceUpgradePending);
+                    };
+                    let endpoints = context
+                        .endpoints
+                        .values()
+                        .filter(|endpoint| {
+                            endpoint.row.harness == *harness
+                                && endpoint.row.native_ids.contains(native)
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(Selection {
+                        count: endpoints.len(),
+                        endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()),
+                        ..Default::default()
+                    })
+                },
+            )
+            .map_err(err)
     }
-    fn semantic_replay_page(&mut self, epoch: i64, owners: &[String], after: &str) -> Result<crate::model::relation_stage::Context, StoreError> {
+    fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<crate::model::relation_stage::Context, StoreError> {
         use crate::model::relation_stage::Context;
-        if owners.len() > 64 { return Err(err(StorageError::Busy)); }
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
-            let context = super::semantic_stage::context(tx, epoch)?;
-            let mut output = Context { epoch: Some(epoch), ..Default::default() };
-            for (key, relation) in context.relations.range((std::ops::Bound::Excluded(after.to_owned()), std::ops::Bound::Unbounded)) {
-                if !owners.contains(&relation.from) && !relation.to.as_ref().is_some_and(|to| owners.contains(to)) { continue; }
-                for key in std::iter::once(&relation.from).chain(relation.to.iter()) {
-                    if let Some(endpoint) = context.endpoints.get(key) { output.endpoints.insert(key.clone(), endpoint.clone()); }
-                }
-                output.relations.insert(key.clone(), relation.clone());
-                if output.relations.len() == 64 { break; }
-            }
-            Ok(output)
-        }).map_err(err)
+        if owners.len() > 64 {
+            return Err(err(StorageError::Busy));
+        }
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| {
+                    let context = super::semantic_stage::context(tx, epoch)?;
+                    let mut output = Context {
+                        epoch: Some(epoch),
+                        ..Default::default()
+                    };
+                    for (key, relation) in context.relations.range((
+                        std::ops::Bound::Excluded(after.to_owned()),
+                        std::ops::Bound::Unbounded,
+                    )) {
+                        if !owners.contains(&relation.from)
+                            && !relation.to.as_ref().is_some_and(|to| owners.contains(to))
+                        {
+                            continue;
+                        }
+                        for key in std::iter::once(&relation.from).chain(relation.to.iter()) {
+                            if let Some(endpoint) = context.endpoints.get(key) {
+                                output.endpoints.insert(key.clone(), endpoint.clone());
+                            }
+                        }
+                        output.relations.insert(key.clone(), relation.clone());
+                        if output.relations.len() == 64 {
+                            break;
+                        }
+                    }
+                    Ok(output)
+                },
+            )
+            .map_err(err)
     }
     fn source_observations(
         &self,
@@ -414,22 +507,47 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
-        let Some(generation) = expected else { return Ok(None); };
-        if max == 0 || max > 64 { return Err(err(StorageError::Busy)); }
-        super::catalog_effects::snapshot::with_generation(&self.pool, &self.namespace, &self.control, generation, |snapshot| {
-            let Some((stored, header, slots)) = snapshot.selected(&row.key, false, 0, max as i64)? else { return Ok(None); };
-            if serde_json::to_vec(&stored.sources).ok() != serde_json::to_vec(&row.sources).ok() || header.3 > max as i64 { return Ok(None); }
-            slots.iter().map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>().map(Some)
-        }).map_err(err)
+        let Some(generation) = expected else {
+            return Ok(None);
+        };
+        if max == 0 || max > 64 {
+            return Err(err(StorageError::Busy));
+        }
+        super::catalog_effects::snapshot::with_generation(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            generation,
+            |snapshot| {
+                let Some((stored, header, slots)) =
+                    snapshot.selected(&row.key, false, 0, max as i64)?
+                else {
+                    return Ok(None);
+                };
+                if serde_json::to_vec(&stored.sources).ok() != serde_json::to_vec(&row.sources).ok()
+                    || header.3 > max as i64
+                {
+                    return Ok(None);
+                }
+                slots
+                    .iter()
+                    .map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Some)
+            },
+        )
+        .map_err(err)
     }
     fn publish_session_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
+            })
+            .map_err(err)
     }
     fn publish_partial_catalog(
         &mut self,
@@ -437,9 +555,17 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, claims, false)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(
+                    tx,
+                    publication,
+                    expected,
+                    claims,
+                    false,
+                )
+            })
+            .map_err(err)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
@@ -447,9 +573,18 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, claims, true).map(Some)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(
+                    tx,
+                    publication,
+                    expected,
+                    claims,
+                    true,
+                )
+                .map(Some)
+            })
+            .map_err(err)
     }
     fn resolve_catalog_input(
         &mut self,

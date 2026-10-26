@@ -27,7 +27,9 @@ pub(in crate::storage::postgres) fn with_admitted_generation<T>(
         let tx = snapshot.tx.borrow_mut();
         let live: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_leases WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND lease_id=$2 AND generation=$3 AND expires_at>$4)", &[&namespace.as_str().as_bytes(), &lease, &generation.as_bytes(), &now]).map_err(sqlstate::error)?.get(0);
         drop(tx);
-        if !live { return Err(StorageError::ScopeChanged); }
+        if !live {
+            return Err(StorageError::ScopeChanged);
+        }
         read(snapshot)
     });
     // A cancelled transaction may prevent release; the lease still has a hard
