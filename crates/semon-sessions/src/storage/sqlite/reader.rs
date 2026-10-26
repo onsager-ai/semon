@@ -27,6 +27,9 @@ impl NativeReaderBinding {
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         super::catalog_namespace::register(&db, &config.namespace)?;
+        // Cache only a committed layout. Payload snapshots still check the
+        // DDL cookie below, including a change between open and BEGIN.
+        crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
         Ok(db)
     }
 
@@ -50,7 +53,13 @@ impl NativeReaderBinding {
         match self {
             Self::Semantic(owner) => owner.validate_ready(db)?,
             Self::Admitted(_) => {
-                namespace::require_admitted(db, requested)?;
+                let admission = namespace::require_admitted(db, requested)?;
+                crate::events::store::configured::NativeOwnership::validate_physical(db)?;
+                crate::events::store::configured::validate_read_profile(
+                    db,
+                    requested,
+                    i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)?,
+                )?;
             }
         }
         if !crate::events::store::current_contract(db).map_err(failed)? {
