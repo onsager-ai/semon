@@ -3574,15 +3574,18 @@ mod tests {
         assert_eq!(NATIVE_OCCUPANCY_PROBES.with(|count| count.get()), 18);
         NATIVE_OCCUPANCY_PROBES.with(|count| count.set(0));
         for _ in 0..100 {
-            let mut lookup = OrdinaryLookup { db: &connection, replay: Vec::new() };
+            let mut lookup = OrdinaryLookup {
+                db: &connection,
+                replay: Vec::new(),
+            };
             let result = crate::model::relation_stage::select_with(
-                    &mut lookup,
-                    &Selector::NativeKey {
-                        native: "same".into(),
-                        harness: "codex".into(),
-                    },
-                )
-                .unwrap();
+                &mut lookup,
+                &Selector::NativeKey {
+                    native: "same".into(),
+                    harness: "codex".into(),
+                },
+            )
+            .unwrap();
             assert_eq!(result.key, Some(format!("{}codex:same", ":".repeat(80))));
             assert_eq!(
                 native_key(&connection, "same", "claude").unwrap(),
