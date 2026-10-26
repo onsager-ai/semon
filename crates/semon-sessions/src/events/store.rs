@@ -1998,63 +1998,6 @@ pub(crate) fn write_session_descriptions(
 }
 
 impl IndexStore for SqliteStore {
-    fn facts_write_begin(
-        &mut self,
-        options: &crate::Options,
-        intent: &crate::source_change::FactsIntent,
-    ) -> Result<(), StoreError> {
-        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-    fn facts_write_complete(
-        &mut self,
-        options: &crate::Options,
-        intent: &crate::source_change::FactsIntent,
-    ) -> Result<(), StoreError> {
-        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-    fn source_write_begin(
-        &mut self,
-        options: &crate::Options,
-        input: &crate::Input,
-        _: &crate::source_change::WriteIntent,
-    ) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
-        let path = input.full_path(options).to_string_lossy().into_owned();
-        resume_runtime_input(options, &path).map_err(|e| StoreError::Data(e.to_string()))?;
-        let state =
-            begin_source_write(options, input).map_err(|e| StoreError::Data(e.to_string()))?;
-        if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
-            let id = crate::read_regular_at_most(&input.full_path(options), 65536)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .and_then(|v| v["sessionId"].as_str().map(str::to_owned));
-            if let Some(id) = id {
-                enqueue_native(options, "claude", &id)
-                    .map_err(|e| StoreError::Data(e.to_string()))?;
-            }
-            if let Some(pid) = Path::new(&input.path)
-                .file_stem()
-                .and_then(|p| p.to_str())
-                .and_then(|p| p.parse::<u32>().ok())
-            {
-                enqueue_pid(options, pid).map_err(|e| StoreError::Data(e.to_string()))?;
-            }
-        }
-        Ok(state)
-    }
-    fn source_write_complete(
-        &mut self,
-        options: &crate::Options,
-        input: &crate::Input,
-        _: &crate::source_change::WriteIntent,
-        revision: i64,
-        completion: &crate::source_change::WriteCompletion,
-    ) -> Result<(), StoreError> {
-        complete_source_write(options, input, revision, completion.evidence.as_ref())
-            .map_err(|e| StoreError::Data(e.to_string()))
-    }
-
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -3818,34 +3761,6 @@ fn is_busy(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Only operational failures may become an in-memory cache. SQL/schema and
-/// persistent value decoding errors must remain observable refusals.
-fn is_unavailable(error: &rusqlite::Error) -> bool {
-    let rusqlite::Error::SqliteFailure(code, _) = error else {
-        return false;
-    };
-    matches!(
-        code.extended_code & 0xff,
-        rusqlite::ffi::SQLITE_BUSY
-            | rusqlite::ffi::SQLITE_LOCKED
-            | rusqlite::ffi::SQLITE_PERM
-            | rusqlite::ffi::SQLITE_READONLY
-            | rusqlite::ffi::SQLITE_IOERR
-            | rusqlite::ffi::SQLITE_FULL
-            | rusqlite::ffi::SQLITE_CANTOPEN
-            | rusqlite::ffi::SQLITE_NOMEM
-            | rusqlite::ffi::SQLITE_INTERRUPT
-    )
-}
-
-/// The file isn't a database, or is damaged.
-fn is_corrupt(error: &rusqlite::Error) -> bool {
-    matches!(
-        error.sqlite_error_code(),
-        Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
-    )
-}
-
 /// A row that doesn't decode: rewritten from the log, not a reason to stop
 /// using the store.
 fn is_data_error(error: &rusqlite::Error) -> bool {
@@ -3973,6 +3888,11 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
 /// before changing durable rows or proof metadata. Writers that touch archive
 /// custody validate only the selected marker at that call site.
 pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
+    if !current_contract(connection)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    configured::NativeOwnership::validate_physical(connection)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     require_current(connection).map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
@@ -4004,10 +3924,6 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         reprice::catalog_schema(),
         reprice::file_schema(),
     ]
-}
-
-fn storage_ddl() -> [&'static str; 22] {
-    authored_storage_ddl()
 }
 
 /// Qualify the complete authored current profile without changing the store.
@@ -8441,8 +8357,17 @@ mod tests {
                 let config = options.source.config(&path).unwrap();
                 let owner = configured::NativeOwnership::restore(&config).unwrap();
                 let connection = configured::connection(&config).unwrap();
-                crate::storage::NativeReaderBinding::Semantic(owner.clone()).validate(&connection, &config.namespace).unwrap();
-                SqliteStore { owner, connection, path, selected_runs: Some(Default::default()), semantic_rejection: None, traversal_observation: None }
+                crate::storage::NativeReaderBinding::Semantic(owner.clone())
+                    .validate(&connection, &config.namespace)
+                    .unwrap();
+                SqliteStore {
+                    owner,
+                    connection,
+                    path,
+                    selected_runs: Some(Default::default()),
+                    semantic_rejection: None,
+                    traversal_observation: None,
+                }
             })
             .collect()
     }
@@ -10150,9 +10075,13 @@ mod tests {
                 assert!(!sibling(&path, ".corrupt").exists());
             };
             unchanged();
-            let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+            let source =
+                crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
             if name != "archive" {
-                assert!(open_admitted(&path, &source).is_err(), "{name} must be explicitly refused");
+                assert!(
+                    open_admitted(&path, &source).is_err(),
+                    "{name} must be explicitly refused"
+                );
                 unchanged();
             }
             if name != "archive" {
@@ -10415,7 +10344,10 @@ mod tests {
             }));
         });
         let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
-        assert!(open_admitted(&path, &source).is_err(), "the concurrently committed WAL version must be refused");
+        assert!(
+            open_admitted(&path, &source).is_err(),
+            "the concurrently committed WAL version must be refused"
+        );
         assert_eq!(*captured.borrow(), original);
         assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
         assert!(!wal.borrow().is_empty());
