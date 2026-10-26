@@ -22,12 +22,12 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
         // when a current logical source is moved between physical stores.
         "tree_models" => &[(
             "model_digest",
-            "sha256((convert_to('tree.model'::text, 'UTF8'::name) || model))",
+            "sha256(('\\x747265652e6d6f64656c'::bytea || model))",
             false,
         )],
         "tree_tools" => &[(
             "tool_id_digest",
-            "sha256((convert_to('tree.tool'::text, 'UTF8'::name) || tool_id))",
+            "sha256(('\\x747265652e746f6f6c'::bytea || tool_id))",
             false,
         )],
         "tree_headers" | "tree_repairs" => &[(
