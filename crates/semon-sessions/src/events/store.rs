@@ -13200,9 +13200,18 @@ mod tests {
         let expected = index.tree_summary.as_ref().unwrap();
         assert!(expected.line_count > 0);
         assert!(expected.malformed_lines > 0);
-        assert_eq!(json(&actual.compact(false)).unwrap(), json(&expected.compact(false)).unwrap());
+        assert_eq!(
+            json(&actual.compact(false)).unwrap(),
+            json(&expected.compact(false)).unwrap()
+        );
         let mut invalid = vec!["{".to_owned(), " ".repeat(1048577)];
-        for field in ["version", "parser_version", "ledger", "projection_witness", "interpretation_witness"] {
+        for field in [
+            "version",
+            "parser_version",
+            "ledger",
+            "projection_witness",
+            "interpretation_witness",
+        ] {
             let mut changed = base.clone();
             changed[field] = serde_json::Value::Null;
             invalid.push(changed.to_string());
@@ -13211,16 +13220,43 @@ mod tests {
         unsupported["version"] = serde_json::json!(2);
         invalid.push(unsupported.to_string());
         for encoded in invalid {
-            store.connection.execute("UPDATE meta SET value=?2 WHERE key=?1", params![key, encoded]).unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    params![key, encoded],
+                )
+                .unwrap();
             assert!(read().is_none());
-            let after: String = store.connection.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0)).unwrap();
-            assert_eq!(after, encoded, "refusal must leave unsupported bytes untouched");
+            let after: String = store
+                .connection
+                .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                after, encoded,
+                "refusal must leave unsupported bytes untouched"
+            );
         }
-        store.connection.execute("UPDATE meta SET value=?2 WHERE key=?1", params![key, original]).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                params![key, original],
+            )
+            .unwrap();
         let failure = format!("native_tree_failure:{path}");
-        store.connection.execute("INSERT INTO meta(key,value) VALUES(?1,'failed')", [&failure]).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,'failed')",
+                [&failure],
+            )
+            .unwrap();
         assert!(read().is_none());
-        store.connection.execute("DELETE FROM meta WHERE key=?1", [&failure]).unwrap();
+        store
+            .connection
+            .execute("DELETE FROM meta WHERE key=?1", [&failure])
+            .unwrap();
         assert_eq!(read().unwrap().line_count, expected.line_count);
         drop(store);
         fs::remove_dir_all(root).unwrap();
