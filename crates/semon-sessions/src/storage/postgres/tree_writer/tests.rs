@@ -770,6 +770,68 @@ fn interpretation_inputs(pool: &PgPool, data: &Fixture) {
 }
 
 #[test]
+fn pg_native_keys132_tree_real_sqlite_long_path_publication_and_restart() {
+    // Finish the real SQLite parser/store oracle before creating a PG pool.
+    // Models/tools remain short: their bounded traversal is still open work.
+    let data = super::super::tree_checkpoint::tests::parser_fixture_path("claude", true);
+    let expected = oracle_record(&data);
+    assert!(data.path.len() > 2704);
+    let (pool, factory) = fixture(|_| {});
+    interpretation_inputs(&pool, &data);
+    pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+        install_without_tree(tx, &data)?;
+        assert!(publish_fixture(tx, &data, None)?);
+        assert!(scalar(tx, &data) == expected);
+        let projection: i64 = tx.driver.query_one(
+            "SELECT projection_id FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2)",
+            &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()],
+        ).map_err(sqlstate::error)?.get(0);
+        assert_dimensions(tx, &data, projection);
+        let before = state(tx);
+        assert!(publish_fixture(tx, &data, Some(&data.ledger))?);
+        assert!(state(tx) == before, "long-path replay has no row changes");
+        Ok(())
+    }).unwrap();
+    pool.transaction(&ns("foreign\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+        install_without_tree(tx, &data)?;
+        let (projection, actual) = stage_fixture(tx, &data)?;
+        assert_eq!(actual, oracle_witness(&data));
+        assert_dimensions(tx, &data, projection);
+        Ok(())
+    }).unwrap();
+    drop(pool);
+    let reopened = PgPool::open(factory, limits()).unwrap();
+    let mut summary = Snapshot::restore(reopened, ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).unwrap();
+    summary.load_shared_usage().unwrap();
+    assert_eq!(summary.models, data.oracle.models);
+    assert_eq!(serde_json::to_value(summary.usage_by_id).unwrap(), serde_json::to_value(&data.oracle.usage_by_id).unwrap());
+    for tool in data.oracle.tools.keys() {
+        assert_eq!(summary.tool_name(tool).unwrap(), data.oracle.tool_name(tool).unwrap());
+    }
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_keys132_tree_warm_generated_and_index_drift_refuse_before_callback() {
+    for alteration in [
+        "ALTER TABLE semon_pg_native_tree_headers DROP COLUMN source_path_digest CASCADE; ALTER TABLE semon_pg_native_tree_headers ADD COLUMN source_path_digest bytea GENERATED ALWAYS AS (sha256(source_path)) STORED NOT NULL",
+        "DROP INDEX semon_pg_native_tree_repair_queue; CREATE INDEX semon_pg_native_tree_repair_queue ON semon_pg_native_tree_repairs(namespace_digest,last_attempt,state,source_path_digest)",
+        "ALTER TABLE semon_pg_native_tree_usage_models NO FORCE ROW LEVEL SECURITY",
+    ] {
+        let (pool, factory) = fixture(|_| {});
+        let namespace = ns("keys132-drift");
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |_| Ok(())).unwrap();
+        factory.client().batch_execute(alteration).unwrap();
+        let mut entered = false;
+        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |_| {
+            entered = true;
+            Ok(())
+        }).is_err());
+        assert!(!entered, "warm Tree contract drift precedes every callback");
+    }
+}
+
+#[test]
 fn pg_tree_publish_real_scalar_sqlite_oracle_noop_repair_and_restart() {
     for harness in ["claude", "codex"] {
         let data = parser_fixture(harness);

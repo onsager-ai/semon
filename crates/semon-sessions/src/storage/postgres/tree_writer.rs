@@ -133,7 +133,7 @@ fn stage_inner(
     // The source must already be enrolled by the existing usage producer.
     // Locking must not manufacture source_state or increment its revision.
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     if locked.len() != 1 {
         return Err(StorageError::ScopeChanged);
     }
@@ -147,7 +147,7 @@ fn stage_inner(
     // An earlier unacknowledged staged family must be reconciled through its
     // exact operation identity, never replayed as another generation. This
     // check is serialized by the same namespace lock as the first writer.
-    let pending=tx.driver.query("SELECT projection_id FROM semon_pg_native_tree_generations WHERE namespace=$1 AND source_id=$2 AND NOT complete", &[&ns,&expected_source]).map_err(sqlstate::error)?;
+    let pending=tx.driver.query("SELECT projection_id FROM semon_pg_native_tree_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_id=$2 AND NOT complete", &[&ns,&expected_source]).map_err(sqlstate::error)?;
     let repair_projection = if pending.is_empty() {
         None
     } else {
@@ -156,7 +156,7 @@ fn stage_inner(
             return Err(StorageError::Conflict);
         }
         let id: i64 = pending[0].get(0);
-        let valid:bool=tx.driver.query_one("SELECT receipt=$3 AND version=3 AND work_pending FROM semon_pg_native_tree_generations WHERE namespace=$1 AND projection_id=$2", &[&ns,&id,&receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let valid:bool=tx.driver.query_one("SELECT receipt=$3 AND version=3 AND work_pending FROM semon_pg_native_tree_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2", &[&ns,&id,&receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
         if !valid {
             return Err(StorageError::Conflict);
         }
@@ -166,7 +166,7 @@ fn stage_inner(
     let previous_receipt = expected_header.map(header_ledger);
     // An existing header must match the explicitly captured previous ledger.
     // An incomplete or noncurrent generation is not silently made current.
-    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(h.source_path,sha256($2::bytea),$2) AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
+    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace_digest,namespace,projection_id) WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(h.source_path,sha256($2::bytea),$2) AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
     let exists: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2))", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if (exists && headers.len() != 1) || (!exists && expected_header.is_some()) {
         return Err(StorageError::Conflict);
@@ -179,11 +179,11 @@ fn stage_inner(
     let mut writer = Writer { tx };
     let projection = match reuse {
         Some(id) => {
-            writer.effect("UPDATE semon_pg_native_tree_generations SET receipt=$4,complete=false,work_pending=true WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND version=3 AND ((complete AND NOT work_pending) OR (projection_id=$5 AND NOT complete AND work_pending))", &[&ns,&id,&expected_source,&receipt.as_bytes(),&repair_projection])?;
+            writer.effect("UPDATE semon_pg_native_tree_generations SET receipt=$4,complete=false,work_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND source_id=$3 AND version=3 AND ((complete AND NOT work_pending) OR (projection_id=$5 AND NOT complete AND work_pending))", &[&ns,&id,&expected_source,&receipt.as_bytes(),&repair_projection])?;
             id
         }
         None => {
-            let id: i64 = writer.tx.driver.query_one("SELECT coalesce(max(projection_id),0)+1 FROM semon_pg_native_tree_generations WHERE namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+            let id: i64 = writer.tx.driver.query_one("SELECT coalesce(max(projection_id),0)+1 FROM semon_pg_native_tree_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
             writer.effect("INSERT INTO semon_pg_native_tree_generations(namespace,projection_id,source_id,version,receipt,complete,work_pending) VALUES($1,$2,$3,3,$4,false,true)", &[&ns,&id,&expected_source,&receipt.as_bytes()])?;
             id
         }
@@ -212,7 +212,7 @@ pub(super) fn publish(
     // host exclusive lock cannot change pricing until this transaction ends.
     let (_, pricing) = super::store_metadata::read(tx)?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let locked = tx.driver.query("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND namespace_digest=sha256($1::bytea) FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     if locked.len() != 1 {
         return Err(StorageError::ScopeChanged);
     }
@@ -280,7 +280,7 @@ pub(super) fn publish(
     writer.boundary()?;
     // SourceState is still locked and the exact file/Usage fences were matched
     // before the first generation effect. Publish header last in this txn.
-    writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
+    writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
     writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger WHERE semon_pg_native_tree_headers.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_headers.source_path,sha256(excluded.source_path),excluded.source_path)", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
     Ok(true)
 }
