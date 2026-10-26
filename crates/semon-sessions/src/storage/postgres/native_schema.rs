@@ -428,7 +428,9 @@ fn contract_hash() -> Vec<u8> {
 pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     tx.driver.batch_execute(&format!("CREATE FUNCTION semon_pg_native_digest(ns bytea,value bytea,domain text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS '{}';", native_keys::DIGEST_BODY.replace('\'', "''"))).map_err(sqlstate::error)?;
     tx.driver.batch_execute(&format!("CREATE FUNCTION semon_pg_native_key_matches(stored bytea,digest bytea,expected bytea) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS '{}';", native_keys::MATCH_BODY.replace('\'', "''"))).map_err(sqlstate::error)?;
-    tx.driver.batch_execute("ALTER TABLE semon_pg_schema ADD COLUMN native_contract bytea").map_err(sqlstate::error)?;
+    tx.driver
+        .batch_execute("ALTER TABLE semon_pg_schema ADD COLUMN native_contract bytea")
+        .map_err(sqlstate::error)?;
     tx.driver
         .execute(
             "UPDATE semon_pg_schema SET native_contract=$1",
