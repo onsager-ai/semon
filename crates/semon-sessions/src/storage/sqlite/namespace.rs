@@ -176,6 +176,8 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         }
     }
     let admission = require_admitted(&tx, &config.namespace)?;
+    super::source_journal::enroll(&tx, config)?;
+    super::semantic::enroll(&tx, config, admission.generation)?;
     tx.commit().map_err(|_| StorageError::CommitUncertain)?;
     Ok(admission)
 }

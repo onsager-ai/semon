@@ -295,69 +295,19 @@ impl SourceJournal {
     /// the old high watermark even when an earlier claim was acknowledged.
     pub(crate) fn prepare(&self) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failed)?;
-        #[cfg(test)]
-        let reserved = std::time::Instant::now();
+        let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
-        tx.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
-            .map_err(failed)?;
-        qualify_operation_tables(&tx)?;
-        qualify_backfill_metadata(&tx)?;
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_source_revision'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failed)?;
-        let old = old
-            .map(|s| s.parse::<i64>())
-            .transpose()
-            .map_err(|_| StorageError::Unavailable)?
-            .unwrap_or(0);
-        if old < 0 {
-            return Err(StorageError::Unavailable);
+        let valid: bool = tx.query_row("SELECT qualification=?2 AND revision>=coalesce((SELECT max(revision) FROM main.session_catalog_invalidations WHERE namespace=?1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1", params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
+        if !valid {
+            return Err(StorageError::NamespaceUpgradePending);
         }
-        let head: i64 = tx.query_row("SELECT coalesce(max(revision),0) FROM main.session_catalog_invalidations WHERE namespace=?1", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        if head < 0 {
-            return Err(StorageError::Unavailable);
+        for table in ["source_observation_receipts", "source_observation_intents"] {
+            let guards: i64 = tx.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN('storage_source_guard_'||?1||'_INSERT','storage_source_guard_'||?1||'_UPDATE','storage_source_guard_'||?1||'_DELETE')", [table], |r|r.get(0)).map_err(failed)?;
+            if guards != 3 {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
-        let state: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failed)?;
-        if state
-            .as_deref()
-            .is_some_and(|s| !matches!(s, "discovering" | "draining" | "complete"))
-        {
-            return Err(StorageError::Unavailable);
-        }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>=0),backfill_state TEXT CHECK(backfill_state IN ('discovering','draining','complete')),qualification INTEGER NOT NULL CHECK(qualification=1)) STRICT;").map_err(failed)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO storage_source_journal VALUES(?1,?2,?3,?4)",
-            params![
-                self.config.namespace.as_str(),
-                old.max(head),
-                state,
-                SOURCE_JOURNAL_QUALIFICATION_VERSION
-            ],
-        )
-        .map_err(failed)?;
-        catalog_namespace::guard(&tx, "storage_source_journal")?;
-        #[cfg(test)]
-        if reserved.elapsed() >= Duration::from_millis(50) {
-            eprintln!(
-                "configured_reservation stage=journal_prepare total_us={}",
-                reserved.elapsed().as_micros()
-            );
-        }
+        catalog_namespace::validate_guard(&tx, "storage_source_journal")?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 
@@ -678,6 +628,17 @@ impl SourceObservationStore for SourceJournal {
     }
 }
 
+/// Install the current journal once, inside namespace enrollment's transaction.
+pub(crate) fn enroll(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
+    db.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA).map_err(failed)?;
+    qualify_operation_tables(db)?;
+    qualify_backfill_metadata(db)?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>=0),backfill_state TEXT CHECK(backfill_state IN ('discovering','draining','complete')),qualification INTEGER NOT NULL CHECK(qualification=1)) STRICT;").map_err(failed)?;
+    catalog_namespace::guard(db, "storage_source_journal")?;
+    db.execute("INSERT INTO storage_source_journal SELECT ?1,coalesce(max(revision),0),NULL,?2 FROM main.session_catalog_invalidations WHERE namespace=?1", params![config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION]).map_err(failed)?;
+    Ok(())
+}
+
 fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error {
     #[cfg(test)]
     eprintln!(
@@ -704,7 +665,7 @@ pub(crate) fn register_backfill_writer(db: &Connection, enabled: bool) -> Result
     .map_err(failed)
 }
 
-/// The current admitted singleton metadata profile has no Catalog consumer
+/// The admitted metadata profile has no Catalog consumer
 /// yet. Qualify only the four backfill completion keys for this typed producer;
 /// all other metadata writes retain the admission fence. Native ownership's
 /// independently installed metadata guards are never removed or rewritten.

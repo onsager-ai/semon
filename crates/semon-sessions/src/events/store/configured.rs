@@ -865,8 +865,8 @@ impl NativeOwnership {
             admission,
         };
         owner.validate(&tx)?;
+        prepare_owned(&tx, &owner)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        prepare_owned(&owner)?;
         Ok(owner)
     }
 }
@@ -876,14 +876,9 @@ pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageE
     create(config)
 }
 
-fn prepare_owned(owner: &NativeOwnership) -> Result<(), StorageError> {
-    let journal = SourceJournal::owned(owner.clone());
-    journal.prepare()?;
-    let mut db = connection(owner.config())?;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    owner.validate(&tx)?;
+fn prepare_owned(tx: &Connection, owner: &NativeOwnership) -> Result<(), StorageError> {
+    crate::storage::sqlite::source_journal::enroll(tx, owner.config())?;
+    crate::storage::sqlite::semantic::enroll(tx, owner.config(), owner.admission())?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);
@@ -937,7 +932,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
         )
         .map_err(failed)?;
     }
-    tx.commit().map_err(|_| StorageError::CommitUncertain)
+    Ok(())
 }
 
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
