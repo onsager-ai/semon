@@ -626,8 +626,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, self.config.namespace.as_str(), operation)?
-        {
+        if let Some(receipt) = stored_receipt(&tx, self.config.namespace.as_str(), operation)? {
             return Ok(receipt);
         }
         let generation: Option<String> = tx

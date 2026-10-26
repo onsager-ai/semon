@@ -1327,8 +1327,7 @@ impl Stage {
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>()
                 != staged
-            || super::source_journal::claims(&tx, ns, &staged).map_err(error)?
-                != prepared.claims
+            || super::source_journal::claims(&tx, ns, &staged).map_err(error)? != prepared.claims
         {
             return Ok((Outcome::Conflict, None));
         }
@@ -2240,9 +2239,7 @@ impl Stage {
                 |r| r.get(0),
             ).map_err(error)?;
             let paths = paths.into_iter().collect::<Vec<_>>();
-            for (path, claim) in
-                super::source_journal::claims(&tx, ns, &paths).map_err(error)?
-            {
+            for (path, claim) in super::source_journal::claims(&tx, ns, &paths).map_err(error)? {
                 tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
             }
             if phase != "indexing" && (added || changed) {

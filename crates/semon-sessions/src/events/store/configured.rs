@@ -1246,8 +1246,7 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
-        super::remove_files_tx(&tx, files, self.config.namespace.as_str())
-            .map_err(failure)?;
+        super::remove_files_tx(&tx, files, self.config.namespace.as_str()).map_err(failure)?;
         tx.commit()
             .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
         Ok(Outcome::Written)
@@ -2386,7 +2385,10 @@ mod tests {
     #[test]
     fn existing_noncurrent_store_refuses_without_native_changes() {
         let f = Fixture::new();
-        assert_eq!(f.config.create_native_store(), Err(StorageError::Unavailable));
+        assert_eq!(
+            f.config.create_native_store(),
+            Err(StorageError::Unavailable)
+        );
         let path = f.root.join("unsupported.sqlite3");
         let db = Connection::open(&path).unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('original-custody','keep');").unwrap();
@@ -2394,7 +2396,9 @@ mod tests {
         let before = fs::read(&path).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         let mut config = f.config.clone();
-        config.backend = StoreBackend::Sqlite { database: path.clone() };
+        config.backend = StoreBackend::Sqlite {
+            database: path.clone(),
+        };
         assert!(NativeOwnership::restore(&config).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
@@ -4967,9 +4971,11 @@ mod tests {
         let owner = NativeOwnership::restore(&a.config).unwrap();
         let before = shared_state(&a);
         let foreign = LogicalSourceNamespace::new("not-admitted").unwrap();
-        assert!(crate::storage::NativeReaderBinding::Semantic(owner)
-            .validate(&db, &foreign)
-            .is_err());
+        assert!(
+            crate::storage::NativeReaderBinding::Semantic(owner)
+                .validate(&db, &foreign)
+                .is_err()
+        );
         assert_eq!(shared_state(&a), before);
     }
 
