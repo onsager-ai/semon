@@ -694,7 +694,7 @@ fn preview_kind(value: &str) -> io::Result<&'static str> {
 }
 
 #[derive(Debug)]
-struct SourceGenerationChanged;
+pub(super) struct SourceGenerationChanged;
 
 impl std::fmt::Display for SourceGenerationChanged {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -516,7 +516,13 @@ impl StoreConfig {
             return Err(StorageError::InvalidArguments);
         };
         postgres::navigation::captured_source_proof(
-            self, pool, &control.for_selected_read(), options, generation, key, reference,
+            self,
+            pool,
+            &control.for_selected_read(),
+            options,
+            generation,
+            key,
+            reference,
         )
     }
 
@@ -543,7 +549,10 @@ impl StoreConfig {
         };
         check()?;
         if machine.is_empty() {
-            return Err(crate::QueryError::new("invalid_arguments", "Missing Machine key"));
+            return Err(crate::QueryError::new(
+                "invalid_arguments",
+                "Missing Machine key",
+            ));
         }
         if !matches!(tool, "read_transcript" | "get_session") {
             return Err(crate::QueryError::new(
@@ -585,19 +594,12 @@ impl StoreConfig {
         let reader = provider(self.namespace.as_str(), id);
         check()?;
         let reader = reader.map_err(|error| crate::QueryError::io(&error))?;
-        let sources = crate::SessionSources::with_machines(vec![(
-            machine.to_owned(),
-            options.clone(),
-        )]);
+        let sources =
+            crate::SessionSources::with_machines(vec![(machine.to_owned(), options.clone())]);
         let mut selected_args = args.clone();
         selected_args["_machine_alias"] = serde_json::json!(machine);
-        let answer = crate::Query::from_sources(std::sync::Arc::new(sources)).call_bound_selected_at(
-            tool,
-            &selected_args,
-            now,
-            store.as_ref(),
-            reader.as_ref(),
-        );
+        let answer = crate::Query::from_sources(std::sync::Arc::new(sources))
+            .call_bound_selected_at(tool, &selected_args, now, store.as_ref(), reader.as_ref());
         crate::selected_read::checkpoint("captured_final")
             .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
         answer

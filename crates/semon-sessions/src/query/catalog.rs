@@ -321,7 +321,11 @@ impl Query {
         }
         let mut selected_args = args.clone();
         selected_args["_session"] = serde_json::Value::Bool(tool == "get_session");
-        let namespace = self.sources.machines[0].1.options.source.namespace()
+        let namespace = self.sources.machines[0]
+            .1
+            .options
+            .source
+            .namespace()
             .map_err(unavailable)?;
         let mut answer = store.selected_body(
             &namespace,

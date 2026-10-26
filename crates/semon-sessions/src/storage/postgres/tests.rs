@@ -38,9 +38,11 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
             control: PgCancellation::default(),
         },
     };
-    let mut options = crate::Options::default();
-    options.source = crate::storage::HostSource::new(namespace, "a".repeat(64)).unwrap();
-    options.all = true;
+    let options = crate::Options {
+        source: crate::storage::HostSource::new(namespace, "a".repeat(64)).unwrap(),
+        all: true,
+        ..crate::Options::default()
+    };
     let host = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
         panic!("cancelled request must not invoke its host")
     };
@@ -52,16 +54,18 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
             deadline,
             Arc::new(std::sync::atomic::AtomicBool::new(cancelled)),
         );
-        let error = config.call_captured_query_at(
-            &options,
-            "external-machine-z",
-            &"b".repeat(64),
-            "get_session",
-            &json!({"id":"claude:one"}),
-            0,
-            &request,
-            &host,
-        ).unwrap_err();
+        let error = config
+            .call_captured_query_at(
+                &options,
+                "external-machine-z",
+                &"b".repeat(64),
+                "get_session",
+                &json!({"id":"claude:one"}),
+                0,
+                &request,
+                &host,
+            )
+            .unwrap_err();
         assert_eq!(error.code, "unavailable");
         assert!(error.message.contains(reason));
     }

@@ -22,6 +22,7 @@ pub(in crate::storage::postgres) fn native_proof(
     generation: &str,
     source: &CatalogSource,
 ) -> Result<native_pages::Pinned, StorageError> {
+    crate::selected_read::checkpoint("captured_proof").map_err(|_| StorageError::Busy)?;
     tx.check()?;
     let ledger = crate::source_carrier::ledger(source);
     let receipt = crate::events::store::header_ledger(&ledger);
@@ -96,7 +97,9 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
         .map_err(io::Error::other)?;
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
+        crate::selected_read::checkpoint("captured_body")?;
         let part = self.host.read_range(reference, expected, start, length)?;
+        crate::selected_read::check()?;
         if part.offset != start
             || part.bytes.len() != length
             || part.length < self.source.offset
