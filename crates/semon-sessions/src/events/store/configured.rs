@@ -986,6 +986,38 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn resolve_catalog_input(
+        &self,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
+    ) -> Result<Outcome, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        let outcome = super::resolve_catalog_input_tx(&tx, path, revision, native, log)?;
+        if outcome != Outcome::Written {
+            return Ok(outcome);
+        }
+        tx.commit().map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn tree_repair_pending(&self) -> Result<bool, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        Ok(native_usage::repair_pending(&db).map_err(failure)?
+            || tree_state::work_pending(&db).map_err(failure)?)
+    }
+
+    pub(crate) fn queue_tree_repair(&self, path: &str, ledger: &Ledger) -> std::io::Result<()> {
+        let mut db = connection(&self.config).map_err(std::io::Error::other)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(std::io::Error::other)?;
+        self.validate(&tx).map_err(std::io::Error::other)?;
+        super::queue_tree_repair_tx(&tx, path, ledger)?;
+        tx.commit().map_err(|_| std::io::Error::other(StorageError::CommitUncertain))
+    }
+
     pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let mut db = connection(&self.config).map_err(StoreError::Configured)?;
         let tx = db
@@ -3257,6 +3289,17 @@ mod tests {
         }
         let key = f.raw.to_string_lossy().into_owned();
         let expected = restarted.store.as_ref().unwrap().ledger(&key).unwrap();
+        restarted.store.as_mut().unwrap().queue_tree_repair(&key, expected.as_ref().unwrap(), "codex").unwrap();
+        assert!(restarted.store.as_ref().unwrap().tree_repair_pending().unwrap());
+        let repair_sources: Vec<String> = db.prepare("SELECT namespace FROM native_tree_repairs WHERE source_path=?1 ORDER BY namespace").unwrap().query_map([&key], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(repair_sources, ["source-a"]);
+        let revision = restarted.catalog_claims(&[key.clone()]).unwrap()[0].1.unwrap();
+        let foreign_claim = isolated.catalog_claims(&[key.clone()]).unwrap();
+        assert_eq!(restarted.store.as_mut().unwrap().resolve_catalog_input(&key, revision + 1, None, None).unwrap(), Outcome::Conflict);
+        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, Some(revision));
+        assert_eq!(restarted.store.as_mut().unwrap().resolve_catalog_input(&key, revision, None, None).unwrap(), Outcome::Written);
+        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, None);
+        assert_eq!(isolated.catalog_claims(&[key.clone()]).unwrap(), foreign_claim);
         assert_eq!(
             restarted
                 .store

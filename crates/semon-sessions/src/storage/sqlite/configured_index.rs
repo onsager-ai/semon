@@ -175,14 +175,12 @@ impl IndexStore for ConfiguredIndex {
     }
     fn resolve_catalog_input(
         &mut self,
-        _path: &str,
-        _revision: i64,
-        _native: Option<(&str, &str)>,
-        _log: Option<&str>,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.resolve_catalog_input(path, revision, native, log)
     }
     fn relocate_codex(
         &mut self,
@@ -331,19 +329,15 @@ impl IndexStore for ConfiguredIndex {
         ))
     }
     fn tree_repair_pending(&self) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.tree_repair_pending()
     }
     fn queue_tree_repair(
         &mut self,
-        _path: &str,
-        _ledger: &Ledger,
+        path: &str,
+        ledger: &Ledger,
         _harness: &str,
     ) -> io::Result<()> {
-        Err(io::Error::other(
-            StorageError::NamespaceUpgradePending.to_string(),
-        ))
+        self.native.queue_tree_repair(path, ledger)
     }
     fn load_tree(
         &self,
