@@ -728,6 +728,10 @@ fn page_witness(page: &str) -> String {
     format!("{:x}", Sha256::digest(page.as_bytes()))
 }
 
+pub(super) fn preserve(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
+    published::preserve(transaction, path)
+}
+
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
