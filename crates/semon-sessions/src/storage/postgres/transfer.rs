@@ -141,7 +141,14 @@ pub(crate) fn capture(
             return Err(StorageError::ScopeChanged);
         }
         if state.native && !state.done {
-            return capture_native(tx, &mut state);
+            #[cfg(test)]
+            let family = state.native_family;
+            let result = capture_native(tx, &mut state);
+            #[cfg(test)]
+            if let Err(error) = &result {
+                eprintln!("transfer PG capture failed: family={family} error={error:?}");
+            }
+            return result;
         }
         if state.done {
             return Ok(state.progress());
@@ -373,6 +380,34 @@ mod tests {
         std::fs::remove_file(&usage_path).unwrap();
         std::fs::remove_file(&new_path).unwrap();
         let manifest = stage(&config, &reverse, &[98; 32]);
+        // The accepted source's natural keys must remain unique across page
+        // boundaries; report a capture defect before any destination insert.
+        let mut fact_keys = std::collections::BTreeSet::new();
+        let pages = reverse
+            .transfer_inbox()
+            .checkpoint(&manifest)
+            .unwrap()
+            .sequence;
+        for sequence in 1..=pages {
+            let page = reverse
+                .transfer_inbox()
+                .staged_page(&manifest, sequence)
+                .unwrap();
+            for record in page.records {
+                if let transfer::TransferRecord::NativeRow {
+                    path,
+                    kind: transfer::NativeRowKind::UsageFact,
+                    values,
+                } = record
+                {
+                    assert!(
+                        fact_keys.insert((path, values[0].as_i64().unwrap())),
+                        "duplicate native Usage fact key in reverse capture at page {sequence}"
+                    );
+                }
+            }
+        }
+        assert_eq!(fact_keys.len(), 70);
         apply(&reverse, &manifest);
         assert_eq!(sqlite_core(&reverse, &path), expected);
         let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&reverse).unwrap();
