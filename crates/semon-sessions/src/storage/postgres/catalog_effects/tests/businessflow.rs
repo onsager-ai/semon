@@ -1173,10 +1173,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|row| row["key"].as_str().unwrap())
             .collect::<Vec<_>>()
     );
-    type BodySources = std::collections::BTreeMap<
-        (String, String),
-        (crate::SessionSourceRef, std::sync::Arc<[u8]>),
-    >;
+    type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
     #[derive(Clone)]
     struct BodyHost(BodySources);
     impl crate::SessionSourceReader for BodyHost {
@@ -1189,7 +1186,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         ) -> std::io::Result<crate::SessionSourceRange> {
             let (saved, bytes) = self
                 .0
-                .get(&(reference.root.clone(), reference.path.clone()))
+                .iter()
+                .find(|(saved, _)| saved == reference)
                 .ok_or_else(|| std::io::Error::other("host denied"))?;
             if saved != reference
                 || expected.is_some_and(|pin| pin != "body-fixture")
@@ -1227,13 +1225,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             prefix_sha256: source.prefix_sha256,
                             tail_sha256: source.tail_sha256,
                         };
-                        (
-                            (row.harness.clone(), path),
-                            (
-                                reference,
-                                std::sync::Arc::from(fs::read(&source.path).unwrap()),
-                            ),
-                        )
+                        (reference, std::sync::Arc::from(fs::read(&source.path).unwrap()))
                     })
                 })
                 .collect(),
@@ -1804,7 +1796,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: continued_generation.clone(),
         options: options.clone(),
     };
-    let next_host = body_host(&options, &continued.rows);
+    let mut next_host = body_host(&options, &continued.rows);
+    // A retained composite can select both exact original and successor
+    // references for one physical path. Authorize those captured references
+    // explicitly; a current-path entry alone cannot authorize an old prefix.
+    next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
     assert!(
         next_bodies
@@ -2054,7 +2050,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         fs::read(&retained_copy).unwrap(),
         retained_host
             .0
-            .values()
+            .iter()
             .find(|(r, _)| r.root == "copilot")
             .unwrap()
             .1
