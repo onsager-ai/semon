@@ -282,15 +282,14 @@ fn absent(
     if prepared.withdrawals.iter().any(|w| w.path == path) {
         return Ok(true);
     }
-    match crate::events::Stat::of(std::path::Path::new(path)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Ok(false),
+    if !prepared.removed_sources.contains(path) {
+        return Ok(false);
     }
-    Ok(
-        super::native_keys::read_meta(tx, format!("source-retired:{path}").as_bytes(), 16384)?
+    let removed: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed')", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    Ok(removed
+        && (super::native_keys::read_meta(tx, format!("source-retired:{path}").as_bytes(), 16384)?
             .is_some()
-            || super::native_reader::ledger(tx, path)?.is_none(),
-    )
+            || super::native_reader::ledger(tx, path)?.is_none()))
 }
 
 pub(super) fn record(
@@ -330,8 +329,9 @@ pub(super) fn record(
             return Err(StorageError::Conflict);
         }
         // The shared scan skips an absent Source, as the SQLite stage does.
-        // Only a producer withdrawal or a removed Source (retired or never
-        // ledgered) may be absent; its claim is still published under the CAS.
+        // Only a producer withdrawal or durable removal may be absent. Physical
+        // absence was observed during preparation under Source locks; this SQL
+        // transaction checks persisted evidence and the exact claim/ledger CAS.
         for path in batch.paths.iter().filter(|path| !indexed.contains(*path)) {
             if !absent(tx, prepared, path)? {
                 return Err(StorageError::Conflict);

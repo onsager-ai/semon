@@ -2923,7 +2923,11 @@ impl Stage {
                 || !removed_source(&tx, ns, path).map_err(error)?
             {
                 #[cfg(test)]
-                eprintln!("semantic_record_conflict: removal_evidence physical_absent={} durable_removed={}", prepared.removed_sources.contains(path), removed_source(&tx, ns, path).map_err(error)?);
+                eprintln!(
+                    "semantic_record_conflict: removal_evidence physical_absent={} durable_removed={}",
+                    prepared.removed_sources.contains(path),
+                    removed_source(&tx, ns, path).map_err(error)?
+                );
                 return Ok(Outcome::Conflict);
             }
             tx.execute("UPDATE main.catalog_semantic_sources SET index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path]).map_err(error)?;

@@ -7631,8 +7631,12 @@ pub(crate) fn prepare_semantic_index_sources(
     verify_sidecars(&files)?;
     let mut removed_sources = BTreeSet::new();
     for path in &paths {
-        if !files.iter().any(|file| file.path == std::path::Path::new(path))
-            && !withdrawals.iter().any(|withdrawal| withdrawal.path == *path)
+        if !files
+            .iter()
+            .any(|file| file.path == std::path::Path::new(path))
+            && !withdrawals
+                .iter()
+                .any(|withdrawal| withdrawal.path == *path)
             && fs::symlink_metadata(path)
                 .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
         {
