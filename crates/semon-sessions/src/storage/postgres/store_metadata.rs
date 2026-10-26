@@ -136,16 +136,24 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) fn lock(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageError> {
+pub(super) fn lock_admission(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageError> {
     tx.check()?;
     // current_schema is the host-authorized search_path. Its OID only selects
     // a lock domain; it never grants ownership or store mutation authority.
+    // This is session-scoped so it can be acquired before BEGIN. A repeatable-
+    // read snapshot taken before waiting here could otherwise miss a DDL epoch
+    // committed while the lock was held by another connection.
     let sql = if exclusive {
-        "SELECT pg_advisory_xact_lock(current_schema()::regnamespace::oid::int, 477110)"
+        "SELECT pg_advisory_lock(current_schema()::regnamespace::oid::int, 477110)"
     } else {
-        "SELECT pg_advisory_xact_lock_shared(current_schema()::regnamespace::oid::int, 477110)"
+        "SELECT pg_advisory_lock_shared(current_schema()::regnamespace::oid::int, 477110)"
     };
     tx.driver.query_one(sql, &[]).map_err(sqlstate::error)?;
+    tx.check()
+}
+
+pub(super) fn lock_state(tx: &mut PgTxn<'_>, exclusive: bool) -> Result<(), StorageError> {
+    tx.check()?;
     // Real row locking also fences independently authorized SQL writers that
     // obey PostgreSQL row locks without using this adapter's advisory lock.
     // Read-only snapshots cannot take row locks; repeatable-read remains their

@@ -59,6 +59,19 @@ impl PgPool {
         let deadline = control.deadline(Instant::now() + limits.txn_deadline);
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
         connection.client.context(deadline, control, limits);
+        let exclusive_admission = matches!(kind, TxnKind::StoreWrite);
+        if verify_schema {
+            let mut admission = PgTxn {
+                driver: &mut connection.client,
+                namespace,
+                deadline,
+                control,
+            };
+            // Acquire before BEGIN so a REPEATABLE READ transaction cannot
+            // establish a stale snapshot while waiting for controlled DDL.
+            super::store_metadata::lock_admission(&mut admission, exclusive_admission)?;
+        }
+        let schema_binding = &mut connection.schema_binding;
         let mut phase = Phase::PreBegin;
         let result = (|| {
             connection
@@ -97,8 +110,12 @@ impl PgPool {
                 .map_err(sqlstate::error)?;
             tx.check()?;
             if verify_schema {
-                schema::verify(&mut tx)?;
-                super::store_metadata::lock(&mut tx, matches!(kind, TxnKind::StoreWrite))?;
+                let binding = schema::binding(&mut tx, namespace)?;
+                if schema_binding.as_ref() != Some(&binding) {
+                    schema::verify(&mut tx)?;
+                    *schema_binding = Some(binding);
+                }
+                super::store_metadata::lock_state(&mut tx, exclusive_admission)?;
                 if matches!(kind, TxnKind::Write) {
                     super::store_metadata::lock_publication(&mut tx)?;
                 }
@@ -131,5 +148,27 @@ impl PgPool {
             let _ = lease.check_clean();
         }
         result
+    }
+
+    /// Run host-controlled schema DDL under the existing exclusive schema
+    /// lock and commit its epoch invalidation with the DDL. This remains an
+    /// internal capability until a public schema-evolution operation exists.
+    pub(super) fn controlled_schema_change<T>(
+        &self,
+        control: &PgCancellation,
+        operation: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let namespace = LogicalSourceNamespace::new("schema")?;
+        self.transaction_inner(
+            &namespace,
+            TxnKind::StoreWrite,
+            control,
+            true,
+            |tx| {
+                let value = operation(tx)?;
+                schema::advance_epoch(tx)?;
+                Ok(value)
+            },
+        )
     }
 }
