@@ -1761,11 +1761,18 @@ mod tests {
         let mut store = SourceJournal::owned(owner);
         let mut foreign_config = f.config.clone();
         foreign_config.namespace = LogicalSourceNamespace::new("B").unwrap();
-        let foreign_owner = crate::events::store::configured::NativeOwnership::admit(&foreign_config).unwrap();
+        let foreign_owner =
+            crate::events::store::configured::NativeOwnership::admit(&foreign_config).unwrap();
         let mut foreign = SourceJournal::owned(foreign_owner);
         foreign.prepare().unwrap();
         let foreign_paths = vec!["foreign".to_owned()];
-        foreign.discover(&discover_operation("B", &foreign_paths, true), &foreign_paths, true).unwrap();
+        foreign
+            .discover(
+                &discover_operation("B", &foreign_paths, true),
+                &foreign_paths,
+                true,
+            )
+            .unwrap();
         let foreign_before = foreign.claims(&foreign_paths).unwrap();
         let db = f.db();
         db.execute_batch("CREATE TRIGGER journal_test_fault BEFORE INSERT ON catalog_backfill_sources WHEN NEW.source_path='fault' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();

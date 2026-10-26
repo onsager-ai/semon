@@ -62,6 +62,17 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Current owner recovery custody search and navigation
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          result=0
+          cargo test --locked -p semon-sessions --lib configured::tests::current_recovery:: -- --nocapture || result=$?
+          cargo test --locked -p semon-sessions --lib current_history_custody:: -- --nocapture || result=$?
+          cargo test --locked -p semon-sessions --lib catalog_namespace::current_navigation_tests:: -- --nocapture || result=$?
+          cargo test --locked -p semon-sessions --lib sqlite::navigation::tests:: -- --nocapture || result=$?
+          cargo test --locked -p semon-sessions --lib source_journal::tests:: -- --nocapture || result=$?
+          cargo test --locked -p semon-sessions --lib catalog_search::sqlite_tests:: -- --nocapture || result=$?
+          exit "$result"
       - name: Capture bounded native-tree append diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
