@@ -31,7 +31,8 @@ fn bundle_fixture(harness: &str) -> Fixture {
     ));
     std::fs::create_dir(&root).unwrap();
     let physical = root.join("one.jsonl");
-    let value = serde_json::json!({"id":"start🦀","type":"session.start","data":{"sessionId":"s🦀"}});
+    let value =
+        serde_json::json!({"id":"start🦀","type":"session.start","data":{"sessionId":"s🦀"}});
     std::fs::write(&physical, format!("{value}\n")).unwrap();
     let cache_path = root.join("index.json");
     let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
@@ -598,15 +599,27 @@ impl NoSqlite {
         SQLITE_ATTEMPTS.store(0, std::sync::atomic::Ordering::SeqCst);
         let result = unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(reject_sqlite)) };
         assert_eq!(result, rusqlite::ffi::SQLITE_OK);
-        assert!(rusqlite::Connection::open_in_memory().is_err(), "guard must reject an actual SQLite connection");
-        assert_eq!(SQLITE_ATTEMPTS.swap(0, std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            rusqlite::Connection::open_in_memory().is_err(),
+            "guard must reject an actual SQLite connection"
+        );
+        assert_eq!(
+            SQLITE_ATTEMPTS.swap(0, std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         Self
     }
 }
 impl Drop for NoSqlite {
     fn drop(&mut self) {
-        unsafe { rusqlite::ffi::sqlite3_cancel_auto_extension(Some(reject_sqlite)); }
-        assert_eq!(SQLITE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 0, "PG phase attempted SQLite access");
+        unsafe {
+            rusqlite::ffi::sqlite3_cancel_auto_extension(Some(reject_sqlite));
+        }
+        assert_eq!(
+            SQLITE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "PG phase attempted SQLite access"
+        );
     }
 }
 
