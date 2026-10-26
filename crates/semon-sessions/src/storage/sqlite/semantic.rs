@@ -681,7 +681,9 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         )
         .unwrap();
         if family == "metadata" {
-            crate::events::store::configured::metadata_sql(c, "", "namespace").unwrap();
+            // Shape work now belongs to entry, while metadata_sql selects
+            // only the authored current statement. Charge the real entry check.
+            crate::events::store::configured::validate_statement_layout(c).unwrap();
         } else {
             crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
         }

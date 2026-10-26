@@ -1361,14 +1361,13 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
-    tx.execute_batch(configured::metadata_sql(&tx, "DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');", "DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?).map_err(io::Error::other)?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let mut db = journal.connection().map_err(io::Error::other)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
+    tx.execute_batch(configured::metadata_sql(&tx, "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');", "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?).map_err(io::Error::other)?;
     tx.execute(
-        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_reason'),'catalog_recovery_reason',?1)").map_err(io::Error::other)?,
+        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_reason'),'catalog_recovery_reason',?1)").map_err(io::Error::other)?,
         [reason],
     )
     .map_err(io::Error::other)?;
@@ -1376,16 +1375,11 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
 }
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    store
-        .connection
-        .query_row(
-            configured::metadata_sql(&store.connection, "SELECT COALESCE((SELECT value FROM meta WHERE key='catalog_push_driven'),'0')='1'", "SELECT COALESCE((SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_push_driven') AND key='catalog_push_driven'),'0')='1'").map_err(io::Error::other)?,
-            [],
-            |row| row.get(0),
-        )
-        .map_err(io::Error::other)
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
+    let tx = db.unchecked_transaction().map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
+    tx.query_row("SELECT COALESCE((SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_push_driven'),'0')='1'", [], |row|row.get(0)).map_err(io::Error::other)
 }
 
 /// Requeue only sources that changed during an untrusted local observation.
@@ -1420,16 +1414,15 @@ pub(crate) fn requeue_concurrent_sources(
     if paths.is_empty() {
         return Ok(());
     }
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let mut db = journal.connection().map_err(io::Error::other)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     for path in &paths {
         let _ = archived_index(&tx, path).map_err(io::Error::other)?;
     }
     for path in paths {
-        invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     }
     tx.commit().map_err(io::Error::other)
 }
@@ -1734,14 +1727,17 @@ pub(crate) fn enqueue_facts(
 /// the committed record offset and Event rows remain atomic and replayable.
 pub(crate) fn checkpoint_source_scan(
     stem: &Path,
+    source: &crate::storage::HostSource,
     path: &str,
     ledger: &Ledger,
     physical: &Stat,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(stem), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
+    let config = source.config(stem).map_err(io::Error::other)?;
+    let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
+    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+    let mut db = journal.connection().map_err(io::Error::other)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     if ledger_row(&tx, path)
         .map_err(io::Error::other)?
         .map(|(_, ledger)| ledger)
@@ -1765,7 +1761,7 @@ pub(crate) fn checkpoint_source_scan(
         after: *physical,
     };
     tx.execute(
-        "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
+        "INSERT OR REPLACE INTO main.session_source_mutations(namespace,source_path,evidence) VALUES(semon_namespace(),?1,?2)",
         params![path, json(&evidence).map_err(io::Error::other)?],
     )
     .map_err(io::Error::other)?;
@@ -3974,48 +3970,46 @@ impl SqliteStore {
                 let search =
                     crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source)
                         .map_err(StoreError::Configured)?;
-                let mut encoded = Vec::new();
+                let refresh = |encoded: &[String]| -> Result<(), StoreError> {
+                    let refreshed = encoded.iter().map(|value|serde_json::from_str::<crate::model::summary::CatalogRow>(value).map_err(|_|failure(rusqlite::Error::InvalidQuery))).collect::<Result<Vec<_>,_>>()?;
+                    crate::catalog_search::publish_current_rows_with_store(&transaction, &refreshed.iter().collect::<Vec<_>>(), &search).map_err(failure)
+                };
                 if claims.is_none() {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
-                    let mut statement = transaction
-                        .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
-                        .map_err(failure)?;
-                    encoded = statement
-                        .query_map([], |r| r.get::<_, String>(0))
-                        .map_err(failure)?
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .map_err(failure)?;
+                    let mut after = String::new();
+                    loop {
+                        let mut encoded = Vec::new();
+                        let mut bytes = 0usize;
+                        let mut statement = transaction.prepare("SELECT session_key,octet_length(metadata),CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key>?1 ORDER BY session_key LIMIT 64").map_err(failure)?;
+                        let mut values = statement.query([&after]).map_err(failure)?;
+                        while let Some(value) = values.next().map_err(failure)? {
+                            let size: usize = value.get(1).map_err(failure)?;
+                            if size > 1048576 { return Err(failure(rusqlite::Error::InvalidQuery)); }
+                            if bytes + size > 1048576 { break; }
+                            after = value.get(0).map_err(failure)?;
+                            encoded.push(value.get::<_, String>(2).map_err(failure)?);
+                            bytes += size;
+                        }
+                        drop(values);
+                        drop(statement);
+                        if encoded.is_empty() { break; }
+                        refresh(&encoded)?;
+                    }
                 } else {
                     let mut keys = affected.clone();
-                    keys.extend(rows.iter().map(|row| row.key.clone()));
+                    keys.extend(rows.iter().map(|row|row.key.clone()));
+                    let mut encoded = Vec::new();
+                    let mut bytes = 0usize;
                     for key in keys {
-                        if let Some(value) = transaction
-                            .query_row(
-                                "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                                [&key],
-                                |r| r.get::<_, String>(0),
-                            )
-                            .optional()
-                            .map_err(failure)?
-                        {
+                        let value = transaction.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [&key], |r|r.get::<_, String>(0)).optional().map_err(failure)?;
+                        if let Some(value) = value {
+                            if bytes + value.len() > 1048576 || encoded.len() == 64 { refresh(&encoded)?; encoded.clear(); bytes=0; }
+                            bytes += value.len();
                             encoded.push(value);
                         }
                     }
+                    refresh(&encoded)?;
                 }
-                let refreshed = encoded
-                    .iter()
-                    .map(|value| {
-                        serde_json::from_str::<crate::model::summary::CatalogRow>(value)
-                            .map_err(|_| failure(rusqlite::Error::InvalidQuery))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let refs = refreshed.iter().collect::<Vec<_>>();
-                crate::catalog_search::publish_current_rows_with_store(
-                    &transaction,
-                    &refs,
-                    &search,
-                )
-                .map_err(failure)?;
                 transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;
             } else {
                 #[cfg(test)]
