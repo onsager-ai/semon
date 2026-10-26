@@ -3170,11 +3170,6 @@ impl IndexStore for SqliteStore {
         &mut self,
         files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError> {
-        if files.len() > 64 {
-            return Err(StoreError::Data(
-                "initial index batch exceeds source budget".into(),
-            ));
-        }
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let mut row_measurements = crate::native_timing::Measurements::new(timing);
@@ -3194,11 +3189,13 @@ impl IndexStore for SqliteStore {
         if !current(&transaction).map_err(failure)? {
             return Ok(Outcome::Stale);
         }
-        for (path, ledger, _) in files {
-            if ledger.offset != ledger.stat.size
-                || ledger_row(&transaction, path).map_err(failure)?.is_some()
-                || Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat)
-            {
+        if !super::native_commit::initial_batch(files)
+            .map_err(|message| StoreError::Data(message.into()))?
+        {
+            return Ok(Outcome::Conflict);
+        }
+        for (path, _, _) in files {
+            if ledger_row(&transaction, path).map_err(failure)?.is_some() {
                 return Ok(Outcome::Conflict);
             }
         }

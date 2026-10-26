@@ -264,13 +264,15 @@ impl IndexStore for NativeIndex {
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError> {
-        // NativeEventStore is one exact operation/path. Do not manufacture a
-        // batch operation from multiple independently retained request IDs.
-        if files.len() != 1 {
-            return pending();
-        }
-        let (p, l, i) = &files[0];
-        self.commit_file(p, None, None, l, i)
+        native_ingest::commit_initial(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.intents,
+            files,
+        )
+        .map_err(err)?;
+        Ok(Outcome::Written)
     }
     fn select_reported_runs(
         &mut self,
