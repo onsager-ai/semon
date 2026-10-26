@@ -3507,10 +3507,19 @@ fn unsupported_storage_is_observable_at_product_read_entrypoints() {
 fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
     let fixture = Fixture::new();
     fixture.publish(1);
-    let connection = fixture.db();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     connection
         .execute(
-            "UPDATE session_slot_projections SET version=3 WHERE session_key='session-00000'",
+            "UPDATE main.session_slot_projections SET version=3 WHERE namespace=semon_namespace() AND session_key='session-00000'",
             [],
         )
         .unwrap();

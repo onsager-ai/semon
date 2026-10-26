@@ -2286,8 +2286,14 @@ mod catalog_owner_tests {
         fs::write(unrelated.full_path(&options), "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"unrelated\"}}\n").unwrap();
         let evidence = NativeEvidence::new(options.clone());
         drain_catalog(&evidence, &std::cell::Cell::new(0));
+        // A completed publication advances the head. Start this separate
+        // producer operation with a fresh admitted head, rather than asking
+        // the old stage handle to seize a successor generation.
+        evidence.retire();
+        let evidence = NativeEvidence::new(options.clone());
         {
             let mut work = lock(&evidence.work);
+            work.events = Some(EventCache::open_scoped(&options.cache, &options.source).unwrap());
             assert_eq!(
                 work.events
                     .as_mut()
@@ -2300,11 +2306,16 @@ mod catalog_owner_tests {
                 crate::events::Outcome::Written
             );
         }
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let unrelated_key: String = db.query_row("SELECT session_key FROM session_catalog_sources WHERE native_id='unrelated' LIMIT 1", [], |row| row.get(0)).unwrap();
         assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
         db.execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_semantic_recipe'",
+            "UPDATE main.storage_semantic_profiles SET recipe=?1 WHERE namespace=semon_namespace()",
             ["unsupported-semantic-recipe"],
         )
         .unwrap();
@@ -2318,7 +2329,11 @@ mod catalog_owner_tests {
             let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
                 .unwrap_err();
-            assert!(error.to_string().contains("unsupported semantic recipe"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&crate::storage::StorageError::NamespaceUpgradePending.to_string())
+            );
             assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
             assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
             assert!(EventCache::open(&options.cache, &options.source).is_err());

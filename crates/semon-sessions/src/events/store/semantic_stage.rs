@@ -3366,21 +3366,60 @@ mod tests {
 
     #[test]
     fn unsupported_publication_recipe_refuses_without_erasing_history() {
-        let (root, mut store, _) = header_repair_store("unsupported-recipe");
-        store
-            .connection
+        let root = std::env::temp_dir().join(format!(
+            "semon-unsupported-recipe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            claude_home: root.join("claude"),
+            claude_json: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
+            proc_root: root.join("proc"),
+            ..crate::Options::default()
+        };
+        let source = options.claude_home.join("projects/project/old.jsonl");
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "{\"type\":\"user\",\"uuid\":\"old-prompt\",\"sessionId\":\"old\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"retained native prompt\"}}\n").unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        assert!((0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap()
+        }));
+        evidence.retire();
+        let config = options.source.config(&options.cache).unwrap();
+        use crate::storage::sqlite::semantic::{SemanticStaging, Stage};
+        let connection = Stage::open(SemanticStaging::admit(&config).unwrap())
+            .unwrap()
+            .into_test_connection();
+        let next = SemanticStaging::admit(&config).unwrap();
+        assert!(connection.query_row("SELECT count(*)>0 FROM main.session_slots WHERE namespace=semon_namespace() AND session_key='old'", [], |row| row.get::<_, bool>(0)).unwrap());
+        // The scoped semantic profile is authored by this producer. Global
+        // format metadata remains immutable under the ordinary writer guards.
+        connection
             .execute(
-                "UPDATE meta SET value='unsupported' WHERE key='catalog_semantic_recipe'",
+                "UPDATE main.storage_semantic_profiles SET recipe='unsupported' WHERE namespace=semon_namespace()",
                 [],
             )
             .unwrap();
-        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
-        assert!(store.semantic_next(64).is_err());
+        let before = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert!(Stage::open(next).is_err());
         assert_eq!(
-            crate::native_timing::cleanup_tests::snapshot(&store.connection),
+            crate::native_timing::cleanup_tests::snapshot(&connection),
             before
         );
-        drop(store);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 

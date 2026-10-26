@@ -137,7 +137,10 @@ impl Sources {
                 let focused = crate::events::store::chunk_proofs::Focused::with_db(
                     db.as_ref().expect("proof connection opened").clone(),
                     &cache_path,
-                    source.path.to_str().ok_or_else(unavailable)?,
+                    // This is the private Index key used by EventCache::tree,
+                    // not a public source reference. The captured source below
+                    // retains the exact native PathBuf and physical ledger.
+                    &source.path.to_string_lossy(),
                     &ledger,
                 )?;
                 ProofChunks::Focused(Box::new(focused))
