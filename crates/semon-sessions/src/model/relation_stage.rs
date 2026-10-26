@@ -174,7 +174,9 @@ impl LifecycleAuthority {
             scan_window: false,
         };
         let runtime = match facts {
-            Some(ref facts) => crate::native_evidence::recorded_runtime_fingerprint(&options, facts)?,
+            Some(ref facts) => {
+                crate::native_evidence::recorded_runtime_fingerprint(&options, facts)?
+            }
             None => crate::native_evidence::query_runtime_generation(&options)?,
         };
         let mut current = runtime == self.runtime;

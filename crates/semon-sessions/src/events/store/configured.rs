@@ -254,7 +254,13 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
                 .map(str::to_owned)
                 .map_err(|error| {
                     #[cfg(test)]
-                    eprintln!("native tree metadata_scope=unclassified_key family={}", key.split(':').next().filter(|family| family.len() <= 64).unwrap_or("oversized"));
+                    eprintln!(
+                        "native tree metadata_scope=unclassified_key family={}",
+                        key.split(':')
+                            .next()
+                            .filter(|family| family.len() <= 64)
+                            .unwrap_or("oversized")
+                    );
                     rusqlite::Error::UserFunctionError(Box::new(error))
                 })
         },
@@ -837,7 +843,9 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
             let predicate = if table == "meta" {
                 match operation {
                     "INSERT" => "NEW.namespace IS NOT semon_meta_scope(NEW.key)",
-                    "UPDATE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)",
+                    "UPDATE" => {
+                        "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)"
+                    }
                     "DELETE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key)",
                     _ => unreachable!(),
                 }
@@ -1104,7 +1112,11 @@ impl Writer {
                 |_| Ok(1i64),
             )
             .map_err(failure)?;
-        let database = self.config.backend.sqlite_database().map_err(StoreError::Configured)?;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
         let mut store = super::SqliteStore {
             owner: self
                 .owner
@@ -1152,7 +1164,11 @@ impl Writer {
             ));
         }
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
-        let database = self.config.backend.sqlite_database().map_err(StoreError::Configured)?;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
         let mut store = super::SqliteStore {
             owner: self
                 .owner
@@ -1183,7 +1199,11 @@ impl Writer {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
-        let database = self.config.backend.sqlite_database().map_err(std::io::Error::other)?;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(std::io::Error::other)?;
         let mut store = super::SqliteStore {
             owner: owner.clone(),
             connection,

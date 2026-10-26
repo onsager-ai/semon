@@ -2131,7 +2131,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         for tool in ["read_transcript", "get_session"] {
             let args = serde_json::json!({"id":row.key});
             let expected = facts_query.call_bound_selected_at(tool, &args, 1790812805000, facts_store.as_ref(), &facts_host).unwrap();
-            let actual = facts_query.call_selected_at(namespace.as_str(), &row.key, tool, &args, Some(&facts_host), crate::SessionSourceReadMode::ProviderOnly, 1790812805000).unwrap();
+            let actual = facts_query.call_selected_at(namespace.as_str(), &row.key, tool, &args, Some(&facts_host), crate::SessionSourceReadMode::LocalThenProvider, 1790812805000).unwrap();
             assert_eq!(actual, expected, "configured ordinary Facts selected {tool} {}", row.key);
         }
     }
