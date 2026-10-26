@@ -380,7 +380,7 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         .map_err(failure)?
         .is_some()
     {
-        return crate::history_projection::qualified(db, row).map_err(failure);
+        return crate::history_projection::qualified(db, row, false).map_err(failure);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)

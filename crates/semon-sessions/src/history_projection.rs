@@ -46,13 +46,23 @@ pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Op
 
 /// An explicit older harness observation must carry its own complete recipe
 /// header and consumed-source cohort, independently of the Current owner.
-pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::Result<bool> {
+pub(crate) fn qualified(
+    connection: &Connection,
+    row: &CatalogRow,
+    admitted: bool,
+) -> rusqlite::Result<bool> {
     if row.sources.is_empty() || row.sources.len() > 64 {
         return Ok(false);
     }
+    // An admitted reader qualifies only its own namespace's recipe header.
+    let scope = if admitted {
+        "namespace=semon_namespace() AND "
+    } else {
+        ""
+    };
     let header: Option<(u32, String, bool)> = connection
         .query_row(
-            "SELECT version,source_generation,incomplete FROM session_history_projections WHERE session_key=?1",
+            &format!("SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE {scope}session_key=?1"),
             [&row.key],
             |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
         )
@@ -367,7 +377,7 @@ mod tests {
                     break;
                 }
                 assert!(catalog(&db, &old.key).unwrap().is_none());
-                assert!(!qualified(&db, &old).unwrap());
+                assert!(!qualified(&db, &old, false).unwrap());
                 assert_eq!(
                     db.query_row(
                         "SELECT count(*) FROM session_history_projections",
@@ -467,7 +477,7 @@ mod tests {
             .unwrap(),
             header
         );
-        assert!(!qualified(&db, &current).unwrap());
+        assert!(!qualified(&db, &current, false).unwrap());
     }
     #[test]
     fn custody_preserves_unsupported_original_slot_addresses() {
