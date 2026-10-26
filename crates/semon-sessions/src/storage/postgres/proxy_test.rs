@@ -398,7 +398,7 @@ fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
         |_| Ok(()),
     )
     .unwrap();
-    let options = crate::Options {
+    let mut options = crate::Options {
         source: crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap(),
         all: true,
         ..crate::Options::default()
@@ -411,33 +411,44 @@ fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
             control: PgCancellation::default(),
         },
     };
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let request = crate::SelectedReadControl::new(
-        Instant::now() + Duration::from_secs(20),
-        cancelled.clone(),
-    );
+    options.source = options.source.with_store(config.clone()).unwrap();
     let host = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
         panic!("cancelled metadata SQL must not admit host bytes")
     };
-    proxy.replies.set(true);
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| {
-            config.call_captured_query_at(
-                &options,
-                "external-machine-z",
-                &"b".repeat(64),
-                "get_session",
-                &serde_json::json!({"id":"claude:one"}),
-                0,
-                &request,
-                &host,
-            )
+    for phase in ["query", "identity", "proof"] {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request = crate::SelectedReadControl::new(
+            Instant::now() + Duration::from_secs(20),
+            cancelled.clone(),
+        );
+        proxy.replies.set(true);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| request.scope(|| {
+                match phase {
+                    "identity" => crate::session_catalog_history_identity(
+                        &options, "external-machine-z", "claude:one",
+                    ).map(|_| ()).map_err(std::io::Error::other),
+                    "proof" => config.captured_source_proof_at(
+                        &options, &"b".repeat(64), "claude:one",
+                        &crate::SessionSourceRef {
+                            root: "claude".into(), path: "one.jsonl".into(),
+                            native_id: "one".into(), offset: 0,
+                            prefix_sha256: [0; 32], tail_sha256: [0; 32],
+                        },
+                    ).map(|_| ()).map_err(std::io::Error::other),
+                    _ => config.call_captured_query_at(
+                        &options, "external-machine-z", &"b".repeat(64),
+                        "get_session", &serde_json::json!({"id":"claude:one"}),
+                        0, &request, &host,
+                    ).map(|_| ()).map_err(std::io::Error::other),
+                }
+            }));
+            proxy.replies.witness();
+            cancelled.store(true, Ordering::Release);
+            assert!(worker.join().unwrap().is_err(), "{phase}");
         });
-        proxy.replies.witness();
-        cancelled.store(true, Ordering::Release);
-        assert_eq!(worker.join().unwrap().unwrap_err().code, "unavailable");
-    });
-    proxy.recover();
+        proxy.recover();
+    }
 }
 
 #[test]

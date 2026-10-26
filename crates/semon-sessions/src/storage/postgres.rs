@@ -207,6 +207,7 @@ pub(crate) fn catalog_page(
     source: &str,
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, super::StorageError> {
+    let control = &control.for_selected_read();
     let generation = configured_generation(config, pool, control)?;
     catalog_effects::snapshot::with_admitted_generation(
         pool,

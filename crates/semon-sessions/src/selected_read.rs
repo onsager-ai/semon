@@ -57,6 +57,18 @@ impl SelectedReadControl {
         Ok(())
     }
 
+    /// Run synchronous selected preparation on the calling thread under this
+    /// request. Hosts enter this scope inside their blocking worker, before
+    /// identity/proof lookup, and retain their cancellation guard until it exits.
+    /// Nested preparation shares the outer request's deadline and accounting.
+    pub fn scope<T>(&self, prepare: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let _scope = Scope::enter(self);
+        check()?;
+        let result = prepare()?;
+        check()?;
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_limits(mut self, rows: usize, bytes: usize) -> Self {
         self.rows = rows;
