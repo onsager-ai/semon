@@ -88,7 +88,7 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
 #[test]
 fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() {
     let data = oracle();
-    let (pool, _) = fixture(|_| {});
+    let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog124\0🦀");
     pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
@@ -110,7 +110,14 @@ fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() 
     pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
     assert_eq!(pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap(), before);
     pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L2, &data.publication())).unwrap();
-    drop(pool);
+    let reopened = crate::storage::postgres::PgPool::open(factory, crate::storage::postgres::tests::limits()).unwrap();
+    reopened.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+        for table in TABLES {
+            let count: i64 = tx.driver.query_one(&format!("SELECT count(DISTINCT generation) FROM semon_pg_native_{table}"), &[]).map_err(sqlstate::error)?.get(0);
+            if matches!(*table, "catalog_rows" | "catalog_sources" | "catalog_recipe_headers" | "catalog_recipe_rows") { assert_eq!(count, 2); }
+        }
+        Ok(())
+    }).unwrap();
 }
 
 #[test]
@@ -154,4 +161,27 @@ fn pg_catalog124_long_opaque_keys_namespaces_and_precancel() {
         assert!(snapshot(tx)?.iter().all(Vec::is_empty));
         Ok(())
     }).unwrap();
+}
+
+#[test]
+fn pg_catalog124_injected_source_role_rls_and_namespace_reuse() {
+    let data = oracle();
+    let (pool, factory) = fixture(|_| {});
+    let source = crate::storage::postgres::tests::source_factory(&factory);
+    let source_pool = crate::storage::postgres::PgPool::open(source, crate::storage::postgres::tests::limits()).unwrap();
+    for name in ["tenant-a\0中", "tenant-b\0中"] {
+        source_pool.transaction(&ns(name), TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
+    }
+    let a = source_pool.transaction(&ns("tenant-a\0中"), TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    let b = source_pool.transaction(&ns("tenant-b\0中"), TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    assert_eq!(a.iter().map(Vec::len).collect::<Vec<_>>(), b.iter().map(Vec::len).collect::<Vec<_>>());
+    source_pool.transaction(&ns("tenant-a\0中"), TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+        for table in TABLES {
+            let rows = tx.driver.query(&format!("SELECT generation FROM semon_pg_native_{table} WHERE namespace=$1"), &[&"tenant-b\0中".as_bytes()]).map_err(sqlstate::error)?;
+            assert!(rows.is_empty());
+        }
+        Ok(())
+    }).unwrap();
+    assert!(source_pool.transaction(&ns("tenant-c"), TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap().iter().all(Vec::is_empty));
+    drop(pool);
 }
