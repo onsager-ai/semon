@@ -401,6 +401,13 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             || ledger != recorded
             || (!indexed && !withdrawn && !removed_source(c, ns, &path)?)
         {
+            #[cfg(test)]
+            eprintln!(
+                "semantic_reduction_witness claim_changed={} ledger_changed={} negative_missing={}",
+                actual != claim,
+                ledger != recorded,
+                !indexed && !withdrawn && !removed_source(c, ns, &path)?
+            );
             return Ok(ReductionWitness::Changed);
         }
     }
@@ -2325,10 +2332,14 @@ impl Stage {
             return Ok(None);
         };
         if self.epoch != Some(epoch) {
+            #[cfg(test)]
+            eprintln!("semantic_batch_conflict reason=epoch");
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         if head(&tx).map_err(error)? != base_generation || base_generation != self.source.generation
         {
+            #[cfg(test)]
+            eprintln!("semantic_batch_conflict reason=generation");
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         if phase != "indexing" && !self.reduction {
@@ -2343,12 +2354,44 @@ impl Stage {
                 |r| r.get(0),
             )
             .map_err(error)?;
+        // Publication already consumed its exact claims atomically. Return
+        // only the final cleanup batch, rather than trying to reduce against
+        // removal invalidations that publication just ACKed. Select/replay
+        // still use the full live witness checks. New dirty claims remain in
+        // the journal; finish cannot mark a dirty Catalog complete.
+        let acknowledged: bool = phase == "publication" && !resetting
+            && tx.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (publication_done=0 OR ack_done=0))",
+                [ns], |r| r.get(0),
+            ).map_err(error)?;
+        if acknowledged {
+            let source_revision = tx
+                .query_row(
+                    "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            tx.commit().map_err(error)?;
+            return Ok(Some(Batch {
+                epoch,
+                phase: Phase::Publication,
+                paths: Vec::new(),
+                base_generation,
+                source_revision,
+                runtime,
+                context: Context::default(),
+                relation_cursor: None,
+            }));
+        }
         let reset_complete = if resetting {
             reset_page(&tx, ns).map_err(error)?
         } else {
             true
         };
         if !resetting && !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
+            #[cfg(test)]
+            eprintln!("semantic_batch_conflict reason=reduction");
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         let mut result_phase = Phase::Indexing;

@@ -21,6 +21,36 @@ pub(super) fn fail_clean() -> bool {
 static NEXT_SCHEMA: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn pg_vertical140_preparation_scope_shares_nested_budget_and_control() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let request = crate::SelectedReadControl::new(
+        Instant::now() + Duration::from_secs(20),
+        cancelled.clone(),
+    )
+    .with_limits(2, 32);
+    let nested = crate::SelectedReadControl::default();
+    let error = request
+        .scope(|| {
+            crate::selected_read::charge(1, 0)?;
+            nested.scope(|| crate::selected_read::charge(1, 0))?;
+            crate::selected_read::charge(1, 0)
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(!crate::selected_read::active());
+    let error = request
+        .scope(|| {
+            cancelled.store(true, Ordering::Release);
+            nested.scope::<()>(|| panic!("nested scope must retain cancelled outer control"))
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(!crate::selected_read::active());
+    nested.scope(|| crate::selected_read::charge(1, 0)).unwrap();
+    assert!(!crate::selected_read::active());
+}
+
+#[test]
 fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
     struct NoConnection;
     impl PgConnectionFactory for NoConnection {
@@ -73,7 +103,7 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
         assert!(error.message.contains(reason));
         let reference = crate::SessionSourceRef {
             root: "claude".into(),
-            path: "one.jsonl".into(),
+            path: "projects/project/one.jsonl".into(),
             native_id: "one".into(),
             offset: 0,
             prefix_sha256: [0; 32],
