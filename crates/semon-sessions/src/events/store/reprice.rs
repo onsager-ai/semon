@@ -1704,6 +1704,18 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
             namespace: LogicalSourceNamespace::new("a").unwrap(),
             expected_stream_epoch: Some(epoch.clone()),
         };
+        // A current version/profile still needs the current journal contract.
+        // Refusal must precede registry/floor/fence writes, not repair the file.
+        db.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        let before = usage_family_state(&db, "a");
+        assert_eq!(config.admit_namespace(), Err(StorageError::Unavailable));
+        assert_eq!(usage_family_state(&db, "a"), before);
+        assert!(!crate::storage::sqlite::namespace::is_bound(&db).unwrap());
+        let mode: String = db
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
         // A malformed second floor must not leave the first floor, enrollment
         // row, registry DDL or fences behind after the real admission fails.
         db.execute(
@@ -1711,10 +1723,12 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
             [],
         )
         .unwrap();
+        let before = usage_family_state(&db, "a");
         assert_eq!(
             config.admit_namespace(),
             Err(StorageError::NamespaceUpgradePending)
         );
+        assert_eq!(usage_family_state(&db, "a"), before);
         assert!(!crate::storage::sqlite::namespace::is_bound(&db).unwrap());
         assert_eq!(
             db.query_row(
