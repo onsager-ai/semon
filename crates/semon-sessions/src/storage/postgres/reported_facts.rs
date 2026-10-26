@@ -334,8 +334,6 @@ pub(super) fn load(
 fn load_tx(tx: &mut PgTxn<'_>, ids: Option<&BTreeSet<String>>) -> Result<Loaded, StorageError> {
     let revision = revision(tx, false)?;
     let ns = tx.namespace.as_str().as_bytes();
-    let incoming:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='native_transfer_v1:incoming' AND octet_length(value)>0)", &[&ns]).map_err(sqlstate::error)?.get(0);
-    if incoming { return Err(StorageError::NamespaceUpgradePending); }
     let sizes = tx.driver.query("SELECT singleton,octet_length(stamp)::bigint FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 2", &[&ns]).map_err(sqlstate::error)?;
     let mut budget = Budget { rows: 0, bytes: 0 };
     if sizes.len() > 1 || sizes.first().is_some_and(|row| !row.get::<_, bool>(0)) {

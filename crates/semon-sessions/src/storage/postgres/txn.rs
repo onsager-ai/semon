@@ -120,6 +120,10 @@ impl PgPool {
                 if matches!(kind, TxnKind::Write | TxnKind::Transfer) {
                     super::store_metadata::lock_publication(&mut tx)?;
                 }
+                if matches!(kind, TxnKind::ReadSnapshot) {
+                    let incoming:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='native_transfer_v1:incoming' AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
+                    if incoming { return Err(StorageError::NamespaceUpgradePending); }
+                }
                 if matches!(kind, TxnKind::Write) {
                     let blocked:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key IN ('native_transfer_v1:source-freeze','native_transfer_v1:incoming') AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
                     if blocked { return Err(StorageError::ScopeChanged); }
