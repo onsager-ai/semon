@@ -325,14 +325,8 @@ impl NativeEvidence {
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
             work.events = Some(
-                match EventCache::open_scoped(&self.options.cache, &self.options.source) {
-                    Ok(cache) => cache,
-                    Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                        return Err(io::Error::other(error));
-                    }
-                    Err(_) => EventCache::open(&self.options.cache, &self.options.source)
-                        .map_err(io::Error::other)?,
-                },
+                EventCache::open_scoped(&self.options.cache, &self.options.source)
+                    .map_err(io::Error::other)?,
             );
         }
         let cache = work.events.as_mut().expect("event cache initialized");

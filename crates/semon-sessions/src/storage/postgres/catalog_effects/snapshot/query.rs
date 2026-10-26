@@ -165,9 +165,19 @@ impl QueryCatalogStore for QueryCatalog {
                                 .map(|(_, slot)| slot)
                                 .map_err(unavailable)
                         },
-                        &|turn| Ok(window.as_ref().is_none_or(|part| turn["id"].as_str().is_some_and(|id| part.turns.contains(id)))),
+                        &|turn| {
+                            Ok(window.as_ref().is_none_or(|part| {
+                                turn["id"]
+                                    .as_str()
+                                    .is_some_and(|id| part.turns.contains(id))
+                            }))
+                        },
                         &|id| Ok(window.as_ref().is_none_or(|part| part.edges.contains(id))),
-                        &|id| Ok(window.as_ref().is_none_or(|part| part.rows.contains_key(id))),
+                        &|id| {
+                            Ok(window
+                                .as_ref()
+                                .is_none_or(|part| part.rows.contains_key(id)))
+                        },
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
@@ -378,6 +388,7 @@ impl QueryCatalogStore for QueryCatalog {
                     after = page.last().map(|row| (row.get(0), row.get(1)));
                 }
             }
+            let timed_edges = edges.clone();
             for owner in keep.clone() {
                 let mut links = Vec::new();
                 {
@@ -390,7 +401,7 @@ impl QueryCatalogStore for QueryCatalog {
                             let id = text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
                             let metadata = json(row.get(2))?;
                             let last = metadata["last"] == serde_json::json!(1) || metadata["last"] == serde_json::json!(true);
-                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["start"].as_str().is_some_and(|id| edges.contains(id))) { continue; }
+                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["start"].as_str().is_some_and(|id| timed_edges.contains(id))) { continue; }
                             let start = metadata["start"].as_str().map(str::to_owned);
                             let sent: Vec<String> = metadata["sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
                             *bytes_left = bytes_left.checked_sub(id.len() + start.as_ref().map_or(0, String::len) + sent.iter().map(String::len).sum::<usize>()).ok_or(StorageError::Busy)?;
