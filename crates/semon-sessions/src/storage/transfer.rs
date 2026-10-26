@@ -214,6 +214,7 @@ pub enum TransferRecord {
     },
     NativePage {
         path: String,
+        backing: Option<String>,
         kind: NativePageKind,
         key: String,
         payload: String,

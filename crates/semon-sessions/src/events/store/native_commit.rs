@@ -85,6 +85,9 @@ impl Effects for Writer<'_, '_, '_> {
         } = *input;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
+        // The retained header must bind the source generation before append
+        // updates that generation's mutable usage receipt.
+        chunk_proofs::preserve(transaction, path)?;
         relocation::advance(transaction, path, expected, ledger, changes.is_some()).inspect_err(
             |_| {
                 #[cfg(test)]

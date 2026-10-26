@@ -161,6 +161,7 @@ fn verify_authority(
         ProofSource => {
             let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![tx.1,text(0)?,text(1)?], |r| r.get(0)).map_err(failed)?;
             catalog_rows::verify_source_edge(&metadata, text(2)?, text(3)?)?;
+            super::pages::verify_backing(tx, &metadata, text(2)?, text(3)?)?;
         }
         ProofRef => {
             let (metadata,count): (String,i64) = tx.0.query_row("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,(SELECT count(*) FROM storage_proof_sources s WHERE s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key) FROM storage_proof_generations g JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![tx.1,text(2)?,text(0)?], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
