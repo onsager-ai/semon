@@ -266,54 +266,6 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 /// about the store's size, and it would otherwise stay that large.
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
-macro_rules! catalog_support_ddl {
-    () => {
-        "
-CREATE TABLE IF NOT EXISTS session_catalog_invalidations (
-    source_path TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL,
-    reason TEXT NOT NULL CHECK(reason IN ('changed', 'removed')),
-    observed_at INTEGER NOT NULL
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS catalog_relocation_candidates (
-    old_path TEXT NOT NULL, new_path TEXT NOT NULL, native_id TEXT NOT NULL,
-    PRIMARY KEY(old_path,new_path)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS catalog_relocation_new ON catalog_relocation_candidates(new_path,old_path);
-CREATE TABLE IF NOT EXISTS catalog_native_dependencies (
-    source_path TEXT NOT NULL, harness TEXT NOT NULL, native_id TEXT NOT NULL,
-    PRIMARY KEY(source_path,harness,native_id)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS catalog_native_dependency ON catalog_native_dependencies(harness,native_id,source_path);
-CREATE TABLE IF NOT EXISTS catalog_backfill_sources (source_path TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS session_source_mutations (
-    source_path TEXT PRIMARY KEY,
-    evidence TEXT NOT NULL
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_catalog_invalidations_revision ON session_catalog_invalidations(revision,source_path);
-
-CREATE TABLE IF NOT EXISTS session_descriptions (
-    session_key TEXT PRIMARY KEY,
-    version INTEGER NOT NULL,
-    inputs TEXT NOT NULL,
-    description TEXT NOT NULL
-) STRICT;
-CREATE TABLE IF NOT EXISTS reported_runs (
-    session_id TEXT NOT NULL,
-    start INTEGER NOT NULL,
-    cost REAL,
-    duration INTEGER,
-    api_duration INTEGER,
-    tool_duration INTEGER,
-    lines_added INTEGER,
-    lines_removed INTEGER,
-    model_usage TEXT NOT NULL,
-    capture_at INTEGER NOT NULL,
-    PRIMARY KEY (session_id, start)
-) STRICT, WITHOUT ROWID;
-"
-    };
-}
 macro_rules! source_observation_receipts_ddl {
     () => {
         "
@@ -3898,7 +3850,7 @@ pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<(
 
 /// The single current physical contract. Every source-owned family uses a
 /// namespace-leading key; store-global metadata uses the reserved empty scope.
-fn authored_storage_ddl() -> [&'static str; 22] {
+fn authored_storage_ddl() -> [&'static str; 21] {
     let [usage, repair] = native_usage::schema();
     [
         crate::storage::sqlite::publication::SLOT_SCHEMA,
@@ -3914,7 +3866,6 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         semantic_stage::SEMANTIC_CORE_INDEXES_NS,
         semantic_stage::metadata_indexes(),
         crate::overview::SCHEMA,
-        crate::causal_trace::header_schema(true),
         crate::storage::sqlite::trace::SCHEMA,
         crate::storage::sqlite::history::SCHEMA,
         crate::storage::sqlite::search::SCHEMA,

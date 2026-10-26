@@ -3529,7 +3529,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("index.sqlite3");
-        let mut connection = super::super::current_search_test_connection(
+        let connection = super::super::current_search_test_connection(
             &path,
             &crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap(),
         );
