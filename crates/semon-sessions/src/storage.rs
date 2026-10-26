@@ -483,6 +483,28 @@ impl StoreConfig {
         )
     }
 
+    /// Prepare an exact source proof from an admitted captured publication.
+    /// Call before entering the body reader's lease; this grants no Raw access.
+    #[cfg(feature = "postgres")]
+    pub fn captured_source_proof_at(
+        &self,
+        options: &crate::Options,
+        generation: &str,
+        key: &str,
+        reference: &crate::SessionSourceRef,
+    ) -> Result<crate::SessionSourceProof, StorageError> {
+        let source = options.source.config(&options.cache)?;
+        if source.namespace != self.namespace
+            || source.expected_stream_epoch != self.expected_stream_epoch
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let StoreBackend::Postgres { pool, control } = &self.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
+        postgres::navigation::captured_source_proof(self, pool, control, options, generation, key, reference)
+    }
+
     /// Read a captured, admitted PostgreSQL publication using request-owned
     /// host authority. This never reinterprets an expired live runtime as current.
     #[cfg(feature = "postgres")]
