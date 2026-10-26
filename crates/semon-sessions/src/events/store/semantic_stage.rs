@@ -3384,6 +3384,8 @@ mod tests {
             ..crate::Options::default()
         };
         let source = options.claude_home.join("projects/project/old.jsonl");
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, "{\"type\":\"user\",\"uuid\":\"old-prompt\",\"sessionId\":\"old\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"retained native prompt\"}}\n").unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
