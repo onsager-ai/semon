@@ -81,6 +81,19 @@ never authorize changing engines. Preserve actual before/after append evidence,
 Raw/Facts/history custody, byte/WAL/mtime nonmutation checks and reader leases.
 Current publication cohorts remain 2..64 rows with a 1 MiB payload bound.
 
+SQLite native ingestion propagates typed `Busy` after the existing 100 ms
+reservation timeout. It does not promise that every competing scan succeeds.
+The ordinary viewer records a failed refresh and schedules its next check;
+committed rows remain the next scan's base. The concurrent-writer fixture permits
+only that typed refusal during its existing scan rounds, then requires a final
+scan after both writers finish and exact persisted equality with a cold read.
+It neither retries within a scan nor extends the reservation deadline.
+
+An unchanged large source that needs a Tree representation repair queues that
+repair before beginning native ingestion. The projection worker owns no ingest
+OpID or receipt. It must not leave an unexecuted ingest intent behind to block
+the semantic publication recovery fence.
+
 The user allowed the original two-second first-page target to be relaxed. The
 eight-second threshold for 0/256/2048-history fixtures was adopted during
 implementation; it is not an explicit user requirement. That test measures wall

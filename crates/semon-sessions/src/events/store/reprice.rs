@@ -430,7 +430,7 @@ fn sql_json(error: serde_json::Error) -> rusqlite::Error {
 }
 
 /// Reprice only exact retained source generations and complete retained token
-/// facts. Over-budget/legacy/incomplete owners keep their older fingerprint.
+/// facts. Over-budget or incomplete owners keep their older fingerprint.
 fn retained_cost(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
