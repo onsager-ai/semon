@@ -1060,8 +1060,17 @@ impl IndexRegistry {
         });
     }
 
-    fn register(&mut self, owner: crate::events::store::configured::NativeOwnership, now: Instant) -> bool {
-        let path = owner.config().backend.sqlite_database().expect("SQLite repricing owner").clone();
+    fn register(
+        &mut self,
+        owner: crate::events::store::configured::NativeOwnership,
+        now: Instant,
+    ) -> bool {
+        let path = owner
+            .config()
+            .backend
+            .sqlite_database()
+            .expect("SQLite repricing owner")
+            .clone();
         self.prune(now);
         let newly_registered = !self.entries.contains_key(&path);
         self.entries.insert(path, (now, owner));
@@ -1124,7 +1133,11 @@ fn reprice_worker() {
             state.prune(Instant::now());
             observed_epoch = state.wake_epoch;
         }
-        let owners: Vec<_> = state.entries.values().map(|(_, owner)| owner.clone()).collect();
+        let owners: Vec<_> = state
+            .entries
+            .values()
+            .map(|(_, owner)| owner.clone())
+            .collect();
         drop(state);
 
         let table = snapshot();
@@ -1382,13 +1395,19 @@ mod tests {
         let source = crate::storage::HostSource::new(
             crate::storage::LogicalSourceNamespace::new("pricing-registry").unwrap(),
             "a".repeat(64),
-        ).unwrap();
-        drop(crate::events::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
+        )
+        .unwrap();
+        drop(
+            crate::events::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap(),
+        );
         crate::events::store::configured::NativeOwnership::restore(&crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite { database: path.with_extension("sqlite3") },
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.with_extension("sqlite3"),
+            },
             namespace: source.namespace().unwrap(),
             expected_stream_epoch: Some("a".repeat(64)),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -1399,10 +1418,16 @@ mod tests {
         let mut registry = IndexRegistry::default();
         for index in 0..MAX_INDEXES {
             let path = root.join(format!("index-{index}.sqlite3"));
-            registry.register(registry_owner(path), start + Duration::from_secs(index as u64));
+            registry.register(
+                registry_owner(path),
+                start + Duration::from_secs(index as u64),
+            );
         }
         let recently_used = root.join("index-0.sqlite3");
-        registry.register(registry_owner(recently_used.clone()), start + Duration::from_secs(70));
+        registry.register(
+            registry_owner(recently_used.clone()),
+            start + Duration::from_secs(70),
+        );
         let over_cap = root.join("index-over-cap.sqlite3");
         registry.register(registry_owner(over_cap), start + Duration::from_secs(71));
         assert_eq!(registry.entries.len(), MAX_INDEXES);
@@ -1429,11 +1454,17 @@ mod tests {
         assert!(registry.register(registry_owner(first.clone()), start));
         assert_eq!(registry.wake_epoch, initial_epoch + 1);
         for touch in 1..8 {
-            assert!(!registry.register(registry_owner(first.clone()), start + Duration::from_secs(touch)));
+            assert!(!registry.register(
+                registry_owner(first.clone()),
+                start + Duration::from_secs(touch)
+            ));
         }
         assert_eq!(registry.wake_epoch, initial_epoch + 1);
 
-        assert!(registry.register(registry_owner(second.clone()), start + Duration::from_secs(8)));
+        assert!(registry.register(
+            registry_owner(second.clone()),
+            start + Duration::from_secs(8)
+        ));
         assert_eq!(registry.wake_epoch, initial_epoch + 2);
 
         let retired_at = start + INDEX_RETIRE_AFTER + Duration::from_secs(9);

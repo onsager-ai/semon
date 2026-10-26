@@ -1017,10 +1017,13 @@ mod tests {
     }
     fn owner(path: &Path) -> configured::NativeOwnership {
         configured::NativeOwnership::restore(&crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite { database: path.to_owned() },
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.to_owned(),
+            },
             namespace: crate::events::store::fixture_namespace(),
             expected_stream_epoch: Some("a".repeat(64)),
-        }).unwrap()
+        })
+        .unwrap()
     }
     fn drain(path: &Path, table: &Arc<EffectiveTable>) {
         for _ in 0..64 {
