@@ -131,6 +131,9 @@ impl IndexStore for ConfiguredIndex {
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.native.catalog_generation()
     }
+    fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
+        self.native.note_catalog_audit(expected, now)
+    }
     fn session_slots(
         &self,
         row: &crate::model::summary::CatalogRow,

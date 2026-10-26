@@ -1093,6 +1093,9 @@ pub(crate) trait IndexStore: Send {
 
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+    /// Acknowledge a bounded observation only while its exact publication is
+    /// current and no source invalidation or semantic stage remains.
+    fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError>;
 
     /// Existing scalar recipes at the exact source and catalog generations.
     /// Optional reuse never grants source access or changes publication CAS.
@@ -2589,6 +2592,11 @@ impl EventCache {
             .session_catalog_generation()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> io::Result<bool> {
+        self.store.as_mut().ok_or_else(|| io::Error::other("producer store unavailable"))?
+            .note_catalog_audit(expected, now).map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn session_slots(
