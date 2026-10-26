@@ -21,7 +21,6 @@ fn local_database(cache: &std::path::Path) -> std::path::PathBuf {
     crate::events::EventCache::path(cache)
 }
 pub(crate) mod sqlite;
-pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
 pub(crate) fn read_local_catalog_page(
     options: &crate::Options,
@@ -239,16 +238,6 @@ impl StoreConfig {
     /// it is not a finished row migration or permission to admit another source.
     pub fn admit_namespace(&self) -> Result<NamespaceAdmission, StorageError> {
         sqlite::namespace::admit(self)
-    }
-
-    /// Old-schema Catalog assignment is unsupported. Create a current store
-    /// and use current-format transfer for an already current source instead.
-    #[deprecated(note = "old-schema assignment is unsupported; use current store admission")]
-    pub fn assign_catalog_namespace(
-        &self,
-        _max_rows: usize,
-    ) -> Result<CatalogAssignmentProgress, StorageError> {
-        Err(StorageError::NamespaceUpgradePending)
     }
 
     /// Undo the read-only admission stage for its exact first-source witness.

@@ -872,8 +872,8 @@ remain unchanged; all #479 and Hub #313 implementation is still outstanding.
 ## Slice 1b WIP: Catalog namespace assignment
 
 Old-schema Catalog assignment and its table-copy runtime have been removed.
-The deprecated public symbol refuses with `NamespaceUpgradePending` and never
-opens or changes the source. New fixtures and producers use current admission;
+The obsolete public assignment symbol is removed along with its callers.
+New fixtures and producers use current admission;
 current-format engine transfer remains a separate #477 requirement.
 
 ## Configured source-observation writer checkpoint
