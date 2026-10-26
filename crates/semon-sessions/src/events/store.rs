@@ -11852,9 +11852,14 @@ pub(crate) fn current_search_test_connection(
 }
 
 #[cfg(test)]
-fn current_test_store(path: &Path, namespace: &crate::storage::LogicalSourceNamespace) -> SqliteStore {
+fn current_test_store(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+) -> SqliteStore {
     let config = crate::storage::StoreConfig {
-        backend: crate::storage::StoreBackend::Sqlite { database: path.to_owned() },
+        backend: crate::storage::StoreBackend::Sqlite {
+            database: path.to_owned(),
+        },
         namespace: namespace.clone(),
         expected_stream_epoch: Some("a".repeat(64)),
     };
@@ -11863,9 +11868,15 @@ fn current_test_store(path: &Path, namespace: &crate::storage::LogicalSourceName
     }
     let owner = configured::NativeOwnership::admit(&config).unwrap();
     let connection = configured::connection(&config).unwrap();
-    crate::storage::NativeReaderBinding::Semantic(owner.clone()).validate(&connection, namespace).unwrap();
+    crate::storage::NativeReaderBinding::Semantic(owner.clone())
+        .validate(&connection, namespace)
+        .unwrap();
     SqliteStore {
-        owner, connection, path: path.to_owned(), selected_runs: None,
-        semantic_rejection: None, traversal_observation: None,
+        owner,
+        connection,
+        path: path.to_owned(),
+        selected_runs: None,
+        semantic_rejection: None,
+        traversal_observation: None,
     }
 }
