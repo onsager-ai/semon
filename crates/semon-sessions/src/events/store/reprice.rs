@@ -1227,7 +1227,7 @@ mod tests {
         // Both production factories now author the same current contract.
         let original = authored_storage_ddl();
         let configured_original = original;
-        assert_eq!(storage_ddl(), original);
+        assert_eq!(authored_storage_ddl(), original);
         let full_objects = |db: &Connection| {
             db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").unwrap()
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap()

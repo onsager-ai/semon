@@ -9753,7 +9753,7 @@ mod tests {
         );
         for missing in [false, true] {
             let config = crate::Options::default().source.config(&cache_path).unwrap();
-            let connection = store::configured::connection(&config).unwrap();
+            let connection = crate::storage::sqlite::source_journal::SourceJournal(config).connection().unwrap();
             if missing {
                 connection
                     .execute("DELETE FROM meta WHERE key=?1", [&key])
