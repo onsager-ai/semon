@@ -4,7 +4,7 @@ use crate::{
     Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
     model::summary::CatalogRow,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -284,17 +284,19 @@ pub fn session_overview_observe(
     }
 }
 fn connection(options: &Options) -> io::Result<Connection> {
-    let db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(failure)?;
-    crate::events::store::require_current(&db)?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    let db = binding.connection().map_err(failure)?;
     crate::selected_read::install(&db)?;
     Ok(db)
 }
+
+fn transaction<'a>(db: &'a mut Connection, options: &Options) -> io::Result<rusqlite::Transaction<'a>> {
+    let tx = db.transaction().map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    binding.validate(&tx, &binding.config().namespace).map_err(failure)?;
+    Ok(tx)
+}
+
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
     text.map(|text| {
@@ -346,14 +348,16 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
 /// Demand an ordinary producer upgrade for an exact selected owner. This only
 /// schedules work; publication still requires the producer's source proofs.
 pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
-    let db = connection(options)?;
-    let Some(row) = catalog(&db, key)? else {
+    let mut db = connection(options)?;
+    let tx = transaction(&mut db, options)?;
+    let Some(row) = catalog(&tx, key)? else {
         return Ok(false);
     };
-    if projection_ready(&db, &row)? {
+    if projection_ready(&tx, &row)? {
         return Ok(false);
     }
     source_refs(options, std::slice::from_ref(&row))?;
+    tx.commit().map_err(failure)?;
     crate::events::store::prioritize_projection_sources(options, &row.sources)?;
     Ok(true)
 }
@@ -562,7 +566,7 @@ pub fn overview_repair_sources(
     key: &str,
 ) -> io::Result<Option<Vec<crate::SessionSourceRef>>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let rows = selection(&tx, key)?.rows;
     if ready(&tx, &rows[0])? {
         return Ok(None);
@@ -577,7 +581,7 @@ pub fn session_query_sources(
     key: &str,
 ) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selected = query_selection(&tx, key)?;
     if selected.incomplete {
         return Err(io::Error::new(
@@ -691,7 +695,7 @@ pub(crate) fn local_query_inputs(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((_, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -725,7 +729,7 @@ pub(crate) fn local_query_target(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((key, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -808,8 +812,9 @@ pub(crate) fn candidates_after(
             "Invalid overview migration batch",
         ));
     }
-    let db = connection(options)?;
-    // Older schemas migrate through their owning producer, never raw SQL here.
+    let mut connection = connection(options)?;
+    let db = transaction(&mut connection, options)?;
+    // Current-format selected candidates share this admitted read snapshot.
     if !db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_catalog')",
@@ -869,7 +874,7 @@ pub fn repair_session_overview_with_control(
         ));
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = selection(&tx, key)?;
     let rows = selection.rows;
     if ready(&tx, &rows[0])? {
@@ -1376,7 +1381,7 @@ pub(crate) fn with_query<T>(
     let _scope = crate::selected_read::Scope::ensure();
     crate::selected_read::check()?;
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = query_selection(&tx, key)?;
     if selection.incomplete {
         return Err(io::Error::new(
@@ -1406,7 +1411,7 @@ pub(crate) fn with_query<T>(
         crate::model::query_history(options, &rows, native, now)
     })?;
     let result = read(data);
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let current = query_selection(&tx, key)?;
     let footprint = |rows: &[CatalogRow]| -> BTreeMap<_, _> {
         rows.iter()
