@@ -2200,6 +2200,8 @@ impl SourceObservationStore for SqliteStore {
     fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
         let cached = self.discovery.recovery.take();
         if !self.connection.is_autocommit() {
+            #[cfg(test)]
+            eprintln!("source recovery refusal=recovery_is_current_open_transaction");
             self.discovery.publication = None;
             return Err(StorageError::Unavailable);
         }
@@ -2248,6 +2250,8 @@ impl SourceObservationStore for SqliteStore {
         }
         self.discovery.recovery = None;
         if !self.connection.is_autocommit() {
+            #[cfg(test)]
+            eprintln!("source recovery refusal=recover_open_transaction");
             self.discovery.publication = None;
             return Err(StorageError::Unavailable);
         }
@@ -2281,7 +2285,11 @@ impl SourceObservationStore for SqliteStore {
         let applied = current.as_deref() == cursor;
         let before = tx.total_changes();
         let done = if applied {
-            recovery_page(&tx).map_err(|_| StorageError::Unavailable)?
+            recovery_page(&tx).map_err(|_error| {
+                #[cfg(test)]
+                eprintln!("source recovery refusal=recovery_page");
+                StorageError::Unavailable
+            })?
         } else {
             false
         };
