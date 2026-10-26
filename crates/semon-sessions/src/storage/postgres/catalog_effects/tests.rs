@@ -7,7 +7,6 @@ use crate::{
             tests::{fixture, ns},
             txn::TxnKind,
         },
-        sqlite::publication::{CurrentWriter, SlotWriter},
     },
 };
 use std::{fs, time::Duration};
@@ -419,44 +418,15 @@ fn build_oracle(keep_raw: bool) -> Input {
         crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
     assert!(!prepared.rows.is_empty());
     assert!(!prepared.transcripts.is_empty());
-    drop(cache);
-    // Reopen the same current native profile through its admitted owner.  The
-    // oracle must exercise the namespace-keyed publisher, rather than the
-    // transitional unbound port whose conflict keys are deliberately absent
-    // from the current schema.
+    // Exercise the production publisher role, namespace and source/claim CAS.
+    let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
     let config = options.source.config(&options.cache).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
-    let mut connection =
-        rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
-    let db = connection.transaction().unwrap();
-    let writer = CurrentWriter::admitted(&db, &admission).unwrap();
-    for row in &prepared.rows {
-        writer
-            .current(row, &serde_json::to_string(row).unwrap())
-            .unwrap();
-        catalog::publish_current_sources(&writer, row).unwrap();
-        if let Some(trace) = &row.trace {
-            crate::causal_trace::publish_with_store(
-                &crate::storage::sqlite::trace::TraceWriter::owned(&db, &owner).unwrap(),
-                row,
-                trace,
-            )
-            .unwrap();
-        }
-    }
-    catalog::publish_slot_rows(
-        &SlotWriter::admitted(&db, &admission).unwrap(),
-        &prepared.rows,
-        &prepared.transcripts,
-    )
-    .unwrap();
-    crate::catalog_search::publish_current_rows_with_store(
-        &db,
-        &prepared.rows.iter().collect::<Vec<_>>(),
-        &crate::storage::sqlite::search::SearchWriter::admitted(&db, &admission).unwrap(),
-    )
-    .unwrap();
+    let connection = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
+    let db = &connection;
     let read = |sql: &str| {
         db.prepare(sql)
             .unwrap()
@@ -465,20 +435,19 @@ fn build_oracle(keep_raw: bool) -> Input {
             .map(|r| r.unwrap().into_bytes())
             .collect::<Vec<_>>()
     };
-    let metadata = read("SELECT metadata FROM session_catalog ORDER BY session_key");
-    let slots = read("SELECT metadata FROM session_slots ORDER BY session_key,slot");
+    let metadata = read("SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
+    let slots = read("SELECT metadata FROM session_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
     let search = read(
-        "SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents ORDER BY read_scope,session_key",
+        "SELECT json_array(read_scope,session_key,json(fields),complete) FROM session_search_documents WHERE namespace=semon_namespace() ORDER BY read_scope,session_key",
     );
     let trace = [
-        "SELECT metadata FROM session_trace_headers ORDER BY session_key",
-        "SELECT metadata FROM session_trace_turns ORDER BY session_key,turn_id",
-        "SELECT metadata FROM session_trace_edges ORDER BY session_key,edge_id",
+        "SELECT metadata FROM session_trace_headers WHERE namespace=semon_namespace() ORDER BY session_key",
+        "SELECT metadata FROM session_trace_turns WHERE namespace=semon_namespace() ORDER BY session_key,turn_id",
+        "SELECT metadata FROM session_trace_edges WHERE namespace=semon_namespace() ORDER BY session_key,edge_id",
     ]
     .iter()
     .map(|sql| read(sql))
     .collect();
-    db.execute_batch("SAVEPOINT composite_oracle").unwrap();
     let mut missing = prepared.rows.clone();
     for row in &mut missing {
         row.sources.clear();
@@ -491,21 +460,36 @@ fn build_oracle(keep_raw: bool) -> Input {
             repair: false,
         })
         .collect::<Vec<_>>();
-    let history = crate::storage::sqlite::history::OriginalHistory::unbound(&db);
-    catalog::publish_history_rows(&history, &missing, Some(&missing_recipes)).unwrap();
-    let composite = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
-    let composite_slots =
-        read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
-    db.execute_batch("ROLLBACK TO composite_oracle; RELEASE composite_oracle")
+    // Missing-source replacement and original custody share the ordinary
+    // publication lifecycle. Never reopen a physical writer without its role.
+    let missing_generation = cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &missing,
+                transcripts: Some(&missing_recipes),
+            },
+            generation.as_deref(),
+        )
         .unwrap();
-    for row in &prepared.rows {
-        assert!(catalog::preserve_original(&history, row).unwrap());
-    }
-    let original = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
+    assert!(missing_generation.is_some());
+    let composite = read("SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
+    let composite_slots =
+        read("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
+    let restored_generation = cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+            },
+            missing_generation.as_deref(),
+        )
+        .unwrap();
+    assert!(restored_generation.is_some());
+    let original = read("SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key");
     let original_slots =
-        read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
+        read("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot");
     assert!(!slots.is_empty());
-    drop(db);
+    drop(cache);
     drop(connection);
     if !keep_raw {
         fs::remove_dir_all(&root).unwrap();
