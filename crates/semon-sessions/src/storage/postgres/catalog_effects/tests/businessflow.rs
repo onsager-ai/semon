@@ -1648,4 +1648,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some(caught.as_str()));
+    // Restart continues from the successor; the readers' retained proofs
+    // still serve the old selected bodies exactly.
+    drop(catchup);
+    let reopened =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        reopened.session_catalog_generation().as_deref(),
+        Some(caught.as_str())
+    );
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies,
+        "old selected bodies after a connected withdrawal and restart"
+    );
 }
