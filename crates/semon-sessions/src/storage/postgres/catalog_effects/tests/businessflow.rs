@@ -306,21 +306,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let fields = expected
                 .rows
                 .iter()
-                .filter(|row| {
-                    oracle_recent[since]["sessions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|session| session["id"] == row.key)
-                })
                 .map(|row| {
                     let fields = query
                         .call_at(
                             "get_session",
                             &serde_json::json!({"id":row.key}),
                             recent_now,
-                        )
-                        .expect("SQLite recent-window selected fields");
+                        );
                     (row.key.clone(), fields)
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
@@ -1115,8 +1107,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     recent_now,
                     &store,
                     &retained_host,
-                )
-                .expect("PG recent-window selected fields");
+                );
             assert_eq!(
                 &fields, expected,
                 "recent-window selected fields {since:?} {key}"
