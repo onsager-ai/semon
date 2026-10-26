@@ -103,13 +103,12 @@ retained metadata. They never inherit writer liveness or archive read authority.
 Parser 29 qualifies those lifecycle facts; current-source tree repair restores
 them from verified source slices without importing retired Semon storage.
 
-Semon reads only its current schema and parser contract. Normal writable
-producers discard recognized obsolete derived indexes and rebuild from supported
-native sources under the [current storage contract](session-source-reader.md#current-semon-storage-contract).
-This also discards obsolete derived references, recipes and proof metadata;
-archive objects and native bytes remain untouched. Missing original source bytes
-cannot be reconstructed from a discarded index. Future, foreign and ambiguous
-stores remain refused without reset; focused readers never invalidate storage.
+Semon reads only its current schema and parser contract. Producers and focused
+readers refuse unsupported existing state without reset under the
+[current storage contract](session-source-reader.md#current-semon-storage-contract).
+Retained references, recipes, proofs, reported facts and archive custody remain
+untouched, including when original native bytes are absent. Fresh empty stores
+initialize; current stores reopen without repair DDL.
 Physical-corruption recovery is unchanged. Unsupported individual recipe versions
 in a current store remain explicitly unavailable; they are never interpreted as
 current versions.
@@ -123,7 +122,7 @@ global producer work. This change protects provenance and bounds indexed reads;
 it does not claim that the subsequent dirty-lineage producer is complete.
 
 Current verification covers cold initialization, incremental writes and restart,
-obsolete-index rebuild, future/foreign version refusal without changing original
+unsupported-state refusal, current-store concurrent reopen without changing original
 bytes or custody, native source
 reappearance, interrupted lifecycle retirement with the dirty observation still
 pending, and provider-rendered ranges when local source ledgers are absent.

@@ -3329,7 +3329,6 @@ enum Init {
     Ready,
     NoWal,
     Fresh,
-    Obsolete,
     Unsupported(&'static str),
 }
 
@@ -4439,7 +4438,7 @@ impl SqliteStore {
             .map_err(classify)?;
             db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
             let read = db.unchecked_transaction().map_err(classify)?;
-            if let Init::Unsupported(reason) = qualify_producer(&read).map_err(classify)? {
+            if let Init::Unsupported(reason) = qualify(&read).map_err(classify)? {
                 return Err(Unopened::Unsupported(reason.into()));
             }
             read.commit().map_err(classify)?;
@@ -4468,7 +4467,7 @@ impl SqliteStore {
                 ));
             }
             Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
-            Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
+            Init::Fresh => unreachable!("init initializes fresh storage"),
         }
         // Validate/cache the committed layout before the first writer
         // transaction. A transaction may reuse this cookie but must not cache
@@ -5091,6 +5090,13 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
     if crate::storage::sqlite::namespace::is_bound(connection)? {
         return Ok(Init::Unsupported("namespace writer upgrade is pending"));
     }
+    let application: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if application != 0 {
+        return Ok(Init::Unsupported(
+            "unsupported session index: application id",
+        ));
+    }
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
         let nonempty: bool =
@@ -5178,6 +5184,23 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Unsupported(
             "unsupported session index: publication version",
         ));
+    }
+    if !current_objects_present(connection)? {
+        return Ok(Init::Unsupported(
+            "unsupported session index: missing current schema object",
+        ));
+    }
+    for sql in [
+        "SELECT namespace,operation_id,payload_digest,outcome,recovery_done FROM source_observation_receipts LIMIT 0",
+        "SELECT sequence,namespace,operation_id,payload_digest,payload FROM source_observation_intents LIMIT 0",
+    ] {
+        if let Err(error) = connection.prepare(sql) {
+            return malformed_schema(error);
+        }
+    }
+    let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Ok(Init::Unsupported("unsupported session index: journal mode"));
     }
     Ok(Init::Ready)
 }
@@ -5374,213 +5397,63 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 22], DdlProf
     ])
 }
 
-/// Cold initialization and whole-index rebuilds retain their exact default DDL.
+/// The current default producer's cold-initialization DDL.
 fn storage_ddl() -> [&'static str; 22] {
     authored_storage_ddl(PhysicalLayout::default()).expect("authored singleton profile")
 }
 
-/// Recognize ownership without reading old event/proof/recipe payloads. Refuse
-/// mixed databases: no unknown tables, views or triggers may be discarded.
-/// The three retired table names are ownership evidence, never old-schema DDL.
-type OwnedObjects = Vec<(String, String)>;
-
-fn owned_objects(connection: &Connection) -> rusqlite::Result<Option<OwnedObjects>> {
-    let objects = connection
-        .prepare("SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type DESC,name LIMIT 513")?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if objects.len() > 512 {
-        return Ok(None);
-    }
-    let declared = |kind: &str, name: &str| {
-        let prefix = format!("CREATE {kind} IF NOT EXISTS ");
-        storage_ddl().iter().any(|ddl| {
-            ddl.split(prefix.as_str()).skip(1).any(|tail| {
-                tail.split(|ch: char| ch.is_whitespace() || ch == '(')
-                    .next()
-                    == Some(name)
-            })
-        })
-    };
-    let table = |name: &str| {
-        declared("TABLE", name)
-            || matches!(
-                name,
-                "native_usage_migrations" | "native_tree_copy_queue" | "session_search_postings"
-            )
-    };
-    if objects
-        .iter()
-        .any(|(kind, name, owner)| match kind.as_str() {
-            "table" => !table(name),
-            "index" => !table(owner),
-            "trigger" => !table(owner) || !declared("TRIGGER", name),
-            _ => true,
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        objects
-            .into_iter()
-            .filter_map(|(kind, name, _)| {
-                matches!(kind.as_str(), "table" | "trigger").then_some((kind, name))
-            })
-            .collect(),
-    ))
-}
-
-fn contract_number(value: &str) -> Option<u32> {
-    let number = value.parse::<u32>().ok()?;
-    (number > 0 && value == number.to_string()).then_some(number)
-}
-
-/// Only producers can turn an obsolete, positively recognized Semon contract
-/// into a fresh index. Every known version must be readable and <= current;
-/// a single newer/unrecognized contract wins over any older contract.
-fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
-    if crate::storage::sqlite::namespace::is_bound(connection)? {
-        return Ok(Init::Unsupported("namespace writer upgrade is pending"));
-    }
-    let found = qualify(connection)?;
-    if !matches!(found, Init::Unsupported(_)) {
-        return Ok(found);
-    }
-    let schema: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let application: i64 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    if schema <= 0 || schema > SCHEMA_VERSION || application != 0 {
-        return Ok(found);
-    }
-    // These stable columns and the canonical parser key are the evidence
-    // existing Semon databases already wrote; no new marker is required.
-    for sql in [
-        "SELECT key,value FROM meta LIMIT 0",
-        "SELECT file_id,path,dev,ino,resume_at,head_sha256,tail_sha256 FROM files LIMIT 0",
-        "SELECT file_id,extra,seq,k,o,b FROM events LIMIT 0",
-    ] {
-        if let Err(error) = connection.prepare(sql) {
-            return match malformed_schema(error)? {
-                Init::Unsupported(_) => Ok(found),
-                _ => unreachable!(),
-            };
-        }
-    }
-    let mut obsolete = schema < SCHEMA_VERSION;
-    for (key, current, required) in [
-        ("cache_version", CACHE_VERSION, true),
-        (
-            "catalog_version",
-            crate::model::summary::CATALOG_VERSION,
-            false,
-        ),
-        (
-            "search_version",
-            contract_number(crate::catalog_search::VERSION).expect("current search version"),
-            false,
-        ),
-    ] {
-        let value: Option<String> = connection
-            .query_row(
-                configured::metadata_sql(connection, "SELECT value FROM meta WHERE key=?1 AND octet_length(value)<=32", "SELECT value FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1 AND octet_length(value)<=32")?,
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(value) = value else {
-            // Oversized values are not absent metadata.
-            let present: bool = connection.query_row(
-                configured::metadata_sql(connection, "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1)")?,
-                [key],
-                |row| row.get(0),
-            )?;
-            if required || present {
-                return Ok(found);
+/// Check the fixed current object inventory without reading source/history rows
+/// or executing repair DDL. Physical family validators qualify their columns
+/// and keys separately; namespace-leading families are current adapter work.
+fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
+    static INVENTORY: OnceLock<String> = OnceLock::new();
+    let sql = INVENTORY.get_or_init(|| {
+        let mut objects = std::collections::BTreeSet::new();
+        for ddl in storage_ddl() {
+            for (kind, prefix) in [
+                ("table", "CREATE TABLE IF NOT EXISTS "),
+                ("index", "CREATE INDEX IF NOT EXISTS "),
+                ("index", "CREATE UNIQUE INDEX IF NOT EXISTS "),
+                ("trigger", "CREATE TRIGGER IF NOT EXISTS "),
+            ] {
+                for tail in ddl.split(prefix).skip(1) {
+                    let name = tail
+                        .split(|ch: char| ch.is_whitespace() || ch == '(')
+                        .next()
+                        .unwrap_or_default();
+                    objects.insert(format!("('{kind}','{}')", name.replace('\'', "''")));
+                }
             }
-            continue;
-        };
-        let Some(version) = contract_number(&value) else {
-            return Ok(found);
-        };
-        if version > current {
-            return Ok(found);
         }
-        obsolete |= version < current;
-    }
-    let recipe: Option<Option<String>> = connection.query_row(
-        configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe'")?, [], |row| row.get(0),
-    ).optional()?;
-    if let Some(recipe) = recipe {
-        let Some((family, current)) =
-            semantic_stage::RECIPE
-                .rsplit_once("-v")
-                .and_then(|(family, version)| {
-                    contract_number(version).map(|version| (family, version))
-                })
-        else {
-            return Ok(found);
-        };
-        let stored = recipe.as_deref().and_then(|text| {
-            let (stored_family, version) = text.rsplit_once("-v")?;
-            Some((stored_family, contract_number(version)?))
-        });
-        // A different recipe is unsupported, not authority to rebuild or
-        // upgrade historical semantic state under the current producer.
-        if stored != Some((family, current)) {
-            return Ok(found);
-        }
-    }
-    // Inspect only format numbers, never old archive payloads or source bytes.
-    let (invalid, older): (bool, bool) = connection.query_row(
-        configured::metadata_sql(connection, "SELECT COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN CASE WHEN json_type(value,'$.version')='integer' AND json_extract(value,'$.version') BETWEEN 1 AND 6 AND ((json_extract(value,'$.version')<6 AND json_type(value,'$.parser_version') IS NULL) OR (json_type(value,'$.parser_version')='integer' AND json_extract(value,'$.parser_version') BETWEEN 1 AND ?1)) THEN 0 ELSE 1 END ELSE 1 END),0), COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN json_extract(value,'$.version')<6 OR json_extract(value,'$.parser_version')<?1 ELSE 0 END),0) FROM meta WHERE key GLOB 'archive_event_index:*'", "SELECT COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN CASE WHEN json_type(value,'$.version')='integer' AND json_extract(value,'$.version') BETWEEN 1 AND 6 AND ((json_extract(value,'$.version')<6 AND json_type(value,'$.parser_version') IS NULL) OR (json_type(value,'$.parser_version')='integer' AND json_extract(value,'$.parser_version') BETWEEN 1 AND ?1)) THEN 0 ELSE 1 END ELSE 1 END),0), COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN json_extract(value,'$.version')<6 OR json_extract(value,'$.parser_version')<?1 ELSE 0 END),0) FROM meta WHERE namespace=semon_namespace() AND key GLOB 'archive_event_index:*'")?,
-        [CACHE_VERSION], |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if invalid {
-        return Ok(found);
-    }
-    obsolete |= older;
-    if obsolete && owned_objects(connection)?.is_some() {
-        Ok(Init::Obsolete)
-    } else {
-        Ok(found)
-    }
+        format!(
+            "SELECT count(*)={} FROM sqlite_schema WHERE (type,name) IN (VALUES {})",
+            objects.len(),
+            objects.into_iter().collect::<Vec<_>>().join(",")
+        )
+    });
+    connection
+        .prepare_cached(sql)?
+        .query_row([], |row| row.get(0))
 }
 
-/// Reclassify inside SQLite's writer lock. Reset and current DDL commit as one
-/// transaction: WAL readers keep their old snapshots; producers cannot reset a
-/// store that another producer has already rebuilt. No files are unlinked.
+/// Initialize only a fresh store; requalify under the writer lock.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
     let read = connection.transaction()?;
-    let found = qualify_producer(&read)?;
+    let found = qualify(&read)?;
     read.commit()?;
     if matches!(found, Init::Unsupported(_)) {
         return Ok(found);
     }
     let fresh = matches!(found, Init::Fresh);
-    let rebuild = matches!(found, Init::Obsolete);
     let mut initialized = false;
-    if fresh || rebuild {
-        if fresh {
-            // Cold initialization retains exclusion through the first WAL switch.
-            connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
-        }
+    if fresh {
+        // Cold initialization retains exclusion through the first WAL switch.
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match qualify_producer(&transaction)? {
-            state @ (Init::Fresh | Init::Obsolete) => {
-                if matches!(state, Init::Obsolete) {
-                    let Some(objects) = owned_objects(&transaction)? else {
-                        return Ok(Init::Unsupported(
-                            "unsupported session index: ambiguous ownership",
-                        ));
-                    };
-                    // Triggers precede tables; indexes disappear with their table.
-                    for (kind, name) in objects {
-                        let quoted = name.replace('"', "\"\"");
-                        transaction.execute_batch(&format!("DROP {kind} \"{quoted}\""))?;
-                    }
-                }
+        match qualify(&transaction)? {
+            Init::Fresh => {
                 for ddl in storage_ddl() {
                     transaction.execute_batch(ddl)?;
                 }
@@ -5596,9 +5469,6 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         }
         transaction.commit()?;
     }
-    if !initialized {
-        connection.execute_batch(SOURCE_OBSERVATION_RECEIPTS_SCHEMA)?;
-    }
     #[cfg(test)]
     if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
         hook();
@@ -5608,7 +5478,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     }
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh || rebuild {
+        return Ok(if fresh {
             Init::NoWal
         } else {
             Init::Unsupported("unsupported session index: journal mode")
@@ -12337,6 +12207,22 @@ mod tests {
                 "nonempty schema zero",
             ),
             ("newer", "PRAGMA user_version=2147483647", "newer schema"),
+            ("older", "PRAGMA user_version=32", "older schema"),
+            (
+                "application",
+                "PRAGMA application_id=1234",
+                "application id",
+            ),
+            (
+                "missing-index",
+                "DROP INDEX session_catalog_current_order",
+                "missing current schema object",
+            ),
+            (
+                "missing-journal",
+                "DROP TABLE source_observation_receipts",
+                "missing current schema object",
+            ),
             (
                 "foreign",
                 "DROP TABLE events; DROP TABLE files",
@@ -12479,6 +12365,10 @@ mod tests {
             fail(SqliteStore::attempt_scoped(&path, true));
             unchanged();
             if name != "archive" {
+                assert!(
+                    SqliteStore::attempt_selected(&path).is_err(),
+                    "selected {name}"
+                );
                 assert!(focused_connection(&path).is_err(), "focused {name}");
             } else {
                 let db = focused_connection(&path).unwrap();
@@ -12526,244 +12416,151 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_producer_contracts_rebuild_once_and_keep_focused_reads_read_only() {
-        for change in [
-            "PRAGMA user_version=32",
-            "PRAGMA user_version=1",
-            "UPDATE meta SET value='1' WHERE key='cache_version'",
-            "INSERT INTO meta VALUES('catalog_version','1')",
-            "INSERT INTO meta VALUES('search_version','1')",
-            "INSERT INTO meta VALUES('archive_event_index:old','{\"version\":1}')",
-            "CREATE TABLE native_usage_migrations(source_path TEXT); PRAGMA user_version=31",
-        ] {
-            for scoped in [false, true] {
-                let root = scratch("obsolete-contract");
-                let cache = root.join("index.json");
-                let path = cache.with_extension("sqlite3");
-                let (mut old, _) = opened(&path);
-                old.write_one("obsolete", None, None, &ledger(1), &full())
-                    .unwrap();
-                old.write_runs(&[run()], &stamp()).unwrap();
-                old.connection.execute_batch(change).unwrap();
-                old.connection
-                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .unwrap();
-                drop(old);
-                let original = fs::read(&path).unwrap();
-                if change.contains("archive_event_index") {
-                    let reader = focused_connection(&path).unwrap();
-                    assert!(archived_index(&reader, "old").is_err());
-                } else {
-                    assert!(focused_connection(&path).is_err(), "{change}");
-                    assert!(SqliteStore::attempt_selected(&path).is_err(), "{change}");
-                }
-                assert_eq!(fs::read(&path).unwrap(), original);
-                let producer = if scoped {
-                    super::super::EventCache::open_scoped(&cache)
-                } else {
-                    super::super::EventCache::open(&cache)
-                }
-                .unwrap();
-                drop(producer);
-                let (mut current, loaded) = opened(&path);
-                assert!(
-                    loaded.files.is_empty() && loaded.reported_runs.is_empty(),
-                    "{change}"
-                );
-                assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
-                current
-                    .write_one("fresh", None, None, &ledger(2), &full())
-                    .unwrap();
-                drop(current);
-                let (_, loaded) = opened(&path);
-                assert_eq!(loaded.files.len(), 1, "restart must not reset: {change}");
-                assert_eq!(loaded.files[0].0, "fresh");
-                fs::remove_dir_all(root).unwrap();
+    fn unsupported_store_preserves_live_wal_and_retained_facts() {
+        let root = scratch("unsupported-live-wal");
+        let path = root.join("index.sqlite3");
+        let raw = root.join("native.jsonl");
+        fs::write(&raw, b"authoritative native bytes\n").unwrap();
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        store
+            .write_one("retained", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_history_catalog VALUES('retained','retained custody')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta VALUES('archive-custody','independent authority')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
+        let paths = [
+            path.clone(),
+            sibling(&path, "-wal"),
+            sibling(&path, "-shm"),
+            raw,
+        ];
+        let state = catalog_state(&store.connection);
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        for scoped in [false, true] {
+            assert!(matches!(
+                SqliteStore::attempt_scoped(&path, scoped),
+                Err(Unopened::Unsupported(_))
+            ));
+            for (path, bytes) in paths.iter().zip(&before) {
+                let actual = fs::read(path).unwrap();
+                assert_eq!(Sha256::digest(&actual), Sha256::digest(bytes));
+                assert_eq!(&actual, bytes);
             }
         }
-    }
-
-    #[test]
-    fn obsolete_reset_refuses_foreign_databases_and_waits_for_the_sqlite_writer() {
-        let root = scratch("obsolete-ownership-and-lock");
-        let foreign = root.join("foreign.sqlite3");
-        let db = Connection::open(&foreign).unwrap();
-        db.execute_batch("CREATE TABLE private(secret TEXT); INSERT INTO private VALUES('preserve'); PRAGMA user_version=1").unwrap();
-        drop(db);
-        let original = fs::read(&foreign).unwrap();
-        assert!(matches!(
-            SqliteStore::attempt(&foreign),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&foreign, true),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert_eq!(fs::read(&foreign).unwrap(), original);
-        let path = root.join("owned.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
-            .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        old.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let original = catalog_state(&old.connection);
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&path, true),
-            Err(Unopened::Other(_))
-        ));
-        assert_eq!(catalog_state(&old.connection), original);
-        old.connection.execute_batch("ROLLBACK").unwrap();
-        let (_, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        drop(old);
+        assert!(SqliteStore::attempt_selected(&path).is_err());
+        assert!(focused_connection(&path).is_err());
+        for (path, bytes) in paths.iter().zip(&before) {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(catalog_state(&store.connection), state);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM reported_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT metadata FROM session_history_catalog", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "retained custody"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key='archive-custody'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "independent authority"
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn obsolete_reset_preserves_wal_snapshots_and_serializes_concurrent_producers() {
-        let root = scratch("obsolete-wal");
+    fn current_reopen_keeps_wal_reader_and_concurrent_publication() {
+        let root = scratch("current-wal-reopen");
         let path = root.join("index.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
+        let (mut store, _) = opened(&path);
+        store
+            .write_one("original", None, None, &ledger(1), &full())
             .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let reader = focused_connection(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         assert_eq!(
             reader
-                .query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             1
         );
-        assert!(!fs::read(sibling(&path, "-wal")).unwrap().is_empty());
-        // A second producer finishes while the first is between its read-only
-        // qualification and locked initialization. Reclassification must spare
-        // the second producer's newly committed rows.
         let other_path = path.clone();
         BEFORE_STORAGE_INIT.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 std::thread::spawn(move || {
                     let (mut other, _) = opened(&other_path);
                     other
-                        .write_one("fresh", None, None, &ledger(2), &full())
+                        .write_one("concurrent", None, None, &ledger(2), &full())
                         .unwrap();
                 })
                 .join()
                 .unwrap();
             }));
         });
-        let (mut current, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].0, "fresh");
+        let (current, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 2);
         assert_eq!(
             reader
-                .query_row("SELECT path FROM files", [], |r| r.get::<_, String>(0))
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            "obsolete"
+            1
         );
+        reader.execute_batch("ROLLBACK").unwrap();
         assert_eq!(
-            old.write_one("obsolete", Some(&ledger(1)), None, &ledger(2), &full())
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            Outcome::Conflict
+            2
         );
         assert_eq!(
             current
-                .write_one("fresh", Some(&ledger(2)), None, &ledger(3), &full())
+                .connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
                 .unwrap(),
-            Outcome::Written
+            "ok"
         );
-        reader.execute_batch("ROLLBACK").unwrap();
         drop(reader);
-        drop(old);
         drop(current);
+        drop(store);
         let (_, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].1, ledger(3));
+        assert_eq!(loaded.files.len(), 2);
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn obsolete_index_rebuilds_native_catalog_history_and_selected_transcripts() {
-        for scoped in [false, true] {
-            let root = scratch("obsolete-native");
-            let (options, rows, _) = catalog_native_fixture(&root, 2, true);
-            let originals = rows
-                .iter()
-                .flat_map(|row| &row.sources)
-                .map(|source| (source.path.clone(), fs::read(&source.path).unwrap()))
-                .collect::<Vec<_>>();
-            let untouched = [
-                root.join("archive-object"),
-                root.join("credentials"),
-                root.join("seed.tree.json"),
-                root.join("unrelated.sqlite3"),
-            ];
-            for file in &untouched {
-                fs::write(file, b"retain exact original bytes").unwrap();
-            }
-            let path = super::super::EventCache::path(&options.cache);
-            let db = Connection::open(&path).unwrap();
-            db.pragma_update(None, "user_version", 32).unwrap();
-            drop(db);
-            let producer = if scoped {
-                super::super::EventCache::open_scoped(&options.cache)
-            } else {
-                super::super::EventCache::open(&options.cache)
-            }
-            .unwrap();
-            drop(producer);
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-            let complete = (0..128).any(|_| {
-                evidence
-                    .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.work),
-                        CATALOG_FIXTURE_NOW,
-                    )
-                    .unwrap()
-            });
-            evidence.retire();
-            assert!(complete);
-            for row in &rows {
-                assert!(
-                    crate::session_catalog_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-                assert!(
-                    crate::session_catalog_history_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-            }
-            let reply = crate::session_transcript_range_with_mode(
-                &options,
-                "source",
-                "sid=native-cx-01&after=0&limit=2",
-                None,
-                crate::SessionSourceReadMode::LocalOrPinnedProvider,
-            );
-            assert_eq!(
-                reply.status,
-                200,
-                "{}",
-                String::from_utf8_lossy(&reply.body)
-            );
-            for (file, bytes) in originals {
-                assert_eq!(fs::read(file).unwrap(), bytes);
-            }
-            for file in untouched {
-                assert_eq!(fs::read(file).unwrap(), b"retain exact original bytes");
-            }
-            let (store, loaded) = opened(&path);
-            assert_eq!(loaded.files.len(), 2);
-            assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
-            drop(store);
-            fs::remove_dir_all(root).unwrap();
-        }
     }
 
     #[test]

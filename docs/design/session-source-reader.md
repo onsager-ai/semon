@@ -266,35 +266,24 @@ request admission, a deadline and the existing Catalog publication coordinator.
 The Event Index initializes schema 33 with parser/cache version 29 in one
 transaction, including pricing fingerprints and native usage readiness default
 0. Schema 33 fences the retired proof/tree/usage representations as one contract.
-Normal writable producer opens (complete and scoped/background) automatically
-clear a recognized obsolete Semon index and initialize the current empty schema;
-normal native collection then reindexes supported original sources. This is
-whole-index invalidation, with no old-schema reader, conversion or migration.
+Producer and selected-reader opens accept only the current contract. A fresh
+empty database initializes atomically; an existing unsupported schema, parser,
+publication or archive contract is refused before schema, journal or recovery
+writes. There is no historical classifier, upgrade, reset or automatic rebuild.
+Current required tables, indexes and triggers, loader columns, application ID
+and WAL journal mode are qualified before admission. Selected readers inspect
+only the current contract and their selected archive marker, preserving bounded
+work under unrelated retained history.
 
-Recognition requires Semon's existing canonical parser metadata, stable
-`files`/`events` columns and an exclusively Semon-owned table/trigger namespace.
-At least one recognized schema, parser, publication/search, semantic recipe or
-archive-marker version must be older, and none may be newer or unrecognized.
-The current DDL and the retired `native_usage_migrations`,
-`native_tree_copy_queue` and `session_search_postings` table names delimit the
-owned namespace; unknown tables/views/triggers make ownership ambiguous.
-Nonempty schema zero, missing/malformed metadata, ambiguous or foreign databases,
-and future contracts remain refused without reset. Selected/focused readers
-retain their existing read-only qualification and never trigger invalidation.
+Refusal preserves native bytes, retained history, reported facts, archive
+custody and foreign state. It never turns unavailable originals into empty
+history. Current-format cross-engine transfer, catch-up, fenced cutover and
+qualified rollback remain separate requirements of #477.
 
-Reset and empty initialization share one SQLite immediate writer transaction,
-with reclassification under the lock. Concurrent producers cannot reset a newly
-rebuilt store again; existing WAL readers keep their prior snapshots. No index,
-WAL or SHM file is unlinked, and existing private-file handling remains in place.
-Only the exact configured SQLite derived index is cleared. Native logs, archive
-objects, credentials, unrelated files and retired JSON caches remain untouched.
+Fresh initialization retains exclusion through its first WAL switch, then
+reopens with normal locking. Valid current stores reopen without repair DDL;
+existing WAL readers retain their snapshots during concurrent publication.
 Physical corruption retains its existing set-aside/recovery behavior.
-
-Reindexing cannot recover history, retained recipes or reported facts whose
-original supported native source bytes are gone or inaccessible. Archive bytes
-are preserved but old derived archive markers are not converted into new read
-authority; an authorized source/provider must supply supported original bytes.
-Unsupported stores still propagate errors rather than empty in-memory history.
 
 Current native usage writes persist the normalized source facts and dimensions
 with the ledger. Tree writes maintain copied-usage identities through the current
