@@ -448,6 +448,10 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
         Category::Slots,
         Category::Trace,
         Category::Search,
+        Category::Operations,
+        Category::Proofs,
+        Category::ProofReferences,
+        Category::Metadata,
     ] {
         assert_eq!(
             manifest

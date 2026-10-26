@@ -14,6 +14,36 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "semantic_publications",
+        columns: "generation bytea,epoch bigint,admission bigint,base_generation bytea?,source_revision bigint,proof_digest bytea,claims bytea,metadata bytea",
+        key: "epoch",
+    },
+    Table {
+        name: "selected_roots",
+        columns: "publication bytea,base bytea,manifest bytea,digest bytea",
+        key: "digest",
+    },
+    Table {
+        name: "selected_generations",
+        columns: "id bytea,key_digest bytea,session_key bytea,publication bytea,proof bytea,admission bigint,stream bytea,metadata bytea,slots bytea,prefix bytea",
+        key: "id,key_digest",
+    },
+    Table {
+        name: "selected_presentations",
+        columns: "id bytea,key_digest bytea,session_key bytea,metadata bytea",
+        key: "id,key_digest",
+    },
+    Table {
+        name: "selected_sources",
+        columns: "id bytea,key_digest bytea,session_key bytea,path_digest bytea,path bytea,ledger bytea",
+        key: "id,key_digest,path_digest",
+    },
+    Table {
+        name: "selected_refs",
+        columns: "key_digest bytea,session_key bytea,kind bytea,id bytea",
+        key: "key_digest,kind,id",
+    },
+    Table {
         name: "change_feed",
         columns: "read_scope bytea,revision bigint,session_key bytea",
         key: "read_scope,revision",
