@@ -2168,6 +2168,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         root: crate::InputRoot::Claude,
         path: "sessions/4242.json".into(),
     };
+    assert!(
+        crate::native_evidence::query_runtime_generation(&options).unwrap() == stage_runtime,
+        "the local runtime changed before the recorded PID mutation"
+    );
     fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
     let pid_write = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -2187,6 +2191,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .sync_all()
         .unwrap();
     pid_write.complete(pid_bytes.len() as u64).unwrap();
+    assert!(
+        crate::native_evidence::query_runtime_generation(&options).unwrap() != stage_runtime,
+        "the shared PID mutation must invalidate the old local runtime witness"
+    );
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
     let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded).unwrap();
