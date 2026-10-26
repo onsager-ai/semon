@@ -3531,7 +3531,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("index.sqlite3");
         let mut connection = super::super::current_search_test_connection(
-            &path, &crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap(),
+            &path,
+            &crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap(),
         );
         connection.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,runtime,revision) VALUES(semon_namespace(),1,7,'indexing','runtime',0)",[]).unwrap();
         for harness in ["claude", "codex"] {
