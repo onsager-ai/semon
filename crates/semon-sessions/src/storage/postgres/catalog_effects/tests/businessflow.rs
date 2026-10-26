@@ -1184,10 +1184,234 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     let facts_store=super::super::snapshot::query::QueryCatalog {pool:pool.clone(),namespace:namespace.clone(),control:control.clone(),generation:facts_generation,options:facts_options.clone()};
-    let mut facts_query=crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(),facts_options)])));
+    let mut facts_query=crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(),facts_options.clone())])));
     let list=facts_query.call_bound_catalog_at("list_sessions",&serde_json::json!({}),1790812805000,&facts_store).unwrap();
     assert!(list.to_string().contains("source-write-after158"));
     assert_eq!(fs::read(&path).unwrap(),[raw[0].as_slice(),append.as_bytes(),extra.as_bytes()].concat());
     assert!(!options.cache.exists());
-
+    // (a) Ordinary incremental stages grow Current beyond 64 owners. Each
+    // stage names only its changed paths; unmentioned owners carry forward.
+    let stage_publish = |cache: &mut EventCache, inputs: &[crate::Input], at: i64| {
+        let paths = inputs
+            .iter()
+            .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        cache.begin_semantic_stage(&paths, &runtime).unwrap();
+        loop {
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            let model = cache
+                .prepare_semantic_model_batch(&facts_options, inputs, &batch, at)
+                .unwrap();
+            if batch.phase == crate::model::relation_stage::Phase::Publication {
+                let ack = cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap();
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+                break (ack.1.unwrap(), batch, model);
+            }
+        }
+    };
+    let bulk = (0..70)
+        .map(|i| {
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/bulk169-{i:03}.jsonl").into(),
+            };
+            let body = serde_json::json!({"type":"user","sessionId":format!("bulk169-{i:03}"),"uuid":format!("bulk-{i}"),"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"sanitized bulk input"}});
+            fs::write(input.full_path(&facts_options), format!("{body}\n")).unwrap();
+            input
+        })
+        .collect::<Vec<_>>();
+    for (at, input) in bulk.iter().enumerate() {
+        moved_cache
+            .ingest(
+                &format!("{:064x}", 1000 + at),
+                &input.full_path(&facts_options),
+                "claude",
+            )
+            .unwrap();
+    }
+    let mut bulk_generation = String::new();
+    for chunk in bulk.chunks(30) {
+        bulk_generation = stage_publish(&mut moved_cache, chunk, 1790812806000).0;
+    }
+    let store_at = |generation: &str| super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.to_owned(),
+        options: facts_options.clone(),
+    };
+    let total = list["total"].as_u64().unwrap() + 70;
+    assert!(total > 64);
+    let bulk_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812806000,
+            &store_at(&bulk_generation),
+        )
+        .unwrap();
+    assert_eq!(bulk_list["total"].as_u64(), Some(total));
+    assert!(bulk_list.to_string().contains("source-write-after158"));
+    let bulk_page = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &bulk_generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &facts_options,
+                "",
+                &crate::catalog::Request::parse("limit=20").unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    assert_eq!(bulk_page.status, 200);
+    // (b) A small partial update republishes one owner; every unrelated
+    // Current row, Source and proof stays byte-identical, as do Facts bytes.
+    let facts_bytes = fs::read(&facts_path).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(bulk[5].full_path(&facts_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-005","uuid":"bulk-5b","parentUuid":"bulk-5","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized bulk continuation"}})).unwrap();
+    moved_cache
+        .ingest(
+            &format!("{:064x}", 1100),
+            &bulk[5].full_path(&facts_options),
+            "claude",
+        )
+        .unwrap();
+    let (partial_generation, partial_batch, partial_model) =
+        stage_publish(&mut moved_cache, &bulk[5..6], 1790812807000);
+    assert_ne!(partial_generation, bulk_generation);
+    // Unrelated means every owner and proof not reading `path`.
+    let unrelated = |a: &str, b: &str, path: &str| {
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            let mut differences = Vec::new();
+            let owner = "session_key NOT IN (SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation IN ($2,$3) AND source_path=$4)";
+            for (table, columns, owner) in [
+                ("catalog_rows", "session_key,metadata", owner),
+                (
+                    "catalog_sources",
+                    "session_key,source_path,metadata,native_digest",
+                    owner,
+                ),
+                (
+                    "catalog_proofs",
+                    "source_path,page_generation,usage_generation,usage_ready",
+                    "source_path<>$4",
+                ),
+            ] {
+                let count: i64 = tx.driver.query_one(&format!("SELECT count(*) FROM (((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {owner}) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND {owner})) UNION ALL ((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND {owner}) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {owner}))) d"), &[&ns, &a.as_bytes(), &b.as_bytes(), &path.as_bytes()]).map_err(|_| StorageError::Unavailable)?.get(0);
+                differences.push(count);
+            }
+            Ok(differences)
+        })
+        .unwrap()
+    };
+    let changed = bulk[5].full_path(&facts_options);
+    assert_eq!(
+        unrelated(
+            &bulk_generation,
+            &partial_generation,
+            changed.to_str().unwrap()
+        ),
+        vec![0, 0, 0]
+    );
+    assert_eq!(fs::read(&facts_path).unwrap(), facts_bytes);
+    let partial_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812807000,
+            &store_at(&partial_generation),
+        )
+        .unwrap();
+    assert_eq!(partial_list["total"].as_u64(), Some(total));
+    assert!(partial_list.to_string().contains("source-write-after158"));
+    // (c) An isolated Source withdraws by bounded pages. A Source of a mixed
+    // or connected owner refuses and leaves Current untouched: removal and
+    // the owner's semantic republication are separate commits today.
+    let (mut store, _) = crate::storage::postgres::index_store::open(
+        pool.clone(),
+        namespace.clone(),
+        control.clone(),
+    )
+    .unwrap();
+    let agent = claude_agent.to_str().unwrap().to_owned();
+    let agent_ledger = store.ledger(&agent).unwrap().unwrap();
+    assert!(store.remove_files(&[(agent, Some(agent_ledger))]).is_err());
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(partial_generation.as_str())
+    );
+    let gone = bulk[1].full_path(&facts_options);
+    let gone_path = gone.to_str().unwrap().to_owned();
+    let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
+    fs::rename(&gone, oracle.root.join("retained-bulk169.jsonl")).unwrap();
+    assert_eq!(
+        store.remove_files(&gone_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let withdrawn = store.session_catalog_generation().unwrap().unwrap();
+    assert_ne!(withdrawn, partial_generation);
+    assert_eq!(
+        unrelated(&partial_generation, &withdrawn, &gone_path),
+        vec![0, 0, 0],
+        "withdrawal of an isolated owner keeps unrelated Current"
+    );
+    // A successor publication, then exact old requests replay their own
+    // recorded generations without republishing or moving the head.
+    writeln!(fs::OpenOptions::new().append(true).open(bulk[2].full_path(&facts_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-002","uuid":"bulk-2b","parentUuid":"bulk-2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized successor"}})).unwrap();
+    moved_cache
+        .ingest(
+            &format!("{:064x}", 1101),
+            &bulk[2].full_path(&facts_options),
+            "claude",
+        )
+        .unwrap();
+    let successor = stage_publish(&mut moved_cache, &bulk[2..3], 1790812808000).0;
+    assert_ne!(successor, withdrawn);
+    assert_eq!(
+        moved_cache
+            .publish_semantic_catalog(&partial_batch, partial_model.prepared())
+            .unwrap()
+            .1
+            .as_deref(),
+        Some(partial_generation.as_str())
+    );
+    assert_eq!(
+        store.remove_files(&gone_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(successor.as_str())
+    );
+    let successor_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812808000,
+            &store_at(&successor),
+        )
+        .unwrap();
+    assert_eq!(successor_list["total"].as_u64(), Some(total - 1));
+    // (d) Restart: reopened stores read the newest Current and the old
+    // selected bodies exactly as before.
+    drop(store);
+    drop(moved_cache);
+    let reopened =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        reopened.session_catalog_generation().as_deref(),
+        Some(successor.as_str())
+    );
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies,
+        "old selected bodies after incremental publication and restart"
+    );
 }
