@@ -1112,7 +1112,7 @@ mod tests {
                 cache: root.join("index.json"),
                 ..Options::default()
             };
-            drop(EventCache::open_scoped(&options.cache).unwrap());
+            drop(EventCache::open_scoped(&options.cache, &options.source).unwrap());
             let db = Connection::open(EventCache::path(&options.cache)).unwrap();
             db.execute(
                 "INSERT INTO meta VALUES('catalog_completeness','complete')",

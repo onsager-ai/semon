@@ -1285,7 +1285,7 @@ mod tests {
 
     fn catalog_probe_connection(root: &Path, name: &str) -> rusqlite::Connection {
         let stem = root.join(name);
-        drop(crate::events::EventCache::open_scoped(&stem).unwrap());
+        drop(crate::events::EventCache::open_scoped(&stem, &crate::Options::default().source).unwrap());
         // Reuse the actual initializer: synchronous and statement-cache
         // settings are connection-local, unlike the persisted WAL mode.
         let connection =

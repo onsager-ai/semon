@@ -50,7 +50,7 @@ fn configured_semantic_selected57_real_two_source_native_range_and_field_oracle(
         let lease=runtime.selected_generation(key,&id,&"7".repeat(64),60000).unwrap();
         let host=HostSourceBinding {source_key:config.namespace.as_str().into(),snapshot:lease.snapshot().clone()};
         // Independently run the normal native producer and public selected API.
-        let mut ordinary=EventCache::open_scoped(&options[i].cache).unwrap();
+        let mut ordinary=EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
         let original=crate::model::prepare_sources(&options[i],&mut ordinary,std::slice::from_ref(&inputs[i]),1_790_000_000_000).unwrap();
         ordinary.publish_catalog_projection(&crate::slot_projection::Publication{rows:&original.rows,transcripts:Some(&original.transcripts)},original.base_generation.as_deref()).unwrap();
         let query=format!("sid={key}&after=0&limit=1");
