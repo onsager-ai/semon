@@ -16,6 +16,7 @@ use crate::{
     selected_read,
     storage::{LogicalSourceNamespace, StorageError, StoreConfig},
 };
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt, io};
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ pub(crate) struct Snapshot {
     source: i64,
     control: PgCancellation,
     poisoned: bool,
+    scalar_digest: [u8; 32],
 }
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,13 +73,14 @@ impl Snapshot {
             source: 0,
             control,
             poisoned: false,
+            scalar_digest: [0; 32],
         };
         let control = snapshot.control.for_selected_read();
-        let (file, projection, source, mut summary) = snapshot
+        let (file, projection, source, mut summary, scalar_digest) = snapshot
             .pool
             .transaction(&snapshot.namespace, TxnKind::ReadSnapshot, &control, |tx| {
                 let (file, projection, source) = snapshot.authority(tx, false)?;
-                let mut summary = Summary::default();
+                let (mut summary, scalar_digest) = snapshot.scalar(tx, file, projection)?;
                 rows(
                     tx,
                     "tree_labels",
@@ -129,13 +132,15 @@ impl Snapshot {
                                     summary.tools.insert(id, name.clone());
                                 }
                             }
-                            "true" => (),
+                            "true" => {
+                                summary.closed_tools.insert(id);
+                            }
                             _ => return Err(StorageError::Unavailable),
                         }
                         Ok(())
                     },
                 )?;
-                Ok((file, projection, source, summary))
+                Ok((file, projection, source, summary, scalar_digest))
             })
             .map_err(|error| {
                 selected_read::check()
@@ -145,6 +150,7 @@ impl Snapshot {
         snapshot.file = file;
         snapshot.projection = projection;
         snapshot.source = source;
+        snapshot.scalar_digest = scalar_digest;
         summary.stored = Some(TreeCheckpoint::Pg(snapshot));
         Ok(summary)
     }
@@ -156,7 +162,7 @@ impl Snapshot {
         let receipt = header_ledger(ledger).into_bytes();
         // Compare variable metadata server-side: only three fixed bigint values
         // are allocated by the driver. No uncharged Ledger/JSON allocation.
-        let result = tx.driver.query("SELECT h.file_id,h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_files f ON f.namespace=h.namespace AND f.file_id=h.file_id AND f.path=h.source_path JOIN semon_pg_native_tree_generations g ON g.namespace=h.namespace AND g.projection_id=h.projection_id JOIN semon_pg_native_usage_current c ON c.namespace=h.namespace AND c.source_path=h.source_path AND c.source_id=g.source_id JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending AND s.receipt=$3 AND s.parser_version=$4 AND f.dev=$6::text::numeric AND f.ino=$7::text::numeric AND f.size=$8::text::numeric AND f.resume_at=$5::text::numeric AND f.mtime_ns=$9 AND f.ctime_ns IS NOT DISTINCT FROM $10 AND f.head_sha256=$11 AND f.tail_sha256=$12 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.path.as_bytes(), &receipt, &i64::from(CACHE_VERSION), &ledger.offset.to_string(), &ledger.stat.dev.to_string(), &ledger.stat.ino.to_string(), &ledger.stat.size.to_string(), &ledger.stat.modified_ns.to_be_bytes().as_slice(), &ledger.stat.changed_ns.map(|v| v.to_be_bytes().to_vec()), &ledger.prefix.as_slice(), &ledger.tail.as_slice()]).map_err(sqlstate::error)?;
+        let result = tx.driver.query("SELECT h.file_id,h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_files f ON f.namespace=h.namespace AND f.file_id=h.file_id AND f.path=h.source_path JOIN semon_pg_native_tree_generations g ON g.namespace=h.namespace AND g.projection_id=h.projection_id JOIN semon_pg_native_usage_current c ON c.namespace=h.namespace AND c.source_path=h.source_path AND c.source_id=g.source_id JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending AND s.receipt=$3 AND s.parser_version=$4 AND ((s.usage_ready AND s.checkpoint=$5::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.dev=$6::text::numeric AND f.ino=$7::text::numeric AND f.size=$8::text::numeric AND f.resume_at=$5::text::numeric AND f.mtime_ns=$9 AND f.ctime_ns IS NOT DISTINCT FROM $10 AND f.head_sha256=$11 AND f.tail_sha256=$12 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.path.as_bytes(), &receipt, &i64::from(CACHE_VERSION), &ledger.offset.to_string(), &ledger.stat.dev.to_string(), &ledger.stat.ino.to_string(), &ledger.stat.size.to_string(), &ledger.stat.modified_ns.to_be_bytes().as_slice(), &ledger.stat.changed_ns.map(|v| v.to_be_bytes().to_vec()), &ledger.prefix.as_slice(), &ledger.tail.as_slice()]).map_err(sqlstate::error)?;
         selected_read::charge(64, 0).map_err(budget)?;
         let row = result.first().ok_or(StorageError::Busy)?;
         let actual = (row.get(0), row.get(1), row.get(2));
@@ -164,6 +170,66 @@ impl Snapshot {
             return Err(StorageError::Busy);
         }
         Ok(actual)
+    }
+
+    // Every lazy query reauthorizes the captured published scalar in the same
+    // SQL snapshot as its payload. Current L1 explicitly refuses after L2.
+    fn scalar(
+        &self,
+        tx: &mut PgTxn<'_>,
+        file: i64,
+        projection: i64,
+    ) -> Result<(Summary, [u8; 32]), StorageError> {
+        tx.check()?;
+        if super::tree_writer::metadata(
+            tx,
+            format!("native_tree_failure:{}", self.path).as_bytes(),
+        )?
+        .is_some()
+        {
+            return Err(StorageError::Busy);
+        }
+        let encoded = super::tree_writer::metadata(
+            tx,
+            format!("native_tree_summary:{}", self.path).as_bytes(),
+        )?
+        .ok_or(StorageError::Busy)?;
+        let (_, pricing) = super::store_metadata::read(tx)?;
+        let recipe = super::tree_writer::metadata(tx, b"catalog_semantic_recipe")?;
+        let lengths = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?;
+        let length = lengths
+            .first()
+            .ok_or(StorageError::Busy)?
+            .get::<_, Option<i64>>(0);
+        if length.is_some_and(|n| !(0..=1048576).contains(&n)) {
+            return Err(StorageError::Unavailable);
+        }
+        selected_read::charge(64, length.unwrap_or(0) as usize).map_err(budget)?;
+        tx.check()?;
+        let fingerprint: Option<Vec<u8>> = tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?.get(0);
+        let fingerprint = fingerprint.map(text).transpose()?;
+        let interpretation =
+            crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
+                .map_err(|_| StorageError::Unavailable)?;
+        let witness = super::tree_writer::persisted_witness(tx, projection)?;
+        tx.check()?;
+        let record = crate::events::tree_rows::TreeSummaryRecord::decode_current(
+            encoded.as_bytes(),
+            &header_ledger(&self.ledger),
+            Some(&witness),
+            &interpretation,
+        )
+        .ok_or(StorageError::Busy)?;
+        Ok((record.summary, Sha256::digest(encoded.as_bytes()).into()))
+    }
+
+    fn validate(&self, tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+        self.authority(tx, true)?;
+        let (_, digest) = self.scalar(tx, self.file, self.projection)?;
+        if digest != self.scalar_digest {
+            return Err(StorageError::Busy);
+        }
+        Ok(())
     }
 
     fn with<T>(
@@ -178,7 +244,7 @@ impl Snapshot {
         let control = self.control.for_selected_read();
         self.pool
             .transaction(&self.namespace, TxnKind::ReadSnapshot, &control, |tx| {
-                self.authority(tx, true)?;
+                self.validate(tx)?;
                 read(tx)
             })
             .map_err(|error| {
