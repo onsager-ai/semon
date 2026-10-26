@@ -3997,13 +3997,16 @@ pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
 
 pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool> {
     crate::native_timing::discovery_count(|counts| {
-        counts.statements += 2;
+        counts.statements += 3;
         counts.schema_probes += 1;
     });
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
-    Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
+    let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    Ok(application == 0
+        && schema == SCHEMA_VERSION
+        && parser_version(connection)? == Some(CACHE_VERSION))
 }
 
 /// A versioned retention marker in the existing metadata region. Event rows
@@ -6638,7 +6641,10 @@ mod tests {
             &serde_json::to_vec(&(&paths, true)).unwrap(),
         );
         journal.discover(&operation, &paths, true).unwrap();
-        assert_eq!(journal.backfill_state().unwrap().as_deref(), Some("draining"));
+        assert_eq!(
+            journal.backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
         db.execute_batch("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         db.execute(
             "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key=?1",
@@ -6925,7 +6931,7 @@ mod tests {
         state
             .get_mut("meta")
             .unwrap()
-            .retain(|row| row[0] != rusqlite::types::Value::Text("catalog_observed_at".into()));
+            .retain(|row| row[1] != rusqlite::types::Value::Text("catalog_observed_at".into()));
         state
     }
 
@@ -6984,21 +6990,34 @@ mod tests {
         projections: &[crate::slot_projection::Projection],
         scoped: bool,
     ) {
-        let before = crate::model::now_ms();
-        let recording = crate::native_timing::catalog_commit_tests::recording(false);
-        let left = catalog_write(batch, rows, projections, scoped, CatalogWriter::Auto).unwrap();
-        let left_state =
-            catalog_commit_success_state(&batch.connection, before, crate::model::now_ms());
-        crate::native_timing::catalog_commit_tests::assert_written(false);
-        drop(recording);
-        let before = crate::model::now_ms();
-        let recording = crate::native_timing::catalog_commit_tests::recording(true);
-        let right =
-            catalog_write(row_wise, rows, projections, scoped, CatalogWriter::RowWise).unwrap();
-        let right_state =
-            catalog_commit_success_state(&row_wise.connection, before, crate::model::now_ms());
-        crate::native_timing::catalog_commit_tests::assert_written(true);
-        drop(recording);
+        // Original custody copying is a bounded durable continuation. A
+        // Deferred tick does not publish rows or stamp an observation clock.
+        let publish = |store: &mut SqliteStore, writer| {
+            for tick in 0..128 {
+                let timing = matches!(writer, CatalogWriter::RowWise);
+                let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+                let before = crate::model::now_ms();
+                let outcome = catalog_write(store, rows, projections, scoped, writer).unwrap();
+                if outcome.0 == Outcome::Written {
+                    crate::native_timing::catalog_commit_tests::assert_written(timing);
+                    return (
+                        outcome,
+                        catalog_commit_success_state(
+                            &store.connection,
+                            before,
+                            crate::model::now_ms(),
+                        ),
+                    );
+                }
+                assert_eq!(outcome.0, Outcome::Deferred);
+                crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                drop(recording);
+                assert!(tick < 127, "original custody continuation did not complete");
+            }
+            unreachable!()
+        };
+        let (left, left_state) = publish(batch, CatalogWriter::Auto);
+        let (right, right_state) = publish(row_wise, CatalogWriter::RowWise);
         assert_eq!(left, right, "exact committed collection generation");
         assert_eq!(left.0, Outcome::Written);
         assert_eq!(
@@ -9119,6 +9138,7 @@ mod tests {
     /// then proves it is persisted.
     fn full() -> FileIndex {
         FileIndex {
+            native_path: None,
             dirty_rows: None,
             native_usage_observations: None,
             source_chunks: None,
@@ -10017,17 +10037,17 @@ mod tests {
             ),
             (
                 "older-with-future-parser",
-                "PRAGMA user_version=32; UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "older schema",
             ),
             (
                 "older-with-future-recipe",
-                "PRAGMA user_version=32; INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
+                "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-complete-receipts-v99' WHERE namespace=semon_namespace()",
                 "older schema",
             ),
             (
                 "missing",
-                "DELETE FROM meta WHERE key='cache_version'",
+                "DELETE FROM main.storage_semantic_profiles WHERE namespace=semon_namespace()",
                 "missing metadata",
             ),
             (
@@ -10062,12 +10082,12 @@ mod tests {
             ),
             (
                 "malformed",
-                "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+                "UPDATE main.storage_semantic_profiles SET recipe='invalid' WHERE namespace=semon_namespace()",
                 "malformed metadata",
             ),
             (
                 "newer-parser",
-                "UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "parser version mismatch",
             ),
             (
@@ -10082,12 +10102,12 @@ mod tests {
             ),
             (
                 "recipe-other-family",
-                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+                "UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-complete-receipts-v2' WHERE namespace=semon_namespace()",
                 "publication version",
             ),
             (
                 "recipe-older-current-family",
-                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
+                "UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-native-name-hints-v3' WHERE namespace=semon_namespace()",
                 "publication version",
             ),
             (
@@ -10179,6 +10199,7 @@ mod tests {
             unchanged();
             let options = crate::Options {
                 cache: v1.clone(),
+                source: source.clone(),
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
@@ -10187,7 +10208,15 @@ mod tests {
                 ..crate::Options::default()
             };
             let error = crate::local_facts(&options).unwrap_err();
-            assert!(error.to_string().contains(reason), "{name}: {error}");
+            if name == "archive" {
+                assert!(error.to_string().contains(reason), "{name}: {error}");
+            } else {
+                let expected = match open_admitted(&path, &source) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{name} unexpectedly admitted"),
+                };
+                assert_eq!(error.to_string(), expected.to_string(), "{name}");
+            }
             unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             assert_eq!(snapshot(&db), original_state, "{name} schema and rows");
@@ -10299,7 +10328,7 @@ mod tests {
             store
                 .connection
                 .query_row(
-                    "SELECT value FROM meta WHERE key='archive-custody'",
+                    "SELECT value FROM meta WHERE key='catalog_recovery_reason'",
                     [],
                     |row| row.get::<_, String>(0)
                 )

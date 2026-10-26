@@ -65,6 +65,7 @@ pub(crate) struct FileRow<'a> {
 impl<'a> FileRow<'a> {
     pub(crate) fn new(ledger: &'a Ledger, index: &'a FileIndex) -> Self {
         let FileIndex {
+            native_path: _,
             dirty_rows: _,
             native_usage_observations: _,
             tree_summary: _,

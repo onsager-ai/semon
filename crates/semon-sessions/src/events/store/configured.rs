@@ -612,6 +612,9 @@ impl NativeOwnership {
         }
         validate_core(db)?;
         validate_statement_layout(db).map_err(failed)?;
+        // Qualify the ordinary Current keyset read when the DDL cookie
+        // changes. Preparing reads no rows and never repairs missing indexes.
+        db.prepare("SELECT session_key,last_ms FROM main.session_catalog INDEXED BY session_catalog_current_order WHERE namespace=?1 AND lifecycle='current' ORDER BY last_ms DESC,session_key ASC LIMIT 0").map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
         validate_copied_usage(db).map_err(failed)?;
@@ -635,6 +638,16 @@ impl NativeOwnership {
 
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
         self.validate(db)?;
+        // Readers and native writers share the producer's current scoped
+        // profile. A retained capability cannot authorize a replaced recipe.
+        let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![self.config.namespace.as_str(),self.admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
+        if !profile {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_version','search_version') AND value<>CASE key WHEN 'catalog_version' THEN ?2 ELSE ?3 END)",params![self.config.namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
+        if !publications {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
         if incoming {
             return Err(StorageError::NamespaceUpgradePending);
@@ -1771,8 +1784,14 @@ impl Writer {
         drop(self.snapshot()?);
         // Raw checks precede the DB reservation. The parser qualifies complete
         // records and proofs on its open handle; no Raw I/O runs in the DB tx.
-        for (path, _, _, ledger, _) in files {
-            if Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat) {
+        for (path, _, _, ledger, index) in files {
+            let physical = index
+                .native_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new(path));
+            if physical.to_string_lossy() != *path
+                || Stat::of(physical).ok().as_ref() != Some(&ledger.stat)
+            {
                 #[cfg(test)]
                 eprintln!("commit_raw_conflict");
                 return Err(StorageError::Conflict);
