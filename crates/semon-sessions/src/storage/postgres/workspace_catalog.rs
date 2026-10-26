@@ -104,6 +104,7 @@ mod tests {
                     tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude','repo',$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes()]).map_err(sqlstate::error)?;
                 }
                 tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,'workspace-probe','yes')", &[&ns]).map_err(sqlstate::error)?;
+                tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256('raw-fixture'::bytea),'raw-fixture','page',1,false)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(())
             }).unwrap();
             sources.push(OverviewSource { key:name.into(),label:name.into(),options,up:true });
@@ -121,6 +122,8 @@ mod tests {
             let rows = tx.driver.query("SELECT namespace FROM semon_pg_native_meta WHERE key='workspace-probe' ORDER BY namespace", &[]).map_err(sqlstate::error)?;
             assert_eq!(rows.len(),2);
             let other = configs[1].namespace.as_str().as_bytes();
+            let proofs: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_proofs WHERE namespace=$1", &[&other]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(proofs,0,"workspace metadata scope must not grant Native proof/Raw authority");
             assert_eq!(tx.driver.execute("UPDATE semon_pg_native_meta SET value='no' WHERE namespace=$1", &[&other]).map_err(sqlstate::error)?,0);
             assert_eq!(tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace=$1", &[&other]).map_err(sqlstate::error)?,0);
             Ok(())
