@@ -986,6 +986,32 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn slots(&self, row: &crate::model::summary::CatalogRow, expected: Option<&str>, max: usize) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        match expected {
+            Some(expected) => super::read_session_slots(&db, row, expected, max),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        super::read_file_ledgers(&db)
+    }
+
+    pub(crate) fn remove_files(&self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        super::remove_files_tx(&tx, files, Some(self.config.namespace.as_str())).map_err(failure)?;
+        tx.commit().map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(Outcome::Written)
+    }
+
+    pub(crate) fn append_evidence(&self, path: &str) -> Result<Option<crate::source_change::AppendEvidence>, StorageError> {
+        super::read_append_evidence(&self.snapshot()?, path).map_err(failed)
+    }
+
     pub(crate) fn session_description(
         &self,
         key: &str,

@@ -138,13 +138,11 @@ impl IndexStore for ConfiguredIndex {
     }
     fn session_slots(
         &self,
-        _row: &crate::model::summary::CatalogRow,
-        _expected_generation: Option<&str>,
-        _max: usize,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.slots(row, expected_generation, max)
     }
     fn publish_session_catalog_fenced(
         &mut self,
@@ -200,13 +198,8 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn append_evidence(
-        &self,
-        _path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn append_evidence(&self, path: &str) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
+        self.native.append_evidence(path).map_err(StoreError::Configured)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         Err(StoreError::Configured(
@@ -398,14 +391,10 @@ impl IndexStore for ConfiguredIndex {
         Ok(runs)
     }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.file_ledgers()
     }
-    fn remove_files(&mut self, _files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        self.native.remove_files(files)
     }
     fn save_runs(
         &mut self,
