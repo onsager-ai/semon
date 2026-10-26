@@ -662,16 +662,11 @@ pub fn indexed_codex_sources(options: &Options, native_id: &str) -> io::Result<V
             .map_err(io::Error::other);
         }
     }
-    use rusqlite::{Connection, OpenFlags};
-    let connection = Connection::open_with_flags(
-        crate::events::EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(io::Error::other)?;
-    connection
-        .busy_timeout(std::time::Duration::from_millis(100))
-        .map_err(io::Error::other)?;
-    let mut statement = connection.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 LIMIT 2").map_err(io::Error::other)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let db = binding.connection().map_err(io::Error::other)?;
+    let tx = db.unchecked_transaction().map_err(io::Error::other)?;
+    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
+    let mut statement = tx.prepare("SELECT DISTINCT source_path FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id=?1 LIMIT 2").map_err(io::Error::other)?;
     let paths = statement
         .query_map([native_id], |row| row.get::<_, String>(0))
         .map_err(io::Error::other)?
