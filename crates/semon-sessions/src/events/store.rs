@@ -6949,19 +6949,26 @@ mod tests {
         projections: &[crate::slot_projection::Projection],
         scoped: bool,
     ) {
-        let before = crate::model::now_ms();
+        // Original custody copying is a bounded durable continuation. A
+        // Deferred tick does not publish rows or stamp an observation clock.
+        let publish = |store: &mut SqliteStore, writer| {
+            for tick in 0..128 {
+                let before = crate::model::now_ms();
+                let outcome = catalog_write(store, rows, projections, scoped, writer).unwrap();
+                if outcome.0 == Outcome::Written {
+                    return (outcome, catalog_commit_success_state(&store.connection, before, crate::model::now_ms()));
+                }
+                assert_eq!(outcome.0, Outcome::Deferred);
+                assert!(tick < 127, "original custody continuation did not complete");
+            }
+            unreachable!()
+        };
         let recording = crate::native_timing::catalog_commit_tests::recording(false);
-        let left = catalog_write(batch, rows, projections, scoped, CatalogWriter::Auto).unwrap();
-        let left_state =
-            catalog_commit_success_state(&batch.connection, before, crate::model::now_ms());
+        let (left, left_state) = publish(batch, CatalogWriter::Auto);
         crate::native_timing::catalog_commit_tests::assert_written(false);
         drop(recording);
-        let before = crate::model::now_ms();
         let recording = crate::native_timing::catalog_commit_tests::recording(true);
-        let right =
-            catalog_write(row_wise, rows, projections, scoped, CatalogWriter::RowWise).unwrap();
-        let right_state =
-            catalog_commit_success_state(&row_wise.connection, before, crate::model::now_ms());
+        let (right, right_state) = publish(row_wise, CatalogWriter::RowWise);
         crate::native_timing::catalog_commit_tests::assert_written(true);
         drop(recording);
         assert_eq!(left, right, "exact committed collection generation");
@@ -9982,7 +9989,7 @@ mod tests {
             ),
             (
                 "older-with-future-parser",
-                "PRAGMA user_version=32; UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "older schema",
             ),
             (
@@ -9992,7 +9999,7 @@ mod tests {
             ),
             (
                 "missing",
-                "DELETE FROM meta WHERE key='cache_version'",
+                "DELETE FROM main.storage_semantic_profiles WHERE namespace=semon_namespace()",
                 "missing metadata",
             ),
             (
@@ -10027,12 +10034,12 @@ mod tests {
             ),
             (
                 "malformed",
-                "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+                "UPDATE main.storage_semantic_profiles SET recipe='invalid' WHERE namespace=semon_namespace()",
                 "malformed metadata",
             ),
             (
                 "newer-parser",
-                "UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "parser version mismatch",
             ),
             (
@@ -10144,6 +10151,7 @@ mod tests {
             unchanged();
             let options = crate::Options {
                 cache: v1.clone(),
+                source: source.clone(),
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
@@ -10152,7 +10160,15 @@ mod tests {
                 ..crate::Options::default()
             };
             let error = crate::local_facts(&options).unwrap_err();
-            assert!(error.to_string().contains(reason), "{name}: {error}");
+            if name == "archive" {
+                assert!(error.to_string().contains(reason), "{name}: {error}");
+            } else {
+                let expected = match open_admitted(&path, &source) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{name} unexpectedly admitted"),
+                };
+                assert_eq!(error.to_string(), expected.to_string(), "{name}");
+            }
             unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             assert_eq!(snapshot(&db), original_state, "{name} schema and rows");
@@ -10264,7 +10280,7 @@ mod tests {
             store
                 .connection
                 .query_row(
-                    "SELECT value FROM meta WHERE key='archive-custody'",
+                    "SELECT value FROM meta WHERE key='catalog_recovery_reason'",
                     [],
                     |row| row.get::<_, String>(0)
                 )

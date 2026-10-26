@@ -15,12 +15,14 @@ pub(crate) fn initial_batch(
         return Err("initial index batch exceeds source budget");
     }
     let mut paths = std::collections::BTreeSet::new();
-    for (path, ledger, _) in files {
+    for (path, ledger, index) in files {
         if !paths.insert(path) {
             return Err("initial index batch repeats a source");
         }
-        if ledger.offset != ledger.stat.size
-            || super::Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat)
+        let physical = index.native_path.as_deref().unwrap_or_else(|| Path::new(path));
+        if physical.to_string_lossy() != path.as_str()
+            || ledger.offset != ledger.stat.size
+            || super::Stat::of(physical).ok().as_ref() != Some(&ledger.stat)
         {
             return Ok(false);
         }
