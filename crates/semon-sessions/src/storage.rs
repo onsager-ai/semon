@@ -158,11 +158,15 @@ impl NativeReaderBinding {
 pub(crate) fn configured_query_catalog(
     options: &crate::Options,
     config: StoreConfig,
-) -> Box<dyn query::QueryCatalogStore> {
-    Box::new(sqlite::query::SqliteQueryCatalog {
+) -> Result<Box<dyn query::QueryCatalogStore>, StorageError> {
+    #[cfg(feature = "postgres")]
+    if let StoreBackend::Postgres { pool, control } = &config.backend {
+        return postgres::configured_query_catalog(options, &config, pool.clone(), control.clone());
+    }
+    Ok(Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
         binding: NativeReaderBinding::Admitted(config),
-    })
+    }))
 }
 
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogIdentityError, CatalogReadScope};
@@ -187,11 +191,36 @@ impl LogicalSourceNamespace {
     }
 }
 
-/// Only implemented backends are selectable. No PostgreSQL driver is required
-/// by SQLite. #479 adds PostgreSQL after the full native boundary is ported.
-#[derive(Clone, Debug)]
+/// Explicit host-owned storage resources. PostgreSQL never derives credentials
+/// or database placement from the logical Source namespace or Raw root.
+#[derive(Clone)]
 pub enum StoreBackend {
     Sqlite { database: PathBuf },
+    #[cfg(feature = "postgres")]
+    Postgres {
+        pool: postgres::PgPool,
+        control: postgres::PgCancellation,
+    },
+}
+
+impl std::fmt::Debug for StoreBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite { database } => f.debug_struct("Sqlite").field("database", database).finish(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres { .. } => f.write_str("Postgres"),
+        }
+    }
+}
+
+impl StoreBackend {
+    pub(crate) fn sqlite_database(&self) -> Result<&PathBuf, StorageError> {
+        match self {
+            Self::Sqlite { database } => Ok(database),
+            #[cfg(feature = "postgres")]
+            Self::Postgres { .. } => Err(StorageError::InvalidArguments),
+        }
+    }
 }
 
 /// Explicit physical coordinates and logical binding. A discovered epoch must
@@ -215,7 +244,11 @@ impl StoreConfig {
     /// Explicit single-source Event/ledger ingestion. Hosts authorize the Raw
     /// path independently; this does not publish Catalog or enable multi-source.
     pub fn native_events(&self) -> Result<Box<dyn native_events::NativeEventStore>, StorageError> {
-        crate::events::store::configured::prepare(self)?;
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => crate::events::store::configured::prepare(self)?,
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { .. } => {},
+        }
         Ok(Box::new(crate::events::EventCache::open_configured(self)?))
     }
 
@@ -224,7 +257,13 @@ impl StoreConfig {
     pub fn source_observations(
         &self,
     ) -> Result<Box<dyn source_observations::SourceObservationStore>, StorageError> {
-        sqlite::source_journal::open(self)
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => sqlite::source_journal::open(self),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => Ok(Box::new(postgres::PgSourceJournal::configured(
+                pool.clone(), self.namespace.clone(), control.clone(),
+            ))),
+        }
     }
 
     /// Resolve configuration without creating, resetting or repairing storage.
@@ -244,6 +283,8 @@ impl StoreConfig {
                     return Err(StorageError::InvalidArguments);
                 }
             }
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { .. } => return Err(StorageError::NamespaceUpgradePending),
         }
         Ok(Box::new(sqlite::SqliteMetadataStore::new(self)))
     }
@@ -336,7 +377,8 @@ impl StoreConfig {
                 "Invalid metadata byte bound",
             ));
         }
-        let store = configured_query_catalog(options, self.clone());
+        let store = configured_query_catalog(options, self.clone())
+            .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
         let mut left = max_bytes;
         let part = store.read_cohort(&self.namespace, now, &mut left)?;
         store.validate(&self.namespace, &part)?;

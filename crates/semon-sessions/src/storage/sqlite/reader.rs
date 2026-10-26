@@ -1,14 +1,14 @@
 //! One admission path for native Catalog/Query reads. Validate inside the same
 //! snapshot as payload SQL; never infer namespace or coordinates from Options.
 use super::{failed, namespace};
-use crate::storage::{LogicalSourceNamespace, NativeReaderBinding, StorageError, StoreBackend};
+use crate::storage::{LogicalSourceNamespace, NativeReaderBinding, StorageError};
 use rusqlite::{Connection, OpenFlags};
 use std::{ops::Deref, time::Duration};
 
 impl NativeReaderBinding {
     pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         let config = self.config();
-        let StoreBackend::Sqlite { database } = &config.backend;
+        let database = config.backend.sqlite_database()?;
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
             return Err(StorageError::InvalidArguments);
         }
