@@ -20,22 +20,35 @@ checks the durable operation before Raw I/O. Catalog operations remain fenced.
 `events/native_decode.rs` is the shared current row restoration used by the
 production SQLite reader and private PG native reader. PG reads select one path
 and its child families, qualify Usage/pages/auxiliary metadata and restore Tree
-through the existing typed checkpoint. Oversized state refuses before payload
-decoding; the current private reader is capped at 65,536 rows and 1 MiB per
-family and is not yet the required keyset implementation.
+through the existing typed checkpoint. Payload pages use keysets with at most
+64 size probes and 1 MiB per page before decoding. Selected-file restoration
+still loads its history; compact/deferred shared restoration and full resource
+qualification remain open.
 
 The `pg_native126` isolated-process test runs configured SQLite first, then
 PG-only EventCache ingestion with SQLite's connection initializer rejecting all
 opens, including other threads. It covers initial ingest, restart/noop, exact
 replay after Raw changes/disappearance and request rebinding refusal. This WIP
 still needs the complete append/replacement/truncation/concurrency/fault/lost-ACK,
-resource/noise and security matrix. Removal/recovery enumeration and atomic
-multi-path batching remain fenced. No independent acceptance or full-backend
+resource/noise and security matrix. Removal/retirement and native recovery
+remain fenced. No independent acceptance or full-backend
 qualification is claimed; applicable exact-head CI is required.
 
 Inventory additions: `storage/postgres/{index_store,native_ingest,native_reader}.rs`
 contain PG-only production adapter code; `native_ingest_tests.rs` contains the
 test-only SQLite oracle and actual process-wide no-SQLite instrumentation.
+
+Worker133 adds private request-owned cold batches through the ordinary scanner.
+Both SQLite adapters and PostgreSQL consume the current cold-source validation
+plan. PostgreSQL validates every prepared intent, base ledger and captured Source
+claim before family effects. Borrowed `PgTxn::apply_operation` retains exact
+individual completions and all family effects in the same transaction. The
+request boundary reconciles every receipt before Raw and refuses mixed replays.
+Partial/incomplete cold files refuse before family effects; individual ingestion
+remains the path for bounded progress. Tests extend the existing isolated native
+integration with SQLite-first multi-harness batches, every measured bundle-effect
+whole-schema rollback, stale claims, competing writers and missing-Raw restart
+replay. This is unaccepted WIP pending exact-head CI and independent review.
 
 ## Connected native writer (Worker122, unaccepted WIP)
 

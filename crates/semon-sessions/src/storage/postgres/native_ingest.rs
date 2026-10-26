@@ -161,6 +161,37 @@ pub(super) fn commit(
     ledger: &Ledger,
     index: &FileIndex,
 ) -> Result<(), StorageError> {
+    validate_input(intent, path, expected, ledger, index)?;
+    let result = pool.apply_operation(namespace, &identity(intent), control, |tx| {
+        qualify_intent(tx, intent, path, expected)?;
+        complete(tx, intent, path, expected, changes, ledger, index)
+    });
+    match result {
+        Ok(_) => Ok(()),
+        Err(StorageError::CommitUncertain) => {
+            reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
+                .ok_or(StorageError::CommitUncertain)
+                .map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn identity(intent: &Intent) -> OperationIdentity<'_> {
+    OperationIdentity {
+        operation_id: &intent.id,
+        kind: KIND,
+        request_digest: &intent.request,
+    }
+}
+
+fn validate_input(
+    intent: &Intent,
+    path: &str,
+    expected: Option<&Ledger>,
+    ledger: &Ledger,
+    index: &FileIndex,
+) -> Result<(), StorageError> {
     if path != intent.path || intent.base != expected.map(header_ledger).unwrap_or_default() {
         return Err(StorageError::Conflict);
     }
@@ -183,36 +214,133 @@ pub(super) fn commit(
     {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let result=pool.apply_operation(namespace,&OperationIdentity {operation_id:&intent.id,kind:KIND,request_digest:&intent.request},control,|tx|{
-        super::native_core::qualify(tx,path,expected)?;
-        if stored(tx,&intent.id)?.as_ref()!=Some(intent) || claim(tx,path)?!=intent.revision { return Err(StorageError::Conflict); }
-        // Relocation/retirement are deliberately refused before family effects.
-        let relocation:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND (old_path=$2 OR new_path=$2))",&[&namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        if relocation { return Err(StorageError::NamespaceUpgradePending); }
-        // The bundle is a family effect, never the source of a receipt. Require
-        // the actual committed family authority below before recording outcome.
-        let _partial=super::native_bundle::stage(tx,crate::events::native_commit::Input {path,expected,changes,ledger,index,semantic_change:expected!=Some(ledger)})?;
-        let Some((_,stored_ledger))=native_reader::ledger(tx,path)? else { return Err(StorageError::ScopeChanged); };
-        if stored_ledger!=*ledger { return Err(StorageError::ScopeChanged); }
-        let pages=super::native_pages::current(tx,path,ledger)?;
-        pages.launch(tx)?;
-        native_reader::qualify_completion(tx,path,ledger,index)?;
-        if index.tree_summary.is_some() {
-            let exact:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending)",&[&namespace.as_str().as_bytes(),&path.as_bytes(),&header_ledger(ledger).as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if !exact { return Err(StorageError::ScopeChanged); }
-        }
-        let revision=claim(tx,path)?;
-        Ok(serde_json::json!({"operation_id":intent.id,"consumed_bytes":ledger.offset,"observed_revision":revision}))
-    });
-    match result {
-        Ok(_) => Ok(()),
-        Err(StorageError::CommitUncertain) => {
-            reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
-                .ok_or(StorageError::CommitUncertain)
-                .map(|_| ())
-        }
-        Err(e) => Err(e),
+    Ok(())
+}
+
+fn qualify_intent(
+    tx: &mut PgTxn<'_>,
+    intent: &Intent,
+    path: &str,
+    expected: Option<&Ledger>,
+) -> Result<(), StorageError> {
+    super::native_core::qualify(tx, path, expected)?;
+    if stored(tx, &intent.id)?.as_ref() != Some(intent) || claim(tx, path)? != intent.revision {
+        return Err(StorageError::Conflict);
     }
+    let relocation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND (old_path=$2 OR new_path=$2))", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    if relocation {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete(
+    tx: &mut PgTxn<'_>,
+    intent: &Intent,
+    path: &str,
+    expected: Option<&Ledger>,
+    changes: Option<&DirtyRows>,
+    ledger: &Ledger,
+    index: &FileIndex,
+) -> Result<serde_json::Value, StorageError> {
+    let namespace = tx.namespace.clone();
+    // The bundle is a family effect, never the source of a receipt. Require
+    // the actual committed family authority below before recording outcome.
+    let _partial = super::native_bundle::stage(
+        tx,
+        crate::events::native_commit::Input {
+            path,
+            expected,
+            changes,
+            ledger,
+            index,
+            semantic_change: expected != Some(ledger),
+        },
+    )?;
+    let Some((_, stored_ledger)) = native_reader::ledger(tx, path)? else {
+        return Err(StorageError::ScopeChanged);
+    };
+    if stored_ledger != *ledger {
+        return Err(StorageError::ScopeChanged);
+    }
+    let pages = super::native_pages::current(tx, path, ledger)?;
+    pages.launch(tx)?;
+    native_reader::qualify_completion(tx, path, ledger, index)?;
+    if index.tree_summary.is_some() {
+        let exact:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending)",&[&namespace.as_str().as_bytes(),&path.as_bytes(),&header_ledger(ledger).as_bytes()]).map_err(sqlstate::error)?.get(0);
+        if !exact {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    let revision = claim(tx, path)?;
+    Ok(
+        serde_json::json!({"operation_id":intent.id,"consumed_bytes":ledger.offset,"observed_revision":revision}),
+    )
+}
+
+/// One Source-serialized transaction, with one durable native completion for
+/// every independently prepared request. No entry can publish before every
+/// base ledger, intent and captured Source claim has passed qualification.
+pub(super) fn commit_initial(
+    pool: &PgPool,
+    namespace: &LogicalSourceNamespace,
+    control: &PgCancellation,
+    intents: &std::collections::BTreeMap<String, Intent>,
+    files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
+) -> Result<(), StorageError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    if files.len() > 64 {
+        return Err(StorageError::InvalidArguments);
+    }
+    // Bind every full prepared request and consumed ledger, in canonical path
+    // order. Reordering the same batch does not capture another operation.
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut binding = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for (path, ledger, _) in &ordered {
+        let intent = intents.get(path).ok_or(StorageError::InvalidArguments)?;
+        if !ids.insert(&intent.id) {
+            return Err(StorageError::InvalidArguments);
+        }
+        binding.push((intent, header_ledger(ledger)));
+    }
+    let encoded = serde_json::to_vec(&("native-cold-batch-v1", namespace.as_str(), binding))
+        .map_err(|_| StorageError::InvalidArguments)?;
+    let digest: [u8; 32] = Sha256::digest(encoded).into();
+    let id = format!("{:x}", Sha256::digest(digest));
+    pool.apply_operation(
+        namespace,
+        &OperationIdentity {
+            operation_id: &id,
+            kind: "native-cold-batch-v1",
+            request_digest: &digest,
+        },
+        control,
+        |tx| {
+            if !crate::events::native_commit::initial_batch(files)
+                .map_err(|_| StorageError::InvalidArguments)?
+            {
+                return Err(StorageError::Conflict);
+            }
+            for (path, ledger, index) in &ordered {
+                let intent = &intents[path];
+                validate_input(intent, path, None, ledger, index)?;
+                qualify_intent(tx, intent, path, None)?;
+            }
+            for (path, ledger, index) in &ordered {
+                let intent = &intents[path];
+                tx.apply_operation(&identity(intent), |tx| {
+                    complete(tx, intent, path, None, None, ledger, index)
+                })?;
+            }
+            Ok(serde_json::json!({"entries": files.len()}))
+        },
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

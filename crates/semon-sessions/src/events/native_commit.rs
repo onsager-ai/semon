@@ -5,6 +5,29 @@ use std::path::Path;
 
 use super::{DirtyRows, FileIndex, Ledger};
 
+/// Shared cold-publication plan: all entries are complete, distinct sources
+/// and still name the physical witness parsed by the ordinary scanner. Both
+/// engines apply this before any family effect, in their writer transaction.
+pub(crate) fn initial_batch(
+    files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
+) -> Result<bool, &'static str> {
+    if files.len() > 64 {
+        return Err("initial index batch exceeds source budget");
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for (path, ledger, _) in files {
+        if !paths.insert(path) {
+            return Err("initial index batch repeats a source");
+        }
+        if ledger.offset != ledger.stat.size
+            || super::Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) struct Input<'a> {
     pub(crate) path: &'a str,
     pub(crate) ledger: &'a Ledger,
