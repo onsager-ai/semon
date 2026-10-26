@@ -483,6 +483,28 @@ impl StoreConfig {
         )
     }
 
+    /// Prepare an exact source proof from an admitted captured publication.
+    /// Call before entering the body reader's lease; this grants no Raw access.
+    #[cfg(feature = "postgres")]
+    pub fn captured_source_proof_at(
+        &self,
+        options: &crate::Options,
+        generation: &str,
+        key: &str,
+        reference: &crate::SessionSourceRef,
+    ) -> Result<crate::SessionSourceProof, StorageError> {
+        let source = options.source.config(&options.cache)?;
+        if source.namespace != self.namespace
+            || source.expected_stream_epoch != self.expected_stream_epoch
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let StoreBackend::Postgres { pool, control } = &self.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
+        postgres::navigation::captured_source_proof(self, pool, control, options, generation, key, reference)
+    }
+
     /// Read a captured, admitted PostgreSQL publication using request-owned
     /// host authority. This never reinterprets an expired live runtime as current.
     #[cfg(feature = "postgres")]
@@ -498,23 +520,53 @@ impl StoreConfig {
     ) -> Result<serde_json::Value, crate::QueryError> {
         crate::validate_query_call(tool, args)?;
         if !matches!(tool, "read_transcript" | "get_session") {
-            return Err(crate::QueryError::new("invalid_arguments", "Captured Query requires a selected body tool"));
+            return Err(crate::QueryError::new(
+                "invalid_arguments",
+                "Captured Query requires a selected body tool",
+            ));
         }
-        let source = options.source.store_config(self.backend.clone())
+        let source = options
+            .source
+            .store_config(self.backend.clone())
             .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
-        if source.namespace != self.namespace || source.expected_stream_epoch != self.expected_stream_epoch {
-            return Err(crate::QueryError::new("unavailable", "Captured Source binding changed"));
+        if source.namespace != self.namespace
+            || source.expected_stream_epoch != self.expected_stream_epoch
+        {
+            return Err(crate::QueryError::new(
+                "unavailable",
+                "Captured Source binding changed",
+            ));
         }
         let StoreBackend::Postgres { pool, control } = &self.backend else {
-            return Err(crate::QueryError::new("unavailable", "Captured publication reader is not qualified"));
+            return Err(crate::QueryError::new(
+                "unavailable",
+                "Captured publication reader is not qualified",
+            ));
         };
-        let store = postgres::captured_query_catalog(options, self, generation, pool.clone(), control.clone())
-            .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
-        let id = args["id"].as_str().ok_or_else(|| crate::QueryError::new("invalid_arguments", "Missing selected id"))?;
-        let reader = provider(self.namespace.as_str(), id).map_err(|error| crate::QueryError::io(&error))?;
-        let sources = crate::SessionSources::with_machines(vec![(self.namespace.as_str().to_owned(), options.clone())]);
-        crate::Query::from_sources(std::sync::Arc::new(sources))
-            .call_bound_selected_at(tool, args, now, store.as_ref(), reader.as_ref())
+        let store = postgres::captured_query_catalog(
+            options,
+            self,
+            generation,
+            pool.clone(),
+            control.clone(),
+        )
+        .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
+        let id = args["id"]
+            .as_str()
+            .ok_or_else(|| crate::QueryError::new("invalid_arguments", "Missing selected id"))?;
+        let reader =
+            provider(self.namespace.as_str(), id).map_err(|error| crate::QueryError::io(&error))?;
+        let sources = crate::SessionSources::with_machines(vec![(
+            self.namespace.as_str().to_owned(),
+            options.clone(),
+        )]);
+        crate::Query::from_sources(std::sync::Arc::new(sources)).call_bound_selected_at(
+            tool,
+            args,
+            now,
+            store.as_ref(),
+            reader.as_ref(),
+        )
     }
 
     /// Bounded native Query publication metadata from this configured source.

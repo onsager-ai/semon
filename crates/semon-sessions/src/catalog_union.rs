@@ -136,10 +136,34 @@ fn read_union(
     #[cfg(feature = "postgres")]
     {
         let selected = crate::storage::postgres::workspace_catalog::read(
-            &ordered, &request, cursor.as_ref().map(|cursor| (cursor.after.last, cursor.after.key.as_str(), cursor.after.source.as_str())),
-        ).map_err(|_| error(503, "catalog_unavailable", "The authorized workspace Catalog is unavailable.", true))?;
+            &ordered,
+            &request,
+            cursor.as_ref().map(|cursor| {
+                (
+                    cursor.after.last,
+                    cursor.after.key.as_str(),
+                    cursor.after.source.as_str(),
+                )
+            }),
+        )
+        .map_err(|_| {
+            error(
+                503,
+                "catalog_unavailable",
+                "The authorized workspace Catalog is unavailable.",
+                true,
+            )
+        })?;
         if let Some(selected) = selected {
-            return read_pg_union(&ordered, workspace, &clean, &filters, &request, cursor.as_ref(), selected);
+            return read_pg_union(
+                &ordered,
+                workspace,
+                &clean,
+                &filters,
+                &request,
+                cursor.as_ref(),
+                selected,
+            );
         }
     }
     let mut digest = Sha256::new();
@@ -303,11 +327,22 @@ fn read_union(
 /// presentation. Source validation is independent of whether it has a result.
 #[cfg(feature = "postgres")]
 fn read_pg_union(
-    sources: &[&OverviewSource], workspace: &str, clean: &str, filters: &str,
-    request: &Request, cursor: Option<&UnionCursor>,
+    sources: &[&OverviewSource],
+    workspace: &str,
+    clean: &str,
+    filters: &str,
+    request: &Request,
+    cursor: Option<&UnionCursor>,
     selected: crate::storage::postgres::workspace_catalog::Page,
 ) -> Result<ViewerReply, ViewerReply> {
-    let unavailable = || error(503, "catalog_unavailable", "The authorized workspace Catalog changed or is unavailable.", true);
+    let unavailable = || {
+        error(
+            503,
+            "catalog_unavailable",
+            "The authorized workspace Catalog changed or is unavailable.",
+            true,
+        )
+    };
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&(workspace, filters)).map_err(|_| unavailable())?);
     for (source, generation) in sources.iter().zip(&selected.generations) {
@@ -315,7 +350,12 @@ fn read_pg_union(
     }
     let generation = format!("{:x}", digest.finalize());
     if cursor.is_some_and(|cursor| cursor.generation != generation) {
-        return Err(error(409, "stale_cursor", "A source or its Catalog changed. Refresh the list.", true));
+        return Err(error(
+            409,
+            "stale_cursor",
+            "A source or its Catalog changed. Refresh the list.",
+            true,
+        ));
     }
     let mut items = Vec::new();
     let mut after = None;
@@ -325,8 +365,16 @@ fn read_pg_union(
     let mut freshness = "cached";
     for (index, row) in &selected.rows {
         let source = sources[*index];
-        let position = Position { last: row.last.unwrap_or(0), key: row.key.clone(), source: source.key.clone() };
-        if request.q.as_ref().is_some_and(|query| !crate::catalog_search::fields(row).iter().any(|field| field.contains(query))) {
+        let position = Position {
+            last: row.last.unwrap_or(0),
+            key: row.key.clone(),
+            source: source.key.clone(),
+        };
+        if request.q.as_ref().is_some_and(|query| {
+            !crate::catalog_search::fields(row)
+                .iter()
+                .any(|field| field.contains(query))
+        }) {
             after = Some(position);
             continue;
         }
@@ -339,9 +387,13 @@ fn read_pg_union(
         focused.sid = Some(row.key.clone());
         focused.limit = 1;
         let result = page(&source.options, &source.key, focused);
-        if result.status != 200 { return Err(result); }
+        if result.status != 200 {
+            return Err(result);
+        }
         let mut body: Value = serde_json::from_slice(&result.body).map_err(|_| unavailable())?;
-        if body["generation"] != selected.generations[*index] { return Err(unavailable()); }
+        if body["generation"] != selected.generations[*index] {
+            return Err(unavailable());
+        }
         partial |= body["completeness"]["state"] == "partial";
         match body["freshness"].as_str() {
             Some("unavailable") => freshness = "unavailable",
@@ -349,9 +401,16 @@ fn read_pg_union(
             Some("stale") if freshness == "cached" => freshness = "stale",
             _ => {}
         }
-        if let Some(time) = body["observed_at"].as_i64() { observed = Some(observed.map_or(time, |old| old.min(time))); }
+        if let Some(time) = body["observed_at"].as_i64() {
+            observed = Some(observed.map_or(time, |old| old.min(time)));
+        }
         let values = body["items"].as_array_mut().ok_or_else(unavailable)?;
-        if values.len() != 1 || values[0]["key"] != row.key || values[0]["last"].as_i64().unwrap_or(0) != position.last { return Err(unavailable()); }
+        if values.len() != 1
+            || values[0]["key"] != row.key
+            || values[0]["last"].as_i64().unwrap_or(0) != position.last
+        {
+            return Err(unavailable());
+        }
         let mut item = values.remove(0);
         item["machine"] = json!({"key":source.key,"label":source.label});
         items.push(item);
@@ -360,15 +419,38 @@ fn read_pg_union(
     // Recheck every admission/head after presentation, including namespaces
     // with no matching rows. Never publish a page after revocation/cutover.
     for (source, expected) in sources.iter().zip(&selected.generations) {
-        if crate::storage::local_catalog_generation(&source.options, &source.key).map_err(|_| unavailable())? != *expected { return Err(unavailable()); }
+        if crate::storage::local_catalog_generation(&source.options, &source.key)
+            .map_err(|_| unavailable())?
+            != *expected
+        {
+            return Err(unavailable());
+        }
     }
-    let next = if more { after.map(|after| serde_json::to_string(&UnionCursor { version:1, workspace:workspace.into(), filters:filters.into(), generation:generation.clone(), after })).transpose().map_err(|_| unavailable())? } else { None };
-    Ok(reply(200, json!({
-        "api":1,"machine":"","read_scope":request.scope,"generation":generation,"observed_at":observed,
-        "machine_info":{"key":"","label":"All machines","freshness":"cached"},
-        "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc_machine_asc","full_text_search":false,"selected_session_lookup":false,"runtime_status":true,"global_union":true},
-        "completeness":{"state":if partial {"partial"} else {"complete"}},"freshness":if partial {"updating"} else {freshness},
-        "items":items,"next_cursor":next,
-        "search":request.q.as_ref().map(|_|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":selected.more,"candidates":selected.scanned,"index_complete":true,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":1048576}))
-    })))
+    let next = if more {
+        after
+            .map(|after| {
+                serde_json::to_string(&UnionCursor {
+                    version: 1,
+                    workspace: workspace.into(),
+                    filters: filters.into(),
+                    generation: generation.clone(),
+                    after,
+                })
+            })
+            .transpose()
+            .map_err(|_| unavailable())?
+    } else {
+        None
+    };
+    Ok(reply(
+        200,
+        json!({
+            "api":1,"machine":"","read_scope":request.scope,"generation":generation,"observed_at":observed,
+            "machine_info":{"key":"","label":"All machines","freshness":"cached"},
+            "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc_machine_asc","full_text_search":false,"selected_session_lookup":false,"runtime_status":true,"global_union":true},
+            "completeness":{"state":if partial {"partial"} else {"complete"}},"freshness":if partial {"updating"} else {freshness},
+            "items":items,"next_cursor":next,
+            "search":request.q.as_ref().map(|_|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":selected.more,"candidates":selected.scanned,"index_complete":true,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":1048576}))
+        }),
+    ))
 }
