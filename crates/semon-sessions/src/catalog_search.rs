@@ -640,6 +640,24 @@ fn anchor(
     scope: crate::CatalogReadScope,
     query: &str,
 ) -> rusqlite::Result<Option<String>> {
+    let Filter { table, ns, .. } = filter;
+    let mut statement = connection.prepare(&format!(
+        "SELECT members FROM {table}session_search_counts WHERE {ns}read_scope=?1 AND gram=?2"
+    ))?;
+    anchor_with(query, |gram| {
+        let members = statement
+            .query_row(params![scope_key(scope), gram], |row| row.get(0))
+            .optional()?;
+        record_steps(&statement);
+        Ok(members)
+    })
+}
+
+/// Backend-neutral anchor choice; `members` is one exact persisted count read.
+pub(crate) fn anchor_with<E>(
+    query: &str,
+    mut members: impl FnMut(&str) -> Result<Option<i64>, E>,
+) -> Result<Option<String>, E> {
     let chars: Vec<_> = query.chars().collect();
     let width = chars.len().min(3);
     if width == 0 {
@@ -649,17 +667,9 @@ fn anchor(
         .windows(width)
         .map(|window| window.iter().collect())
         .collect();
-    let Filter { table, ns, .. } = filter;
-    let mut statement = connection.prepare(&format!(
-        "SELECT members FROM {table}session_search_counts WHERE {ns}read_scope=?1 AND gram=?2"
-    ))?;
     let mut best = None;
     for gram in wanted {
-        let members: Option<i64> = statement
-            .query_row(params![scope_key(scope), gram], |row| row.get(0))
-            .optional()?;
-        record_steps(&statement);
-        let Some(members) = members else {
+        let Some(members) = members(&gram)? else {
             return Ok(None);
         };
         if best.as_ref().is_none_or(|(count, _)| members < *count) {
@@ -755,41 +765,7 @@ fn read_filtered(
     request: Query<'_>,
     filter: Filter,
 ) -> rusqlite::Result<Selection> {
-    let Query {
-        scope,
-        query,
-        harness,
-        repo,
-        model,
-        after,
-        limit,
-        index_complete,
-    } = request;
-    let Some(gram) = anchor(connection, filter, scope, query)? else {
-        return Ok(Selection {
-            rows: Vec::new(),
-            next: None,
-            report: Report {
-                partial: false,
-                candidates: 0,
-                index_complete,
-            },
-        });
-    };
-    let postings = posting_page(
-        connection,
-        filter,
-        scope,
-        &gram,
-        after.as_ref(),
-        MAX_CANDIDATES + 1,
-    )?;
-    let more = postings.len() > MAX_CANDIDATES;
-    let mut selected = Vec::with_capacity(limit);
-    let mut checked = after;
-    let mut candidates = 0;
-    let mut bytes = 0;
-    let mut partial = false;
+    let scope = request.scope;
     let Filter { table, ns, using } = filter;
     let mut document=connection.prepare(&format!("SELECT octet_length(fields),CASE WHEN octet_length(fields)<=?3 THEN fields ELSE NULL END FROM {table}session_search_documents WHERE {ns}read_scope=?1 AND session_key=?2 AND complete=1"))?;
     let metadata_sql = match scope {
@@ -801,52 +777,116 @@ fn read_filtered(
         ),
     };
     let mut metadata = connection.prepare(&metadata_sql)?;
+    select(
+        request,
+        |query| anchor(connection, filter, scope, query),
+        |gram, after, limit| posting_page(connection, filter, scope, gram, after, limit),
+        |key, budget| {
+            let found = document.query_row(
+                params![scope_key(scope), key, budget as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            record_steps(&document);
+            Ok(found)
+        },
+        |key, budget| {
+            let found = metadata
+                .query_row(params![key, budget as i64], |row| {
+                    Ok(Candidate {
+                        length: row.get(0)?,
+                        encoded: row.get(1)?,
+                        last: row.get(2)?,
+                        harness: row.get(3)?,
+                        repo: row.get(4)?,
+                        lifecycle: row.get(5)?,
+                    })
+                })
+                .optional()?;
+            record_steps(&metadata);
+            Ok(found)
+        },
+        || rusqlite::Error::InvalidQuery,
+    )
+}
+
+/// One candidate's stored Catalog metadata, bounded by the remaining scan bytes.
+pub(crate) struct Candidate {
+    pub(crate) length: i64,
+    pub(crate) encoded: Option<String>,
+    pub(crate) last: i64,
+    pub(crate) harness: String,
+    pub(crate) repo: Option<String>,
+    pub(crate) lifecycle: String,
+}
+
+/// Backend-neutral posting reducer: exact field match, filters, scan budgets
+/// and the keyset cursor are shared; each backend supplies only its lookups.
+/// `document` returns a complete scope document as (length, bounded fields).
+pub(crate) fn select<E>(
+    request: Query<'_>,
+    anchor: impl FnOnce(&str) -> Result<Option<String>, E>,
+    posting_page: impl FnOnce(&str, Option<&Position>, usize) -> Result<Vec<Position>, E>,
+    mut document: impl FnMut(&str, usize) -> Result<(i64, Option<String>), E>,
+    mut metadata: impl FnMut(&str, usize) -> Result<Option<Candidate>, E>,
+    invalid: impl Fn() -> E,
+) -> Result<Selection, E> {
+    let Query {
+        scope: _,
+        query,
+        harness,
+        repo,
+        model,
+        after,
+        limit,
+        index_complete,
+    } = request;
+    let Some(gram) = anchor(query)? else {
+        return Ok(Selection {
+            rows: Vec::new(),
+            next: None,
+            report: Report {
+                partial: false,
+                candidates: 0,
+                index_complete,
+            },
+        });
+    };
+    let postings = posting_page(&gram, after.as_ref(), MAX_CANDIDATES + 1)?;
+    let more = postings.len() > MAX_CANDIDATES;
+    let mut selected = Vec::with_capacity(limit);
+    let mut checked = after;
+    let mut candidates = 0;
+    let mut bytes = 0;
+    let mut partial = false;
     for position in postings.iter().take(MAX_CANDIDATES) {
-        let (length, encoded): (i64, Option<String>) = document.query_row(
-            params![
-                scope_key(scope),
-                position.key,
-                (MAX_SCAN_BYTES - bytes) as i64
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        record_steps(&document);
+        let (length, encoded) = document(&position.key, MAX_SCAN_BYTES - bytes)?;
         let Some(encoded) = encoded else {
             partial = true;
             break;
         };
-        bytes += usize::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let fields: Vec<String> =
-            serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        bytes += usize::try_from(length).map_err(|_| invalid())?;
+        let fields: Vec<String> = serde_json::from_str(&encoded).map_err(|_| invalid())?;
         if !fields.iter().any(|field| field.contains(query)) {
             candidates += 1;
             checked = Some(position.clone());
             continue;
         }
-        let row = metadata
-            .query_row(
-                params![position.key, (MAX_SCAN_BYTES - bytes) as i64],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-        record_steps(&metadata);
-        let Some((length, encoded, last, row_harness, row_repo, lifecycle)) = row else {
-            return Err(rusqlite::Error::InvalidQuery);
+        let Some(Candidate {
+            length,
+            encoded,
+            last,
+            harness: row_harness,
+            repo: row_repo,
+            lifecycle,
+        }) = metadata(&position.key, MAX_SCAN_BYTES - bytes)?
+        else {
+            return Err(invalid());
         };
         let Some(encoded) = encoded else {
             partial = true;
             break;
         };
-        bytes += usize::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        bytes += usize::try_from(length).map_err(|_| invalid())?;
         if harness.is_some_and(|wanted| wanted != row_harness)
             || repo.is_some_and(|wanted| {
                 if wanted.is_empty() {
@@ -860,8 +900,7 @@ fn read_filtered(
             checked = Some(position.clone());
             continue;
         }
-        let row: CatalogRow =
-            serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let row: CatalogRow = serde_json::from_str(&encoded).map_err(|_| invalid())?;
         if model.is_some_and(|wanted| wanted != row.model) {
             candidates += 1;
             checked = Some(position.clone());
@@ -875,7 +914,7 @@ fn read_filtered(
             || row.lifecycle.as_str() != lifecycle
             || fields != self::fields(&row)
         {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(invalid());
         }
         candidates += 1;
         if selected.len() == limit {
@@ -894,7 +933,7 @@ fn read_filtered(
     }
     let partial = partial || more;
     if partial && checked.is_none() {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(invalid());
     }
     Ok(Selection {
         rows: selected,

@@ -359,6 +359,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     (
+        "catalog_search_order",
+        "catalog_search_memberships",
+        "generation,gram,last_ms,session_key",
+        false,
+    ),
+    (
         "catalog_source_path",
         "catalog_sources",
         "generation,path_digest",
