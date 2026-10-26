@@ -129,7 +129,9 @@ impl SearchPublicationStore for SearchWriter<'_> {
     fn counts(&self, scope: crate::CatalogReadScope) -> rusqlite::Result<()> {
         let (column, _) = columns(scope);
         let scope = crate::catalog_search::scope_key(scope);
-        let sql = format!("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT ?1,?2,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN main.session_search_memberships p WHERE p.namespace=?1 AND p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members");
+        let sql = format!(
+            "INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT ?1,?2,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN main.session_search_memberships p WHERE p.namespace=?1 AND p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members"
+        );
         self.db
             .prepare_cached(&sql)?
             .execute(params![self.namespace, scope])?;
