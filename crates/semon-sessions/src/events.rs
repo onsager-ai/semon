@@ -953,7 +953,7 @@ impl Ledger {
 /// Hash the complete consumed prefix and its tail window. Idle scans retain
 /// the stat shortcut; changed files must verify all consumed bytes because
 /// unchanged end windows cannot establish an unchanged interior.
-fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+pub(crate) fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Sha256::new();
     let bytes = io::copy(&mut (&mut *file).take(offset), &mut prefix)?;

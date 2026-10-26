@@ -203,16 +203,8 @@ pub(super) fn reuse(
     let [old] = candidates.as_slice() else {
         return Ok(None);
     };
-    fn namespace(path: &str) -> Option<(&str, bool)> {
-        path.rsplit_once("/archived_sessions/")
-            .map(|(root, _)| (root, true))
-            .or_else(|| {
-                path.rsplit_once("/sessions/")
-                    .map(|(root, _)| (root, false))
-            })
-    }
     let (Some((root, archived)), Some((old_root, old_archived))) =
-        (namespace(path), namespace(old))
+        (crate::events::native_commit::relocation_namespace(path), crate::events::native_commit::relocation_namespace(old))
     else {
         return Ok(None);
     };
