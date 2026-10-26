@@ -294,39 +294,89 @@ pub(crate) fn seed_native(config: &StoreConfig, path: &Path, count: usize, opera
 
 pub(crate) fn seed_native_usage(config: &StoreConfig, path: &Path, count: usize) {
     let body=(0..count).map(|i| format!("{}\n",serde_json::json!({"type":"assistant","uuid":format!("r{i}"),"timestamp":"2026-01-01T00:00:00Z","message":{"id":format!("m{i}"),"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"sanitized"}],"usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}}}))).collect::<String>();
-    std::fs::write(path,body).unwrap();
-    let mut cache=cache(config);cache.ingest(&"4".repeat(64),path,"claude").unwrap();cache.flush_cold_writes().unwrap();
+    std::fs::write(path, body).unwrap();
+    let mut cache = cache(config);
+    cache.ingest(&"4".repeat(64), path, "claude").unwrap();
+    cache.flush_cold_writes().unwrap();
 }
 
-pub(crate) fn seed_catalog(config: &StoreConfig, root: &Path) -> (crate::Options, Vec<crate::model::summary::CatalogRow>) {
+pub(crate) fn seed_catalog(
+    config: &StoreConfig,
+    root: &Path,
+) -> (crate::Options, Vec<crate::model::summary::CatalogRow>) {
     let options = crate::Options {
-        source: crate::storage::HostSource::new(config.namespace.clone(), config.expected_stream_epoch.clone().unwrap()).unwrap().with_store(config.clone()).unwrap(),
-        claude_home: root.join("claude"), claude_json: root.join("claude.json"),
-        codex_home: root.join("codex"), copilot_home: root.join("copilot"),
-        proc_root: root.join("proc"), cache: root.join("unused.sqlite3"),
-        all: true, ..Default::default()
+        source: crate::storage::HostSource::new(
+            config.namespace.clone(),
+            config.expected_stream_epoch.clone().unwrap(),
+        )
+        .unwrap()
+        .with_store(config.clone())
+        .unwrap(),
+        claude_home: root.join("claude"),
+        claude_json: root.join("claude.json"),
+        codex_home: root.join("codex"),
+        copilot_home: root.join("copilot"),
+        proc_root: root.join("proc"),
+        cache: root.join("unused.sqlite3"),
+        all: true,
+        ..Default::default()
     };
-    let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/sanitized/catalog.jsonl".into() };
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/sanitized/catalog.jsonl".into(),
+    };
     let path = input.full_path(&options);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
-    std::fs::write(options.proc_root.join("sys/kernel/hostname"), "sanitized-transfer-host\n").unwrap();
+    std::fs::write(
+        options.proc_root.join("sys/kernel/hostname"),
+        "sanitized-transfer-host\n",
+    )
+    .unwrap();
     let body = (0..130).map(|i| format!("{}\n",serde_json::json!({"type":"user","sessionId":"catalog","uuid":format!("u{i}"),"parentUuid":if i==0 {None} else {Some(format!("u{}",i-1))},"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":format!("sanitized {i}")}}))).collect::<String>();
     std::fs::write(&path, body).unwrap();
     let mut cache = cache(config);
     cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
     let paths = vec![path.to_str().unwrap().to_owned()];
-    assert_eq!(cache.begin_semantic_stage_with_journal(&paths,"transfer-real-model",true).unwrap(),crate::events::Outcome::Written);
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(&paths, "transfer-real-model", true)
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
-        if batch.paths.is_empty() { continue; }
-        let model = cache.prepare_semantic_model_batch(&options,std::slice::from_ref(&input),&batch,1_790_000_000_000).unwrap();
+        if batch.paths.is_empty() {
+            continue;
+        }
+        let model = cache
+            .prepare_semantic_model_batch(
+                &options,
+                std::slice::from_ref(&input),
+                &batch,
+                1_790_000_000_000,
+            )
+            .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(!model.prepared().rows.is_empty());
-            assert!(model.prepared().transcripts.iter().map(|p|p.slots.len()).sum::<usize>() > 64);
-            assert_eq!(cache.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,crate::events::Outcome::Written);
-            return (options,model.prepared().rows.clone());
+            assert!(
+                model
+                    .prepared()
+                    .transcripts
+                    .iter()
+                    .map(|p| p.slots.len())
+                    .sum::<usize>()
+                    > 64
+            );
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                crate::events::Outcome::Written
+            );
+            return (options, model.prepared().rows.clone());
         }
     }
     panic!("real source Catalog did not publish");
@@ -335,24 +385,62 @@ pub(crate) fn seed_catalog(config: &StoreConfig, root: &Path) -> (crate::Options
 #[test]
 fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_publication() {
     let root = root();
-    let source = sqlite(&root,"catalog-source");
-    let target = sqlite(&root,"catalog-target");
-    let reverse = sqlite(&root,"catalog-reverse");
-    let (options, expected) = seed_catalog(&source,&root);
-    let manifest = stage(&source,&target,&[118;32]);
-    assert!(manifest.categories.iter().find(|c|c.category==Category::Slots).unwrap().rows>64);
+    let source = sqlite(&root, "catalog-source");
+    let target = sqlite(&root, "catalog-target");
+    let reverse = sqlite(&root, "catalog-reverse");
+    let (options, expected) = seed_catalog(&source, &root);
+    let manifest = stage(&source, &target, &[118; 32]);
+    assert!(
+        manifest
+            .categories
+            .iter()
+            .find(|c| c.category == Category::Slots)
+            .unwrap()
+            .rows
+            > 64
+    );
     std::fs::remove_dir_all(&options.claude_home).unwrap();
-    apply(&target,&manifest);
-    let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
-    let actual = crate::storage::sqlite::catalog::rows(&db,&crate::catalog::Request::parse("limit=60").unwrap()).unwrap();
-    assert_eq!(serde_json::to_value(&actual).unwrap(),serde_json::to_value(&expected).unwrap());
-    assert!(target.catalog_generation().is_err(),"content transfer cannot manufacture publication authority");
-    let backwards = stage(&target,&reverse,&[119;32]);
-    for category in [Category::CatalogCurrent,Category::Recipes,Category::Slots,Category::Trace,Category::Search] {
-        assert_eq!(manifest.categories.iter().find(|c|c.category==category).unwrap(), backwards.categories.iter().find(|c|c.category==category).unwrap());
+    apply(&target, &manifest);
+    let owner =
+        crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
+    let actual = crate::storage::sqlite::catalog::rows(
+        &db,
+        &crate::catalog::Request::parse("limit=60").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    assert!(
+        target.catalog_generation().is_err(),
+        "content transfer cannot manufacture publication authority"
+    );
+    let backwards = stage(&target, &reverse, &[119; 32]);
+    for category in [
+        Category::CatalogCurrent,
+        Category::Recipes,
+        Category::Slots,
+        Category::Trace,
+        Category::Search,
+    ] {
+        assert_eq!(
+            manifest
+                .categories
+                .iter()
+                .find(|c| c.category == category)
+                .unwrap(),
+            backwards
+                .categories
+                .iter()
+                .find(|c| c.category == category)
+                .unwrap()
+        );
     }
-    apply(&reverse,&backwards);
+    apply(&reverse, &backwards);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -394,41 +482,121 @@ fn current_transfer225_native_rows_real_ingest_paged_absent_raw_and_reverse() {
 
 #[test]
 fn current_transfer225_usage_multi_page_absent_raw_exact_native_reader() {
-    let root=root();let source=sqlite(&root,"usage-source");let target=sqlite(&root,"usage-target");let reverse=sqlite(&root,"usage-reverse");
-    let path=root.join("usage.jsonl");seed_native_usage(&source,&path,130);
-    let load=|config:&StoreConfig| {
-        let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
-        let store=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
-        let (ledger,index)=store.load_file(path.to_str().unwrap()).unwrap().unwrap();
+    let root = root();
+    let source = sqlite(&root, "usage-source");
+    let target = sqlite(&root, "usage-target");
+    let reverse = sqlite(&root, "usage-reverse");
+    let path = root.join("usage.jsonl");
+    seed_native_usage(&source, &path, 130);
+    let load = |config: &StoreConfig| {
+        let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (ledger, index) = store.load_file(path.to_str().unwrap()).unwrap().unwrap();
         serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"events":index.events,"extras":index.extras,"usage":index.usage(),"signals":index.signals.iter().map(|s|(&s.k,s.o,s.t,s.at,&s.n,s.v)).collect::<Vec<_>>(),"chunks":index.source_chunks.as_ref().unwrap().hashes,"launch":index.handoff_index})
     };
-    let expected=load(&source);assert_eq!(expected["usage"].as_object().unwrap().len(),130);
-    let manifest=stage(&source,&target,&[99;32]);
-    let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
-    let mut message=0;let mut identities=0;
-    for sequence in 1..=pages {let page=source.transfer_inbox().staged_page(&manifest,sequence).unwrap();assert!(page.records.len()<=MAX_PAGE_ROWS);for record in page.records {if let TransferRecord::NativeRow{kind,..}=record {match kind {super::super::NativeRowKind::MessageUsage=>message+=1,super::super::NativeRowKind::CopiedUsage=>identities+=1,_=>{}}}}}
-    assert_eq!(message,130);assert_eq!(identities,130);
-    std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
-    let manifest=stage(&target,&reverse,&[100;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);
+    let expected = load(&source);
+    assert_eq!(expected["usage"].as_object().unwrap().len(), 130);
+    let manifest = stage(&source, &target, &[99; 32]);
+    let pages = source
+        .transfer_inbox()
+        .checkpoint(&manifest)
+        .unwrap()
+        .sequence;
+    let mut message = 0;
+    let mut identities = 0;
+    for sequence in 1..=pages {
+        let page = source
+            .transfer_inbox()
+            .staged_page(&manifest, sequence)
+            .unwrap();
+        assert!(page.records.len() <= MAX_PAGE_ROWS);
+        for record in page.records {
+            if let TransferRecord::NativeRow { kind, .. } = record {
+                match kind {
+                    super::super::NativeRowKind::MessageUsage => message += 1,
+                    super::super::NativeRowKind::CopiedUsage => identities += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(message, 130);
+    assert_eq!(identities, 130);
+    std::fs::remove_file(&path).unwrap();
+    apply(&target, &manifest);
+    assert_eq!(load(&target), expected);
+    let manifest = stage(&target, &reverse, &[100; 32]);
+    apply(&reverse, &manifest);
+    assert_eq!(load(&reverse), expected);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn current_transfer225_normalized_usage_facts_cross_pages_and_reverse() {
-    let root=root();let source=sqlite(&root,"normalized-source");let target=sqlite(&root,"normalized-target");let reverse=sqlite(&root,"normalized-reverse");
-    let path=root.join("native-codex.jsonl");
-    seed_codex_usage(&source,&path);
-    let load=|config:&StoreConfig| {let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();let reader=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();let (ledger,index)=reader.load_file(path.to_str().unwrap()).unwrap().unwrap();serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"usage":index.codex_usage(),"events":index.codex_usage_events(),"chunks":index.source_chunks.as_ref().unwrap().hashes})};
-    let expected=load(&source);assert!(!expected["usage"].as_object().unwrap().is_empty());
-    let manifest=stage(&source,&target,&[101;32]);let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;let mut facts=0;
-    for sequence in 1..=pages {for record in source.transfer_inbox().staged_page(&manifest,sequence).unwrap().records {if matches!(record,TransferRecord::NativeRow{kind:super::super::NativeRowKind::UsageFact,..}){facts+=1;}}}assert_eq!(facts,70);
-    std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
-    let manifest=stage(&target,&reverse,&[102;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);std::fs::remove_dir_all(root).unwrap();
+    let root = root();
+    let source = sqlite(&root, "normalized-source");
+    let target = sqlite(&root, "normalized-target");
+    let reverse = sqlite(&root, "normalized-reverse");
+    let path = root.join("native-codex.jsonl");
+    seed_codex_usage(&source, &path);
+    let load = |config: &StoreConfig| {
+        let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
+        let reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (ledger, index) = reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"usage":index.codex_usage(),"events":index.codex_usage_events(),"chunks":index.source_chunks.as_ref().unwrap().hashes})
+    };
+    let expected = load(&source);
+    assert!(!expected["usage"].as_object().unwrap().is_empty());
+    let manifest = stage(&source, &target, &[101; 32]);
+    let pages = source
+        .transfer_inbox()
+        .checkpoint(&manifest)
+        .unwrap()
+        .sequence;
+    let mut facts = 0;
+    for sequence in 1..=pages {
+        for record in source
+            .transfer_inbox()
+            .staged_page(&manifest, sequence)
+            .unwrap()
+            .records
+        {
+            if matches!(
+                record,
+                TransferRecord::NativeRow {
+                    kind: super::super::NativeRowKind::UsageFact,
+                    ..
+                }
+            ) {
+                facts += 1;
+            }
+        }
+    }
+    assert_eq!(facts, 70);
+    std::fs::remove_file(&path).unwrap();
+    apply(&target, &manifest);
+    assert_eq!(load(&target), expected);
+    let manifest = stage(&target, &reverse, &[102; 32]);
+    apply(&reverse, &manifest);
+    assert_eq!(load(&reverse), expected);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
-pub(crate) fn seed_codex_usage(config:&StoreConfig,path:&Path) {
-    let mut body=format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":"transfer-thread","cwd":"/sanitized"}}));
-    body.push_str(&format!("{}\n",serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5"}})));
-    for i in 0..70 {body.push_str(&format!("{}\n",serde_json::json!({"type":"token_usage_record","payload":{"thread_id":"transfer-thread","session_id":"transfer-session","turn_id":format!("turn-{i}"),"response_id":format!("response-{i}"),"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"cache_write_input_tokens":2,"reasoning_output_tokens":0}}})));}
-    std::fs::write(path,body).unwrap();let mut cache=cache(config);cache.ingest(&"5".repeat(64),path,"codex").unwrap();cache.flush_cold_writes().unwrap();drop(cache);
+pub(crate) fn seed_codex_usage(config: &StoreConfig, path: &Path) {
+    let mut body = format!(
+        "{}\n",
+        serde_json::json!({"type":"session_meta","payload":{"id":"transfer-thread","cwd":"/sanitized"}})
+    );
+    body.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5"}})
+    ));
+    for i in 0..70 {
+        body.push_str(&format!("{}\n",serde_json::json!({"type":"token_usage_record","payload":{"thread_id":"transfer-thread","session_id":"transfer-session","turn_id":format!("turn-{i}"),"response_id":format!("response-{i}"),"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"cache_write_input_tokens":2,"reasoning_output_tokens":0}}})));
+    }
+    std::fs::write(path, body).unwrap();
+    let mut cache = cache(config);
+    cache.ingest(&"5".repeat(64), path, "codex").unwrap();
+    cache.flush_cold_writes().unwrap();
+    drop(cache);
 }
