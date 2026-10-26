@@ -202,9 +202,7 @@ impl IndexStore for ConfiguredIndex {
         self.native.append_evidence(path).map_err(StoreError::Configured)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.qualified_catalog()
     }
     fn catalog_component_paths(
         &self,

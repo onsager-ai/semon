@@ -986,6 +986,14 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        let ready = super::qualify_catalog_tx(&tx, Some(self.config.namespace.as_str()))?;
+        tx.commit().map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(ready)
+    }
     pub(crate) fn catalog_component_paths(&self, paths: &[String], keys: &[String], native_parents: &[(String, String)]) -> Result<Option<Vec<String>>, StoreError> {
         let db = self.snapshot().map_err(StoreError::Configured)?;
         crate::storage::sqlite::catalog_namespace::scope_readers(&db).map_err(StoreError::Configured)?;

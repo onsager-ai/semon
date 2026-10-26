@@ -78,7 +78,10 @@ impl HomeArgs {
         if self.machines.is_empty() {
             Ok(semon_sessions::Query::new(options))
         } else {
-            Ok(semon_sessions::Query::with_machines(machine_options(&options, &self.machines)?))
+            Ok(semon_sessions::Query::with_machines(machine_options(
+                &options,
+                &self.machines,
+            )?))
         }
     }
 }
