@@ -14,7 +14,8 @@ use std::{
 fn options(root: &Path, machine: usize) -> Options {
     let home = root.join(machine.to_string());
     Options {
-        source: semon_sessions::storage::HostSource::load_or_create(&home.join("source.json")).unwrap(),
+        source: semon_sessions::storage::HostSource::load_or_create(&home.join("source.json"))
+            .unwrap(),
         claude_home: home.join("claude"),
         claude_json: home.join(".claude.json"),
         codex_home: home.join("codex"),
