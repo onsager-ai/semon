@@ -785,8 +785,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let expected_runtime = current_binding.witness(&current_runtime).unwrap();
         for row in &model.prepared().rows {
             assert!(
-                row.query.as_ref().is_some_and(|query| query["runtime"].as_str() == Some(expected_runtime.as_str())),
-                "staged row runtime differs: phase={:?}", batch.phase
+                row.query.as_ref().is_some_and(
+                    |query| query["runtime"].as_str() == Some(expected_runtime.as_str())
+                ),
+                "staged row runtime differs: phase={:?}",
+                batch.phase
             );
         }
         if batch.phase == crate::model::relation_stage::Phase::Relations {
