@@ -1047,7 +1047,7 @@ fn phase_failed(phase: &'static str, error: rusqlite::Error) -> StorageError {
     failed(diagnose_sql(phase, error))
 }
 
-fn register_backfill_writer(db: &Connection, enabled: bool) -> Result<(), StorageError> {
+pub(crate) fn register_backfill_writer(db: &Connection, enabled: bool) -> Result<(), StorageError> {
     db.create_scalar_function(
         "semon_source_backfill_writer",
         0,

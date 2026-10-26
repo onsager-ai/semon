@@ -10281,6 +10281,9 @@ mod tests {
                 )
                 .unwrap();
             let db = f.db();
+            // Native writes compile the source-journal trigger; this is an
+            // event writer, never the backfill writer.
+            crate::storage::sqlite::source_journal::register_backfill_writer(&db, false).unwrap();
             // Native metadata writes still compile the complete ownership
             // trigger. Register the denied publisher role; these noise rows
             // are native keys and must not gain publication authority.
