@@ -60,7 +60,7 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
 impl Effects for Usage<'_, '_> {
     fn current(&mut self, path: &str) -> Result<Option<(i64, String)>, StorageError> {
         self.tx.check()?;
-        let rows = self.tx.driver.query("SELECT s.source_id,s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace=$1 AND c.source_path=$2 AND s.parser_version=$3", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?;
+        let rows = self.tx.driver.query("SELECT s.source_id,s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.parser_version=$3", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?;
         rows.first()
             .map(|r| Ok((r.get(0), text(r.get(1))?)))
             .transpose()
@@ -71,7 +71,8 @@ impl Effects for Usage<'_, '_> {
         // The namespace source_state lock serializes max+1 and generation changes.
         let id: i64 = self.tx.driver.query_one("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,(SELECT coalesce(max(source_id),0)+1 FROM semon_pg_native_usage_sources WHERE namespace=$1),$2,$3,0,$4,false) RETURNING source_id", &[&ns,&path.as_bytes(),&receipt.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?.get(0);
         self.after_effect()?;
-        self.tx.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET source_id=excluded.source_id", &[&ns,&path.as_bytes(),&id]).map_err(sqlstate::error)?;
+        let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET source_id=excluded.source_id WHERE semon_pg_native_usage_current.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_usage_current.source_path,sha256(excluded.source_path),excluded.source_path)", &[&ns,&path.as_bytes(),&id]).map_err(sqlstate::error)?;
+        if changed != 1 { return Err(StorageError::ScopeChanged); }
         self.after_effect()?;
         Ok(id)
     }
@@ -100,7 +101,7 @@ impl Effects for Usage<'_, '_> {
         identity: &str,
     ) -> Result<Option<String>, StorageError> {
         self.tx.check()?;
-        let rows = self.tx.driver.query("SELECT f.payload FROM semon_pg_native_usage_identities i JOIN semon_pg_native_usage_facts f USING(namespace,source_id,native_offset) WHERE i.namespace=$1 AND i.source_id=$2 AND i.scope=$3 AND i.identity=$4", &[&self.tx.namespace.as_str().as_bytes(),&id,&scope.as_bytes(),&identity.as_bytes()]).map_err(sqlstate::error)?;
+        let rows = self.tx.driver.query("SELECT f.payload FROM semon_pg_native_usage_identities i JOIN semon_pg_native_usage_facts f USING(namespace,source_id,native_offset) WHERE i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.source_id=$2 AND i.scope_digest=semon_pg_native_digest($1,$3,'usage.scope') AND i.identity_digest=semon_pg_native_digest($1,$4,'usage.identity') AND semon_pg_native_key_matches(i.scope,sha256($3::bytea),$3) AND semon_pg_native_key_matches(i.identity,sha256($4::bytea),$4)", &[&self.tx.namespace.as_str().as_bytes(),&id,&scope.as_bytes(),&identity.as_bytes()]).map_err(sqlstate::error)?;
         rows.first().map(|r| text(r.get(0))).transpose()
     }
     fn identity(
@@ -127,7 +128,8 @@ impl Effects for Usage<'_, '_> {
         value: &str,
     ) -> Result<(), StorageError> {
         self.tx.check()?;
-        self.tx.driver.execute("INSERT INTO semon_pg_native_usage_dimensions(namespace,source_id,kind,dimension,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT(namespace_digest,source_id,kind,dimension) DO UPDATE SET value=excluded.value", &[&self.tx.namespace.as_str().as_bytes(),&id,&kind.as_bytes(),&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+        let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_usage_dimensions(namespace,source_id,kind,dimension,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT(namespace_digest,source_id,kind_digest,dimension_digest) DO UPDATE SET value=excluded.value WHERE semon_pg_native_usage_dimensions.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_usage_dimensions.kind,sha256(excluded.kind),excluded.kind) AND semon_pg_native_key_matches(semon_pg_native_usage_dimensions.dimension,sha256(excluded.dimension),excluded.dimension)", &[&self.tx.namespace.as_str().as_bytes(),&id,&kind.as_bytes(),&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+        if changed != 1 { return Err(StorageError::ScopeChanged); }
         self.after_effect()
     }
     fn ready(&mut self, id: i64, checkpoint: u64) -> Result<(), StorageError> {

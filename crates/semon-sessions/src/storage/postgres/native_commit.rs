@@ -48,10 +48,10 @@ impl Relationships for Dependencies<'_, '_> {
         self.tx.check()?;
         let query = match group {
             RelationshipGroup::Lineage => {
-                "DELETE FROM semon_pg_native_native_dependencies WHERE namespace=$1 AND source_path=$2 AND (substring(harness from 1 for 8)=$3 OR substring(harness from 1 for 7)=$4)"
+                "DELETE FROM semon_pg_native_native_dependencies WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1,$2,'dependency.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2) AND (substring(harness from 1 for 8)=$3 OR substring(harness from 1 for 7)=$4)"
             }
             RelationshipGroup::Semantic => {
-                "DELETE FROM semon_pg_native_native_dependencies WHERE namespace=$1 AND source_path=$2 AND harness IN ($3,$4)"
+                "DELETE FROM semon_pg_native_native_dependencies WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1,$2,'dependency.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2) AND harness IN ($3,$4)"
             }
         };
         let (first, second): (&[u8], &[u8]) = match group {
@@ -74,7 +74,8 @@ impl Relationships for Dependencies<'_, '_> {
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> Result<(), StorageError> {
         self.tx.check()?;
-        self.tx.driver.execute("INSERT INTO semon_pg_native_native_dependencies(namespace,source_path,harness,native_id) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,source_path,harness,native_id) DO NOTHING", &[&self.tx.namespace.as_str().as_bytes(), &path.as_bytes(), &harness.as_bytes(), &id.as_bytes()]).map_err(sqlstate::error)?;
+        let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_native_dependencies(namespace,source_path,harness,native_id) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,source_path_digest,harness_digest,native_id_digest) DO UPDATE SET native_id=excluded.native_id WHERE semon_pg_native_native_dependencies.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.source_path,sha256(excluded.source_path),excluded.source_path) AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.harness,sha256(excluded.harness),excluded.harness) AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.native_id,sha256(excluded.native_id),excluded.native_id)", &[&self.tx.namespace.as_str().as_bytes(), &path.as_bytes(), &harness.as_bytes(), &id.as_bytes()]).map_err(sqlstate::error)?;
+        if changed != 1 { return Err(StorageError::ScopeChanged); }
         self.after_effect()
     }
     fn finished(&mut self, _: RelationshipGroup) -> Result<(), StorageError> {

@@ -5,6 +5,10 @@ use crate::{selected_read, storage::StorageError};
 
 pub(super) const MATCH_BODY: &str = "BEGIN IF digest <> sha256(expected) THEN RETURN false; END IF; IF stored <> expected THEN RAISE EXCEPTION 'Native key digest collision' USING ERRCODE='55000'; END IF; RETURN stored = expected; END;";
 
+// Fixed-width namespace and domain prefixes make the framing unambiguous.
+// This function addresses heap witnesses; it never grants identity authority.
+pub(super) const DIGEST_BODY: &str = "BEGIN RETURN sha256(sha256(ns) || sha256(convert_to(domain, 'UTF8')) || value); END;";
+
 pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, bool)] {
     match table {
         "files" => &[
@@ -12,6 +16,29 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("cwd_digest", "sha256(cwd)", true),
         ],
         "meta" => &[("key_digest", "sha256(key)", false)],
+        "usage_current" | "usage_sources" => &[(
+            "source_path_digest",
+            "semon_pg_native_digest(namespace, source_path, 'usage.path'::text)",
+            false,
+        )],
+        "usage_facts" => &[(
+            "identity_digest",
+            "semon_pg_native_digest(namespace, identity, 'usage.identity'::text)",
+            false,
+        )],
+        "usage_identities" => &[
+            ("scope_digest", "semon_pg_native_digest(namespace, scope, 'usage.scope'::text)", false),
+            ("identity_digest", "semon_pg_native_digest(namespace, identity, 'usage.identity'::text)", false),
+        ],
+        "usage_dimensions" => &[
+            ("kind_digest", "semon_pg_native_digest(namespace, kind, 'usage.kind'::text)", false),
+            ("dimension_digest", "semon_pg_native_digest(namespace, dimension, 'usage.dimension'::text)", false),
+        ],
+        "native_dependencies" => &[
+            ("source_path_digest", "semon_pg_native_digest(namespace, source_path, 'dependency.path'::text)", false),
+            ("harness_digest", "semon_pg_native_digest(namespace, harness, 'dependency.harness'::text)", false),
+            ("native_id_digest", "semon_pg_native_digest(namespace, native_id, 'dependency.native'::text)", false),
+        ],
         _ => &[],
     }
 }
