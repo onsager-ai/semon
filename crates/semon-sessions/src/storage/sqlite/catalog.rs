@@ -17,12 +17,12 @@ use std::io;
 pub(crate) fn rows(
     connection: &Connection,
     request: &Request,
-    qualified: bool,
+    _qualified: bool,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
     if let Some(sid) = &request.sid {
         return read_range(
             connection,
-            qualified,
+            true,
             "sqlite_autoindex_session_catalog_1",
             if request.require_complete && request.scope == CatalogReadScope::Current {
                 "lifecycle='current' AND "
@@ -78,7 +78,7 @@ pub(crate) fn rows(
         args.push(SqlValue::Text(cursor.key.clone()));
         let mut found = read_range(
             connection,
-            qualified,
+            true,
             &index,
             &filters,
             if cursor.inclusive {
@@ -95,7 +95,7 @@ pub(crate) fn rows(
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
-                qualified,
+                true,
                 &index,
                 &filters,
                 "last_ms < ?",
@@ -105,7 +105,7 @@ pub(crate) fn rows(
         }
         found
     } else {
-        read_range(connection, qualified, &index, &filters, "1", base, limit)?
+        read_range(connection, true, &index, &filters, "1", base, limit)?
     };
     // Capacity returned by SQLite is bounded by the requested page plus one.
     found.shrink_to_fit();
@@ -119,7 +119,7 @@ thread_local! {
 
 fn read_range(
     connection: &Connection,
-    qualified: bool,
+    _qualified: bool,
     index: &str,
     filters: &str,
     range: &str,
@@ -128,11 +128,7 @@ fn read_range(
 ) -> rusqlite::Result<Vec<CatalogRow>> {
     // The current namespace schema leads every Catalog index with namespace,
     // including the (namespace,session_key) primary key autoindex.
-    let (table, namespace_filter) = if qualified {
-        ("main.session_catalog", "namespace=semon_namespace() AND ")
-    } else {
-        ("session_catalog", "")
-    };
+    let (table, namespace_filter) = ("main.session_catalog", "namespace=semon_namespace() AND ");
     let sql = format!(
         "SELECT metadata,session_key,last_ms,harness,repo FROM {table} INDEXED BY {index} WHERE {namespace_filter}{filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
     );
@@ -175,12 +171,14 @@ pub(crate) fn read_page(
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    let qualified = binding.validate(&transaction, &binding.config().namespace)?;
+    if !binding.validate(&transaction, &binding.config().namespace)? {
+        return Err(crate::storage::StorageError::NamespaceUpgradePending.into());
+    }
     let reply = crate::catalog::read_page_snapshot(
         options,
         machine,
         request,
-        &AdmittedSnapshot(&transaction, qualified),
+        &AdmittedSnapshot(&transaction),
     )?;
     transaction.commit()?;
     Ok(reply)
@@ -198,15 +196,15 @@ pub(crate) fn history_identity(
     let tx = db
         .transaction()
         .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
-    let qualified = binding
-        .validate(&tx, &binding.config().namespace)
-        .map_err(crate::CatalogIdentityError::from)?;
+    if !binding.validate(&tx, &binding.config().namespace).map_err(crate::CatalogIdentityError::from)? {
+        return Err(crate::CatalogIdentityError::Unavailable);
+    }
     let selected = crate::catalog::catalog_selection_in_snapshot(
         options,
         source,
         key,
         CatalogReadScope::RetainedHistory,
-        &AdmittedSnapshot(&tx, qualified),
+        &AdmittedSnapshot(&tx),
     )?;
     tx.commit()
         .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
@@ -286,61 +284,7 @@ pub(crate) fn source_proof_observation(
     }))
 }
 
-impl CatalogSnapshot for Transaction<'_> {
-    fn require_current(&self) -> io::Result<()> {
-        crate::events::store::require_current(self)
-    }
-    fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
-        self.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(io::Error::other)
-    }
-    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        rows(self, request, false).map_err(io::Error::other)
-    }
-    fn search(
-        &self,
-        query: crate::catalog_search::Query<'_>,
-    ) -> io::Result<crate::catalog_search::Selection> {
-        crate::catalog_search::read(self, query).map_err(io::Error::other)
-    }
-    fn has_history(&self, key: &str) -> io::Result<bool> {
-        self.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
-            [key],
-            |row| row.get(0),
-        )
-        .map_err(io::Error::other)
-    }
-    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        crate::history_projection::catalog(self, key).map_err(io::Error::other)
-    }
-    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        crate::history_projection::qualified(self, row, false).map_err(io::Error::other)
-    }
-    fn selected_details(
-        &self,
-        key: &str,
-        sources: &[CatalogSource],
-        status: &mut dyn FnMut(&CatalogRow) -> Value,
-    ) -> io::Result<Option<Value>> {
-        crate::causal_trace::selected_details(self, key, sources, &mut |row| status(row))
-            .map_err(io::Error::other)
-    }
-    fn transcript_observation(
-        &self,
-        key: &str,
-        generation: &str,
-        history: bool,
-    ) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self, key, generation, history, false)
-            .map_err(io::Error::other)
-    }
-}
-
-pub(crate) struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+pub(crate) struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>);
 
 /// Bound Home/Query readers select through the same admitted snapshot as
 /// Catalog pages. Only the current namespace schema is readable.
@@ -351,7 +295,7 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
     if !binding.validate(transaction, &binding.config().namespace)? {
         return Err(crate::storage::StorageError::NamespaceUpgradePending);
     }
-    Ok(AdmittedSnapshot(transaction, true))
+    Ok(AdmittedSnapshot(transaction))
 }
 
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
@@ -359,9 +303,6 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         Ok(())
     }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
-        if !self.1 {
-            return self.0.publication_value(key);
-        }
         let sql = "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1";
         let tx = self.0;
         tx.query_row(sql, [key], |row| row.get(0))
@@ -369,34 +310,25 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        rows(self.0, request, self.1).map_err(io::Error::other)
+        rows(self.0, request, true).map_err(io::Error::other)
     }
     fn search(
         &self,
         query: crate::catalog_search::Query<'_>,
     ) -> io::Result<crate::catalog_search::Selection> {
-        if !self.1 {
-            return self.0.search(query);
-        }
         crate::catalog_search::read_admitted(self.0, query).map_err(io::Error::other)
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
-        if !self.1 {
-            return self.0.has_history(key);
-        }
         let sql = "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)";
         let tx = self.0;
         tx.query_row(sql, [key], |row| row.get(0))
             .map_err(io::Error::other)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        if !self.1 {
-            return self.0.history_catalog(key);
-        }
         crate::history_projection::admitted_catalog(self.0, key).map_err(io::Error::other)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        crate::history_projection::qualified(self.0, row, self.1).map_err(io::Error::other)
+        crate::history_projection::qualified(self.0, row, true).map_err(io::Error::other)
     }
     fn selected_details(
         &self,
@@ -404,9 +336,6 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         sources: &[CatalogSource],
         status: &mut dyn FnMut(&CatalogRow) -> Value,
     ) -> io::Result<Option<Value>> {
-        if !self.1 {
-            return self.0.selected_details(key, sources, status);
-        }
         // The owned lookup scopes every selected table to this namespace.
         crate::storage::selected::selected_details(
             &super::selected::Context::owned(self.0),
@@ -421,7 +350,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self.0, key, generation, history, self.1)
+        crate::transcript_range::observation(self.0, key, generation, history, true)
             .map_err(io::Error::other)
     }
 }
