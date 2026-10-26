@@ -29,6 +29,17 @@ struct Writer<'a, 'tx> {
 thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 static BOUNDARIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
+pub(super) fn inject_failure(after: Option<usize>) {
+    FAIL_AFTER.with(|point| point.set(after));
+    BOUNDARIES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn measured_boundaries() -> usize {
+    BOUNDARIES.with(|count| count.get())
+}
+
 pub(super) fn page_boundary(tx: &PgTxn<'_>) -> Result<(), StorageError> {
     #[cfg(test)]
     BOUNDARIES.with(|count| count.set(count.get() + 1));
