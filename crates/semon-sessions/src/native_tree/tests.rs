@@ -53,6 +53,15 @@ impl Home {
         events::EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap()
     }
 
+    fn writer(&self) -> rusqlite::Connection {
+        let config = self.options.source.config(&self.options.cache).unwrap();
+        let owner = events::store::configured::NativeOwnership::restore(&config).unwrap();
+        let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+        let db = journal.connection().unwrap();
+        journal.validate(&db).unwrap();
+        db
+    }
+
     fn observe(
         &self,
         path: &Path,
@@ -388,9 +397,9 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     text += &line(json!({"type":"assistant","message":{"id":"m-0","usage":{"input_tokens":9}}}));
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
     collect(&home.options).unwrap();
-    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let db = home.writer();
     db.execute(
-        "DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key LIKE 'native_tree_summary:%'",
         [],
     )
     .unwrap();
@@ -454,13 +463,13 @@ fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_gr
             .repeat(count);
         let path = home.write("claude/projects/repo/parent.jsonl", &text);
         let expected = serde_json::to_value(collect(&home.options).unwrap()).unwrap();
-        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        let db = home.writer();
         let rows: i64 = db
             .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, (count + 1) as i64);
         // A tree must not decode transcript rows, even an unsupported row tag.
-        db.execute("UPDATE events SET k='unsupported' WHERE seq=0", [])
+        db.execute("UPDATE events SET k='unsupported' WHERE namespace=semon_namespace() AND seq=0", [])
             .unwrap();
         let reads = events::FILE_READS.with(std::cell::Cell::get);
         let parsed = events::PARSED.with(std::cell::Cell::get);
@@ -651,16 +660,15 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
     );
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
     assert_eq!(collect(&home.options).unwrap()[0].tokens.total, 3);
-    let connection =
-        rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let connection = home.writer();
     let key = format!("native_tree_summary:{}", path.display());
     let parsed = events::PARSED.with(std::cell::Cell::get);
     for change in [
-        "DELETE FROM meta WHERE key=?1",
-        "UPDATE meta SET value='{' WHERE key=?1",
-        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
-        "UPDATE meta SET value=json_set(value,'$.ledger','wrong') WHERE key=?1",
-        "UPDATE meta SET value=printf('%1048577s','x') WHERE key=?1",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value='{' WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=json_set(value,'$.ledger','wrong') WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=printf('%1048577s','x') WHERE namespace=semon_namespace() AND key=?1",
     ] {
         connection.execute(change, [&key]).unwrap();
         let nodes = collect(&home.options).unwrap();
@@ -669,7 +677,7 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
     }
     connection
-        .execute("DELETE FROM meta WHERE key=?1", [&key])
+        .execute("DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1", [&key])
         .unwrap();
     fs::OpenOptions::new()
         .append(true)
