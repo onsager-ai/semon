@@ -8,6 +8,48 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+/// Retained endpoints must own their field recipes before a later Current
+/// publication can withdraw the other endpoint's relationship observation.
+pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
+    let mut fields = std::collections::BTreeMap::<String, serde_json::Map<String, Value>>::new();
+    for row in rows.iter() {
+        for edge in row
+            .query
+            .as_ref()
+            .into_iter()
+            .flat_map(|query| query["selected"]["edges"].as_array().into_iter().flatten())
+        {
+            let saved = fields
+                .entry(edge["id"].as_str().expect("edge identity").into())
+                .or_default();
+            for (field, recipe) in edge["query_content"].as_object().into_iter().flatten() {
+                if recipe.is_null() {
+                    continue;
+                }
+                if let Some(prior) = saved.insert(field.clone(), recipe.clone())
+                    && prior != *recipe
+                {
+                    return Err(std::io::Error::other(
+                        "Native handoff source recipes disagree",
+                    ));
+                }
+            }
+        }
+    }
+    for row in rows {
+        if let Some(edges) = row
+            .query
+            .as_mut()
+            .and_then(|query| query["selected"]["edges"].as_array_mut())
+        {
+            for edge in edges {
+                edge["query_content"] = json!(fields[edge["id"].as_str().expect("edge identity")]);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     session: Value,
@@ -106,7 +148,6 @@ impl Projection {
         &self,
         tx: &Transaction<'_>,
         row: &CatalogRow,
-        summary: &Summary,
         trace: &str,
     ) -> rusqlite::Result<()> {
         let session = serde_json::to_string(&self.session).map_err(data)?;
@@ -116,15 +157,13 @@ impl Projection {
             .map(serde_json::to_string)
             .collect::<Result<_, _>>()
             .map_err(data)?;
-        let edges: Vec<_> = self
-            .edges
+        let edges: Vec<_> = row
+            .query
+            .as_ref()
+            .and_then(|query| query["selected"]["edges"].as_array())
+            .ok_or(rusqlite::Error::InvalidQuery)?
             .iter()
-            .map(|edge| {
-                let mut edge = edge.clone();
-                edge["query_content"] =
-                    summary.query_recipe(edge["id"].as_str().expect("edge identity"));
-                serde_json::to_string(&edge)
-            })
+            .map(serde_json::to_string)
             .collect::<Result<_, _>>()
             .map_err(data)?;
         let source = crate::retention::source_generation(&row.sources).map_err(data)?;

@@ -5189,7 +5189,7 @@ impl<'a> Builder<'a> {
                 return Value::Null;
             };
             decorate(
-                serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd}),
+                serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd,"source":summary::source(file)}),
             )
         };
         let placed = |id: &str, place: Place| {
@@ -8560,7 +8560,7 @@ fn build_sources_inner(
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
         measurements.record("projection_context", started, rows.len());
-        for row in rows {
+        for row in rows.iter_mut() {
             let selected_turns = turns_by_session
                 .get(row.key.as_str())
                 .map(Vec::as_slice)
@@ -8679,6 +8679,7 @@ fn build_sources_inner(
                 measurements.record("projection_overview", started, 1);
             }
         }
+        crate::query_projection::complete_recipes(rows)?;
     }
     if catalog.is_some()
         && measured!(

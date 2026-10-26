@@ -829,7 +829,10 @@ pub(crate) mod selected_receipts {
         let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
             .connection()
             .unwrap();
-        let refs = db.prepare("SELECT DISTINCT session_key,id FROM storage_proof_refs WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
+        // A same-harness append replaces Current without inventing a retained
+        // Catalog owner. The frozen Source still owns both persisted receipts;
+        // qualify each through its real generation-bound reader below.
+        let refs = db.prepare("SELECT session_key,id FROM storage_proof_generations WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
             .query_map([config.namespace.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(
@@ -892,8 +895,7 @@ pub(crate) mod selected_receipts {
             for original in &row.sources {
                 let reference = crate::SessionSourceRef {
                     root: row.harness.clone(),
-                    path: crate::catalog::source_relative(options, &row.harness, original)
-                        .unwrap(),
+                    path: crate::catalog::source_relative(options, &row.harness, original).unwrap(),
                     native_id: original.native_id.clone(),
                     offset: original.offset,
                     prefix_sha256: original.prefix_sha256,
