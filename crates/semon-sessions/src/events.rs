@@ -1125,6 +1125,12 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
+    fn source_write_begin(&mut self, _options: &crate::Options, _input: &crate::Input, _intent: &crate::source_change::WriteIntent) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
+        Err(StoreError::Configured(crate::storage::StorageError::Unavailable))
+    }
+    fn source_write_complete(&mut self, _options: &crate::Options, _input: &crate::Input, _intent: &crate::source_change::WriteIntent, _revision: i64, _completion: &crate::source_change::WriteCompletion) -> Result<(), StoreError> {
+        Err(StoreError::Configured(crate::storage::StorageError::Unavailable))
+    }
     fn resume_runtime_input(&mut self, _: &crate::Options, _: &str) -> Result<(), StoreError> {
         Err(StoreError::Configured(
             crate::storage::StorageError::Unavailable,

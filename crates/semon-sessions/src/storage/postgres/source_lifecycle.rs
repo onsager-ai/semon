@@ -483,3 +483,90 @@ pub(super) fn relocate(
     tx.check()?;
     Ok(true)
 }
+
+#[derive(serde::Serialize,serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIntent { request:Vec<u8>, revision:i64, previous:Option<crate::source_change::AppendEvidence> }
+fn raw_request(tx:&PgTxn<'_>,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<Vec<u8>,StorageError> {
+    if intent.operation.is_empty() || intent.operation.len()>512 || intent.root!=input.root.as_str() || intent.path.len()>4096 {return Err(StorageError::InvalidArguments);}
+    let bytes=serde_json::to_vec(&("raw-source-write-v1",tx.namespace.as_str(),input.root.as_str(),&input.path,intent)).map_err(|_|StorageError::InvalidArguments)?;
+    if bytes.len()>16384 {return Err(StorageError::Busy);} Ok(bytes)
+}
+fn raw_intent_key(intent:&crate::source_change::WriteIntent)->String {format!("raw-write-intent:{}",intent.operation)}
+fn raw_ack_key(intent:&crate::source_change::WriteIntent)->String {format!("raw-write-ack:{}",intent.operation)}
+
+pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<(i64,Option<crate::source_change::AppendEvidence>),StorageError> {
+    let request=raw_request(tx,input,intent)?;
+    if input.full_path(options).to_str()!=Some(intent.path.as_str()) {return Err(StorageError::InvalidArguments);}
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    if let Some(bytes)=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),32768)? {
+        let prior:RawIntent=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+        if prior.request!=request {return Err(StorageError::Conflict);}return Ok((prior.revision,prior.previous));
+    }
+    if model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
+    let actual=crate::events::Stat::of(&input.full_path(options)).ok();
+    if actual!=intent.before {return Err(StorageError::Conflict);}
+    if let Some(before)=&intent.before {
+        if Some(crate::source_change::bytes_hash(&input.full_path(options),before.size).map_err(|_|StorageError::ScopeChanged)?)!=intent.before_hash {return Err(StorageError::Conflict);}
+    } else if intent.before_hash.is_some() {return Err(StorageError::ScopeChanged);}
+    let inflight=format!("raw-write-inflight:{}",intent.path);
+    if super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.is_some() {return Err(StorageError::Conflict);}
+    let previous=model_cache::append_evidence(tx,&intent.path)?;
+    // Existing append evidence can be continued; unknown pending evidence may
+    // not be overwritten to manufacture a fresh source write.
+    let mutation:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    if mutation && previous.is_none() {return Err(StorageError::Conflict);}
+    super::source_journal::invalidate(tx,&intent.path)?;
+    let revision:i64=tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+        if let Some(facts)=options.facts.as_ref().map(|p|crate::read_facts(p)).transpose().map_err(|_|StorageError::ScopeChanged)? {
+            let evidence=crate::source_change::RuntimeInputEvidence{unaffected:crate::native_evidence::recorded_runtime_fingerprint_excluding(options,&facts,Some(std::path::Path::new(&intent.path))).map_err(|_|StorageError::ScopeChanged)?};
+            let bytes=serde_json::to_vec(&evidence).map_err(|_|StorageError::Unavailable)?;
+            tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
+        }
+    }
+    let state=RawIntent{request:request.clone(),revision,previous:previous.clone()};
+    super::native_keys::put_meta(tx,raw_intent_key(intent).as_bytes(),&serde_json::to_vec(&state).map_err(|_|StorageError::Unavailable)?)?;
+    super::native_keys::put_meta(tx,inflight.as_bytes(),&request)?;
+    tx.check()?;Ok((revision,previous))
+}
+
+pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent,revision:i64,completion:&crate::source_change::WriteCompletion)->Result<(),StorageError> {
+    use sha2::{Digest,Sha256};
+    let request=raw_request(tx,input,intent)?;
+    let ack=serde_json::to_vec(&(&request,revision,completion)).map_err(|_|StorageError::InvalidArguments)?;
+    if ack.len()>32768 {return Err(StorageError::Busy);}
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    if let Some(prior)=super::native_keys::read_meta(tx,raw_ack_key(intent).as_bytes(),32768)? {return if prior==ack {Ok(())} else {Err(StorageError::Conflict)};}
+    let stored=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),32768)?.ok_or(StorageError::ScopeChanged)?;
+    let state:RawIntent=serde_json::from_slice(&stored).map_err(|_|StorageError::ScopeChanged)?;
+    let inflight=format!("raw-write-inflight:{}",intent.path);
+    if state.request!=request || state.revision!=revision || super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.as_ref()!=Some(&request) || model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
+    let claims=tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?;
+    if claims.first().map(|r|r.get::<_,i64>(0))!=Some(revision) {return Err(StorageError::Conflict);}
+    let path=input.full_path(options);
+    if crate::events::Stat::of(&path).ok()!=Some(completion.after) || completion.after.size!=completion.to || crate::source_change::bytes_hash(&path,completion.to).map_err(|_|StorageError::ScopeChanged)?!=completion.hash {return Err(StorageError::ScopeChanged);}
+    if let Some(evidence)=&completion.evidence {
+        let before=intent.before.ok_or(StorageError::ScopeChanged)?;
+        if !evidence.qualifies(&evidence.before,&completion.after) || intent.generation.as_deref()!=Some(evidence.generation.as_str()) || before.size!=intent.from || crate::source_change::bytes_hash(&path,before.size).map_err(|_|StorageError::ScopeChanged)?!=intent.before_hash.ok_or(StorageError::ScopeChanged)? {return Err(StorageError::ScopeChanged);}
+    }
+    let runtime=crate::native_evidence::query_runtime_generation(options).map_err(|_|StorageError::ScopeChanged)?;
+    let facts=options.facts.as_ref().map(|p| {
+        let facts=crate::read_facts(p).map_err(|_|StorageError::ScopeChanged)?;
+        Ok::<_,StorageError>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(|_|StorageError::Unavailable)?)))
+    }).transpose()?;
+    if runtime!=completion.runtime || facts!=completion.facts {return Err(StorageError::Conflict);}
+    resume_runtime(tx,options,&intent.path)?;
+    if let Some(evidence)=&completion.evidence {
+        let bytes=serde_json::to_vec(evidence).map_err(|_|StorageError::Unavailable)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
+    }
+    // Metadata records the qualified interpretation; it never contains Raw body.
+    super::native_keys::put_meta(tx,b"raw-write-runtime",completion.runtime.as_bytes())?;
+    if let Some(facts)=&completion.facts {super::native_keys::put_meta(tx,b"raw-write-facts",facts.as_bytes())?;}
+    super::native_keys::put_meta(tx,raw_ack_key(intent).as_bytes(),&ack)?;
+    super::native_keys::delete_meta(tx,inflight.as_bytes())?;
+    tx.check()?;Ok(())
+}

@@ -136,6 +136,7 @@ pub(super) fn qualify(
     expected: Option<&Ledger>,
 ) -> Result<(i64, bool), StorageError> {
     tx.check()?;
+    if super::native_keys::read_meta(tx,format!("raw-write-inflight:{path}").as_bytes(),16384)?.is_some() {return Err(StorageError::Conflict);}
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.execute("INSERT INTO semon_pg_source_state(namespace) VALUES($1) ON CONFLICT(namespace_digest) DO NOTHING", &[&ns]).map_err(sqlstate::error)?;
     let locked = tx.driver.query("SELECT namespace FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
