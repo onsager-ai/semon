@@ -46,12 +46,15 @@ jobs:
 
       - name: Run parser event fixture tests on the exact head
         run: |
-          cargo test --locked -p semon-sessions 'events::tests::'
+          result=0
+          cargo test --locked -p semon-sessions 'events::tests::' || result=$?
           for run in 1 2 3 4 5; do
-            cargo test --locked -p semon-sessions events::tests::two_processes_indexing_at_once_end_equal_to_a_cold_read -- --exact
+            cargo test --locked -p semon-sessions events::tests::two_processes_indexing_at_once_end_equal_to_a_cold_read -- --exact || result=$?
           done
+          exit "$result"
 
       - name: Run durable owned-turn lifecycle regressions on the exact head
+        if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p semon-sessions codex_lifecycle::tests::
 
