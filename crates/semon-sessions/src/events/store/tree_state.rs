@@ -145,8 +145,12 @@ pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
             | FunctionFlags::SQLITE_INNOCUOUS,
         |context| {
             let domain: String = context.get(0)?;
-            let key: String = context.get(1)?;
-            Ok(crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec())
+            // Generated columns can evaluate a transient NULL during updates.
+            // The authored table still requires a non-null stored key.
+            let key: Option<String> = context.get(1)?;
+            Ok(key.map(|key| {
+                crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec()
+            }))
         },
     )
 }
