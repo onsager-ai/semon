@@ -2479,17 +2479,13 @@ fn resolve_catalog_input_tx(
 }
 
 pub(super) enum Unopened {
-    /// Not a database, or a damaged one: set aside and rebuilt.
-    Corrupt(rusqlite::Error),
     Other(String),
-    Unsupported(String),
 }
 
 impl fmt::Display for Unopened {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Corrupt(error) => write!(formatter, "{error}"),
-            Self::Other(message) | Self::Unsupported(message) => formatter.write_str(message),
+            Self::Other(message) => formatter.write_str(message),
         }
     }
 }
@@ -3474,28 +3470,17 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn read_stamp(&self) -> rusqlite::Result<Option<ReportedFileStamp>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .and_then(|text| serde_json::from_str(&text).ok()))
-    }
-
     /// Every file's index, and the reported runs, in one read transaction.
     /// A file whose rows can't be read is left out: it is read from its log
     /// again when next seen, and its rows replaced.
+    #[cfg(test)]
     fn load(&self) -> rusqlite::Result<Loaded> {
         let transaction = self.connection.unchecked_transaction()?;
         let mut files = Vec::new();
         {
             let mut readers = Readers::new(&transaction)?;
             let mut statement = transaction.prepare(&format!(
-                "SELECT {FILE_COLUMNS} FROM files ORDER BY file_id"
+                "SELECT {FILE_COLUMNS} FROM files WHERE namespace=semon_namespace() ORDER BY file_id"
             ))?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
