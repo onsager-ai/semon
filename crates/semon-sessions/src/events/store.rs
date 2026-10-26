@@ -926,8 +926,7 @@ pub(crate) fn verify_relocation_prefix(
                 sha2::digest::generic_array::GenericArray::from(ledger.prefix)
             ) == expected);
         }
-        let mut file = crate::sealed::LogFile::open(path)?;
-        let (prefix, _) = super::consumed_hashes(&mut file, length)?;
+        let prefix = crate::source_change::bytes_hash(path, length, || Ok(()))?;
         return Ok(format!(
             "{:x}",
             sha2::digest::generic_array::GenericArray::from(prefix)
@@ -949,8 +948,8 @@ pub(crate) fn verify_relocation_prefix(
             sha2::digest::generic_array::GenericArray::from(ledger.prefix)
         ) == expected);
     }
-    let mut file = crate::sealed::LogFile::open(path)?;
-    let (prefix, _) = super::consumed_hashes(&mut file, length)?;
+    drop(tx);
+    let prefix = crate::source_change::bytes_hash(path, length, || Ok(()))?;
     Ok(format!(
         "{:x}",
         sha2::digest::generic_array::GenericArray::from(prefix)
