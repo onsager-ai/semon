@@ -140,7 +140,9 @@ pub(super) fn diagnose(statement: &'static str, error: rusqlite::Error) -> rusql
     #[cfg(test)]
     if let rusqlite::Error::SqliteFailure(code, message) = &error {
         let message = message.as_deref().unwrap_or("");
-        let reason = if message.contains("unable to delete/modify user-function") {
+        let reason = if message.starts_with("Invalid function parameter type Null") {
+            "function_argument_null"
+        } else if message.contains("unable to delete/modify user-function") {
             "function_rebind_active"
         } else if message.contains("user-defined function raised exception") {
             "function_callback"
@@ -191,8 +193,16 @@ pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
             | FunctionFlags::SQLITE_INNOCUOUS,
         |context| {
             let domain: String = context.get(0)?;
-            let key: String = context.get(1)?;
-            Ok(crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec())
+            // SQLite can evaluate a generated expression with a transient NULL
+            // while updating another column. The stored key remains NOT NULL.
+            let key: Option<String> = context.get(1)?;
+            #[cfg(test)]
+            if key.is_none() {
+                eprintln!("native tree digest_argument=null");
+            }
+            Ok(key.map(|key| {
+                crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec()
+            }))
         },
     )
 }
@@ -444,13 +454,14 @@ pub(super) fn write_values(
             "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING",
             "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
         )?)?
-        .execute(params![id, model])?;
+        .execute(params![id, model])
+        .map_err(|error| diagnose("model_insert", error))?;
     }
     for (tool, name) in rows.tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name])?;
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name]).map_err(|error| diagnose("tool_open_upsert", error))?;
     }
     for tool in rows.closed_tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool])?;
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool]).map_err(|error| diagnose("tool_closed_upsert", error))?;
     }
     for (message, model) in rows.usage_models {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_usage_models VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET model=excluded.model", "INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?)?.execute(params![id,message,model])?;

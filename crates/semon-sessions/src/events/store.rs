@@ -5805,13 +5805,15 @@ fn write_tree_summary(
                     crate::selected_read::row(r, 512)?;
                     r.get(0)
                 })
-                .optional()?;
+                .optional()
+                .map_err(|error| tree_state::diagnose("summary_metadata_read", error))?;
             let failed: Option<Option<String>> = statement
                 .query_row([format!("native_tree_failure:{path}")], |r| {
                     crate::selected_read::row(r, 64)?;
                     r.get(0)
                 })
-                .optional()?;
+                .optional()
+                .map_err(|error| tree_state::diagnose("summary_metadata_read", error))?;
             if failed.is_none() && encoded.flatten().as_deref() == Some(json(&current)?.as_str()) {
                 return Ok(());
             }
