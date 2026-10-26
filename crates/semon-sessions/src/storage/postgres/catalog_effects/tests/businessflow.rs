@@ -1473,4 +1473,32 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         expected_bodies,
         "old selected bodies through a fresh Pool"
     );
+    // Codex active/archive membership: a Facts write selecting the archived
+    // rollout completes, replays its lost ACK and keeps the exact Facts bytes.
+    let mut archived_facts = recorded.clone();
+    archived_facts.codex_rollouts = Some(std::collections::BTreeSet::from([format!(
+        "archived_sessions/rollout-{codex_id}.jsonl"
+    )]));
+    let membership = crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &archived_facts,
+        true,
+        raw_store(),
+        None,
+    )
+    .unwrap();
+    let membership_request = membership.intent();
+    crate::save_json_file(&facts_path, &archived_facts).unwrap();
+    membership.complete().unwrap();
+    crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &archived_facts,
+        true,
+        raw_store(),
+        Some(membership_request),
+    )
+    .unwrap()
+    .complete()
+    .unwrap();
+    assert_eq!(crate::read_facts(&facts_path).unwrap(), archived_facts);
 }

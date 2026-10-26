@@ -574,9 +574,9 @@ pub(super) fn facts_begin(tx:&mut PgTxn<'_>,intent:&crate::source_change::FactsI
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let key=format!("facts-write-intent:{}",intent.operation);
     if let Some(prior)=super::native_keys::read_meta(tx,key.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
-    // Retained active/archive membership needs the shared relocation planner;
-    // until that adapter is connected, refuse before the receiver writes Facts.
-    if intent.before.codex_rollouts!=intent.wanted.codex_rollouts || intent.before.codex_provisional_rollouts!=intent.wanted.codex_provisional_rollouts {return Err(StorageError::NamespaceUpgradePending);}
+    // Active/archive rollout membership changes are admitted: completion
+    // invalidates exactly the changed rollout Sources (or every Codex Source
+    // when the selection itself appears/disappears) for ordinary catch-up.
     if model_cache::generation(tx)?!=intent.head || actual!=&intent.before || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.is_some() {return Err(StorageError::Conflict);}
     super::native_keys::put_meta(tx,key.as_bytes(),&request)?;
     super::native_keys::put_meta(tx,b"facts-write-inflight",&request)?;tx.check()
@@ -597,10 +597,11 @@ pub(super) fn facts_complete(tx:&mut PgTxn<'_>,options:&crate::Options,intent:&c
         let old=selected(&intent.before);let new=selected(&intent.wanted);
         let every=intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none();
         // A global or whole-selection change affects every (Codex) Current Source
-        // and is bounded by this operation's 64 Source budget. Otherwise only the
+        // (selection change: Codex owners only) and is bounded by this operation's
+        // 64 Source budget. Otherwise only the
         // changed rollout paths are looked up by the Source path index.
         let targets=if changes.global||every {None} else {Some(old.symmetric_difference(&new).map(|relative|options.codex_home.join(relative).to_string_lossy().into_owned().into_bytes()).collect::<Vec<_>>())};
-        let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) ORDER BY source_path LIMIT 65", &[&ns,&generation.as_bytes(),&targets]).map_err(sqlstate::error)?;
+        let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) AND (NOT $4 OR key_digest IN (SELECT key_digest FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND harness=$5)) ORDER BY source_path LIMIT 65", &[&ns,&generation.as_bytes(),&targets,&(every&&!changes.global),&b"codex".as_slice()]).map_err(sqlstate::error)?;
         if rows.len()>64 {return Err(StorageError::Busy);}
         for row in rows {
             let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
