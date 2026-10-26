@@ -10,6 +10,50 @@ pub(crate) struct Navigation {
     pub(crate) pool: PgPool,
     pub(crate) control: PgCancellation,
 }
+
+pub(crate) fn source_proof_observation(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    root: &str,
+    absolute: &str,
+) -> Result<Option<crate::storage::catalog::SourceProofObservation>, StorageError> {
+    let generation = configured_generation(config, pool, control)?;
+    snapshot::with_admitted_snapshot(pool, &config.namespace, control, &generation, |snapshot| {
+        let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        let rows = tx.driver.query("SELECT r.session_key,CASE WHEN octet_length(r.metadata)<=1048576 THEN r.metadata END FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r USING(namespace_digest,namespace,generation,key_digest) WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.path_digest=sha256($3::bytea) AND s.source_path=$3 ORDER BY r.session_key LIMIT 1", &[&config.namespace.as_str().as_bytes(), &generation.as_bytes(), &absolute.as_bytes()]).map_err(super::sqlstate::error)?;
+        let Some(found) = rows.first() else {
+            return Ok(None);
+        };
+        let key = String::from_utf8(found.get(0)).map_err(|_| StorageError::ScopeChanged)?;
+        let bytes = found
+            .get::<_, Option<Vec<u8>>>(1)
+            .ok_or(StorageError::Busy)?;
+        let row: crate::model::summary::CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != key || row.harness != root || row.sources.len() > 64 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let source = row
+            .sources
+            .iter()
+            .find(|source| source.path.to_str() == Some(absolute))
+            .ok_or(StorageError::ScopeChanged)?;
+        let (_, ledger) =
+            super::native_reader::ledger(&mut tx, absolute)?.ok_or(StorageError::ScopeChanged)?;
+        if !crate::storage::catalog::source_matches_ledger(source, &ledger)
+            || source.size != ledger.stat.size
+            || source.modified_ns != ledger.stat.modified_ns
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(Some(crate::storage::catalog::SourceProofObservation {
+            key,
+            source: source.clone(),
+            generation: generation.clone(),
+        }))
+    })
+}
 impl Navigation {
     fn read<T>(
         &self,

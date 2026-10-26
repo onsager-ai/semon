@@ -11,6 +11,15 @@ fn unavailable<T>() -> io::Result<T> {
 }
 
 impl CatalogSnapshot for Snapshot<'_, '_> {
+    fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
+        super::super::super::current_sources::runtime_in_snapshot(self, options).map_err(failed)
+    }
+    fn facts_authority<'a>(
+        &'a self,
+        path: &std::path::Path,
+    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
+        super::super::super::current_sources::in_snapshot(self, path).map_err(failed)
+    }
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         let mut tx = self.tx.lock().ok()?;
         super::super::super::model_cache::binding(&mut tx).ok()
