@@ -230,7 +230,10 @@ impl Sources {
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
         let db =
-            crate::events::store::focused_unbound_connection(&cache_path).map_err(|error| {
+            crate::storage::local_navigation_binding(options, "")
+                .map_err(io::Error::other)
+                .and_then(|binding| crate::events::store::focused_connection(&binding))
+                .map_err(|error| {
                 for source in sources.iter().take(16) {
                     note_focused_source_interest(&cache_path, source);
                 }
@@ -1475,7 +1478,8 @@ mod tests {
             crate::source_carrier::FailureStage::of(&mcp_error),
             Some(crate::source_carrier::FailureStage::HeaderVersion)
         );
-        let result = crate::events::store::chunk_proofs::Focused::open_unbound_with_raw(
+        let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
+            &crate::storage::local_navigation_binding(&options, "").unwrap(),
             &crate::events::EventCache::path(&options.cache),
             fixture.path.to_str().unwrap(),
             &ledger,
@@ -1504,7 +1508,8 @@ mod tests {
         // a second upgrade for the same failure transition.
         assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_err());
         assert!(
-            crate::events::store::chunk_proofs::Focused::open_unbound_with_raw(
+            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                &crate::storage::local_navigation_binding(&options, "").unwrap(),
                 &crate::events::EventCache::path(&options.cache),
                 fixture.path.to_str().unwrap(),
                 &ledger,
