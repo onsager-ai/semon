@@ -552,7 +552,8 @@ pub(in crate::storage::postgres) struct PgPage<'a, 'b, 'tx, 'r> {
     pub(in crate::storage::postgres) snapshot: &'a Snapshot<'b, 'tx>,
     pub(in crate::storage::postgres) key: &'a str,
     pub(in crate::storage::postgres) history: bool,
-    pub(in crate::storage::postgres) records: &'a super::super::selected_reader::SelectedRecords<'r, 'b, 'tx>,
+    pub(in crate::storage::postgres) records:
+        &'a super::super::selected_reader::SelectedRecords<'r, 'b, 'tx>,
 }
 impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
     fn slots(
