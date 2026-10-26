@@ -159,16 +159,10 @@ impl PgPool {
         operation: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
         let namespace = LogicalSourceNamespace::new("schema")?;
-        self.transaction_inner(
-            &namespace,
-            TxnKind::StoreWrite,
-            control,
-            true,
-            |tx| {
-                let value = operation(tx)?;
-                schema::advance_epoch(tx)?;
-                Ok(value)
-            },
-        )
+        self.transaction_inner(&namespace, TxnKind::StoreWrite, control, true, |tx| {
+            let value = operation(tx)?;
+            schema::advance_epoch(tx)?;
+            Ok(value)
+        })
     }
 }

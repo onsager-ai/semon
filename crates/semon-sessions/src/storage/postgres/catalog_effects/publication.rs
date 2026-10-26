@@ -16,10 +16,32 @@ pub(super) fn request(
         return Err(StorageError::Busy);
     }
     let recipes = publication.transcripts.map(|projections| {
-        projections.iter().map(|p| (&p.key, &p.slots, p.repair)).collect::<Vec<_>>()
+        projections
+            .iter()
+            .map(|p| (&p.key, &p.slots, p.repair))
+            .collect::<Vec<_>>()
     });
-    let derivations = publication.rows.iter().map(|row| (&row.overview, row.trace.as_ref().map(|trace| trace.publication_witness(row)))).collect::<Vec<_>>();
-    let payload = encoded(&("catalog-publication-v1", publication.rows, derivations, recipes, expected, claims, closed))?;
+    let derivations = publication
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                &row.overview,
+                row.trace
+                    .as_ref()
+                    .map(|trace| trace.publication_witness(row)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let payload = encoded(&(
+        "catalog-publication-v1",
+        publication.rows,
+        derivations,
+        recipes,
+        expected,
+        claims,
+        closed,
+    ))?;
     Ok((digest(&payload), payload))
 }
 
@@ -31,7 +53,15 @@ pub(in crate::storage::postgres) fn publish(
     closed: bool,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let (operation, payload) = request(publication, expected, claims, closed)?;
-    publish_operation(tx, publication, expected, claims, closed, &operation, &payload)
+    publish_operation(
+        tx,
+        publication,
+        expected,
+        claims,
+        closed,
+        &operation,
+        &payload,
+    )
 }
 
 fn publish_operation(
@@ -50,49 +80,107 @@ fn publish_operation(
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old = tx.driver.query("SELECT payload=$3,CASE WHEN octet_length(generation)=64 THEN generation END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns, &operation, &payload]).map_err(sqlstate::error)?;
     if let Some(row) = old.first() {
-        if !row.get::<_, bool>(0) { return Err(StorageError::Conflict); }
-        let generation = String::from_utf8(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)?;
+        if !row.get::<_, bool>(0) {
+            return Err(StorageError::Conflict);
+        }
+        let generation = String::from_utf8(
+            row.get::<_, Option<Vec<u8>>>(1)
+                .ok_or(StorageError::ScopeChanged)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
         return Ok((Outcome::Written, Some(generation)));
     }
     if super::super::model_cache::generation(tx)?.as_deref() != expected {
         return Ok((Outcome::Conflict, None));
     }
-    let paths = publication.rows.iter().flat_map(|row| &row.sources).map(|source| path(source).map(str::to_owned)).collect::<Result<std::collections::BTreeSet<_>, _>>()?.into_iter().collect::<Vec<_>>();
+    let paths = publication
+        .rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .map(|source| path(source).map(str::to_owned))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
     let fence = admission::capture(tx, &paths)?;
     for (path, revision) in claims {
         let actual = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?;
-        if actual.first().map(|row| row.get::<_, i64>(0)) != *revision { return Ok((Outcome::Conflict, None)); }
+        if actual.first().map(|row| row.get::<_, i64>(0)) != *revision {
+            return Ok((Outcome::Conflict, None));
+        }
     }
     // A partial request cannot silently drop an unmentioned Current owner.
     // Larger/incomplete closures refuse; the semantic producer must form a
     // complete bounded cohort rather than publishing a blank success.
     if let Some(previous) = expected {
         let rows = tx.driver.query("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns, &previous.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len() > 64 { return Err(StorageError::Busy); }
+        if rows.len() > 64 {
+            return Err(StorageError::Busy);
+        }
         for row in rows {
             let key: Vec<u8> = row.get(0);
-            if !publication.rows.iter().any(|row| row.key.as_bytes() == key) { return Err(StorageError::NamespaceUpgradePending); }
+            if !publication.rows.iter().any(|row| row.key.as_bytes() == key) {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
     }
     if closed {
         let outstanding: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
-        if outstanding != claims.iter().filter(|(_, revision)| revision.is_some()).count() as i64 { return Ok((Outcome::Conflict, None)); }
+        if outstanding
+            != claims
+                .iter()
+                .filter(|(_, revision)| revision.is_some())
+                .count() as i64
+        {
+            return Ok((Outcome::Conflict, None));
+        }
     }
-    let runtime = publication.rows.iter().filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str()).collect::<std::collections::BTreeSet<_>>();
-    if runtime.len() != 1 { return Err(StorageError::ScopeChanged); }
+    let runtime = publication
+        .rows
+        .iter()
+        .filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if runtime.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
     let runtime = *runtime.first().ok_or(StorageError::ScopeChanged)?;
     let binding = super::super::model_cache::binding(tx)?;
     let bound = semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?;
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old_epoch = prior.first().map(|row| row.get::<_, i64>(0));
-    let old_runtime = prior.first().map(|row| String::from_utf8(row.get(1))).transpose().map_err(|_| StorageError::ScopeChanged)?;
-    let old_generation = prior.first().and_then(|row| row.get::<_, Option<Vec<u8>>>(2)).map(String::from_utf8).transpose().map_err(|_| StorageError::ScopeChanged)?;
-    semantic_owner::begin(semantic_owner::Observed { epoch: old_epoch, runtime: old_runtime.as_deref(), generation: old_generation.as_deref(), invalid_withdrawal: false }, None, false, expected, &bound, true)?;
-    let epoch = old_epoch.unwrap_or(0).checked_add(1).ok_or(StorageError::ScopeChanged)?;
+    let old_runtime = prior
+        .first()
+        .map(|row| String::from_utf8(row.get(1)))
+        .transpose()
+        .map_err(|_| StorageError::ScopeChanged)?;
+    let old_generation = prior
+        .first()
+        .and_then(|row| row.get::<_, Option<Vec<u8>>>(2))
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| StorageError::ScopeChanged)?;
+    semantic_owner::begin(
+        semantic_owner::Observed {
+            epoch: old_epoch,
+            runtime: old_runtime.as_deref(),
+            generation: old_generation.as_deref(),
+            invalid_withdrawal: false,
+        },
+        None,
+        false,
+        expected,
+        &bound,
+        true,
+    )?;
+    let epoch = old_epoch
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(StorageError::ScopeChanged)?;
     let generation = format!("{:x}", Sha256::digest(operation));
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     if let Some(previous) = expected {
-        if !history::preserve(tx, &generation, previous, publication)? { return Err(StorageError::Busy); }
+        if !history::preserve(tx, &generation, previous, publication)? {
+            return Err(StorageError::Busy);
+        }
     }
     for reference in refs {
         tx.check()?;
@@ -100,7 +188,9 @@ fn publish_operation(
     }
     let expected_value = expected.map(str::to_owned);
     let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NOT DISTINCT FROM $3", &[&ns, &generation, &expected_value]).map_err(sqlstate::error)?;
-    if changed != 1 { return Err(StorageError::Conflict); }
+    if changed != 1 {
+        return Err(StorageError::Conflict);
+    }
     for (path, revision) in claims {
         if let Some(revision) = revision {
             if tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns, &path.as_bytes(), revision]).map_err(sqlstate::error)? != 1 { return Err(StorageError::Conflict); }

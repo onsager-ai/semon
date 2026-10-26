@@ -104,7 +104,11 @@ fn pg_binding_reuses_full_verification_and_controlled_ddl_invalidates_epoch() {
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
     }
-    assert_eq!(schema::verify_count(), 1, "namespace changes reuse schema proof");
+    assert_eq!(
+        schema::verify_count(),
+        1,
+        "namespace changes reuse schema proof"
+    );
 
     pool.controlled_schema_change(&control, |tx| {
         tx.driver
@@ -115,11 +119,25 @@ fn pg_binding_reuses_full_verification_and_controlled_ddl_invalidates_epoch() {
     .unwrap();
     assert_eq!(schema::verify_count(), 1);
 
-    pool.transaction(&ns("binding-a"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
-        .unwrap();
-    assert_eq!(schema::verify_count(), 2, "epoch change triggers full verification");
-    pool.transaction(&ns("binding-a"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
-        .unwrap();
+    pool.transaction(
+        &ns("binding-a"),
+        TxnKind::ReadSnapshot,
+        &control,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        schema::verify_count(),
+        2,
+        "epoch change triggers full verification"
+    );
+    pool.transaction(
+        &ns("binding-a"),
+        TxnKind::ReadSnapshot,
+        &control,
+        |_| Ok(()),
+    )
+    .unwrap();
     assert_eq!(schema::verify_count(), 2, "revalidated binding is reused");
 }
 
@@ -136,18 +154,21 @@ fn pg_controlled_ddl_waits_for_reader_without_lock_order_deadlock() {
         let reader_pool = pool.clone();
         scope.spawn(move || {
             reader_pool
-                .transaction(&ns("lock-order-reader"), TxnKind::ReadSnapshot, &control, |_| {
-                    reader_held_tx.send(()).unwrap();
-                    release_reader_rx
-                        .recv_timeout(Duration::from_secs(2))
-                        .unwrap();
-                    Ok(())
-                })
+                .transaction(
+                    &ns("lock-order-reader"),
+                    TxnKind::ReadSnapshot,
+                    &control,
+                    |_| {
+                        reader_held_tx.send(()).unwrap();
+                        release_reader_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .unwrap();
+                        Ok(())
+                    },
+                )
                 .unwrap();
         });
-        reader_held_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
+        reader_held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
         let ddl_pool = pool.clone();
         let ddl_control = PgCancellation::default();
@@ -161,18 +182,18 @@ fn pg_controlled_ddl_waits_for_reader_without_lock_order_deadlock() {
             });
             ddl_done_tx.send(result).unwrap();
         });
-        ddl_started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
+        ddl_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(
             ddl_done_rx.recv_timeout(Duration::from_millis(100)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         release_reader_tx.send(()).unwrap();
-        assert!(ddl_done_rx
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap()
-            .is_ok());
+        assert!(
+            ddl_done_rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .is_ok()
+        );
     });
 }
 
@@ -186,19 +207,37 @@ fn pg_role_binding_validates_once_per_connection_and_role() {
     let control = PgCancellation::default();
     schema::reset_verify_count();
     host_pool
-        .transaction(&ns("host-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .transaction(
+            &ns("host-role"),
+            TxnKind::ReadSnapshot,
+            &control,
+            |_| Ok(()),
+        )
         .unwrap();
     assert_eq!(schema::verify_count(), 1);
     host_pool
-        .transaction(&ns("host-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .transaction(
+            &ns("host-role"),
+            TxnKind::ReadSnapshot,
+            &control,
+            |_| Ok(()),
+        )
         .unwrap();
     assert_eq!(schema::verify_count(), 1, "host binding is reused");
     source_pool
-        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| {
+            Ok(())
+        })
         .unwrap();
-    assert_eq!(schema::verify_count(), 2, "restricted Source role gets its own proof");
+    assert_eq!(
+        schema::verify_count(),
+        2,
+        "restricted Source role gets its own proof"
+    );
     source_pool
-        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| {
+            Ok(())
+        })
         .unwrap();
     assert_eq!(schema::verify_count(), 2, "Source binding is reused");
 }
@@ -223,12 +262,15 @@ fn pg_source_role_is_denied_create_alter_and_drop() {
         "ALTER TABLE semon_pg_schema ADD COLUMN semon_binding_unauthorized integer",
         "DROP TABLE semon_pg_schema",
     ] {
-        assert!(pool
-            .transaction(&ns("restricted-source"), TxnKind::Write, &control, |tx| {
-                tx.driver.batch_execute(statement).map_err(sqlstate::error)?;
+        assert!(
+            pool.transaction(&ns("restricted-source"), TxnKind::Write, &control, |tx| {
+                tx.driver
+                    .batch_execute(statement)
+                    .map_err(sqlstate::error)?;
                 Ok(())
             })
-            .is_err());
+            .is_err()
+        );
     }
 }
 
