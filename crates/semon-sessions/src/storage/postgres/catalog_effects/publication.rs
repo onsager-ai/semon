@@ -170,6 +170,7 @@ fn publish_operation(
     // A partial request keeps every unmentioned Current owner. Owners connected
     // to a republished or claimed Source must be republished by the producer.
     let mut leaving = Vec::new();
+    let mut carried = None;
     if let Some(previous) = expected {
         let mut mentioned = publication
             .rows
@@ -197,7 +198,6 @@ fn publish_operation(
             if withdrawn.len() > 64 {
                 return Err(StorageError::Busy);
             }
-            tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns, &previous.as_bytes(), &generation.as_bytes(), &withdrawn]).map_err(sqlstate::error)?;
             leaving.clone_from(&withdrawn);
             mentioned.extend(withdrawn);
         }
@@ -207,13 +207,19 @@ fn publish_operation(
             .chain(claims.iter().map(|(path, _)| path.as_str()))
             .map(|path| path.as_bytes().to_vec())
             .collect::<Vec<_>>();
-        super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
+        carried = Some((previous, mentioned, claimed));
     }
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     if let Some(previous) = expected
         && !history::preserve(tx, &generation, previous, publication, &leaving)?
     {
-        return Err(StorageError::Busy);
+        // Only private custody checkpoints commit, before any successor row
+        // or owner is carried; the head, claims and stage stay with the old
+        // generation until custody completes and the CAS below succeeds.
+        return Ok((Outcome::Deferred, None));
+    }
+    if let Some((previous, mentioned, claimed)) = carried {
+        super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
     }
     for reference in refs {
         tx.check()?;
