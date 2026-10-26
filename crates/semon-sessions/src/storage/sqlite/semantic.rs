@@ -747,8 +747,8 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
     }
     c.execute_batch("ROLLBACK TO native_layout_probe; RELEASE native_layout_probe")
         .unwrap();
-    // Bind the same fully validated choices used by the production page.
-    // Charge this actual combined setup too, rather than assuming its cost.
+    // Binding the single current layout performs no SQL. Schema qualification
+    // above remains measured separately at the actual admission boundary.
     let setup = Arc::new(AtomicUsize::new(0));
     let observed = setup.clone();
     let started = std::time::Instant::now();
@@ -769,10 +769,7 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         elapsed.as_micros()
     );
     assert!(elapsed < std::time::Duration::from_secs(1));
-    assert!(
-        setup > 0 && setup < 32768,
-        "page layout qualification: {setup}"
-    );
+    assert_eq!(setup, 0, "current layout binding must perform no SQL");
     result.push(("setup:page".to_owned(), setup));
     // Each read/page starts from exactly the same source/stage state.
     for kind in [
@@ -1007,7 +1004,7 @@ pub(crate) fn name_members_vm_probe(
     let layout = FrontierLayout::bind(&tx).unwrap();
     c.progress_handler(0, None::<fn() -> bool>).unwrap();
     let setup = steps.load(Ordering::Relaxed);
-    assert!(setup > 0 && setup <= 32768);
+    assert_eq!(setup, 0, "current layout binding must perform no SQL");
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     eprintln!("name_members_setup vm_steps={setup}");
     let mut result = vec![("setup".into(), setup, 0)];

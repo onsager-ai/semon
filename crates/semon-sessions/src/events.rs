@@ -10567,8 +10567,14 @@ mod tests {
                 })
             })
             .collect();
-        let scans: usize = writers.into_iter().map(|writer| writer.join().unwrap()).sum();
-        assert!(scans > 0, "concurrent scans must make progress before catch-up");
+        let scans: usize = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .sum();
+        assert!(
+            scans > 0,
+            "concurrent scans must make progress before catch-up"
+        );
         // A fresh process resumes from committed rows. Any row written twice
         // or lost under the concurrent writers shows in the persisted oracle.
         let mut last = EventCache::open(&v1, &crate::Options::default().source).unwrap();

@@ -1437,8 +1437,7 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     let (status, retained) = fixture.body("sid=session-00000&scope=retained_history");
     assert_eq!(status, 200);
     assert_eq!(
-        retained["items"][0]["details"]["content_generation"],
-        details["content_generation"],
+        retained["items"][0]["details"]["content_generation"], details["content_generation"],
         "retained details remain bound to the original source generation"
     );
     assert_eq!(retained["items"][0]["details"]["turns"], 1);
