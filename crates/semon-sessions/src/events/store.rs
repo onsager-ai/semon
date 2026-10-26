@@ -7346,10 +7346,10 @@ mod tests {
         let meta = state.get_mut("main.meta").unwrap();
         let clock = meta
             .iter()
-            .filter(|row| row[0] == rusqlite::types::Value::Text("catalog_observed_at".into()))
+            .filter(|row| row[1] == rusqlite::types::Value::Text("catalog_observed_at".into()))
             .collect::<Vec<_>>();
         assert_eq!(clock.len(), 1);
-        let rusqlite::types::Value::Text(value) = &clock[0][1] else {
+        let rusqlite::types::Value::Text(value) = &clock[0][2] else {
             panic!("observation clock must be decimal text")
         };
         assert!(!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
@@ -7360,7 +7360,7 @@ mod tests {
         );
         // Separate successful commits have independent wall clocks. Every
         // other row and schema remains exact; rollback never uses this filter.
-        meta.retain(|row| row[0] != rusqlite::types::Value::Text("catalog_observed_at".into()));
+        meta.retain(|row| row[1] != rusqlite::types::Value::Text("catalog_observed_at".into()));
         state
     }
 
@@ -10064,6 +10064,12 @@ mod tests {
             let root = scratch(name);
             let v1 = root.join("index.json");
             let path = v1.with_extension("sqlite3");
+            let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+            let native = root.join("original.jsonl");
+            fs::write(&native, "{\"type\":\"user\",\"uuid\":\"original\",\"sessionId\":\"original\",\"message\":{\"role\":\"user\",\"content\":\"original native input\"}}\n").unwrap();
+            let mut cache = super::super::EventCache::open_scoped(&v1, &source).unwrap();
+            super::super::scan_file(&native, "claude", &mut cache, &mut false).unwrap();
+            drop(cache);
             let (mut store, _) = opened(&path);
             // Fixture writes and corruption target the physical current
             // schema through the admitted publisher, before any writes.
@@ -10074,9 +10080,6 @@ mod tests {
             .unwrap()
             .into_test_connection();
             store.write_runs(&[run()], &stamp()).unwrap();
-            store
-                .write_one("original", None, None, &ledger(1), &full())
-                .unwrap();
             // Custody is deliberately opaque to version classification.
             store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
@@ -10179,6 +10182,10 @@ mod tests {
         let path = root.join("index.sqlite3");
         let raw = root.join("native.jsonl");
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
+        let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+        let mut cache = super::super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap();
+        super::super::scan_file(&raw, "claude", &mut cache, &mut false).unwrap();
+        drop(cache);
         let (mut store, _) = opened(&path);
         store.connection = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
@@ -10186,9 +10193,6 @@ mod tests {
         .unwrap()
         .into_test_connection();
         store.write_runs(&[run()], &stamp()).unwrap();
-        store
-            .write_one("retained", None, None, &ledger(1), &full())
-            .unwrap();
         store
             .connection
             .execute(
