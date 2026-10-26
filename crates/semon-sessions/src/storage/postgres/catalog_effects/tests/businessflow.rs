@@ -135,6 +135,31 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
+    // Only the request-owned host can grant fixture bytes. The PG reader adds
+    // persisted native proof verification to the ordinary scalar-field parser.
+    struct Host {
+        source: crate::SessionSourceRef,
+        bytes: std::sync::Arc<[u8]>,
+    }
+    impl crate::SessionSourceReader for Host {
+        fn read_range(&self, source: &crate::SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> std::io::Result<crate::SessionSourceRange> {
+            if source != &self.source || expected.is_some_and(|g| g != "authorized-fixture") || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX { return Err(std::io::Error::other("fixture authority mismatch")); }
+            let at = usize::try_from(offset).map_err(std::io::Error::other)?;
+            let end = self.bytes.len().min(at.saturating_add(max));
+            let bytes = self.bytes.get(at..end).ok_or_else(|| std::io::Error::other("fixture range"))?;
+            Ok(crate::SessionSourceRange { generation: "authorized-fixture".into(), length: self.bytes.len() as u64, offset, bytes: std::sync::Arc::from(bytes), cached: false })
+        }
+    }
+    let (projection, slot) = prepared.transcripts.iter().find_map(|projection| projection.slots.iter().find(|slot| slot.field.is_some() && slot.file.is_some()).map(|slot| (projection, slot))).expect("ordinary producer must capture a selected native field");
+    let selected = prepared.rows.iter().find(|row| row.key == projection.key).unwrap();
+    let source = selected.sources.iter().find(|source| source.path == slot.file.as_ref().unwrap().path).unwrap();
+    let input = inputs.iter().find(|input| input.full_path(&options) == source.path).unwrap();
+    let reference = crate::SessionSourceRef { root: input.root.clone(), path: input.path.clone(), native_id: source.native_id.clone(), offset: source.offset, prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256 };
+    let host = Host { source: reference.clone(), bytes: std::sync::Arc::from(fs::read(&source.path).unwrap()) };
+    let field = slot.field.as_ref().unwrap();
+    let expected_field = crate::native_field::preview(&host, &reference, field, "text", &mut (1024 * 1024)).unwrap();
+    let read_selected = || super::super::selected_reader::with_reader(&pool, &namespace, &control, &generation, source, &reference, &host, |reader| crate::native_field::preview(reader, &reference, field, "text", &mut (1024 * 1024))).unwrap();
+    assert_eq!(read_selected(), expected_field);
     drop(pg);
     let mut resumed =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
@@ -177,6 +202,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(continued.rows.iter().flat_map(|row| &row.sources).find(|source| source.path == path).unwrap().offset, receipt.consumed_bytes);
     let continued_generation = resumed.publish_partial_catalog_fenced(&continued).unwrap().1.unwrap();
     assert_ne!(continued_generation, generation);
+    assert_eq!(read_selected(), expected_field, "retained selected proof must survive a newer publication");
     assert_eq!(
         fs::read(&path).unwrap(),
         [raw[0].as_slice(), append.as_bytes()].concat()
