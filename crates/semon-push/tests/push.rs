@@ -501,7 +501,7 @@ impl Home {
             copilot_home: root.join("copilot"),
             proc_root: root.join("proc"),
             cache: root.join("index.json"),
-            ..Options::default()
+            ..Options::from_host().unwrap()
         };
         let home = Self { root, options };
         home.write("proc/locks", "");
