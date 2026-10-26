@@ -81,12 +81,19 @@ never authorize changing engines. Preserve actual before/after append evidence,
 Raw/Facts/history custody, byte/WAL/mtime nonmutation checks and reader leases.
 Current publication cohorts remain 2..64 rows with a 1 MiB payload bound.
 
-The user relaxed only progressive cold first-page latency: the 0/256/2048-history
-producer may take eight seconds for the first 60 selected sessions. Foreground
-Catalog/Query remains two seconds and full background completion remains sixty
-seconds. Ordering, discovery barriers, provisional authority, ownership, archive
-eviction, source/VM/byte bounds and cancellation/security checks are unchanged.
-Historical two/five-second runs do not qualify the final eight-second revision.
+The user allowed the original two-second first-page target to be relaxed. The
+eight-second threshold for 0/256/2048-history fixtures was adopted during
+implementation; it is not an explicit user requirement. That test measures wall
+time including scheduling, filesystem and database work. A single CI result
+does not distinguish environmental variation from a performance regression.
+Keep its failures visible while assessing performance separately from the
+deterministic first-page contracts: 60 correctly ordered selected sessions,
+partial publication before global observation, bounded native observation,
+isolation and cancellation. Do not add caches or scheduling frameworks merely
+to satisfy one wall-time sample. Foreground Catalog/Query remains two seconds
+and full background completion remains sixty seconds. Discovery barriers,
+provisional authority, ownership, archive eviction and source/VM/byte/security
+bounds remain unchanged.
 
 ## Proof generations, leases and recovery
 
