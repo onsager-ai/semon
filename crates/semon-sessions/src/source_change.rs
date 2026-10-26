@@ -3,7 +3,7 @@ use crate::{Input, Options, events::Stat};
 use serde::{Deserialize, Serialize};
 use std::io;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppendEvidence {
     pub(crate) generation: String,
@@ -106,11 +106,11 @@ impl SessionSourceWrite {
         let source_lock=SourceLock::acquire(options,&lock_key(options,input),true)?;
         let intent=if let Some(intent)=resume {intent} else {
             let before=Stat::of(&input.full_path(options)).ok();
-            let before_hash=before.as_ref().map(|s|bytes_hash(&input.full_path(options),s.size)).transpose()?;
+            let before_hash=if store.source_write_proofs() {before.as_ref().map(|s|bytes_hash(&input.full_path(options),s.size)).transpose()?} else {None};
             WriteIntent {
                 operation:crate::storage::source_observations::SourceOperation::capture("source-write","raw",input.path.as_bytes()).id,
                 root:input.root.as_str().into(),path:input.full_path(options).to_string_lossy().into_owned(),
-                generation:generation.filter(|v|v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit())).map(str::to_owned),from,before,before_hash,
+                generation:generation.filter(|v|input.path.ends_with(".jsonl") && v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit())).map(str::to_owned),from,before,before_hash,
                 head:store.session_catalog_generation().map_err(|e|io::Error::other(e.to_string()))?,
                 ledger:store.ledger(input.full_path(options).to_string_lossy().as_ref()).map_err(|e|io::Error::other(e.to_string()))?,
             }
@@ -137,16 +137,30 @@ impl SessionSourceWrite {
 
     pub fn complete(mut self, to: u64) -> io::Result<()> {
         let after = Stat::of(&self.input.full_path(&self.options))?;
-        let evidence = match (self.generation, self.before) {
+        let evidence=append_plan(self.generation,self.before,self.previous,self.from,after,to);
+        let completion=WriteCompletion {
+            to,after,hash:if self.store.source_write_proofs() {bytes_hash(&self.input.full_path(&self.options),to)?} else {[0;32]},evidence,
+            runtime:if self.store.source_write_proofs() {crate::native_evidence::query_runtime_generation(&self.options)?} else {String::new()},
+            facts:self.options.facts.as_ref().filter(|_|self.store.source_write_proofs()).map(|path| {
+                use sha2::{Digest,Sha256};
+                let facts=crate::read_facts(path)?;
+                Ok::<_,io::Error>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(io::Error::other)?)))
+            }).transpose()?,
+        };
+        self.store.source_write_complete(&self.options,&self.input,&self.intent,self.revision,&completion).map_err(|e|io::Error::other(e.to_string()))
+    }
+}
+
+pub(crate) fn append_plan(generation:Option<String>,before:Option<Stat>,previous:Option<AppendEvidence>,from:u64,after:Stat,to:u64)->Option<AppendEvidence> {
+    match (generation, before) {
             (Some(generation), Some(before))
-                if before.size == self.from
+                if before.size == from
                     && after.size == to
                     && before.dev == after.dev
                     && before.ino == after.ino
-                    && to >= self.from =>
+                    && to >= from =>
             {
-                let base = self
-                    .previous
+                let base = previous
                     .filter(|previous| {
                         previous.generation == generation && previous.after == before
                     })
@@ -158,17 +172,6 @@ impl SessionSourceWrite {
                 })
             }
             _ => None,
-        };
-        let completion=WriteCompletion {
-            to,after,hash:bytes_hash(&self.input.full_path(&self.options),to)?,evidence,
-            runtime:if self.store.source_write_proofs() {crate::native_evidence::query_runtime_generation(&self.options)?} else {String::new()},
-            facts:self.options.facts.as_ref().filter(|_|self.store.source_write_proofs()).map(|path| {
-                use sha2::{Digest,Sha256};
-                let facts=crate::read_facts(path)?;
-                Ok::<_,io::Error>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(io::Error::other)?)))
-            }).transpose()?,
-        };
-        self.store.source_write_complete(&self.options,&self.input,&self.intent,self.revision,&completion).map_err(|e|io::Error::other(e.to_string()))
     }
 }
 

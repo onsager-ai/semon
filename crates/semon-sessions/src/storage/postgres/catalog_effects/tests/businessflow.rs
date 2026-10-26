@@ -698,7 +698,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     raw_file.write_all(append.as_bytes()).unwrap();raw_file.sync_all().unwrap();drop(raw_file);
     drop(writer); // Fault: durable bytes, completion transaction not attempted.
     let written=raw[0].len() as u64+append.len() as u64;
-    assert!(resumed.ingest(&format!("{:064x}",158),&path,"claude").is_err(),"unacknowledged Raw bytes cannot enter native SQL");
+    assert_eq!(resumed.ingest(&format!("{:064x}",158),&path,"claude").err(),Some(StorageError::Conflict),"unacknowledged Raw bytes cannot enter native SQL");
     let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
     writer.complete(written).unwrap();
     // Fault: SQL committed but the receiver lost the ACK. The exact request
@@ -1099,7 +1099,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies
     );
-    let (mut cache, _) = crate::storage::postgres::index_store::open(
+    let (_cache, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
         namespace.clone(),
         control.clone(),
