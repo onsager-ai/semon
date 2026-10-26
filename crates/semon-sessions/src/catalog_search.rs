@@ -762,8 +762,9 @@ pub(crate) fn retire_missing(transaction: &Transaction<'_>) -> rusqlite::Result<
 
 /// Pick a selective gram using persisted exact member counts. This performs at
 /// most query-length primary-key reads; it never counts/scans postings on reads.
-pub(crate) fn anchor(
+fn anchor(
     connection: &Connection,
+    filter: Filter,
     scope: crate::CatalogReadScope,
     query: &str,
 ) -> rusqlite::Result<Option<String>> {
@@ -776,8 +777,10 @@ pub(crate) fn anchor(
         .windows(width)
         .map(|window| window.iter().collect())
         .collect();
-    let mut statement = connection
-        .prepare("SELECT members FROM session_search_counts WHERE read_scope=?1 AND gram=?2")?;
+    let Filter { table, ns, .. } = filter;
+    let mut statement = connection.prepare(&format!(
+        "SELECT members FROM {table}session_search_counts WHERE {ns}read_scope=?1 AND gram=?2"
+    ))?;
     let mut best = None;
     for gram in wanted {
         let members: Option<i64> = statement
@@ -844,7 +847,42 @@ pub(crate) struct Query<'a> {
     pub(crate) limit: usize,
     pub(crate) index_complete: bool,
 }
+/// Table qualifier and namespace predicate shared by one search read.
+#[derive(Clone, Copy)]
+struct Filter {
+    table: &'static str,
+    ns: &'static str,
+    using: &'static str,
+}
+const UNBOUND: Filter = Filter {
+    table: "",
+    ns: "",
+    using: "",
+};
+/// Admitted reads see only the bound namespace through its leading indexes.
+const ADMITTED: Filter = Filter {
+    table: "main.",
+    ns: "namespace=semon_namespace() AND ",
+    using: "namespace,",
+};
+
 pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Result<Selection> {
+    read_filtered(connection, request, UNBOUND)
+}
+
+/// Search the current namespace of an admitted snapshot.
+pub(crate) fn read_admitted(
+    connection: &Connection,
+    request: Query<'_>,
+) -> rusqlite::Result<Selection> {
+    read_filtered(connection, request, ADMITTED)
+}
+
+fn read_filtered(
+    connection: &Connection,
+    request: Query<'_>,
+    filter: Filter,
+) -> rusqlite::Result<Selection> {
     let Query {
         scope,
         query,
@@ -855,7 +893,7 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
         limit,
         index_complete,
     } = request;
-    let Some(gram) = anchor(connection, scope, query)? else {
+    let Some(gram) = anchor(connection, filter, scope, query)? else {
         return Ok(Selection {
             rows: Vec::new(),
             next: None,
@@ -866,23 +904,31 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
             },
         });
     };
-    let postings = posting_page(connection, scope, &gram, after.as_ref(), MAX_CANDIDATES + 1)?;
+    let postings = posting_page(
+        connection,
+        filter,
+        scope,
+        &gram,
+        after.as_ref(),
+        MAX_CANDIDATES + 1,
+    )?;
     let more = postings.len() > MAX_CANDIDATES;
     let mut selected = Vec::with_capacity(limit);
     let mut checked = after;
     let mut candidates = 0;
     let mut bytes = 0;
     let mut partial = false;
-    let mut document=connection.prepare("SELECT octet_length(fields),CASE WHEN octet_length(fields)<=?3 THEN fields ELSE NULL END FROM session_search_documents WHERE read_scope=?1 AND session_key=?2 AND complete=1")?;
+    let Filter { table, ns, using } = filter;
+    let mut document=connection.prepare(&format!("SELECT octet_length(fields),CASE WHEN octet_length(fields)<=?3 THEN fields ELSE NULL END FROM {table}session_search_documents WHERE {ns}read_scope=?1 AND session_key=?2 AND complete=1"))?;
     let metadata_sql = match scope {
-        crate::CatalogReadScope::Current => {
-            "SELECT octet_length(metadata),CASE WHEN octet_length(metadata)<=?2 THEN metadata ELSE NULL END,last_ms,harness,repo,lifecycle FROM session_catalog WHERE session_key=?1 AND lifecycle='current'"
-        }
-        crate::CatalogReadScope::RetainedHistory => {
-            "SELECT octet_length(COALESCE(history.metadata,catalog.metadata)),CASE WHEN octet_length(COALESCE(history.metadata,catalog.metadata))<=?2 THEN COALESCE(history.metadata,catalog.metadata) ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM session_catalog AS catalog LEFT JOIN session_history_catalog AS history USING(session_key) WHERE session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
-        }
+        crate::CatalogReadScope::Current => format!(
+            "SELECT octet_length(metadata),CASE WHEN octet_length(metadata)<=?2 THEN metadata ELSE NULL END,last_ms,harness,repo,lifecycle FROM {table}session_catalog WHERE {ns}session_key=?1 AND lifecycle='current'"
+        ),
+        crate::CatalogReadScope::RetainedHistory => format!(
+            "SELECT octet_length(COALESCE(history.metadata,catalog.metadata)),CASE WHEN octet_length(COALESCE(history.metadata,catalog.metadata))<=?2 THEN COALESCE(history.metadata,catalog.metadata) ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM {table}session_catalog AS catalog LEFT JOIN {table}session_history_catalog AS history USING({using}session_key) WHERE {ns}session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
+        ),
     };
-    let mut metadata = connection.prepare(metadata_sql)?;
+    let mut metadata = connection.prepare(&metadata_sql)?;
     for position in postings.iter().take(MAX_CANDIDATES) {
         let (length, encoded): (i64, Option<String>) = document.query_row(
             params![
@@ -989,7 +1035,12 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
     })
 }
 
-fn posting_sql(scope: crate::CatalogReadScope, range: &str, limit: usize) -> String {
+fn posting_sql(
+    filter: Filter,
+    scope: crate::CatalogReadScope,
+    range: &str,
+    limit: usize,
+) -> String {
     let (column, index) = match scope {
         crate::CatalogReadScope::Current => ("current_last_ms", "session_search_current_order"),
         crate::CatalogReadScope::RetainedHistory => {
@@ -997,13 +1048,15 @@ fn posting_sql(scope: crate::CatalogReadScope, range: &str, limit: usize) -> Str
         }
     };
     let compact_range = range.replace("last_ms", column);
+    let Filter { table, ns, .. } = filter;
     format!(
-        "SELECT {column} AS last_ms,session_key FROM session_search_memberships INDEXED BY {index} WHERE ?1 IN ('current','retained_history') AND gram=?2 AND {column} IS NOT NULL AND {compact_range} ORDER BY last_ms DESC,session_key ASC LIMIT ?{limit}"
+        "SELECT {column} AS last_ms,session_key FROM {table}session_search_memberships INDEXED BY {index} WHERE ?1 IN ('current','retained_history') AND {ns}gram=?2 AND {column} IS NOT NULL AND {compact_range} ORDER BY last_ms DESC,session_key ASC LIMIT ?{limit}"
     )
 }
 
 fn posting_page(
     connection: &Connection,
+    filter: Filter,
     scope: crate::CatalogReadScope,
     gram: &str,
     after: Option<&Position>,
@@ -1014,7 +1067,7 @@ fn posting_page(
                     mut args: Vec<rusqlite::types::Value>,
                     limit: usize|
      -> rusqlite::Result<()> {
-        let sql = posting_sql(scope, range, args.len() + 1);
+        let sql = posting_sql(filter, scope, range, args.len() + 1);
         args.push(rusqlite::types::Value::Integer(limit as i64));
         let mut statement = connection.prepare(&sql)?;
         found.extend(
@@ -1052,7 +1105,7 @@ fn posting_page(
         if remaining > 0 {
             let mut args = base;
             args.push(rusqlite::types::Value::Integer(after.last));
-            let sql = posting_sql(scope, "last_ms<?3", 4);
+            let sql = posting_sql(filter, scope, "last_ms<?3", 4);
             args.push(rusqlite::types::Value::Integer(remaining as i64));
             let mut statement = connection.prepare(&sql)?;
             found.extend(
@@ -1504,7 +1557,15 @@ mod sqlite_tests {
         }
         transaction.commit().unwrap();
         for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
-            let first = posting_page(&connection, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
+            let first = posting_page(
+                &connection,
+                UNBOUND,
+                scope,
+                "nee",
+                None,
+                MAX_CANDIDATES + 1,
+            )
+            .unwrap();
             assert_eq!(first.len(), MAX_CANDIDATES + 1);
             assert_eq!(
                 first.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
@@ -1514,6 +1575,7 @@ mod sqlite_tests {
             );
             let last = posting_page(
                 &connection,
+                UNBOUND,
                 scope,
                 "nee",
                 Some(&first[MAX_CANDIDATES - 1]),
@@ -1545,7 +1607,7 @@ mod sqlite_tests {
         }
         let selected_work = |connection: &Connection, scope| {
             SQL_STEPS.with(|value| value.set(0));
-            let page = posting_page(connection, scope, "nee", None, 2).unwrap();
+            let page = posting_page(connection, UNBOUND, scope, "nee", None, 2).unwrap();
             (
                 page.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
                 SQL_STEPS.with(|value| value.get()),
@@ -1568,7 +1630,7 @@ mod sqlite_tests {
         connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                posting_sql(scope, "1", 3)
+                posting_sql(UNBOUND, scope, "1", 3)
             ))
             .unwrap()
             .query_map(params![scope_key(scope), "nee", 2], |row| row.get(3))
@@ -1775,5 +1837,90 @@ mod sqlite_tests {
         transaction.commit().unwrap();
         assert_eq!(incomplete(&connection, "current"), 0);
         assert_eq!(incomplete(&connection, "retained_history"), 1);
+    }
+
+    #[test]
+    fn admitted_search_reads_only_the_bound_namespace() {
+        // Both namespaces hold the same key and shared grams; the admitted
+        // read must never surface the other namespace's row or postings.
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(crate::storage::sqlite::search::SCHEMA)
+            .unwrap();
+        connection.execute_batch("CREATE TABLE session_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,last_ms INTEGER,harness TEXT,repo TEXT,lifecycle TEXT,metadata TEXT,PRIMARY KEY(namespace,session_key)); CREATE TABLE session_history_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT,PRIMARY KEY(namespace,session_key));").unwrap();
+        connection
+            .create_scalar_function(
+                "semon_namespace",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                |_| Ok("a".to_owned()),
+            )
+            .unwrap();
+        for (namespace, name) in [("a", "needle alpha"), ("b", "needle beta")] {
+            let row = row("shared", name);
+            let fields = fields(&row);
+            connection
+                .execute(
+                    "INSERT INTO session_catalog VALUES(?1,?2,1,'claude','fixture','current',?3)",
+                    params![namespace, row.key, serde_json::to_string(&row).unwrap()],
+                )
+                .unwrap();
+            for scope in ["current", "retained_history"] {
+                connection
+                    .execute(
+                        "INSERT INTO session_search_documents VALUES(?1,?2,?3,?4,1)",
+                        params![
+                            namespace,
+                            scope,
+                            row.key,
+                            serde_json::to_string(&fields).unwrap()
+                        ],
+                    )
+                    .unwrap();
+            }
+            for gram in grams(&fields) {
+                connection
+                    .execute(
+                        "INSERT INTO session_search_memberships VALUES(?1,?2,?3,1,1)",
+                        params![namespace, row.key, gram],
+                    )
+                    .unwrap();
+                for scope in ["current", "retained_history"] {
+                    connection
+                        .execute(
+                            "INSERT INTO session_search_counts VALUES(?1,?2,?3,1)",
+                            params![namespace, scope, gram],
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+            let query = |query| Query {
+                scope,
+                query,
+                harness: None,
+                repo: None,
+                model: None,
+                after: None,
+                limit: 10,
+                index_complete: true,
+            };
+            let found = read_admitted(&connection, query("needle")).unwrap();
+            assert_eq!(
+                found.rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+                ["needle alpha"]
+            );
+            assert_eq!(found.report.candidates, 1);
+            assert!(!found.report.partial);
+            // Grams present only in namespace b have no admitted count.
+            assert!(
+                read_admitted(&connection, query("beta"))
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+        }
     }
 }
