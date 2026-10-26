@@ -452,6 +452,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let cache_path = root.join("index.json");
+        let source =
+            crate::storage::HostSource::new(ns("reported-facts-oracle"), "f".repeat(64))
+                .unwrap();
         let input = root.join(".claude.json");
         // Three real producer observations: A, a new run B, then C overwrites A.
         // B is absent from C's input and must nevertheless survive with NULL cost.
@@ -461,13 +464,13 @@ mod tests {
             (100, 303, Some(0.25)),
         ] {
             std::fs::write(&input,serde_json::json!({"projects":{"/sanitized":{"lastSessionId":"原生\0id","lastStartTime":start,"lastDuration":u64::MAX,"lastCost":cost,"lastModelUsage":{"模型\0":{"inputTokens":u64::MAX}}}}}).to_string()).unwrap();
-            let mut cache = EventCache::open(&cache_path).unwrap();
+            let mut cache = EventCache::open(&cache_path, &source).unwrap();
             cache
                 .refresh_reported_runs(&input, capture, &mut false)
                 .unwrap();
         }
         std::fs::remove_file(&input).unwrap();
-        let cache = EventCache::open(&cache_path).unwrap();
+        let cache = EventCache::open(&cache_path, &source).unwrap();
         let runs = cache.reported_runs().cloned().collect::<Vec<_>>();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].last_duration, Some(u64::MAX));
