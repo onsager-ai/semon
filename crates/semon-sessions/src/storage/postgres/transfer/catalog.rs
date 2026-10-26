@@ -37,6 +37,9 @@ pub(super) fn capture(tx: &mut Inbox<'_, '_>, state: &mut CaptureState) -> Resul
         None => tx.get(catalog_rows::IMPORTED_GENERATION, 64)?.map(|bytes| String::from_utf8(bytes).map_err(|_|StorageError::ScopeChanged)).transpose()?,
     };
     let Some(generation) = generation else {
+        let ns = tx.0.namespace.as_str().as_bytes();
+        let occupied: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)", &[&ns]).map_err(sqlstate::error)?.get(0);
+        if occupied { return Err(StorageError::ScopeChanged); }
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
@@ -120,7 +123,8 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         return Ok(());
     }
     if *kind == HistoryRecipe {
-        tx.0.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET recipe_generation=$4,source_generation=$5,version=$6,total=$7,incomplete=$8 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes(),&text(2)?.as_bytes(),&values[3].as_i64().ok_or(StorageError::ScopeChanged)?,&values[4].as_i64().ok_or(StorageError::ScopeChanged)?,&values[5].as_bool().ok_or(StorageError::ScopeChanged)?]).map_err(sqlstate::error)?;
+        let changed = tx.0.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET recipe_generation=$4,source_generation=$5,version=$6,total=$7,incomplete=$8 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes(),&text(2)?.as_bytes(),&values[3].as_i64().ok_or(StorageError::ScopeChanged)?,&values[4].as_i64().ok_or(StorageError::ScopeChanged)?,&values[5].as_bool().ok_or(StorageError::ScopeChanged)?]).map_err(sqlstate::error)?;
+        if changed != 1 { return Err(StorageError::ScopeChanged); }
         return Ok(());
     }
     let (table, columns) = match kind {
