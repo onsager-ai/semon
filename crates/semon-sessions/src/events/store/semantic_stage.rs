@@ -3530,16 +3530,14 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("index.sqlite3");
-        let mut connection = Connection::open(&path).unwrap();
-        assert!(matches!(
-            super::super::init(&mut connection).unwrap(),
-            Init::Ready
-        ));
-        connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,runtime,revision) VALUES(1,7,'indexing','runtime',0)",[]).unwrap();
+        let mut connection = super::super::current_search_test_connection(
+            &path, &crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap(),
+        );
+        connection.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,runtime,revision) VALUES(semon_namespace(),1,7,'indexing','runtime',0)",[]).unwrap();
         for harness in ["claude", "codex"] {
             connection
                 .execute(
-                    "INSERT INTO catalog_semantic_inputs VALUES(?1,?2,'same',1,'{}')",
+                    "INSERT INTO main.catalog_semantic_inputs VALUES(semon_namespace(),?1,?2,'same',1,'{}')",
                     params![format!("/{harness}/same.jsonl"), harness],
                 )
                 .unwrap();
@@ -3548,7 +3546,7 @@ mod tests {
             let native = format!("{}codex:same", ":".repeat(n));
             connection
                 .execute(
-                    "INSERT INTO catalog_semantic_inputs VALUES(?1,'codex',?2,1,'{}')",
+                    "INSERT INTO main.catalog_semantic_inputs VALUES(semon_namespace(),?1,'codex',?2,1,'{}')",
                     params![format!("/codex/reserved-{n}.jsonl"), native],
                 )
                 .unwrap();
@@ -3603,7 +3601,7 @@ mod tests {
         );
         // New primitive evidence invalidates keys logically. Old rows remain
         // unreachable until overwritten or reclaimed by bounded GC.
-        connection.execute("UPDATE catalog_semantic_stage SET key_epoch=key_epoch+1,key_after_harness='',key_after_native='',key_candidate='',keys_done=0",[]).unwrap();
+        connection.execute("UPDATE main.catalog_semantic_stage SET key_epoch=key_epoch+1,key_after_harness='',key_after_native='',key_candidate='',keys_done=0",[]).unwrap();
         assert!(native_key(&connection, "same", "codex").is_err());
         assert_eq!(
             connection

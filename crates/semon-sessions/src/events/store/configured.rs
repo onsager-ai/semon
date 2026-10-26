@@ -1,5 +1,5 @@
-//! Configured native transaction with a composite core Event family. The global/multi-source and
-//! Catalog publisher gates remain closed. Parser/identity logic stays in events.
+//! Current namespace-owned native transactions. Public admission remains gated;
+//! the private owner authorizes ingest and Catalog publication.
 use super::*;
 use crate::storage::sqlite::source_journal::SourceJournal;
 use crate::storage::{StorageError, StoreConfig, native_events::EventReceipt};
@@ -322,9 +322,8 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     Ok(())
 }
 
-// The connected transaction still owns one admitted namespace. Only CORE_TABLES
-// have composite row keys; the other 22 families remain singleton and fenced.
-// A public second namespace must still be refused before any operation.
+// Current native families use namespace-leading keys. The capability binds
+// one admitted namespace; public admission retains its qualification gate.
 const TABLES: &[&str] = &[
     "session_descriptions",
     "reported_runs",
