@@ -8617,7 +8617,7 @@ mod tests {
                 let mut pages = Vec::new();
                 let mut after: Option<crate::catalog_search::Position> = None;
                 for _ in 0..4096 {
-                    let selection = crate::catalog_search::read(
+                    let selection = crate::catalog_search::read_admitted(
                         connection,
                         crate::catalog_search::Query {
                             scope,

@@ -1712,12 +1712,16 @@ impl Writer {
             tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
         }
         let id = operation_id.to_owned();
+        #[cfg(test)]
+        let applied = reserved.elapsed();
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if reserved.elapsed() >= Duration::from_millis(50) {
             eprintln!(
-                "configured_reservation stage=intent validation_us={} total_us={}",
+                "configured_reservation stage=intent validation_us={} applied_us={} commit_us={} total_us={}",
                 validated.as_micros(),
+                applied.as_micros(),
+                reserved.elapsed().saturating_sub(applied).as_micros(),
                 reserved.elapsed().as_micros()
             );
         }
@@ -1834,12 +1838,16 @@ impl Writer {
         }
         #[cfg(test)]
         effect("completion").map_err(failed)?;
+        #[cfg(test)]
+        let applied = reserved.elapsed();
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if reserved.elapsed() >= Duration::from_millis(50) {
             eprintln!(
-                "configured_reservation stage=ledger validation_us={} total_us={}",
+                "configured_reservation stage=ledger validation_us={} applied_us={} commit_us={} total_us={}",
                 validated.as_micros(),
+                applied.as_micros(),
+                reserved.elapsed().saturating_sub(applied).as_micros(),
                 reserved.elapsed().as_micros()
             );
         }
