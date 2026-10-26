@@ -128,13 +128,6 @@ fn publish_measured(
 /// Current native publication cannot replace a complete historical derivation
 /// with just the files still on disk. Rebuild missing generations through the
 /// qualified producer; unchanged generations retain their exact activity.
-pub(crate) fn publish_current(
-    tx: &Transaction<'_>,
-    row: &crate::model::summary::CatalogRow,
-) -> rusqlite::Result<()> {
-    publish_current_measured(tx, row, &mut crate::native_timing::Measurements::default())
-}
-
 fn update_retained_observation(prior: &mut Value, current: &Value) {
     // Retained source recipes cannot describe a different current call.
     let same_activity = prior["activity"][0] == current["activity"][0]
@@ -148,19 +141,11 @@ fn update_retained_observation(prior: &mut Value, current: &Value) {
     }
 }
 
-pub(crate) fn publish_current_measured(
-    tx: &Transaction<'_>,
-    row: &crate::model::summary::CatalogRow,
-    measurements: &mut crate::native_timing::Measurements,
-) -> rusqlite::Result<()> {
-    publish_current_owned(tx, row, measurements, None)
-}
-
 pub(crate) fn publish_current_owned(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
     measurements: &mut crate::native_timing::Measurements,
-    owner: Option<&crate::events::store::configured::NativeOwnership>,
+    owner: &crate::events::store::configured::NativeOwnership,
 ) -> rusqlite::Result<()> {
     let started = measurements.start();
     let history = crate::history_projection::catalog(tx, &row.key)?
@@ -221,13 +206,7 @@ pub(crate) fn publish_current_owned(
     }
     if let Some(trace) = &row.trace {
         let started = measurements.start();
-        if let Some(owner) = owner {
-            crate::causal_trace::publish_owned(tx, owner, row, trace)?;
-        } else if started.is_some() {
-            crate::causal_trace::publish_measured(tx, row, trace, measurements)?;
-        } else {
-            crate::causal_trace::publish(tx, row, trace)?;
-        }
+        crate::causal_trace::publish_owned(tx, owner, row, trace)?;
         measurements.record("trace_publish_inclusive", started, 1);
     }
     if let Some(summary) = &row.overview {
