@@ -14,6 +14,50 @@ use std::{fs, time::Duration};
 
 const L1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const L2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+#[test]
+fn pg_catalog131_borrowed_snapshot_real_producer_mvcc_and_source_witness() {
+    let data = oracle();
+    let (pool, _) = fixture(|b| b.max_connections = 2);
+    let namespace = ns("catalog131\0🦀");
+    let control = PgCancellation::default();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| stage(tx, L1, &data.publication())).unwrap();
+    let key = &data.rows[0].key;
+    super::snapshot::with_generation(&pool, &namespace, &control, L1, |view| {
+        let (row, header, slots) = view.selected(key, false, 0, 64)?.unwrap();
+        assert_eq!(serde_json::to_vec(&row).unwrap(), data.metadata[0]);
+        assert_eq!(slots.iter().map(|s| s.as_bytes().to_vec()).collect::<Vec<_>>(), data.slots);
+        assert_eq!(header.3 as usize, slots.len());
+        // A second connection commits while the callback holds its actual SQL
+        // snapshot. Test-only corruption distinguishes MVCC from fresh reads.
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            stage(tx, L2, &data.publication())?;
+            tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET metadata=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&namespace.as_str().as_bytes(), &L1.as_bytes(), &b"corrupt".as_slice()]).map_err(sqlstate::error)?;
+            Ok(())
+        })?;
+        assert_eq!(serde_json::to_vec(&view.catalog(key, false)?.unwrap()).unwrap(), data.metadata[0]);
+        assert!(view.catalog(key, true)?.is_none());
+        Ok(())
+    }).unwrap();
+    assert_eq!(super::snapshot::with_generation(&pool, &namespace, &control, L1, |view| view.catalog(key, false)).err(), Some(StorageError::ScopeChanged));
+    super::snapshot::with_generation(&pool, &namespace, &control, L2, |view| {
+        assert!(view.selected(key, false, 0, 1)?.is_some());
+        assert_eq!(view.recipe(key, false, -1, 1).err(), Some(StorageError::InvalidArguments));
+        Ok(())
+    }).unwrap();
+    super::snapshot::with_generation(&pool, &ns("foreign\0🦀"), &control, L2, |view| {
+        assert!(view.catalog(key, false)?.is_none());
+        Ok(())
+    }).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver.execute("UPDATE semon_pg_native_catalog_recipe_headers SET source_generation=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&namespace.as_str().as_bytes(), &L2.as_bytes(), &L1.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(super::snapshot::with_generation(&pool, &namespace, &control, L2, |view| view.selected(key, false, 0, 1)).err(), Some(StorageError::ScopeChanged));
+    let cancelled = PgCancellation::default();
+    cancelled.cancel();
+    assert_eq!(super::snapshot::with_generation(&pool, &namespace, &cancelled, L2, |_| Ok(())).err(), Some(StorageError::Busy));
+}
 const TABLES: &[&str] = &[
     "catalog_search_documents",
     "catalog_search_memberships",

@@ -31,6 +31,14 @@ pub(super) fn with_generation<T>(
 }
 
 impl Snapshot<'_, '_> {
+    pub(super) fn selected(&self, key: &str, history: bool, start: i64, limit: i64) -> Result<Option<(CatalogRow, catalog::OriginalHeader, Vec<String>)>, StorageError> {
+        let Some(row) = self.catalog(key, history)? else { return Ok(None); };
+        let (header, slots) = self.recipe(key, history, start, limit)?.ok_or(StorageError::ScopeChanged)?;
+        let source = crate::retention::source_generation(&row.sources).map_err(|_| StorageError::ScopeChanged)?;
+        if header.2.as_deref() != Some(source.as_str()) { return Err(StorageError::ScopeChanged); }
+        Ok(Some((row, header, slots)))
+    }
+
     fn owner(&self, key: &str) -> Result<Option<String>, StorageError> {
         let tx = self.tx.borrow_mut();
         tx.check()?;
@@ -70,7 +78,8 @@ impl Snapshot<'_, '_> {
     /// SQL validates counts and aggregate byte sizes before any recipe text is
     /// returned to the driver. A dangling owner/header is corruption, not empty
     /// retained history. Old immutable generations remain readable across L2.
-    pub(super) fn recipe(&self, key: &str, history: bool) -> Result<Option<(catalog::OriginalHeader, Vec<String>)>, StorageError> {
+    pub(super) fn recipe(&self, key: &str, history: bool, start: i64, limit: i64) -> Result<Option<(catalog::OriginalHeader, Vec<String>)>, StorageError> {
+        if start < 0 || !(1..=64).contains(&limit) { return Err(StorageError::InvalidArguments); }
         let owner = if history {
             let Some(owner) = self.owner(key)? else { return Ok(None); };
             owner
@@ -83,20 +92,21 @@ impl Snapshot<'_, '_> {
         let ns = tx.namespace.as_str().as_bytes();
         let hash = digest(key.as_bytes());
         let args: &[&(dyn ToSql + Sync)] = &[&ns, &owner.as_bytes(), &hash, &key.as_bytes()];
-        let rows = tx.driver.query(&format!("SELECT session_key=$4,recipe_generation,version,source_generation,total FROM {headers} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3"), args).map_err(sqlstate::error)?;
+        let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN octet_length(recipe_generation)=64 THEN recipe_generation END,version,CASE WHEN octet_length(source_generation)=64 THEN source_generation END,total FROM {headers} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3"), args).map_err(sqlstate::error)?;
         let Some(row) = rows.first() else {
             return if history { Err(StorageError::ScopeChanged) } else { Ok(None) };
         };
         if !row.get::<_, bool>(0) { return Err(StorageError::ScopeChanged); }
         let total: i64 = row.get(4);
         let version = u32::try_from(row.get::<_, i64>(2)).map_err(|_| StorageError::ScopeChanged)?;
-        if version != crate::slot_projection::VERSION || !(0..=64).contains(&total) { return Err(StorageError::ScopeChanged); }
-        let header = (text(row.get(1))?, version, row.get::<_, Option<Vec<u8>>>(3).map(text).transpose()?, total);
-        let measure = tx.driver.query_one(&format!("SELECT count(*)::bigint,coalesce(sum(octet_length(metadata)),0)::bigint,coalesce(bool_and(session_key=$4 AND slot>=0 AND slot<$5),true) FROM (SELECT session_key,slot,metadata FROM {slots} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p"), &[&ns, &owner.as_bytes(), &hash, &key.as_bytes(), &total]).map_err(sqlstate::error)?;
-        if measure.get::<_, i64>(0) != total || measure.get::<_, i64>(1) > MAX as i64 || !measure.get::<_, bool>(2) { return Err(StorageError::ScopeChanged); }
+        if version != crate::slot_projection::VERSION || total < 0 || start > total { return Err(StorageError::ScopeChanged); }
+        let header = (text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?)?, version, row.get::<_, Option<Vec<u8>>>(3).map(text).transpose()?, total);
+        let end = start.checked_add(limit).ok_or(StorageError::InvalidArguments)?.min(total);
+        let measure = tx.driver.query_one(&format!("SELECT count(*)::bigint,coalesce(sum(octet_length(metadata)),0)::bigint,coalesce(bool_and(session_key=$4),true) FROM (SELECT session_key,metadata FROM {slots} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND slot>=$5 AND slot<$6 ORDER BY slot LIMIT 65) p"), &[&ns, &owner.as_bytes(), &hash, &key.as_bytes(), &start, &end]).map_err(sqlstate::error)?;
+        if measure.get::<_, i64>(0) != end-start || measure.get::<_, i64>(1) > MAX as i64 || !measure.get::<_, bool>(2) { return Err(StorageError::ScopeChanged); }
         crate::selected_read::charge(64, measure.get::<_, i64>(1) as usize).map_err(|_| StorageError::Busy)?;
         tx.check()?;
-        let rows = tx.driver.query(&format!("SELECT metadata FROM {slots} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 ORDER BY slot LIMIT 65"), args).map_err(sqlstate::error)?;
+        let rows = tx.driver.query(&format!("SELECT metadata FROM {slots} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 AND slot>=$5 AND slot<$6 ORDER BY slot LIMIT 65"), &[&ns, &owner.as_bytes(), &hash, &key.as_bytes(), &start, &end]).map_err(sqlstate::error)?;
         tx.check()?;
         let texts = rows.iter().map(|r| text(r.get(0))).collect::<Result<Vec<_>, _>>()?;
         Ok(Some((header, texts)))
