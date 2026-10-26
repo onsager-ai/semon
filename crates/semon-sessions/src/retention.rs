@@ -7,7 +7,7 @@ use crate::{
     model::summary::{CatalogRow, CatalogSource},
     storage::NativeReaderBinding,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -270,14 +270,10 @@ pub fn retain_source_event_index(
     let full = path.to_str().ok_or(InvalidArguments)?;
     let binding = crate::storage::local_navigation_binding(options, &proof.source.root)
         .map_err(|_| Unavailable)?;
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| Unavailable)?;
-    crate::storage::sqlite::catalog_namespace::register(&connection, &binding.config().namespace)
+    let owner = crate::events::store::configured::NativeOwnership::restore(binding.config())
+        .map_err(|_| Unavailable)?;
+    let mut connection = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
         .map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
@@ -316,15 +312,7 @@ pub fn source_event_index_retained(
     let full = path.to_str().ok_or(InvalidArguments)?;
     let binding = crate::storage::local_navigation_binding(options, &proof.source.root)
         .map_err(|_| Unavailable)?;
-    let connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| Unavailable)?;
-    crate::storage::sqlite::catalog_namespace::register(&connection, &binding.config().namespace)
-        .map_err(|_| Unavailable)?;
+    let connection = binding.connection().map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| Unavailable)?;
