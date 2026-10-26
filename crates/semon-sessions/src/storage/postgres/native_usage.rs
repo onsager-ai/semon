@@ -57,10 +57,27 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
     String::from_utf8(bytes).map_err(|_| StorageError::Unavailable)
 }
 
+const CURRENT_SQL: &str = "SELECT s.source_id,s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.source_path_digest=c.source_path_digest AND semon_pg_native_key_matches(s.source_path,sha256($2::bytea),$2) AND s.parser_version=$3";
+
 impl Effects for Usage<'_, '_> {
     fn current(&mut self, path: &str) -> Result<Option<(i64, String)>, StorageError> {
         self.tx.check()?;
-        let rows = self.tx.driver.query("SELECT s.source_id,s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.parser_version=$3", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?;
+        let parameters: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
+            &self.tx.namespace.as_str().as_bytes(),
+            &path.as_bytes(),
+            &i64::from(CACHE_VERSION),
+        ];
+        let lengths = self.tx.driver.query(
+            &CURRENT_SQL.replace("s.source_id,s.receipt", "s.source_id,octet_length(s.receipt)::bigint"),
+            parameters,
+        ).map_err(sqlstate::error)?;
+        let Some(length) = lengths.first() else { return Ok(None); };
+        let bytes = usize::try_from(length.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
+        if bytes > 1024 * 1024 { return Err(StorageError::ScopeChanged); }
+        crate::selected_read::charge(2, bytes + 16).map_err(|_| StorageError::Busy)?;
+        self.tx.check()?;
+        let rows = self.tx.driver.query(CURRENT_SQL, parameters).map_err(sqlstate::error)?;
+        self.tx.check()?;
         rows.first()
             .map(|r| Ok((r.get(0), text(r.get(1))?)))
             .transpose()
@@ -72,7 +89,9 @@ impl Effects for Usage<'_, '_> {
         let id: i64 = self.tx.driver.query_one("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,(SELECT coalesce(max(source_id),0)+1 FROM semon_pg_native_usage_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1),$2,$3,0,$4,false) RETURNING source_id", &[&ns,&path.as_bytes(),&receipt.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?.get(0);
         self.after_effect()?;
         let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET source_id=excluded.source_id WHERE semon_pg_native_usage_current.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_usage_current.source_path,sha256(excluded.source_path),excluded.source_path)", &[&ns,&path.as_bytes(),&id]).map_err(sqlstate::error)?;
-        if changed != 1 { return Err(StorageError::ScopeChanged); }
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
         self.after_effect()?;
         Ok(id)
     }
@@ -129,7 +148,9 @@ impl Effects for Usage<'_, '_> {
     ) -> Result<(), StorageError> {
         self.tx.check()?;
         let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_usage_dimensions(namespace,source_id,kind,dimension,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT(namespace_digest,source_id,kind_digest,dimension_digest) DO UPDATE SET value=excluded.value WHERE semon_pg_native_usage_dimensions.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_usage_dimensions.kind,sha256(excluded.kind),excluded.kind) AND semon_pg_native_key_matches(semon_pg_native_usage_dimensions.dimension,sha256(excluded.dimension),excluded.dimension)", &[&self.tx.namespace.as_str().as_bytes(),&id,&kind.as_bytes(),&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
-        if changed != 1 { return Err(StorageError::ScopeChanged); }
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
         self.after_effect()
     }
     fn ready(&mut self, id: i64, checkpoint: u64) -> Result<(), StorageError> {

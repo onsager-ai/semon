@@ -376,8 +376,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         || digest[0].get::<_, String>(0) != native_keys::DIGEST_BODY
         || digest[0].get::<_, bool>(1)
         || !digest[0].get::<_, bool>(2)
-        || digest[0].get::<_, Option<Vec<String>>>(3)
-            != Some(vec!["search_path=pg_catalog".into()])
+        || digest[0].get::<_, Option<Vec<String>>>(3) != Some(vec!["search_path=pg_catalog".into()])
     {
         return Err(StorageError::ScopeChanged);
     }
