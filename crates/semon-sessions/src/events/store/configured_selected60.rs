@@ -314,7 +314,7 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     let facts_path = options.facts.as_ref().unwrap();
     let mut facts = crate::facts::read_facts(facts_path).unwrap();
     facts.codex_rollouts = Some([input.path.clone()].into_iter().collect());
-    crate::facts::write_facts(facts_path, &facts).unwrap();
+    crate::facts::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
     cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
     let (batch, model) = model_ready(&f, &mut cache, options, input, "selected60");
     assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
@@ -343,7 +343,7 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     // availability observation. The old witness must never be reconstructed.
     facts.hostname = "independent-facts-change".into();
     facts.offline_since = Some(1_790_000_100_000);
-    crate::facts::write_facts(facts_path, &facts).unwrap();
+    crate::facts::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
     assert_eq!(bytes(&lease, options, &host, &query), original);
     let current = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
     assert_eq!(current["identity"]["machine_label"], "independent-facts-change");
@@ -762,7 +762,7 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
     let facts_path = options.facts.as_ref().unwrap();
     let mut facts_a = crate::facts::read_facts(facts_path).unwrap();
     facts_a.codex_rollouts = Some([input.path.clone()].into_iter().collect());
-    crate::facts::write_facts(facts_path, &facts_a).unwrap();
+    crate::facts::write_facts(facts_path, &facts_a, &crate::Options::default().source).unwrap();
     cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
     let (_, model) = model_ready(&f, &mut cache, options, input, "selected80-facts-race");
     let row = &model.prepared().rows[0];
@@ -780,19 +780,19 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
     assert_ne!(saved_a, json!({"state":null,"observation":"unavailable"}));
     let mut facts_b = facts_a.clone();
     facts_b.codex_rollouts = Some(Default::default());
-    crate::facts::write_facts(facts_path, &facts_b).unwrap();
+    crate::facts::write_facts(facts_path, &facts_b, &crate::Options::default().source).unwrap();
     assert_eq!(saved.capture_relative_status(row), saved_a);
 
     // A row requiring a lazy lookup through A's now-invalid identity fails
     // closed instead of taking B's current_codex answer.
-    crate::facts::write_facts(facts_path, &facts_a).unwrap();
+    crate::facts::write_facts(facts_path, &facts_a, &crate::Options::default().source).unwrap();
     let mut lazy = crate::storage::selected::PresentationObservations::capture(
         options,
         runtime_binding.as_ref(),
         model.prepared().rows.iter().skip(1),
     );
     assert_eq!(lazy.captured_source_count(), 0);
-    crate::facts::write_facts(facts_path, &facts_b).unwrap();
+    crate::facts::write_facts(facts_path, &facts_b, &crate::Options::default().source).unwrap();
     assert_eq!(
         lazy.capture_relative_status(row),
         json!({"state":null,"observation":"unavailable"})
@@ -802,7 +802,7 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
     assert_eq!(durable.captured_source_count(), 0);
     let mut facts_c = facts_a.clone();
     facts_c.hostname = "after-deserialization".into();
-    crate::facts::write_facts(facts_path, &facts_c).unwrap();
+    crate::facts::write_facts(facts_path, &facts_c, &crate::Options::default().source).unwrap();
     assert_eq!(
         durable.capture_relative_status(row),
         json!({"state":null,"observation":"unavailable"})
@@ -824,7 +824,7 @@ fn configured_semantic_selected80_capture_ignores_unrelated_facts_history() {
     rollouts.insert(input.path.clone());
     rollouts.extend((0..512).map(|number| format!("unrelated/history-{number}.jsonl")));
     facts.codex_rollouts = Some(rollouts);
-    crate::facts::write_facts(facts_path, &facts).unwrap();
+    crate::facts::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
     cache.ingest(&"a".repeat(64), &input.full_path(options), "codex").unwrap();
     let (_, model) = model_ready(&f, &mut cache, options, input, "selected80-bounds");
     let runtime_binding = cache.query_runtime_binding().unwrap();
