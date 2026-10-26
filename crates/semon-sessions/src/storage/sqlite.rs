@@ -29,7 +29,23 @@ use std::time::Duration;
 
 pub(super) fn failed(error: rusqlite::Error) -> StorageError {
     #[cfg(test)]
-    semantic::diagnose(&error);
+    {
+        semantic::diagnose(&error);
+        // Static kind and code only: SQLite messages can contain SQL or native data.
+        let kind = match &error {
+            rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
+            rusqlite::Error::QueryReturnedNoRows => "no_rows",
+            rusqlite::Error::UserFunctionError(_) => "user_function",
+            rusqlite::Error::InvalidQuery => "invalid_query",
+            rusqlite::Error::InvalidColumnType(..) => "column_type",
+            rusqlite::Error::FromSqlConversionFailure(..) => "from_sql",
+            _ => "other",
+        };
+        eprintln!(
+            "storage_sqlite_failure kind={kind} sqlite_extended_code={:?}",
+            error.sqlite_error().map(|e| e.extended_code)
+        );
+    }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,
