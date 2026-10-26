@@ -200,6 +200,13 @@ Each page needs namespace, snapshot/version identity, bounded rows/bytes,
 continuation and digest. Checkpoint advancement and applied operation IDs commit
 together at the destination. Duplicate pages must be safe to replay.
 
+Semantic withdrawal also owns original recipe custody. A staged publication
+may contain only the exact validated retired owners after an ordinary source
+removal has already been acknowledged. It preserves their original recipes
+through the existing bounded custody algorithm before retiring Current; a
+`Deferred` custody page leaves Current and claims unchanged. This uses the same
+retirement witness, namespace, epoch and publication CAS as nonempty publication.
+
 Completed semantic producers intentionally delete their temporary model batches.
 Migration preserves their original publication receipts exactly and validates
 the admitted persisted presentation, Native proof and ledger graph from an
