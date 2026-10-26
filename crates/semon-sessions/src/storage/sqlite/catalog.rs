@@ -356,14 +356,6 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
     Ok(AdmittedSnapshot(transaction, true))
 }
 
-fn require_ported_helper(qualified: bool) -> io::Result<()> {
-    if qualified {
-        return Err(io::Error::other(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        ));
-    }
-    Ok(())
-}
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     fn require_current(&self) -> io::Result<()> {
         Ok(())
@@ -385,8 +377,10 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         query: crate::catalog_search::Query<'_>,
     ) -> io::Result<crate::catalog_search::Selection> {
-        require_ported_helper(self.1)?;
-        self.0.search(query)
+        if !self.1 {
+            return self.0.search(query);
+        }
+        crate::catalog_search::read_admitted(self.0, query).map_err(io::Error::other)
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
         if !self.1 {
@@ -441,40 +435,5 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     ) -> io::Result<Option<Value>> {
         crate::transcript_range::observation(self.0, key, generation, history, self.1)
             .map_err(io::Error::other)
-    }
-}
-
-#[cfg(test)]
-mod namespace_reader_tests {
-    use super::*;
-
-    #[test]
-    fn unported_indexed_reader_refuses_with_typed_storage_error_before_sql() {
-        // No native tables exist: an unported search must refuse through its
-        // real adapter entry before a legacy query can reach SQLite.
-        let mut db = Connection::open_in_memory().unwrap();
-        let tx = db.transaction().unwrap();
-        let snapshot = AdmittedSnapshot(&tx, true);
-        let error = snapshot
-            .search(crate::catalog_search::Query {
-                scope: crate::CatalogReadScope::Current,
-                query: "missing",
-                harness: None,
-                repo: None,
-                model: None,
-                after: None,
-                limit: 1,
-                index_complete: false,
-            })
-            .err()
-            .expect("typed refusal before SQL");
-        assert_eq!(
-            error
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<crate::storage::StorageError>(),
-            Some(&crate::storage::StorageError::NamespaceUpgradePending)
-        );
-        assert!(require_ported_helper(false).is_ok());
     }
 }
