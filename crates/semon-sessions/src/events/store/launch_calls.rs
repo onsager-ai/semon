@@ -184,10 +184,7 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name), &crate::events::store::fixture_namespace()) {
-            Ok((store, _)) => store,
-            Err(error) => panic!("real Index schema: {error}"),
-        }
+        crate::events::store::current_test_store(&root.join(name), &crate::events::store::fixture_namespace())
     }
 
     fn cleanup_proof(count: usize, version: u8) -> (Ledger, FileIndex) {

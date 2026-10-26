@@ -1227,7 +1227,7 @@ mod tests {
         // Both production factories now author the same current contract.
         let original = authored_storage_ddl();
         let configured_original = original;
-        assert_eq!(storage_ddl(), original);
+        assert_eq!(authored_storage_ddl(), original);
         let full_objects = |db: &Connection| {
             db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").unwrap()
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap()
@@ -2348,8 +2348,7 @@ mod tests {
     fn completed_fingerprint_stays_idle_without_writes_or_payload_decodes() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (_store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let _store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let table = table("anthropic", "claude-opus-5-5", 8.0, 1);
         drain(&path, &table);
         let before: (i64, String) = Connection::open(&path)
@@ -2391,9 +2390,7 @@ mod tests {
     fn pending_source_append_restarts_partial_batch_and_prices_all_retained_facts() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (mut store, _) =
-            SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-                .unwrap_or_else(|e| panic!("{e}"));
+        let mut store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let p = "/not-present/pending-append.jsonl";
         let unrelated = "/not-present/already-current.jsonl";
         let p_ledger = ledger();
@@ -2625,9 +2622,7 @@ mod tests {
     fn pending_source_current_id_replacement_discards_old_partial_job() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (mut store, _) =
-            SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-                .unwrap_or_else(|e| panic!("{e}"));
+        let mut store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let native = "/not-present/pending-replacement.jsonl";
         let original_ledger = ledger();
         store
@@ -2798,9 +2793,7 @@ mod tests {
     fn a_new_stale_retained_owner_is_enqueued_and_repriced_without_rescanning_others() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (mut store, _) =
-            SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-                .unwrap_or_else(|e| panic!("{e}"));
+        let mut store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/new-retained-claude.jsonl";
         let usage = MessageUsage {
@@ -2900,9 +2893,7 @@ mod tests {
     fn unchanged_saved_session_overview_and_summary_reprice_without_native_files_across_restart() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (mut store, _) =
-            SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-                .unwrap_or_else(|e| panic!("{e}"));
+        let mut store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/retained-claude.jsonl";
         let used = MessageUsage {
@@ -2998,9 +2989,7 @@ mod tests {
     fn normalized_codex_cost_dimensions_resume_after_a_fact_batch() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (mut store, _) =
-            SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-                .unwrap_or_else(|e| panic!("{e}"));
+        let mut store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/retained-codex.jsonl";
         let mut index = FileIndex {
@@ -3086,8 +3075,7 @@ mod tests {
     fn missing_or_changed_retained_facts_keep_the_previous_price_fingerprint() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let (store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let store = crate::events::store::current_test_store(&path, &crate::events::store::fixture_namespace());
         let cost = crate::pricing::Cost::default();
         let old = cost.pricing_fingerprint.clone();
         publish(&store, &row("/missing/native", &ledger(), cost, "claude"));
