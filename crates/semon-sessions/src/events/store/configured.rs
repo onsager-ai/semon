@@ -1509,7 +1509,12 @@ impl Writer {
             return Err(StorageError::NamespaceUpgradePending);
         }
         check()?;
-        let db = self.snapshot()?;
+        // Export callbacks can advance the writer. Keep this long-lived read
+        // on its own WAL snapshot, separate from the short operation connection.
+        let connection = connection(&self.config)?;
+        let db = Transaction::new_unchecked(&connection, TransactionBehavior::Deferred)
+            .map_err(failed)?;
+        self.validate(&db)?;
         let stamp = read_reported_stamp(&db)?;
         begin(stamp.as_ref())?;
         let mut statement = db.prepare(&format!("SELECT {RUN_COLUMNS},length(CAST(session_id AS BLOB))+length(CAST(model_usage AS BLOB)) FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start")).map_err(failed)?;
