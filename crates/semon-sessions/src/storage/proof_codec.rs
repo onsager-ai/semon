@@ -24,7 +24,7 @@ pub(crate) fn verify_presentation_entry(
     manifest: &str,
 ) -> Result<(), StorageError> {
     let manifest: PresentationManifest =
-        serde_json::from_str(manifest).map_err(|_| StorageError::ScopeChanged)?;
+        serde_json::from_str(manifest).map_err(|_| StorageError::Unavailable)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
         || !manifest
