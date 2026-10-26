@@ -1773,16 +1773,28 @@ mod tests {
                 core.views()
                     .iter()
                     .map(|(key, view)| {
-                        let identity = match crate::catalog::qualified_current_identity(
+                        let selected = crate::catalog::qualified_current_identity(
                             view.options(),
                             key,
                             "replacement",
-                        ) {
+                        );
+                        let query = selected.as_ref().ok().and_then(|row| row.as_ref()).map(
+                            |row| {
+                                crate::overview_repair::local_query_target(
+                                    view.options(),
+                                    &row.catalog_key,
+                                    crate::model::now_ms(),
+                                )
+                                .map(|target| target.is_some())
+                                .map_err(|error| error.kind())
+                            },
+                        );
+                        let identity = match selected {
                             Ok(Some(_)) => "present",
                             Ok(None) => "absent",
                             Err(_) => "unavailable",
                         };
-                        (key.clone(), view.catalog_observation_pending(), identity)
+                        (key.clone(), view.catalog_observation_pending(), identity, query)
                     })
                     .collect::<Vec<_>>()
             );

@@ -107,6 +107,9 @@ jobs:
       - name: Strict published Tree scalar and deferred interpretation qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture
+      - name: Native ownership after source replacement
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
