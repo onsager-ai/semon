@@ -61,6 +61,9 @@ pub(crate) fn open_semantic_with_stamp(
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
+        crate::facts::source_authority::Sources::sqlite(path)
+    }
     fn facts_write_begin(
         &mut self,
         options: &crate::Options,
