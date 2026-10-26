@@ -310,13 +310,14 @@ pub(super) fn publish(
     let witness = prepared
         .staged_model_witness()
         .map_err(|_| StorageError::ScopeChanged)?;
-    if let Some(stage) = load(tx, false)? {
-        if !stage.active && stage.epoch == batch.epoch {
-            if stage.model.as_deref() != Some(&witness) {
-                return Err(StorageError::Conflict);
-            }
-            return Ok((Outcome::Written, stage.acknowledgement));
+    if let Some(stage) = load(tx, false)?
+        && !stage.active
+        && stage.epoch == batch.epoch
+    {
+        if stage.model.as_deref() != Some(&witness) {
+            return Err(StorageError::Conflict);
         }
+        return Ok((Outcome::Written, stage.acknowledgement));
     }
     let mut stage = checked(tx, batch)?;
     if stage.model.as_deref() != Some(&witness) {

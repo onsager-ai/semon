@@ -108,6 +108,7 @@ jobs:
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
       - name: Ordinary PG model producer without SQLite fallback
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-vertical140.log"
       - name: Retain ordinary PG model diagnostics
@@ -118,6 +119,7 @@ jobs:
           path: ${{ runner.temp }}/pg-vertical140.log
           if-no-files-found: error
       - name: Catalog native proof binding before physical effects
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog135 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog135.log"
       - name: Retain Catalog native proof binding diagnostics
@@ -128,6 +130,7 @@ jobs:
           path: ${{ runner.temp }}/pg-catalog135.log
           if-no-files-found: error
       - name: Actual native EventCache PostgreSQL integration
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native126 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-native126.log"
       - name: Retain early native ingest diagnostics
@@ -208,7 +211,15 @@ jobs:
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-focused.log"
+      - name: Retain focused PostgreSQL diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-focused-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-focused.log
+          if-no-files-found: error
       - name: Reported facts shared codec and SQLite history oracle
         run: |
           cargo test -p semon-sessions --locked --features postgres-test-tls reported_rows -- --nocapture
