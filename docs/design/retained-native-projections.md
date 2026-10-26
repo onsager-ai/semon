@@ -19,6 +19,12 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
+SQLite semantic catch-up accepts a removed path only with its durable ordinary
+producer removal invalidation, no remaining live ledger and a still-absent file.
+Each later reduction and publication rechecks that evidence and the exact claim.
+This completes the existing staged path and retains outgoing owners through the
+ordinary custody publication; it does not fabricate a Facts admission withdrawal.
+
 Pending slot outcomes record the absence of a final native result, separately
 from a recorded result with unknown exit status. Recipes never store live flags
 or elapsed runtime. A current read may display an active call only when qualified
