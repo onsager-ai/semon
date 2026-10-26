@@ -210,6 +210,10 @@ fn publish_operation(
         carried = Some((previous, mentioned, claimed));
     }
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
+    for reference in refs {
+        tx.check()?;
+        tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
+    }
     if let Some(previous) = expected
         && !history::preserve(tx, &generation, previous, publication, &leaving)?
     {
@@ -235,10 +239,6 @@ fn publish_operation(
         ] {
             effects.counts(scope)?;
         }
-    }
-    for reference in refs {
-        tx.check()?;
-        tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6)", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
     }
     let expected_value = expected.map(str::to_owned);
     let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NOT DISTINCT FROM $3", &[&ns, &generation, &expected_value]).map_err(sqlstate::error)?;
