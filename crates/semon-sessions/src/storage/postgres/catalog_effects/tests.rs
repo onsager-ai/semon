@@ -18,6 +18,11 @@ const TABLES: &[&str] = &[
     "catalog_search_documents",
     "catalog_search_memberships",
     "catalog_search_counts",
+    "catalog_history_owners",
+    "catalog_history_headers",
+    "catalog_history_slots",
+    "catalog_history_sources",
+    "catalog_history_progress",
     "catalog_rows",
     "catalog_sources",
     "catalog_dependencies",
@@ -36,6 +41,8 @@ struct Input {
     slots: Vec<Vec<u8>>,
     trace: Vec<Vec<Vec<u8>>>,
     search: Vec<Vec<u8>>,
+    original: Vec<Vec<u8>>,
+    original_slots: Vec<Vec<u8>>,
 }
 impl Input {
     fn publication(&self) -> crate::slot_projection::Publication<'_> {
@@ -108,6 +115,8 @@ fn oracle() -> Input {
                 row,
                 trace,
         search,
+        original,
+        original_slots,
             )
             .unwrap();
         }
@@ -138,6 +147,10 @@ fn oracle() -> Input {
     .iter()
     .map(|sql| read(sql))
     .collect();
+    let history = crate::storage::sqlite::history::OriginalHistory::unbound(&db);
+    for row in &prepared.rows { assert!(catalog::preserve_original(&history, row).unwrap()); }
+    let original = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
+    let original_slots = read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
     assert!(!slots.is_empty());
     drop(db);
     drop(connection);
@@ -155,6 +168,60 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
     TABLES.iter().map(|table| {
         tx.driver.query(&format!("SELECT to_jsonb(t)::text FROM semon_pg_native_{table} t ORDER BY to_jsonb(t)::text"), &[]).map_err(sqlstate::error).map(|rows| rows.iter().map(|row| row.get(0)).collect())
     }).collect()
+}
+
+#[test]
+fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() {
+    let data = oracle();
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("catalog127-original");
+    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
+    let preserve = |tx: &mut PgTxn<'_>| {
+        let store = history::History { effects: Effects { tx: RefCell::new(tx), generation: L2 }, previous: L1 };
+        for row in &data.rows { assert!(catalog::preserve_original(&store, row)?); }
+        Ok(())
+    };
+    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    BOUNDARIES.with(|count| count.set(0));
+    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
+        preserve(tx)?;
+        Err::<(), _>(StorageError::Unavailable)
+    }).unwrap_err();
+    let boundaries = BOUNDARIES.with(|count| count.get());
+    assert!(boundaries > 0);
+    for point in 1..=boundaries {
+        FAIL_AFTER.with(|fail| fail.set(Some(point)));
+        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), preserve).is_err());
+        FAIL_AFTER.with(|fail| fail.set(None));
+        assert_eq!(pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap(), before);
+    }
+    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), preserve).unwrap();
+    let reopened = crate::storage::postgres::PgPool::open(factory, crate::storage::postgres::tests::limits()).unwrap();
+    reopened.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+        let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
+        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.original);
+        let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
+        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.original_slots);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects() {
+    let data = oracle();
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("catalog127-history-refuse");
+    pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
+    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();
+    for mode in 0..2 {
+        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
+            let store = history::History { effects: Effects { tx: RefCell::new(tx), generation: L2 }, previous: L1 };
+            use catalog::{CompositeHistoryStore, OriginalHistoryStore};
+            if mode == 0 { store.reset_transfer(&data.rows[0].key) }
+            else { store.composed(&data.rows[0].key, L1, L1, "{}", &["x".repeat(MAX + 1)], false) }
+        }).is_err());
+        assert_eq!(pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap(), before);
+    }
 }
 
 #[test]
@@ -231,7 +298,7 @@ fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() 
             TxnKind::ReadSnapshot,
             &PgCancellation::default(),
             |tx| {
-                for table in TABLES {
+                for table in TABLES.iter().filter(|table| !table.starts_with("catalog_history_")) {
                     let count: i64 = tx
                         .driver
                         .query_one(
