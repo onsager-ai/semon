@@ -138,9 +138,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t6_listing_readiness_does_not_qualify_other_readers -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_model_refuses_noncurrent_schema_and_changed_raw_zero_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history -- --exact --nocapture
-          cargo test --locked -p semon-sessions --lib events::store::tests::catalog_typed_custody_and_slots_match_original_publication_digest -- --exact --nocapture
-          cargo test --locked -p semon-sessions --lib history_projection::tests:: -- --nocapture
-          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publisher_keeps_unbound_head_refusal -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::current_history_custody:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_ingest_and_stage_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_rollback_and_reopen_isolated -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_cross_namespace_capability_refused_zero_writes -- --exact --nocapture
