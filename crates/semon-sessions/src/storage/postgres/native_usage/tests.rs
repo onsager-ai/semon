@@ -305,6 +305,103 @@ fn sqlite_rows(db: &rusqlite::Connection) -> Vec<Vec<String>> {
     result
 }
 
+#[test]
+fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision() {
+    use sha2::{Digest, Sha256};
+    let key = (0u32..56)
+        .map(|i| format!("{:x}", Sha256::digest(i.to_be_bytes())))
+        .collect::<String>();
+    let path = format!("/{key}\0🦀");
+    let model = format!("model-{key}\0🦀");
+    let body = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"turn_context","payload":{"model":model}}),
+        serde_json::json!({"type":"token_usage_record","timestamp":"2026-09-29T00:00:01Z","payload":{"thread_id":key,"session_id":key,"turn_id":key,"response_id":key,"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"reasoning_output_tokens":0}}})
+    );
+    let index = parsed("codex", &body);
+    let end = ledger(body.len() as u64);
+    let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
+    for ddl in shared::schema(false) {
+        oracle.execute_batch(ddl).unwrap();
+    }
+    shared::sqlite_fixture(&mut oracle, &path, None, &end, false, &index);
+    let expected = sqlite_rows(&oracle);
+    assert!(expected.iter().flatten().any(|v| v.len() > 5408));
+    drop(oracle);
+    let (pool, factory) = fixture(|l| l.max_connections = 1);
+    let control = PgCancellation::default();
+    let own = ns("keys128-usage\0🦀");
+    let foreign = ns("keys128-foreign\0🦀");
+    for namespace in [&own, &foreign] {
+        pool.transaction(namespace, TxnKind::Write, &control, |tx| {
+            let mut usage = Usage::new(tx)?;
+            algorithm::begin(&mut usage, &path, None, &end, false)?;
+            algorithm::write(&mut usage, &path, &end, &index)?;
+            assert_eq!(rows(tx)?, expected);
+            Ok(())
+        }).unwrap();
+    }
+    drop(pool);
+    let pool = PgPool::open(factory, limits()).unwrap();
+    pool.transaction(&own, TxnKind::Write, &control, |tx| {
+        assert_eq!(rows(tx)?, expected);
+        assert!(Usage::new(tx)?.current(&path)?.is_some());
+        Ok(())
+    }).unwrap();
+    // Force an actual wrong heap witness at the selected physical address.
+    // Returning Err rolls back both the test-only DDL and the corrupt row.
+    assert!(pool.transaction(&own, TxnKind::Write, &control, |tx| {
+        tx.driver.batch_execute("ALTER TABLE semon_pg_native_usage_current ALTER COLUMN source_path_digest DROP EXPRESSION; UPDATE semon_pg_native_usage_current SET source_path=decode('00','hex')").map_err(sqlstate::error)?;
+        Usage::new(tx)?.current(&path)
+    }).is_err());
+    for namespace in [&own, &foreign] {
+        pool.transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            assert_eq!(rows(tx)?, expected);
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn pg_native_keys128_usage_current_sql_rows_and_bytes_with_history_noise() {
+    let (pool, _) = fixture(|l| l.max_connections = 1);
+    let namespace = ns("keys128-noise");
+    let control = PgCancellation::default();
+    let path = "selected\0🦀";
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        Usage::new(tx)?.create(path, "qualified-family-receipt")
+    }).unwrap();
+    let mut previous = 0;
+    for noise in [0, 256, 2048] {
+        for batch in (previous..noise).step_by(64) {
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                let mut usage = Usage::new(tx)?;
+                for n in batch..(batch + 64).min(noise) {
+                    usage.create(&format!("unrelated-{n}"), "unrelated-family-receipt")?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        let measurement = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let selected = Usage::new(tx)?.current(path)?.unwrap();
+            let row = tx.driver.query_one("EXPLAIN (ANALYZE, FORMAT JSON) SELECT s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2)", &[&namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
+            let plan: serde_json::Value = row.get(0);
+            fn visited(plan: &serde_json::Value) -> u64 {
+                let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                match plan.get("Plans").and_then(serde_json::Value::as_array) {
+                    Some(children) => removed + children.iter().map(visited).sum::<u64>(),
+                    None => (removed + plan["Actual Rows"].as_u64().unwrap()) * plan["Actual Loops"].as_u64().unwrap(),
+                }
+            }
+            Ok((visited(&plan[0]["Plan"]), selected.1.len()))
+        }).unwrap();
+        assert!(measurement.0 <= 32, "noise={noise}, physical rows/bytes={measurement:?}");
+        assert_eq!(measurement.1, "qualified-family-receipt".len());
+        eprintln!("keys128_usage_current noise={noise} sql_rows={} returned_bytes={}", measurement.0, measurement.1);
+        previous = noise;
+    }
+}
+
 fn parsed(harness: &str, body: &str) -> crate::events::FileIndex {
     let path = std::env::temp_dir().join(format!(
         "pg95-parser-{}-{}.jsonl",
