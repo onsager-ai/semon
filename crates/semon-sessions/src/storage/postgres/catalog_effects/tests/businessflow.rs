@@ -1786,6 +1786,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut facts_options = options.clone();
     facts_options.facts = Some(facts_path.clone());
     let before_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    // A selected read cannot reuse a publication under different runtime
+    // Facts, even when its immutable Raw recipes and host custody still match.
+    let changed_runtime_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: facts_options.clone(),
+    };
+    assert!(crate::storage::query::QueryCatalogStore::selected_body(
+        &changed_runtime_store,
+        &namespace,
+        &prepared.rows[0].key,
+        &serde_json::json!({"limit":1}),
+        1790812802000,
+        &retained_host,
+    ).is_err());
     let from = fs::metadata(&path).unwrap().len();
     let writer = crate::SessionSourceWrite::begin_with_store(
         &facts_options,

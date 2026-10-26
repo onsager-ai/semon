@@ -32,6 +32,8 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
+        let runtime = crate::native_evidence::query_runtime_generation(&self.options)
+            .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(
             &self.pool,
             &self.namespace,
@@ -44,6 +46,18 @@ impl QueryCatalogStore for QueryCatalog {
                 let (row, header, _) = snapshot
                     .selected(key, history, 0, 1)?
                     .ok_or(StorageError::ScopeChanged)?;
+                let binding = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
+                let observations = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+                    .map_err(|_| StorageError::ScopeChanged)?;
+                let expected = observations.expected(&row);
+                if !crate::model::summary::query_observation_matches(
+                    row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
+                    &row.sources,
+                    true,
+                    expected.as_deref(),
+                ).map_err(|_| StorageError::ScopeChanged)? {
+                    return Err(StorageError::ScopeChanged);
+                }
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
                 let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"]
@@ -135,6 +149,10 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
+                    if crate::native_evidence::query_runtime_generation(&self.options)
+                        .map_err(|_| StorageError::Unavailable)? != runtime {
+                        return Err(StorageError::ScopeChanged);
+                    }
                     return Ok(serde_json::json!({"now":now,"session":summary}));
                 }
                 let anchor = crate::tx::Anchor::of(
@@ -173,6 +191,10 @@ impl QueryCatalogStore for QueryCatalog {
                 )
                 .map_err(|_| StorageError::Unavailable)?;
                 records.finish().map_err(|_| StorageError::ScopeChanged)?;
+                if crate::native_evidence::query_runtime_generation(&self.options)
+                    .map_err(|_| StorageError::Unavailable)? != runtime {
+                    return Err(StorageError::ScopeChanged);
+                }
                 Ok(answer)
             },
         )
@@ -396,22 +418,25 @@ impl QueryCatalogStore for QueryCatalog {
             &self.control,
             &self.generation,
             |snapshot| {
-                let Some((header, slots)) = snapshot.recipe(key, false, 0, 64)? else {
-                    return Ok(false);
-                };
-                if header.3 > 64 {
-                    return Err(StorageError::Busy);
-                }
-                for slot in slots {
-                    let slot: serde_json::Value =
-                        serde_json::from_str(&slot).map_err(|_| StorageError::ScopeChanged)?;
-                    if since
-                        .is_none_or(|since| slot["t"].as_i64().is_some_and(|time| time >= since))
-                    {
-                        return Ok(true);
+                let mut first = 0;
+                loop {
+                    let Some((header, slots)) = snapshot.recipe(key, false, first, 64)? else {
+                        return Ok(false);
+                    };
+                    for slot in &slots {
+                        let slot: serde_json::Value =
+                            serde_json::from_str(slot).map_err(|_| StorageError::ScopeChanged)?;
+                        if since
+                            .is_none_or(|since| slot["t"].as_i64().is_some_and(|time| time >= since))
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    first += slots.len() as i64;
+                    if first >= header.3 {
+                        return Ok(false);
                     }
                 }
-                Ok(false)
             },
         )
         .map_err(unavailable)
