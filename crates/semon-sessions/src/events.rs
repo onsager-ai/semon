@@ -3853,7 +3853,10 @@ pub(crate) fn scan_file(
                 .as_ref()
                 .or(cache.v1_cache.as_ref())
                 .ok_or_else(|| io::Error::other("bounded source requires a durable store"))?;
-            let source = cache.host_source.as_ref().ok_or_else(|| io::Error::other("bounded source requires host Source admission"))?;
+            let source = cache
+                .host_source
+                .as_ref()
+                .ok_or_else(|| io::Error::other("bounded source requires host Source admission"))?;
             super::events::store::checkpoint_source_scan(stem, source, &key, &ledger, &stat)?;
         }
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {

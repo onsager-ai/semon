@@ -1363,7 +1363,9 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
     let journal = host_journal(options).map_err(io::Error::other)?;
     let mut db = journal.connection().map_err(io::Error::other)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     tx.execute_batch(configured::metadata_sql(&tx, "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');", "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?).map_err(io::Error::other)?;
     tx.execute(
@@ -1416,7 +1418,9 @@ pub(crate) fn requeue_concurrent_sources(
     }
     let journal = host_journal(options).map_err(io::Error::other)?;
     let mut db = journal.connection().map_err(io::Error::other)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     for path in &paths {
         let _ = archived_index(&tx, path).map_err(io::Error::other)?;
@@ -1736,7 +1740,9 @@ pub(crate) fn checkpoint_source_scan(
     let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
     let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let mut db = journal.connection().map_err(io::Error::other)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     if ledger_row(&tx, path)
         .map_err(io::Error::other)?
@@ -3971,8 +3977,19 @@ impl SqliteStore {
                     crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source)
                         .map_err(StoreError::Configured)?;
                 let refresh = |encoded: &[String]| -> Result<(), StoreError> {
-                    let refreshed = encoded.iter().map(|value|serde_json::from_str::<crate::model::summary::CatalogRow>(value).map_err(|_|failure(rusqlite::Error::InvalidQuery))).collect::<Result<Vec<_>,_>>()?;
-                    crate::catalog_search::publish_current_rows_with_store(&transaction, &refreshed.iter().collect::<Vec<_>>(), &search).map_err(failure)
+                    let refreshed = encoded
+                        .iter()
+                        .map(|value| {
+                            serde_json::from_str::<crate::model::summary::CatalogRow>(value)
+                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    crate::catalog_search::publish_current_rows_with_store(
+                        &transaction,
+                        &refreshed.iter().collect::<Vec<_>>(),
+                        &search,
+                    )
+                    .map_err(failure)
                 };
                 if claims.is_none() {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
@@ -3984,26 +4001,36 @@ impl SqliteStore {
                         let mut values = statement.query([&after]).map_err(failure)?;
                         while let Some(value) = values.next().map_err(failure)? {
                             let size: usize = value.get(1).map_err(failure)?;
-                            if size > 1048576 { return Err(failure(rusqlite::Error::InvalidQuery)); }
-                            if bytes + size > 1048576 { break; }
+                            if size > 1048576 {
+                                return Err(failure(rusqlite::Error::InvalidQuery));
+                            }
+                            if bytes + size > 1048576 {
+                                break;
+                            }
                             after = value.get(0).map_err(failure)?;
                             encoded.push(value.get::<_, String>(2).map_err(failure)?);
                             bytes += size;
                         }
                         drop(values);
                         drop(statement);
-                        if encoded.is_empty() { break; }
+                        if encoded.is_empty() {
+                            break;
+                        }
                         refresh(&encoded)?;
                     }
                 } else {
                     let mut keys = affected.clone();
-                    keys.extend(rows.iter().map(|row|row.key.clone()));
+                    keys.extend(rows.iter().map(|row| row.key.clone()));
                     let mut encoded = Vec::new();
                     let mut bytes = 0usize;
                     for key in keys {
                         let value = transaction.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [&key], |r|r.get::<_, String>(0)).optional().map_err(failure)?;
                         if let Some(value) = value {
-                            if bytes + value.len() > 1048576 || encoded.len() == 64 { refresh(&encoded)?; encoded.clear(); bytes=0; }
+                            if bytes + value.len() > 1048576 || encoded.len() == 64 {
+                                refresh(&encoded)?;
+                                encoded.clear();
+                                bytes = 0;
+                            }
                             bytes += value.len();
                             encoded.push(value);
                         }
