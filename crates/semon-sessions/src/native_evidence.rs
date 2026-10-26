@@ -356,7 +356,10 @@ impl NativeEvidence {
         let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_total");
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        let state = cache.backfill_state()?;
+        let state = cache.backfill_state().inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=backfill_state");
+        })?;
         if !cache.is_scoped() {
             work.cold_catalog = None;
             return Ok(CatalogPreparation::Reconcile);
@@ -380,7 +383,10 @@ impl NativeEvidence {
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
-                cache.discover_recovery_sources()?
+                cache.discover_recovery_sources().inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=recovery_page");
+                })?
             };
             let page = {
                 let _timing =
@@ -396,7 +402,10 @@ impl NativeEvidence {
                     &self.options,
                     &page.inputs,
                     page.complete && recovery_complete,
-                )?;
+                ).inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=discovery_publication");
+                })?;
             }
             for input in page.inputs {
                 if !input.path.ends_with(".jsonl") {
@@ -423,7 +432,10 @@ impl NativeEvidence {
                 return Ok(CatalogPreparation::Pending);
             }
         }
-        let pending_inputs = cache.pending_catalog_sources(64)?;
+        let pending_inputs = cache.pending_catalog_sources(64).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=pending_sources");
+        })?;
         if let Some(path) = pending_inputs.iter().find(|path| path.ends_with(".json")) {
             cache.resolve_catalog_input(&self.options, path)?;
             return Ok(CatalogPreparation::Pending);
@@ -456,7 +468,10 @@ impl NativeEvidence {
                 cache.scan_byte_budget = Some(4 * 1024 * 1024);
                 let prepared = self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
                 cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
+                if let Some(prepared) = prepared.inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=cold_component");
+                })? {
                     prepared
                 } else {
                     let paths = seeds
@@ -486,7 +501,10 @@ impl NativeEvidence {
                 }
             };
             discovery.pids.extend(prepared.pids.iter().copied());
-            let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
+            let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared).inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=cold_partial_publication");
+            })?;
             if outcome == crate::events::Outcome::Deferred {
                 cache.end_scan();
                 cache.release_published_indexes();
@@ -758,7 +776,10 @@ impl NativeEvidence {
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
             let component =
-                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?;
+                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options).inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=component_lookup_before");
+                })?;
             measurements.record("lookup_before", started, selected.len());
             let Some(component) = component else {
                 break None;
@@ -769,7 +790,10 @@ impl NativeEvidence {
             }
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
-            let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+            let prepared = model::prepare_sources(&options, cache, &selected, now).inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=component_prepare");
+            })?;
             measurements.record("model_prepare_inclusive", started, selected.len());
             let dependencies: BTreeSet<_> = prepared
                 .rows
@@ -1267,7 +1291,10 @@ impl NativeEvidence {
             work.pending_sources = true;
             return Ok(false);
         }
-        match self.prepare_catalog(work, now)? {
+        match self.prepare_catalog(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=cold_prepare");
+        })? {
             CatalogPreparation::Pending => return Ok(false),
             CatalogPreparation::PublishedPending => {
                 before_build()?;

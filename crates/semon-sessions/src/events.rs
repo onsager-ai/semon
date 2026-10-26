@@ -2171,6 +2171,10 @@ impl EventCache {
             .as_ref()
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .qualified_catalog()
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=qualification");
+            })
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
