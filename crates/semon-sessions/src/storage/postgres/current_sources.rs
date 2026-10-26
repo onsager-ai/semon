@@ -9,6 +9,7 @@ use crate::{
     storage::{LogicalSourceNamespace, QueryRuntimeBinding, StorageError},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -116,11 +117,13 @@ pub(super) fn prepare(
     // Immutable identity-addressed pages cannot change membership of the old
     // published header. Each SQL operation is at most 64 members / 1 MiB.
     for page in members.chunks(64) {
+        let page_bytes = serde_json::to_vec(page).map_err(|_| StorageError::Unavailable)?;
+        let completed = [b"facts-current-page:".as_slice(), &Sha256::digest(&page_bytes)].concat();
         if page
             .iter()
             .map(|key| key.len() + stamp.len())
             .sum::<usize>()
-            > 1024 * 1024
+            + completed.len() + stamp.len() > 1024 * 1024
         {
             return Err(StorageError::Busy);
         }
@@ -132,6 +135,11 @@ pub(super) fn prepare(
             {
                 return Err(StorageError::Conflict);
             }
+            // The marker commits with its immutable members. A restarted
+            // producer skips completed pages; an interrupted page rolls back.
+            if native_keys::read_meta(tx, &completed, MAX)?.as_ref() == Some(&stamp) {
+                return Ok(());
+            }
             for member in page {
                 tx.check()?;
                 native_keys::put_meta(tx, member, &stamp)?;
@@ -139,6 +147,7 @@ pub(super) fn prepare(
             if identity(path)? != source {
                 return Err(StorageError::Conflict);
             }
+            native_keys::put_meta(tx, &completed, &stamp)?;
             Ok(())
         })?;
     }
