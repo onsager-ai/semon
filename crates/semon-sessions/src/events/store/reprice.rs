@@ -1993,7 +1993,6 @@ mod tests {
         {
             {
                 {
-                    
                     let root = root();
                     let database = root.join("families.sqlite3");
                     let mut db = Connection::open(&database).unwrap();
@@ -2071,9 +2070,7 @@ mod tests {
                         assert_eq!(records["same-message"].len(), 1);
                         assert_eq!(tokens["same-message"].input, amount);
                         assert_eq!(tx.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-                        let key = {
-                            "same-session".to_owned()
-                        };
+                        let key = { "same-session".to_owned() };
                         let mut owner = row(
                             "same/source.jsonl",
                             &ledger,
@@ -2092,9 +2089,7 @@ mod tests {
                         tx.execute("INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')",
                             params![key, crate::retention::source_generation(&owner.sources).unwrap()]).unwrap();
                         // Equal child IDs and parent IDs must remain in their Source family.
-                        let child = {
-                            "same-child".to_owned()
-                        };
+                        let child = { "same-child".to_owned() };
                         owner.key = child.clone();
                         owner.parent = Some(key.clone());
                         let child_metadata = json(&owner).unwrap();
