@@ -211,17 +211,17 @@ const TABLES: &[Table] = &[
     Table {
         name: "tree_usage_work",
         columns: "projection_id bigint,message_id bytea,tokens bytea",
-        key: "projection_id,message_id",
+        key: "projection_id,message_id_digest",
     },
     Table {
         name: "tree_codex_work",
         columns: "projection_id bigint,identity bytea",
-        key: "projection_id,identity",
+        key: "projection_id,identity_digest",
     },
     Table {
         name: "tree_headers",
         columns: "source_path bytea,file_id bigint,projection_id bigint,ledger bytea",
-        key: "source_path",
+        key: "source_path_digest",
     },
     Table {
         name: "tree_models",
@@ -241,17 +241,17 @@ const TABLES: &[Table] = &[
     Table {
         name: "tree_usage_models",
         columns: "projection_id bigint,message_id bytea,model bytea",
-        key: "projection_id,message_id",
+        key: "projection_id,message_id_digest",
     },
     Table {
         name: "tree_copied_identities",
         columns: "file_id bigint,message_id bytea,record_uuid bytea",
-        key: "file_id,message_id,record_uuid",
+        key: "file_id,message_id_digest,record_uuid_digest",
     },
     Table {
         name: "tree_repairs",
         columns: "source_path bytea,receipt bytea,source_id bigint?,cursor numeric,projection_id bigint?,last_model bytea?,tree_root bytea?,state bytea,last_attempt bigint",
-        key: "source_path",
+        key: "source_path_digest",
     },
     Table {
         name: "recovery",
@@ -337,7 +337,7 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
         "tree_repair_queue",
         "tree_repairs",
-        "state,last_attempt,source_path",
+        "state,last_attempt,source_path_digest",
         false,
     ),
     (
@@ -352,7 +352,7 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v7");
+    hash.update(b"semon-private-native-v8");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());

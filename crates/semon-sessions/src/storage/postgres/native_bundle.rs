@@ -252,7 +252,7 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
     if input.index.tree_summary.is_none() {
         // A genuine Copilot source has no Tree. Until Tree retirement is
         // connected, refuse a path that still owns another native Tree.
-        let existing: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace=$1 AND source_path=$2)", &[&tx.namespace.as_str().as_bytes(), &input.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let existing: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2))", &[&tx.namespace.as_str().as_bytes(), &input.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
         if existing {
             return Err(StorageError::NamespaceUpgradePending);
         }

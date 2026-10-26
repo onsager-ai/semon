@@ -87,7 +87,7 @@ impl Writer<'_, '_> {
             self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id) DO UPDATE SET closed=true", &[&ns,&projection,&id.as_bytes()])?;
         }
         for (id, model) in rows.usage_models {
-            self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id) DO UPDATE SET model=excluded.model", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()])?;
+            self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()])?;
         }
         Ok(())
     }
@@ -166,8 +166,8 @@ fn stage_inner(
     let previous_receipt = expected_header.map(header_ledger);
     // An existing header must match the explicitly captured previous ledger.
     // An incomplete or noncurrent generation is not silently made current.
-    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
-    let exists: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace=$1 AND source_path=$2)", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(h.source_path,sha256($2::bytea),$2) AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
+    let exists: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2))", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if (exists && headers.len() != 1) || (!exists && expected_header.is_some()) {
         return Err(StorageError::Conflict);
     }
@@ -266,7 +266,7 @@ pub(super) fn publish(
         super::native_keys::put_meta(writer.tx, failure.as_bytes(), receipt.as_bytes())?;
         writer.boundary()?;
         // Generation remains incomplete and cannot be returned by readers.
-        let changed=writer.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$3 WHERE namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes(),&b"blocked_metadata".as_slice()]).map_err(sqlstate::error)?;
+        let changed=writer.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2)", &[&ns,&path.as_bytes(),&b"blocked_metadata".as_slice()]).map_err(sqlstate::error)?;
         if changed > 1 {
             return Err(StorageError::Conflict);
         }
@@ -281,7 +281,7 @@ pub(super) fn publish(
     // SourceState is still locked and the exact file/Usage fences were matched
     // before the first generation effect. Publish header last in this txn.
     writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
-    writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
+    writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger WHERE semon_pg_native_tree_headers.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_headers.source_path,sha256(excluded.source_path),excluded.source_path)", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
     Ok(true)
 }
 

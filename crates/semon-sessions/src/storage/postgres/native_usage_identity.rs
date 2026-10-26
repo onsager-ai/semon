@@ -21,10 +21,17 @@ const COPIES: &str = r#"
 BEGIN
     IF TG_OP <> 'INSERT' THEN
         DELETE FROM @SCHEMA@.semon_pg_native_tree_copied_identities
-            WHERE namespace=OLD.namespace AND file_id=OLD.file_id
-                AND message_id=OLD.message_id AND record_uuid=OLD.record_uuid;
+            WHERE namespace_digest=sha256(OLD.namespace) AND namespace=OLD.namespace AND file_id=OLD.file_id
+                AND message_id_digest=@SCHEMA@.semon_pg_native_digest(OLD.namespace,OLD.message_id,'tree.message')
+                AND record_uuid_digest=@SCHEMA@.semon_pg_native_digest(OLD.namespace,OLD.record_uuid,'tree.record')
+                AND @SCHEMA@.semon_pg_native_key_matches(message_id,sha256(OLD.message_id),OLD.message_id)
+                AND @SCHEMA@.semon_pg_native_key_matches(record_uuid,sha256(OLD.record_uuid),OLD.record_uuid);
         DELETE FROM @SCHEMA@.semon_pg_native_tree_copied_identities c
-            WHERE c.namespace=OLD.namespace AND c.message_id=OLD.message_id AND c.record_uuid=OLD.record_uuid
+            WHERE c.namespace_digest=sha256(OLD.namespace) AND c.namespace=OLD.namespace
+                AND c.message_id_digest=@SCHEMA@.semon_pg_native_digest(OLD.namespace,OLD.message_id,'tree.message')
+                AND c.record_uuid_digest=@SCHEMA@.semon_pg_native_digest(OLD.namespace,OLD.record_uuid,'tree.record')
+                AND @SCHEMA@.semon_pg_native_key_matches(c.message_id,sha256(OLD.message_id),OLD.message_id)
+                AND @SCHEMA@.semon_pg_native_key_matches(c.record_uuid,sha256(OLD.record_uuid),OLD.record_uuid)
                 AND NOT EXISTS(SELECT 1 FROM @SCHEMA@.semon_pg_native_usage_identity p
                     WHERE p.namespace=c.namespace AND p.message_id=c.message_id
                         AND p.record_uuid=c.record_uuid AND p.file_id<>c.file_id);
@@ -37,7 +44,11 @@ BEGIN
                 AND EXISTS(SELECT 1 FROM @SCHEMA@.semon_pg_native_usage_identity p
                     WHERE p.namespace=i.namespace AND p.message_id=i.message_id
                         AND p.record_uuid=i.record_uuid AND p.file_id<>i.file_id)
-            ON CONFLICT DO NOTHING;
+            ON CONFLICT(namespace_digest,file_id,message_id_digest,record_uuid_digest)
+            DO UPDATE SET namespace=excluded.namespace
+            WHERE @SCHEMA@.semon_pg_namespace_matches(semon_pg_native_tree_copied_identities.namespace,semon_pg_native_tree_copied_identities.namespace_digest,excluded.namespace)
+                AND @SCHEMA@.semon_pg_native_key_matches(semon_pg_native_tree_copied_identities.message_id,sha256(excluded.message_id),excluded.message_id)
+                AND @SCHEMA@.semon_pg_native_key_matches(semon_pg_native_tree_copied_identities.record_uuid,sha256(excluded.record_uuid),excluded.record_uuid);
     END IF;
     RETURN NULL;
 END;

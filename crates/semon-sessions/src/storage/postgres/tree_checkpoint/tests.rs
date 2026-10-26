@@ -687,7 +687,7 @@ fn install_families(tx: &mut PgTxn<'_>, fixture: &Fixture, tree: bool) -> Result
             continue;
         }
         let table = format!("semon_pg_native_{family}");
-        let columns = tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
+        let columns = tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER' AND column_name NOT IN ('namespace','namespace_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
         for row in rows {
             let mut parameters: Vec<Option<Vec<u8>>> =
                 vec![Some(tx.namespace.as_str().as_bytes().to_vec())];
