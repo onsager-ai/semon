@@ -391,7 +391,13 @@ fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
     let proxy = Proxy::new(target(&real), false);
     let pool = proxy_pool(real, &proxy);
     let namespace = ns("captured-source-a");
-    pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |_| Ok(())).unwrap();
+    pool.transaction(
+        &namespace,
+        super::txn::TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |_| Ok(()),
+    )
+    .unwrap();
     let options = crate::Options {
         source: crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap(),
         all: true,
@@ -415,16 +421,18 @@ fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
     };
     proxy.replies.set(true);
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| config.call_captured_query_at(
-            &options,
-            "external-machine-z",
-            &"b".repeat(64),
-            "get_session",
-            &serde_json::json!({"id":"claude:one"}),
-            0,
-            &request,
-            &host,
-        ));
+        let worker = scope.spawn(|| {
+            config.call_captured_query_at(
+                &options,
+                "external-machine-z",
+                &"b".repeat(64),
+                "get_session",
+                &serde_json::json!({"id":"claude:one"}),
+                0,
+                &request,
+                &host,
+            )
+        });
         proxy.replies.witness();
         cancelled.store(true, Ordering::Release);
         assert_eq!(worker.join().unwrap().unwrap_err().code, "unavailable");
