@@ -423,7 +423,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         evidence.request_metadata_audit();
         let mut work = evidence.work.lock().unwrap();
         let mut complete = false;
-        for _ in 0..64 {
+        // Each advance retains its normal bounded work. Qualify completion
+        // against the existing background budget, not a source-count-sized
+        // number of calls through the producer's multiple durable phases.
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
             if evidence.refresh_catalog(&mut work, recent_now).unwrap() {
                 complete = true;
                 break;
