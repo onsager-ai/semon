@@ -209,8 +209,9 @@ fn native_homes(
     (claude, settings, codex)
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    /// Load the host-owned Source binding, propagating invalid configuration.
+    pub fn from_host() -> io::Result<Self> {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -220,11 +221,11 @@ impl Default for Options {
             env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
             env::var_os("CODEX_HOME").as_deref(),
         );
-        Self {
+        Ok(Self {
             source: storage::HostSource::load_or_create(
                 &default_state_dir(&home).join("source.json"),
             )
-            .expect("host Source configuration is unavailable or invalid"),
+            ?,
             claude_home,
             claude_json,
             codex_home,
@@ -239,7 +240,14 @@ impl Default for Options {
             session: None,
             facts: None,
             scan_window: false,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+impl Default for Options {
+    fn default() -> Self {
+        Self::from_host().unwrap()
     }
 }
 
