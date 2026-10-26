@@ -497,6 +497,7 @@ fn raw_intent_key(intent:&crate::source_change::WriteIntent)->String {format!("r
 fn raw_ack_key(intent:&crate::source_change::WriteIntent)->String {format!("raw-write-ack:{}",intent.operation)}
 
 pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<(i64,Option<crate::source_change::AppendEvidence>),StorageError> {
+    #[cfg(test)] let _sql_scope=crate::source_change::SqlLockScope::enter();
     let request=raw_request(tx,input,intent)?;
     if input.full_path(options).to_str()!=Some(intent.path.as_str()) {return Err(StorageError::InvalidArguments);}
     let ns=tx.namespace.as_str().as_bytes().to_vec();
@@ -538,6 +539,7 @@ pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate
 
 pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent,revision:i64,completion:&crate::source_change::WriteCompletion)->Result<(),StorageError> {
     use sha2::{Digest,Sha256};
+    #[cfg(test)] let _sql_scope=crate::source_change::SqlLockScope::enter();
     let request=raw_request(tx,input,intent)?;
     let ack=serde_json::to_vec(&(&request,revision,completion)).map_err(|_|StorageError::InvalidArguments)?;
     if ack.len()>131072 {return Err(StorageError::Busy);}
