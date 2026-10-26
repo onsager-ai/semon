@@ -81,16 +81,7 @@ fn report_candidate_plan(
     true
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogRelocation {
-    version: u32,
-    new_path: String,
-    native_id: String,
-    prior: Ledger,
-    catalog_before: Option<Ledger>,
-    after: Ledger,
-}
+use crate::events::native_commit::CatalogRelocation;
 fn catalog_key(path: &str) -> String {
     format!("native_catalog_relocation:{path}")
 }
@@ -159,11 +150,11 @@ pub(super) fn advance(
         .collect::<Result<Vec<_>, _>>()?;
     for old in olds {
         let proof = catalog_evidence(connection, &old)?;
-        if let Some(mut proof) = proof.filter(|proof| append && Some(&proof.after) == expected) {
-            proof.after = next.clone();
+        let encoded = proof.as_ref().map(json).transpose()?;
+        if let Some(encoded) = crate::events::native_commit::advance_relocation(encoded.as_deref(), expected, next, append).map_err(|_| rusqlite::Error::InvalidQuery)? {
             connection.execute(
                 configured::metadata_sql(connection, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)")?,
-                params![catalog_key(&old), json(&proof)?],
+                params![catalog_key(&old), encoded],
             )?;
         } else {
             connection.execute(native_metadata_delete(connection)?, [catalog_key(&old)])?;

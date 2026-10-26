@@ -7062,45 +7062,40 @@ fn write_file(
         measurements,
         &layout,
         &mut UsageDeletes::default(),
-    )
+    )?;
+    write_native_tree(transaction, path, ledger, index, measurements)?;
+    for stage in crate::events::native_commit::AUXILIARY_ORDER {
+        write_native_aux(transaction, path, ledger, index, measurements, stage)?;
+    }
+    Ok(())
 }
 
-fn write_file_with_usage_deletes<'tx>(
+fn write_native_aux(
+    transaction: &Transaction<'_>,
     path: &str,
     ledger: &Ledger,
-    changes: &super::DirtyRows,
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
-    layout: &WriterLayout<'tx, '_>,
-    usage_deletes: &mut UsageDeletes<'tx>,
+    stage: crate::events::native_commit::Auxiliary,
 ) -> rusqlite::Result<()> {
-    let transaction = layout.transaction;
-    let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
-    let file_row = super::file_rows::FileRow::new(ledger, index);
-    let FileIndex {
-        tree_summary,
-        source_chunks,
-        marker_index,
-        handoff_index,
-        codex_header,
-        claude_sidecar,
-        events,
-        extras,
-        signals,
-        usage_by_id,
-        codex_usage_events,
-        ..
-    } = index;
+    use crate::events::native_commit::Auxiliary;
+    let FileIndex { codex_header, claude_sidecar, source_chunks, marker_index, handoff_index, .. } = index;
+    match stage {
+        Auxiliary::Header => {
     let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     measurements.record("proof_header", started, 1);
     #[cfg(test)]
     configured::effect("proof_header")?;
+        }
+        Auxiliary::Sidecar => {
     let started = measurements.start();
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     measurements.record("proof_sidecar", started, 1);
     #[cfg(test)]
     configured::effect("proof_sidecar")?;
+        }
+        Auxiliary::Chunks => {
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
     if started.is_some() {
@@ -7123,11 +7118,15 @@ fn write_file_with_usage_deletes<'tx>(
     );
     #[cfg(test)]
     configured::effect("proof_chunks")?;
+        }
+        Auxiliary::Parent => {
     let started = measurements.start();
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
     measurements.record("proof_parent", started, 1);
     #[cfg(test)]
     configured::effect("proof_parent")?;
+        }
+        Auxiliary::Launch => {
     let started = measurements.start();
     if started.is_some() {
         launch_calls::write_measured(
@@ -7143,6 +7142,60 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.record("proof_launch", started, 1);
     #[cfg(test)]
     configured::effect("proof_launch")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_native_tree(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let tree_summary = &index.tree_summary;
+    let started = measurements.start();
+    let rows_before = started.map(|_| transaction.total_changes());
+    write_tree_summary(
+        transaction,
+        path,
+        ledger,
+        tree_summary.as_ref(),
+        index.native_usage_observations.is_some(),
+    )?;
+    measurements.record("proof_tree", started, 1);
+    record_writer_rows(
+        transaction,
+        measurements,
+        "proof_tree_written_rows",
+        rows_before,
+    );
+    #[cfg(test)]
+    configured::effect("proof_tree")?;
+    Ok(())
+}
+
+fn write_file_with_usage_deletes<'tx>(
+    path: &str,
+    ledger: &Ledger,
+    changes: &super::DirtyRows,
+    index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
+    layout: &WriterLayout<'tx, '_>,
+    usage_deletes: &mut UsageDeletes<'tx>,
+) -> rusqlite::Result<()> {
+    let transaction = layout.transaction;
+    let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
+    let file_row = super::file_rows::FileRow::new(ledger, index);
+    let FileIndex {
+        events,
+        extras,
+        signals,
+        usage_by_id,
+        codex_usage_events,
+        ..
+    } = index;
     let started = measurements.start();
     let rate_limits = file_row.rate_limits.as_ref().map(json).transpose()?;
     measurements.record("rate_limit_serialization", started, 1);
@@ -7191,24 +7244,6 @@ fn write_file_with_usage_deletes<'tx>(
         file_id
     };
 
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    write_tree_summary(
-        transaction,
-        path,
-        ledger,
-        tree_summary.as_ref(),
-        index.native_usage_observations.is_some(),
-    )?;
-    measurements.record("proof_tree", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "proof_tree_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("proof_tree")?;
     let started = measurements.start();
     let mut put = transaction.prepare_cached(layout.core(PUT_EVENT, configured::PUT_EVENT))?;
     let mut cut = transaction
