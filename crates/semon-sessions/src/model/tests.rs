@@ -10648,9 +10648,19 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
 #[test]
 fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     let home = Home::new();
+    let publish = || {
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let complete = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap()
+        });
+        evidence.retire();
+        assert!(complete, "the ordinary producer must finish this fixture");
+    };
     home.top("root", &[human("root", ts(0, 0), "current root prompt")]);
     let removed=home.top("cleared", &[json!({"type":"user","uuid":"old-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"unsupported old native prompt"}})]);
-    home.build_query();
+    publish();
     let config = home.options.source.config(&home.options.cache).unwrap();
     let connection = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -10664,7 +10674,7 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
         )
         .unwrap();
     fs::remove_file(removed).unwrap();
-    home.build_query();
+    publish();
     let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
         .unwrap()
         .unwrap();
