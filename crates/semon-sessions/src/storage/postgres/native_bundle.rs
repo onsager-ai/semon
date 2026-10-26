@@ -263,7 +263,14 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
     if input.index.tree_summary.is_none() {
         // A genuine Copilot source has no Tree. Until Tree retirement is
         // connected, refuse a path that still owns another native Tree.
-        let existing: bool = tx.driver.query_one(super::tree_writer::HEADER_EXISTS_SQL, &[&tx.namespace.as_str().as_bytes(), &input.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let existing: bool = tx
+            .driver
+            .query_one(
+                super::tree_writer::HEADER_EXISTS_SQL,
+                &[&tx.namespace.as_str().as_bytes(), &input.path.as_bytes()],
+            )
+            .map_err(sqlstate::error)?
+            .get(0);
         if existing {
             return Err(StorageError::NamespaceUpgradePending);
         }

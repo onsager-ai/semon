@@ -385,7 +385,7 @@ pub(crate) fn parser_fixture(harness: &str) -> Fixture {
 }
 
 pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
-    let mut root = std::env::temp_dir().join(format!(
+    let root = std::env::temp_dir().join(format!(
         "pg100-{}-{}-{harness}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -394,22 +394,26 @@ pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
             .as_nanos()
     ));
     std::fs::create_dir(&root).unwrap();
+    let mut source_root = root.clone();
     if long_path {
         // Different SHA-256 blocks keep the real path nonrepeating rather
         // than relying on PostgreSQL compression of a repeated character.
         for segment in 0..15 {
             let mut name = String::new();
             for block in 0..3 {
-                name.push_str(&format!("{:x}", Sha256::digest(format!("tree132-{segment}-{block}"))));
+                name.push_str(&format!(
+                    "{:x}",
+                    Sha256::digest(format!("tree132-{segment}-{block}"))
+                ));
             }
-            root.push(name);
-            std::fs::create_dir(&root).unwrap();
+            source_root.push(name);
+            std::fs::create_dir(&source_root).unwrap();
         }
-        assert!(root.as_os_str().len() > 2704);
-        assert!(root.as_os_str().len() < 4000);
+        assert!(source_root.as_os_str().len() > 2704);
+        assert!(source_root.as_os_str().len() < 4000);
     }
     let cache_path = root.join("index.json");
-    let path = root.join("one.jsonl");
+    let path = source_root.join("one.jsonl");
     let body = match harness {
         "claude" => format!(
             "{}\n{}\n{}\n",
@@ -439,11 +443,16 @@ pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
     }
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    capture_fixture(root, harness)
+    capture_fixture_at(root, harness, path)
 }
 fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
-    let cache_path = root.join("index.json");
     let path = root.join("one.jsonl");
+    capture_fixture_at(root, harness, path)
+}
+fn capture_fixture_at(root: std::path::PathBuf, harness: &str, path: std::path::PathBuf) -> Fixture {
+    // Raw may have a valid long native path while the independent SQLite
+    // oracle's physical database stays at its ordinary short cache location.
+    let cache_path = root.join("index.json");
     let mut cache = EventCache::open(&cache_path).unwrap();
     let index = scan_file(&path, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();

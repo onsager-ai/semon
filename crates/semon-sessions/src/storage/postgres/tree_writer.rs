@@ -169,7 +169,11 @@ fn stage_inner(
     // An existing header must match the explicitly captured previous ledger.
     // An incomplete or noncurrent generation is not silently made current.
     let headers = tx.driver.query("SELECT h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace_digest,namespace,projection_id) WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(h.source_path,sha256($2::bytea),$2) AND h.file_id=$3 AND h.ledger=$4 AND g.version=3 AND ((g.receipt=h.ledger AND g.complete AND NOT g.work_pending) OR (g.projection_id=$5 AND NOT g.complete AND g.work_pending))", &[&ns,&path.as_bytes(),&file,&previous_receipt.as_ref().map(|s|s.as_bytes()),&repair_projection]).map_err(sqlstate::error)?;
-    let exists: bool = tx.driver.query_one(HEADER_EXISTS_SQL, &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let exists: bool = tx
+        .driver
+        .query_one(HEADER_EXISTS_SQL, &[&ns, &path.as_bytes()])
+        .map_err(sqlstate::error)?
+        .get(0);
     if (exists && headers.len() != 1) || (!exists && expected_header.is_some()) {
         return Err(StorageError::Conflict);
     }

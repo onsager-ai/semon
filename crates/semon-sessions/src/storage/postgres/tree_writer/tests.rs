@@ -741,7 +741,10 @@ fn interpretation_values(data: &Fixture) -> (Option<String>, Option<String>) {
         .optional()
         .unwrap()
     };
-    (value("pricing_recompute_target"), value("catalog_semantic_recipe"))
+    (
+        value("pricing_recompute_target"),
+        value("catalog_semantic_recipe"),
+    )
 }
 fn apply_interpretation_inputs(pool: &PgPool, (pricing, recipe): (Option<String>, Option<String>)) {
     if pricing.is_some() {
@@ -782,7 +785,12 @@ fn pg_native_keys132_tree_real_sqlite_long_path_publication_and_restart() {
     assert!(data.path.len() > 2704);
     let interpretation = interpretation_values(&data);
     let expected_witness = oracle_witness(&data);
-    let expected_tools = data.oracle.tools.keys().map(|id| (id.clone(), data.oracle.tool_name(id).unwrap())).collect::<Vec<_>>();
+    let expected_tools = data
+        .oracle
+        .tools
+        .keys()
+        .map(|id| (id.clone(), data.oracle.tool_name(id).unwrap()))
+        .collect::<Vec<_>>();
     let (pool, factory) = fixture(|_| {});
     apply_interpretation_inputs(&pool, interpretation);
     pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
@@ -799,19 +807,35 @@ fn pg_native_keys132_tree_real_sqlite_long_path_publication_and_restart() {
         assert!(state(tx) == before, "long-path replay has no row changes");
         Ok(())
     }).unwrap();
-    pool.transaction(&ns("foreign\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
-        install_without_tree(tx, &data)?;
-        let (projection, actual) = stage_fixture(tx, &data)?;
-        assert_eq!(actual, expected_witness);
-        assert_dimensions(tx, &data, projection);
-        Ok(())
-    }).unwrap();
+    pool.transaction(
+        &ns("foreign\0🦀"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            install_without_tree(tx, &data)?;
+            let (projection, actual) = stage_fixture(tx, &data)?;
+            assert_eq!(actual, expected_witness);
+            assert_dimensions(tx, &data, projection);
+            Ok(())
+        },
+    )
+    .unwrap();
     drop(pool);
     let reopened = PgPool::open(factory, limits()).unwrap();
-    let mut summary = Snapshot::restore(reopened, ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).unwrap();
+    let mut summary = Snapshot::restore(
+        reopened,
+        ns("tree\0🦀"),
+        &data.path,
+        &data.ledger,
+        PgCancellation::default(),
+    )
+    .unwrap();
     summary.load_shared_usage().unwrap();
     assert_eq!(summary.models, data.oracle.models);
-    assert_eq!(serde_json::to_value(&summary.usage_by_id).unwrap(), serde_json::to_value(&data.oracle.usage_by_id).unwrap());
+    assert_eq!(
+        serde_json::to_value(&summary.usage_by_id).unwrap(),
+        serde_json::to_value(&data.oracle.usage_by_id).unwrap()
+    );
     for (tool, name) in expected_tools {
         assert_eq!(summary.tool_name(&tool).unwrap(), name);
     }
@@ -830,7 +854,8 @@ fn pg_native_keys132_tree_header_actual_sql_noise_rows_and_heap_bytes() {
         install_without_tree(tx, &data)?;
         assert!(publish_fixture(tx, &data, None)?);
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     let mut previous = 0_i64;
     for noise in [0_i64, 256, 2048] {
         let measurement = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -851,9 +876,16 @@ fn pg_native_keys132_tree_header_actual_sql_noise_rows_and_heap_bytes() {
             let bytes: i64 = tx.driver.query_one("SELECT octet_length(source_path)::bigint FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2)", &[&namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
             Ok((visited(&plan[0]["Plan"]), bytes))
         }).unwrap();
-        assert!(measurement.0 <= 4, "noise={noise} selected physical rows={}", measurement.0);
+        assert!(
+            measurement.0 <= 4,
+            "noise={noise} selected physical rows={}",
+            measurement.0
+        );
         assert_eq!(measurement.1 as usize, data.path.len());
-        eprintln!("keys132_tree_header noise={noise} sql_rows={} heap_path_bytes={}", measurement.0, measurement.1);
+        eprintln!(
+            "keys132_tree_header noise={noise} sql_rows={} heap_path_bytes={}",
+            measurement.0, measurement.1
+        );
         previous = noise;
     }
     std::fs::remove_dir_all(data.root).unwrap();
@@ -868,13 +900,27 @@ fn pg_native_keys132_tree_warm_generated_and_index_drift_refuse_before_callback(
     ] {
         let (pool, factory) = fixture(|_| {});
         let namespace = ns("keys132-drift");
-        pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |_| Ok(())).unwrap();
+        pool.transaction(
+            &namespace,
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            |_| Ok(()),
+        )
+        .unwrap();
         factory.client().batch_execute(alteration).unwrap();
         let mut entered = false;
-        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |_| {
-            entered = true;
-            Ok(())
-        }).is_err());
+        assert!(
+            pool.transaction(
+                &namespace,
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |_| {
+                    entered = true;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
         assert!(!entered, "warm Tree contract drift precedes every callback");
     }
 }

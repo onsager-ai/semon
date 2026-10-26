@@ -360,7 +360,11 @@ fn rows(
         let row = tx
             .driver
             .query_one(
-                &format!("SELECT {},{} {predicate}", columns.join(","), physical.join(",")),
+                &format!(
+                    "SELECT {},{} {predicate}",
+                    columns.join(","),
+                    physical.join(",")
+                ),
                 &[&tx.namespace.as_str().as_bytes(), &id, &cursor],
             )
             .map_err(sqlstate::error)?;
