@@ -835,6 +835,8 @@ pub(crate) fn select<E>(
             lifecycle,
         }) = metadata(&position.key, MAX_SCAN_BYTES - bytes)?
         else {
+            #[cfg(test)]
+            eprintln!("catalog_search_candidate_metadata_absent");
             return Err(invalid());
         };
         let Some(encoded) = encoded else {
@@ -899,6 +901,8 @@ pub(crate) fn select<E>(
     }
     let partial = partial || more;
     if partial && checked.is_none() {
+        #[cfg(test)]
+        eprintln!("catalog_search_first_candidate_exceeds_budget bytes={bytes}");
         return Err(invalid());
     }
     Ok(Selection {
