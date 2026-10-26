@@ -118,7 +118,9 @@ impl Sources {
                     let c = crate::events::store::focused_connection(&binding)?;
                     c.busy_timeout(std::time::Duration::from_millis(100))
                         .map_err(io::Error::other)?;
-                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(c, binding));
+                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(
+                        c, binding,
+                    ));
                 }
                 let ledger = Ledger {
                     stat: Stat {
@@ -257,10 +259,9 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let binding = crate::storage::local_navigation_binding(options, "")
-            .map_err(|error| {
-                crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
-            })?;
+        let binding = crate::storage::local_navigation_binding(options, "").map_err(|error| {
+            crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
+        })?;
         binding
             .validate(&db, &binding.config().namespace)
             .map_err(|error| {
