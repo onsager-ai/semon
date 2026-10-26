@@ -33,6 +33,15 @@ pub(crate) struct RuntimeInputEvidence {
     pub(crate) unaffected: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppendContinuation {
+    pub(crate) proof: String,
+    pub(crate) state: crate::source_chunks::PrefixState,
+    pub(crate) offset: u64,
+    pub(crate) prefix: [u8;32],
+}
+
 /// Exact content-free request retained across Raw/SQL commit domains.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +53,7 @@ pub(crate) struct WriteIntent {
     pub(crate) from: u64,
     pub(crate) before: Option<Stat>,
     pub(crate) before_hash: Option<[u8;32]>,
+    pub(crate) continuation: Option<AppendContinuation>,
     pub(crate) head: Option<String>,
     pub(crate) ledger: Option<crate::events::Ledger>,
 }
@@ -58,15 +68,17 @@ pub(crate) struct WriteCompletion {
     pub(crate) facts: Option<String>,
 }
 
-pub(crate) fn bytes_hash(path: &std::path::Path, length:u64) -> io::Result<[u8;32]> {
+pub(crate) fn bytes_hash(path: &std::path::Path, length:u64, mut check:impl FnMut()->io::Result<()>) -> io::Result<[u8;32]> {
     use std::io::Read;
     use sha2::{Digest,Sha256};
     let mut file=crate::sealed::LogFile::open(path)?;
     let mut hash=Sha256::new();let mut left=length;let mut buffer=[0u8;65536];
     while left>0 {
+        check()?;
         crate::selected_read::check()?;
         let size=(left.min(buffer.len() as u64)) as usize;
         file.read_exact(&mut buffer[..size])?;hash.update(&buffer[..size]);left-=size as u64;
+        #[cfg(test)] {crate::events::SOURCE_READ_BYTES.with(|n|n.set(n.get()+size as u64));crate::events::SOURCE_HASHED_BYTES.with(|n|n.set(n.get()+size as u64));}
     }
     Ok(hash.finalize().into())
 }
@@ -104,18 +116,20 @@ impl SessionSourceWrite {
     pub(crate) fn begin_with_store(options:&Options,input:&Input,generation:Option<&str>,from:u64,mut store:Box<dyn crate::events::IndexStore>,resume:Option<WriteIntent>) -> io::Result<Self> {
         if !crate::is_input_path(input.root.as_str(),&input.path) {return Err(io::Error::other("write intent outside native allowlist"));}
         let source_lock=SourceLock::acquire(options,&lock_key(options,input),true)?;
-        let intent=if let Some(intent)=resume {intent} else {
+        let resumed=resume.is_some();
+        let mut intent=if let Some(intent)=resume {intent} else {
             let before=match Stat::of(&input.full_path(options)) {Ok(stat)=>Some(stat),Err(e) if e.kind()==io::ErrorKind::NotFound=>None,Err(e)=>return Err(e)};
-            let before_hash=if store.source_write_proofs() {before.as_ref().map(|s|bytes_hash(&input.full_path(options),s.size)).transpose()?} else {None};
+            let before_hash=None;
             WriteIntent {
                 operation:crate::storage::source_observations::SourceOperation::capture("source-write","raw",input.path.as_bytes()).id,
                 root:input.root.as_str().into(),path:input.full_path(options).to_string_lossy().into_owned(),
-                generation:generation.filter(|v|input.path.ends_with(".jsonl") && v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit())).map(str::to_owned),from,before,before_hash,
+                generation:generation.filter(|v|input.path.ends_with(".jsonl") && v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit())).map(str::to_owned),from,before,before_hash,continuation:None,
                 head:store.session_catalog_generation().map_err(|e|io::Error::other(e.to_string()))?,
                 ledger:store.ledger(input.full_path(options).to_string_lossy().as_ref()).map_err(|e|io::Error::other(e.to_string()))?,
             }
         };
         if intent.path!=input.full_path(options).to_string_lossy() || intent.root!=input.root.as_str() {return Err(io::Error::other("source request binding changed"));}
+        if !resumed {store.source_write_prepare(options,input,&mut intent).map_err(|e|io::Error::other(e.to_string()))?;}
         let (revision,previous)=store.source_write_begin(options,input,&intent).map_err(|e|io::Error::other(e.to_string()))?;
         let before=intent.before;let generation=intent.generation.clone();let from=intent.from;
         Ok(Self {
@@ -139,7 +153,7 @@ impl SessionSourceWrite {
         let after = Stat::of(&self.input.full_path(&self.options))?;
         let evidence=append_plan(self.generation,self.before,self.previous,self.from,after,to);
         let completion=WriteCompletion {
-            to,after,hash:if self.store.source_write_proofs() {bytes_hash(&self.input.full_path(&self.options),to)?} else {[0;32]},evidence,
+            to,after,hash:[0;32],evidence,
             runtime:if self.store.source_write_proofs() {crate::native_evidence::query_runtime_generation(&self.options)?} else {String::new()},
             facts:self.options.facts.as_ref().filter(|_|self.store.source_write_proofs()).map(|path| {
                 use sha2::{Digest,Sha256};
