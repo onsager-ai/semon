@@ -395,7 +395,10 @@ impl NativeEvidence {
         let cache = work.events.as_mut().expect("event cache initialized");
         #[cfg(feature = "postgres")]
         if self.store_config.as_ref().is_some_and(|config| {
-            matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })
+            matches!(
+                config.backend,
+                crate::storage::StoreBackend::Postgres { .. }
+            )
         }) {
             // Facts consumption belongs to this producer, before any semantic
             // transaction. Later runtime checks reuse its bounded PG header.
@@ -550,11 +553,8 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if self.begin_catalog_stage(
-                        cache,
-                        &paths,
-                        &self.query_runtime()?,
-                    )? != crate::events::Outcome::Written
+                    if self.begin_catalog_stage(cache, &paths, &self.query_runtime()?)?
+                        != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -1242,11 +1242,8 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if self.begin_catalog_stage(
-                cache,
-                &staged_paths,
-                &self.query_runtime()?,
-            )? != crate::events::Outcome::Written
+            if self.begin_catalog_stage(cache, &staged_paths, &self.query_runtime()?)?
+                != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -1335,11 +1332,8 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if self.begin_catalog_stage(
-                    cache,
-                    &staged_paths,
-                    &self.query_runtime()?,
-                )? != crate::events::Outcome::Written
+                if self.begin_catalog_stage(cache, &staged_paths, &self.query_runtime()?)?
+                    != crate::events::Outcome::Written
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
