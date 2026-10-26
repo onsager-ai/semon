@@ -493,57 +493,63 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         )
         .map_err(sqlstate::error)?;
     if *kind == CatalogRowKind::ProofSource {
-        let saved = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND id=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&tx.0.namespace.as_str().as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
-        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(
-            &saved
-                .get::<_, Option<Vec<u8>>>(0)
-                .ok_or(StorageError::Busy)?,
-        )
-        .map_err(|_| StorageError::ScopeChanged)?;
-        let source = metadata
-            .sources
-            .iter()
-            .find(|source| {
-                source.path.to_str() == text(2).ok()
-                    && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source))
-                        == text(3).unwrap_or("")
-            })
-            .ok_or(StorageError::ScopeChanged)?;
-        let ledger = crate::source_carrier::ledger(source);
-        let receipt = crate::events::store::header_ledger(&ledger);
-        let backing = tx.0.driver.query("SELECT generation FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND ledger=$3 LIMIT 65", &[&tx.0.namespace.as_str().as_bytes(),&text(2)?.as_bytes(),&receipt.as_bytes()]).map_err(sqlstate::error)?;
-        if backing.is_empty() || backing.len() > 64 {
+        bind_backing(tx,values)?;
+    }
+    Ok(())
+}
+
+fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(),StorageError> {
+    let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
+    let saved = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND id=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&tx.0.namespace.as_str().as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+    let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(
+        &saved
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or(StorageError::Busy)?,
+    )
+    .map_err(|_| StorageError::ScopeChanged)?;
+    let source = metadata
+        .sources
+        .iter()
+        .find(|source| {
+            source.path.to_str() == text(2).ok()
+                && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source))
+                    == text(3).unwrap_or("")
+        })
+        .ok_or(StorageError::ScopeChanged)?;
+    let ledger = crate::source_carrier::ledger(source);
+    let receipt = crate::events::store::header_ledger(&ledger);
+    let backing = tx.0.driver.query("SELECT generation FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND ledger=$3 LIMIT 65", &[&tx.0.namespace.as_str().as_bytes(),&text(2)?.as_bytes(),&receipt.as_bytes()]).map_err(sqlstate::error)?;
+    if backing.is_empty() || backing.len() > 64 {
+        return Err(StorageError::ScopeChanged);
+    }
+    for row in backing {
+        let id = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
+        let pinned = super::super::native_pages::open(
+            tx.0,
+            text(2)?,
+            &ledger,
+            crate::storage::proof_lifetime::ProofGenerationId(id),
+        )?;
+        let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+        let pages = header.count.div_ceil(1024);
+        let mut width = pages;
+        let mut nodes = 0usize;
+        while width>0 {
+            nodes = nodes.checked_add(width).ok_or(StorageError::ScopeChanged)?;
+            if width==1 {break;}
+            width=width.div_ceil(2);
+        }
+        let counts = tx.0.driver.query_one("SELECT count(*) FILTER(WHERE kind=0),count(*) FILTER(WHERE kind=2) FROM semon_pg_native_page_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&tx.0.namespace.as_str().as_bytes(),&pinned.id.0.as_bytes()]).map_err(sqlstate::error)?;
+        if usize::try_from(counts.get::<_,i64>(0)).ok()!=Some(pages) || usize::try_from(counts.get::<_,i64>(1)).ok()!=Some(nodes) {return Err(StorageError::ScopeChanged);}
+    }
+    // The selected edge names an original publication and exact Native
+    // ledger. Bind only backing generations actually carried above; this
+    // grants neither a publication operation nor an ordinary reader lease.
+    let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,namespace,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
+    if changed == 0 {
+        let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_selected_generations s ON s.namespace_digest=p.namespace_digest AND s.namespace=p.namespace AND s.publication=p.generation JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5)", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        if !exists {
             return Err(StorageError::ScopeChanged);
-        }
-        for row in backing {
-            let id = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
-            let pinned = super::super::native_pages::open(
-                tx.0,
-                text(2)?,
-                &ledger,
-                crate::storage::proof_lifetime::ProofGenerationId(id),
-            )?;
-            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
-            let pages = header.count.div_ceil(1024);
-            let mut width = pages;
-            let mut nodes = 0usize;
-            while width>0 {
-                nodes = nodes.checked_add(width).ok_or(StorageError::ScopeChanged)?;
-                if width==1 {break;}
-                width=width.div_ceil(2);
-            }
-            let counts = tx.0.driver.query_one("SELECT count(*) FILTER(WHERE kind=0),count(*) FILTER(WHERE kind=2) FROM semon_pg_native_page_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&tx.0.namespace.as_str().as_bytes(),&pinned.id.0.as_bytes()]).map_err(sqlstate::error)?;
-            if usize::try_from(counts.get::<_,i64>(0)).ok()!=Some(pages) || usize::try_from(counts.get::<_,i64>(1)).ok()!=Some(nodes) {return Err(StorageError::ScopeChanged);}
-        }
-        // The selected edge names an original publication and exact Native
-        // ledger. Bind only backing generations actually carried above; this
-        // grants neither a publication operation nor an ordinary reader lease.
-        let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,namespace,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
-        if changed == 0 {
-            let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_selected_generations s ON s.namespace_digest=p.namespace_digest AND s.namespace=p.namespace AND s.publication=p.generation JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5)", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if !exists {
-                return Err(StorageError::ScopeChanged);
-            }
         }
     }
     Ok(())
@@ -646,6 +652,7 @@ mod tests {
         let mut retained_backing = false;
         let mut retained_page = false;
         let mut checked_tree_forgery = false;
+        let mut checked_missing_backing = false;
         for sequence in 1..=pages {
             for mut record in source
                 .transfer_inbox()
@@ -655,6 +662,14 @@ mod tests {
             {
                 if let TransferRecord::NativeSource(source) = &record {
                     retained_backing |= source.backing.is_some();
+                }
+                if !checked_missing_backing && let TransferRecord::CatalogRow {kind:CatalogRowKind::ProofSource,values,..} = &record {
+                    assert!(matches!(transaction(&config,&pool,&control,|tx| {
+                        let ns=tx.0.namespace.as_str().as_bytes();
+                        tx.0.driver.execute("DELETE FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
+                        bind_backing(tx,values)
+                    }),Err(StorageError::ScopeChanged)));
+                    checked_missing_backing=true;
                 }
                 if let TransferRecord::NativePage { backing, .. } = &record {
                     retained_page |= backing.is_some();
@@ -697,6 +712,7 @@ mod tests {
             "retained selected references require original Native backing pages"
         );
         assert!(checked_tree_forgery,"real backing tree nodes must be checked against their children and original root");
+        assert!(checked_missing_backing,"missing Native generations must roll back without granting a proof edge");
         assert!(
             checked_forgery,
             "real publisher must contribute original selected proof authority"

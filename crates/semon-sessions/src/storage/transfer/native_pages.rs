@@ -177,34 +177,57 @@ pub(crate) fn verify_tree_node(
     mut get: impl FnMut(NativePageKind, &str) -> Result<String, StorageError>,
 ) -> Result<(), StorageError> {
     let bad = || StorageError::ScopeChanged;
-    let header: crate::events::native_pages::chunks::Header = serde_json::from_str(header).map_err(|_|bad())?;
-    let (level,index) = key.split_once(':').ok_or_else(bad)?;
-    let level: u32 = level.parse().map_err(|_|bad())?;
-    let index: usize = index.parse().map_err(|_|bad())?;
-    if level >= usize::BITS { return Err(bad()); }
+    let header: crate::events::native_pages::chunks::Header =
+        serde_json::from_str(header).map_err(|_| bad())?;
+    let (level, index) = key.split_once(':').ok_or_else(bad)?;
+    let level: u32 = level.parse().map_err(|_| bad())?;
+    let index: usize = index.parse().map_err(|_| bad())?;
+    if level >= usize::BITS {
+        return Err(bad());
+    }
     let mut width = header.count.div_ceil(1024);
     for _ in 0..level {
-        if width <= 1 { return Err(bad()); }
+        if width <= 1 {
+            return Err(bad());
+        }
         width = width.div_ceil(2);
     }
-    if index >= width { return Err(bad()); }
-    let expected: [u8;32] = if level == 0 {
-        let page: crate::events::native_pages::chunks::Page = serde_json::from_str(&get(NativePageKind::Chunks,&format!("{index:010}"))?).map_err(|_|bad())?;
-        if page.index != index || page.hashes.len() != (header.count-index*1024).min(1024) {return Err(bad());}
-        Sha256::digest(page.canonical().map_err(|_|bad())?.as_bytes()).into()
+    if index >= width {
+        return Err(bad());
+    }
+    let expected: [u8; 32] = if level == 0 {
+        let page: crate::events::native_pages::chunks::Page =
+            serde_json::from_str(&get(NativePageKind::Chunks, &format!("{index:010}"))?)
+                .map_err(|_| bad())?;
+        if page.index != index || page.hashes.len() != (header.count - index * 1024).min(1024) {
+            return Err(bad());
+        }
+        Sha256::digest(page.canonical().map_err(|_| bad())?.as_bytes()).into()
     } else {
-        let previous_width = header.count.div_ceil(1024).div_ceil(1usize << (level-1));
-        let left: [u8;32] = serde_json::from_str(&get(NativePageKind::Tree,&format!("{:03}:{:010}",level-1,index*2))?).map_err(|_|bad())?;
-        let right: [u8;32] = if index*2+1 < previous_width {
-            serde_json::from_str(&get(NativePageKind::Tree,&format!("{:03}:{:010}",level-1,index*2+1))?).map_err(|_|bad())?
-        } else {left};
+        let previous_width = header.count.div_ceil(1024).div_ceil(1usize << (level - 1));
+        let left: [u8; 32] = serde_json::from_str(&get(
+            NativePageKind::Tree,
+            &format!("{:03}:{:010}", level - 1, index * 2),
+        )?)
+        .map_err(|_| bad())?;
+        let right: [u8; 32] = if index * 2 + 1 < previous_width {
+            serde_json::from_str(&get(
+                NativePageKind::Tree,
+                &format!("{:03}:{:010}", level - 1, index * 2 + 1),
+            )?)
+            .map_err(|_| bad())?
+        } else {
+            left
+        };
         let mut hash = Sha256::new();
         hash.update(left);
         hash.update(right);
         hash.finalize().into()
     };
-    let actual: [u8;32] = serde_json::from_str(payload).map_err(|_|bad())?;
-    if actual != expected || (width == 1 && actual != header.pages_root) {return Err(bad());}
+    let actual: [u8; 32] = serde_json::from_str(payload).map_err(|_| bad())?;
+    if actual != expected || (width == 1 && actual != header.pages_root) {
+        return Err(bad());
+    }
     Ok(())
 }
 
