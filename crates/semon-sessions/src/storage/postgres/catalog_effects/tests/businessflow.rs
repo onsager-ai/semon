@@ -1724,6 +1724,74 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }).unwrap();
     assert_eq!(counts[0], 0, "withdrawn Source left the successor Current");
     assert!(counts[1] > 0 && counts[2] > 0, "parent republished; qualified generation retained");
+    // P3: the successor's retained history is its Current rows plus every
+    // session the withdrawal removed, served from the owner headers as
+    // Retained. Whole scopes follow the viewer keyset cursor (bulk169 made
+    // the generation larger than one page).
+    let scoped = |generation: &str, scope: &str| {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let query = match &cursor {
+                Some(cursor) => format!(
+                    "{scope}limit=50&cursor={}",
+                    crate::viewer::percent_encode(cursor)
+                ),
+                None => format!("{scope}limit=50"),
+            };
+            let reply = super::super::snapshot::with_admitted_generation(
+                &pool,
+                &namespace,
+                &control,
+                generation,
+                |snapshot| {
+                    crate::catalog::read_page_snapshot(
+                        &options,
+                        recent_machine,
+                        &crate::catalog::Request::parse(&query).unwrap(),
+                        snapshot,
+                    )
+                    .map_err(|_| StorageError::ScopeChanged)
+                },
+            )
+            .unwrap();
+            assert_eq!(reply.status, 200);
+            let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            for item in page["items"].as_array().unwrap() {
+                items.push((
+                    item["key"].as_str().unwrap().to_owned(),
+                    item["lifecycle"] == "retained",
+                ));
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break items,
+            }
+        }
+    };
+    let before = scoped(qualified.as_deref().unwrap(), "");
+    let current = scoped(&caught, "");
+    let mut retained = scoped(&caught, "scope=retained_history&");
+    let current_keys = current
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let removed = before
+        .iter()
+        .filter(|(key, _)| !current_keys.contains(key))
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!removed.is_empty(), "connected withdrawal removed no Current session");
+    assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
+    // Membership and lifecycle are exact; removed rows come from custody.
+    let mut expected_retained = current
+        .iter()
+        .map(|(key, _)| (key.clone(), false))
+        .chain(removed.iter().map(|key| (key.clone(), true)))
+        .collect::<Vec<_>>();
+    expected_retained.sort();
+    retained.sort();
+    assert_eq!(retained, expected_retained);
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
