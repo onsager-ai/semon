@@ -1842,6 +1842,7 @@ mod tests {
             ));
             fs::create_dir_all(&root).unwrap();
             let options = Options {
+                source: semon_sessions::storage::HostSource::load_or_create(&root.join("source.json")).unwrap(),
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
@@ -2870,7 +2871,7 @@ mod sync_status_tests {
                 copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("cache"),
-                ..Options::default()
+                ..Options::from_host().unwrap()
             },
             state: root.join("push.json"),
         };
@@ -2957,7 +2958,7 @@ mod sync_status_tests {
                 copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("cache"),
-                ..Options::default()
+                ..Options::from_host().unwrap()
             },
             state: root.join("push.json"),
         };
@@ -3023,7 +3024,7 @@ mod sync_status_tests {
                 copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("cache"),
-                ..Options::default()
+                ..Options::from_host().unwrap()
             },
             state: root.join("push.json"),
         };
@@ -3054,7 +3055,7 @@ mod sync_status_tests {
         let options = PushOptions {
             url: "http://127.0.0.1:1".into(),
             credential: Credential::Memory(Token::new("test-status-token").unwrap()),
-            sessions: Options::default(),
+            sessions: Options::from_host().unwrap(),
             state: std::env::temp_dir().join("semon-phase-unwritten.json"),
         };
         let mut client = Client::new(&options).unwrap();

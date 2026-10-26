@@ -198,8 +198,13 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn append_evidence(&self, path: &str) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        self.native.append_evidence(path).map_err(StoreError::Configured)
+    fn append_evidence(
+        &self,
+        path: &str,
+    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
+        self.native
+            .append_evidence(path)
+            .map_err(StoreError::Configured)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         self.native.qualified_catalog()
@@ -210,7 +215,8 @@ impl IndexStore for ConfiguredIndex {
         keys: &[String],
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError> {
-        self.native.catalog_component_paths(paths, keys, native_parents)
+        self.native
+            .catalog_component_paths(paths, keys, native_parents)
     }
     fn begin_semantic_stage(
         &mut self,

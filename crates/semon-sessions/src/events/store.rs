@@ -2842,7 +2842,8 @@ impl IndexStore for SqliteStore {
     }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate).map_err(failure)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+            .map_err(failure)?;
         let ready = qualify_catalog_tx(&tx, None)?;
         tx.commit().map_err(failure)?;
         Ok(ready)
@@ -12980,22 +12981,26 @@ pub(crate) fn read_catalog_component_paths(
     Ok(Some(sources.into_iter().collect()))
 }
 
-pub(crate) fn qualify_catalog_tx(tx: &Transaction<'_>, namespace: Option<&str>) -> Result<bool, StoreError> {
-        let repairs = {
-            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE namespace=semon_namespace() AND version=?1 AND source_generation IS NULL LIMIT 64) LIMIT 64").map_err(failure)?;
-            statement
-                .query_map([crate::slot_projection::VERSION], |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?
-        };
-        for path in repairs {
-            if !semantic_stage::owns_header_repair(tx, &path).map_err(failure)? {
-                crate::storage::sqlite::source_journal::invalidate(tx, namespace, &path, "changed").map_err(failure)?;
-            }
+pub(crate) fn qualify_catalog_tx(
+    tx: &Transaction<'_>,
+    namespace: Option<&str>,
+) -> Result<bool, StoreError> {
+    let repairs = {
+        let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE namespace=semon_namespace() AND version=?1 AND source_generation IS NULL LIMIT 64) LIMIT 64").map_err(failure)?;
+        statement
+            .query_map([crate::slot_projection::VERSION], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(failure)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?
+    };
+    for path in repairs {
+        if !semantic_stage::owns_header_repair(tx, &path).map_err(failure)? {
+            crate::storage::sqlite::source_journal::invalidate(tx, namespace, &path, "changed")
+                .map_err(failure)?;
         }
+    }
 
-        tx.query_row(configured::metadata_sql(tx, "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", "SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')").map_err(failure)?, [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
+    tx.query_row(configured::metadata_sql(tx, "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", "SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')").map_err(failure)?, [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
 }
