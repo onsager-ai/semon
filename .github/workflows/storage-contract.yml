@@ -62,6 +62,11 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Current owned recovery and retained custody
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::current_recovery:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::current_history_custody:: -- --nocapture
       - name: Capture bounded native-tree append diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
