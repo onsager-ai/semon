@@ -225,9 +225,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite complete ordinary source publication");
     // Selected body/field reads consume the fully published ordinary Query
     // profile, including its completion and reader binding, not a partial head.
-    let mut oracle_query = crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-        vec![("vertical140-oracle".into(), sqlite_options.clone())],
-    )));
+    let mut oracle_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(
+            "vertical140-oracle".into(),
+            sqlite_options.clone(),
+        )]),
+    ));
     oracle_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite fully published body/field oracle");
