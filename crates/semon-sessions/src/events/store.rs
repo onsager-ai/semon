@@ -6956,7 +6956,14 @@ mod tests {
                 let before = crate::model::now_ms();
                 let outcome = catalog_write(store, rows, projections, scoped, writer).unwrap();
                 if outcome.0 == Outcome::Written {
-                    return (outcome, catalog_commit_success_state(&store.connection, before, crate::model::now_ms()));
+                    return (
+                        outcome,
+                        catalog_commit_success_state(
+                            &store.connection,
+                            before,
+                            crate::model::now_ms(),
+                        ),
+                    );
                 }
                 assert_eq!(outcome.0, Outcome::Deferred);
                 assert!(tick < 127, "original custody continuation did not complete");
@@ -9091,6 +9098,7 @@ mod tests {
     /// then proves it is persisted.
     fn full() -> FileIndex {
         FileIndex {
+            native_path: None,
             dirty_rows: None,
             native_usage_observations: None,
             source_chunks: None,

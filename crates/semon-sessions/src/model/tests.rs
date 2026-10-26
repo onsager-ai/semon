@@ -10677,7 +10677,11 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     publish();
     // Exercise the product page too so a failure records the existing
     // adapter's sanitized metadata diagnostic before identity maps it.
-    let page = crate::session_catalog_page(&home.options, "fixture", "sid=root&scope=retained_history&limit=1");
+    let page = crate::session_catalog_page(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&limit=1",
+    );
     assert_eq!(page.status, 200, "retained identity metadata page");
     let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
         .unwrap()
