@@ -411,6 +411,7 @@ pub(crate) fn observation(
     key: &str,
     catalog_generation: &str,
     history: bool,
+    qualified: bool,
 ) -> rusqlite::Result<Option<Value>> {
     let published: Option<String> = tx
         .query_row(
@@ -422,7 +423,23 @@ pub(crate) fn observation(
     if published.as_deref() != Some(catalog_generation) {
         return Ok(None);
     }
-    let history = history && crate::history_projection::catalog(tx, key)?.is_some();
+    // An admitted reader sees only its own namespace's projections.
+    let scope = if qualified {
+        "namespace=semon_namespace() AND "
+    } else {
+        ""
+    };
+    let history = if !history {
+        false
+    } else if qualified {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)",
+            [key],
+            |row| row.get(0),
+        )?
+    } else {
+        crate::history_projection::catalog(tx, key)?.is_some()
+    };
     let table = if history {
         "session_history_projections"
     } else {
@@ -430,7 +447,9 @@ pub(crate) fn observation(
     };
     let projection: Option<(String, u32, i64)> = tx
         .query_row(
-            &format!("SELECT generation,version,total FROM {table} WHERE session_key=?1"),
+            &format!(
+                "SELECT generation,version,total FROM main.{table} WHERE {scope}session_key=?1"
+            ),
             [key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
