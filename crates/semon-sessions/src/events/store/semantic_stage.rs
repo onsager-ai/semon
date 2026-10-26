@@ -3387,9 +3387,14 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, "{\"type\":\"user\",\"uuid\":\"old-prompt\",\"sessionId\":\"old\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"retained native prompt\"}}\n").unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-        assert!((0..128).any(|_| evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), crate::model::now_ms())
-            .unwrap()));
+        assert!((0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap()
+        }));
         evidence.retire();
         let config = options.source.config(&options.cache).unwrap();
         use crate::storage::sqlite::semantic::{SemanticStaging, Stage};

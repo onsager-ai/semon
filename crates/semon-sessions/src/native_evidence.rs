@@ -2329,9 +2329,11 @@ mod catalog_owner_tests {
             let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
                 .unwrap_err();
-            assert!(error.to_string().contains(
-                &crate::storage::StorageError::NamespaceUpgradePending.to_string()
-            ));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&crate::storage::StorageError::NamespaceUpgradePending.to_string())
+            );
             assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
             assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
             assert!(EventCache::open(&options.cache, &options.source).is_err());

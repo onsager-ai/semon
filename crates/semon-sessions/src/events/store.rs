@@ -10181,8 +10181,7 @@ mod tests {
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
         let (mut store, _) = opened(&path);
         store.connection = crate::storage::sqlite::semantic::Stage::open(
-            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
-                .unwrap(),
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
         )
         .unwrap()
         .into_test_connection();
