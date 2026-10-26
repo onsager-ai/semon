@@ -1421,45 +1421,27 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
         false,
         "retained metadata cannot claim current activity"
     );
-    // Publish changed provenance without a replacement trace. The existing
-    // trace must not supply details for this new source cohort.
-    let db = fixture.db();
-    let mut row: crate::model::summary::CatalogRow = serde_json::from_str(
-        &db.query_row("SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() AND session_key='session-00000'", [], |r| r.get::<_, String>(0)).unwrap(),
-    ).unwrap();
-    row.sources.clear();
-    row.trace = None;
-    let config = fixture
-        .options
-        .source
-        .config(&fixture.options.cache.with_extension("sqlite3"))
-        .unwrap();
-    let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
-    let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
-    let generation = writer.catalog_generation().unwrap();
-    let rows = [row];
-    assert_eq!(
-        writer
-            .publish_catalog(
-                &crate::slot_projection::Publication {
-                    rows: &rows,
-                    transcripts: None
-                },
-                generation.as_deref(),
-                None,
-                false,
-            )
-            .unwrap()
-            .unwrap()
-            .0,
-        crate::events::Outcome::Written
-    );
-    let (status, changed) = fixture.body("sid=session-00000&scope=retained_history");
+    // Reappearance is a new physical source cohort. Drive it through native
+    // ingest and the ordinary Catalog producer; the retained original trace
+    // must not supply details for this Current cohort.
+    let path = fixture.source("session-00000");
+    let bytes = fs::read(&path).unwrap();
+    fixture.publish_existing();
+    assert_eq!(fs::read(&path).unwrap(), bytes, "publication mutated Raw");
+    let (status, changed) = fixture.body("sid=session-00000");
     assert_eq!(status, 200);
     assert!(
         changed["items"][0].get("details").is_none(),
         "changed native provenance must not supply recorded details"
     );
+    let (status, retained) = fixture.body("sid=session-00000&scope=retained_history");
+    assert_eq!(status, 200);
+    assert_eq!(
+        retained["items"][0]["details"]["content_generation"],
+        details["content_generation"],
+        "retained details remain bound to the original source generation"
+    );
+    assert_eq!(retained["items"][0]["details"]["turns"], 1);
     assert_eq!(
         fixture.body("sid=session-00001&scope=retained_history").1["items"][0]["details"]["turns"],
         1
