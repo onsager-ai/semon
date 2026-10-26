@@ -438,8 +438,64 @@ impl SourceJournal {
 }
 
 impl SourceObservationStore for SourceJournal {
+    fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
+        let db = self.snapshot()?;
+        self.owner.as_ref().ok_or(StorageError::Unavailable)?;
+        // This adapter opens a fresh transaction for each operation, so it has
+        // no retained owner-connection witness. Run the bounded durable page.
+        drop(db);
+        Ok(false)
+    }
+
+    fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
+        let db = self.snapshot()?;
+        self.owner.as_ref().ok_or(StorageError::Unavailable)?;
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after'",
+            [],
+            |row| row.get(0),
+        ).optional().map_err(failed)
+    }
+
+    fn recover(
+        &mut self,
+        operation: &SourceOperation,
+        cursor: Option<&str>,
+    ) -> Result<(SourceMutationReceipt, bool), StorageError> {
+        self.owner.as_ref().ok_or(StorageError::Unavailable)?;
+        if cursor.is_some_and(|value| value.len() > 4096) {
+            return Err(StorageError::InvalidArguments);
+        }
+        let namespace = Some(self.namespace());
+        let payload = serde_json::to_vec(&cursor).map_err(|_| StorageError::InvalidArguments)?;
+        if let Some(receipt) = operation_replay(operation, namespace, "recover", &payload)? {
+            return Ok((receipt, false));
+        }
+        let mut db = self.connection()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        self.validate(&tx)?;
+        if let Some((receipt, done)) = recovery_receipt(&tx, namespace, operation)? {
+            if receipt == SourceMutationReceipt::AlreadyApplied {
+                acknowledge_intent_sql(&tx, namespace, operation)?;
+            }
+            tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+            return Ok((receipt, done));
+        }
+        let current: Option<String> = tx.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after'",
+            [], |row| row.get(0),
+        ).optional().map_err(failed)?;
+        let applied = current.as_deref() == cursor;
+        let done = applied && crate::events::store::recovery_page(&tx)
+            .map_err(|_| StorageError::Unavailable)?;
+        insert_recovery_receipt(&tx, namespace, operation, applied, done)?;
+        acknowledge_intent_sql(&tx, namespace, operation)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Ok((if applied { SourceMutationReceipt::Applied } else { SourceMutationReceipt::Conflict }, done))
+    }
+
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
-        if matches!(intent, SourceIntent::Recover { .. }) {
+        if matches!(intent, SourceIntent::Recover { .. }) && self.owner.is_none() {
             return Err(StorageError::Unavailable);
         }
         let mut db = self.connection()?;
@@ -1093,14 +1149,15 @@ pub(crate) fn stored_receipt(
 
 pub(crate) fn recovery_receipt(
     db: &Connection,
+    namespace: Option<&str>,
     operation: &SourceOperation,
 ) -> Result<Option<(SourceMutationReceipt, bool)>, StorageError> {
-    let Some(receipt) = stored_receipt(db, None, operation)? else {
+    let Some(receipt) = stored_receipt(db, namespace, operation)? else {
         return Ok(None);
     };
     let done: Option<Option<bool>> = db.query_row(
-        "SELECT recovery_done FROM main.source_observation_receipts WHERE namespace='' AND operation_id=?1 AND payload_digest=?2",
-        params![operation.id, operation.payload_digest], |row| row.get(0),
+        "SELECT recovery_done FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3",
+        params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0),
     ).optional().map_err(failed)?;
     match done {
         Some(Some(done)) => Ok(Some((receipt, done))),
@@ -1112,6 +1169,7 @@ pub(crate) fn recovery_receipt(
 
 pub(crate) fn insert_recovery_receipt(
     db: &Connection,
+    namespace: Option<&str>,
     operation: &SourceOperation,
     applied: bool,
     done: bool,
@@ -1119,8 +1177,8 @@ pub(crate) fn insert_recovery_receipt(
     // Receipt rows are control records, not discovered source rows.
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
     db.execute(
-        "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES('',?1,?2,?3,?4)",
-        params![operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
+        "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES(?1,?2,?3,?4,?5)",
+        params![namespace.unwrap_or(""), operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
     ).map_err(|error| phase_failed("recovery-receipt-insert", error))?;
     Ok(())
 }
