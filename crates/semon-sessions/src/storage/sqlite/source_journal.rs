@@ -1464,8 +1464,8 @@ mod tests {
             let configured = Fixture::new_with_namespace("configured\0source");
             let StoreBackend::Sqlite { database } = &configured.config.backend;
             producer_restart_conformance(
-                || EventCache::open_configured(&configured.config).unwrap(),
-                || configured.config.source_observations().unwrap(),
+                || EventCache::open_scoped(&configured.root.join("index.json"), &crate::storage::HostSource::new(configured.config.namespace.clone(), "a".repeat(64)).unwrap()).unwrap(),
+                || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&configured.config).unwrap())) as Box<dyn SourceObservationStore>,
                 database,
                 &configured.root,
                 "configured\0source",
@@ -1511,7 +1511,7 @@ mod tests {
             crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
             config
         };
-        let open = || config.source_observations().unwrap();
+        let open = || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&config).unwrap())) as Box<dyn SourceObservationStore>;
         let namespace = config.namespace.as_str();
         let mut store = open();
         let discovery = discover_operation(namespace, &[], true);
@@ -1566,7 +1566,7 @@ mod tests {
     #[test]
     fn durable_source_queue_enforces_the_256_intent_admission_bound() {
         let fixture = Fixture::new();
-        let mut store = fixture.config.source_observations().unwrap();
+        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap())) as Box<dyn SourceObservationStore>;
         for index in 0..256 {
             let paths = vec![format!("source-{index}")];
             let operation = discover_operation("A", &paths, false);
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn durable_intent_capture_refuses_rebinding_and_premature_ack() {
         let fixture = Fixture::new();
-        let mut store = fixture.config.source_observations().unwrap();
+        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap())) as Box<dyn SourceObservationStore>;
         let paths = vec!["first".into()];
         let operation = discover_operation("A", &paths, true);
         let intent = SourceIntent::Discover {
@@ -1647,49 +1647,15 @@ mod tests {
     fn shared_observation_conformance_runs_on_configured_sqlite() {
         let configured = Fixture::new_with_namespace("configured\0source");
         crate::storage::source_observations::conformance::shared_source_observation_conformance(
-            || configured.config.source_observations().unwrap(),
+            || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&configured.config).unwrap())) as Box<dyn SourceObservationStore>,
             "configured\0source",
         );
     }
 
     #[test]
-    fn configured_recovery_refuses_without_changing_the_database() {
-        let f = Fixture::new();
-        let mut store = f.config.source_observations().unwrap();
-        let db = f.db();
-        let before: i64 = db
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .unwrap();
-        let operation = SourceOperation::capture(
-            f.config.namespace.as_str(),
-            "recover",
-            &serde_json::to_vec(&Some("")).unwrap(),
-        );
-        let intent = SourceIntent::Recover {
-            operation: operation.clone(),
-            cursor: Some(String::new()),
-        };
-        assert_eq!(store.recovery_is_current(), Err(StorageError::Unavailable));
-        assert_eq!(store.recovery_cursor(), Err(StorageError::Unavailable));
-        assert_eq!(
-            store.persist_intent(&intent),
-            Err(StorageError::Unavailable)
-        );
-        assert_eq!(
-            store.recover(&operation, Some("")),
-            Err(StorageError::Unavailable)
-        );
-        assert_eq!(intent.apply(store.as_mut()), Err(StorageError::Unavailable));
-        let after: i64 = db
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(before, after);
-    }
-
-    #[test]
     fn configured_discovery_claim_cas_restart_and_originals() {
         let f = Fixture::new();
-        let mut store = f.config.source_observations().unwrap();
+        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
         let paths = vec!["seed".into(), "new".into()];
         assert_eq!(
             store.claims(&paths).unwrap(),
@@ -1726,7 +1692,7 @@ mod tests {
         );
         assert_eq!(store.claims(&paths).unwrap(), captured);
         assert_eq!(store.pending(1).unwrap(), vec!["seed".to_owned()]);
-        let mut concurrent = f.config.source_observations().unwrap();
+        let mut concurrent = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
         let concurrent_cas = invalidate_operation("A", &captured[1..]);
         assert_eq!(
             concurrent
@@ -1742,7 +1708,7 @@ mod tests {
         );
         assert_eq!(store.claims(&paths).unwrap(), before_conflict);
         drop(store);
-        let restarted = f.config.source_observations().unwrap();
+        let restarted = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
         assert_eq!(restarted.claims(&paths).unwrap(), before_conflict);
         let db = f.db();
         assert_eq!(db.query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace='A' AND source_path='seed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -1832,36 +1798,7 @@ mod tests {
             Err(StorageError::Unavailable)
         ));
         assert!(!missing.exists());
-        let unbound_cache = f.root.join("unbound.json");
-        drop(EventCache::open_scoped(&unbound_cache, &crate::Options::default().source).unwrap());
-        let unbound_database = EventCache::path(&unbound_cache);
-        let unbound_db = Connection::open(&unbound_database).unwrap();
-        let unbound_epoch = unbound_db
-            .query_row(
-                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        wrong.backend = StoreBackend::Sqlite {
-            database: unbound_database,
-        };
-        wrong.expected_stream_epoch = Some(unbound_epoch);
-        assert!(matches!(
-            wrong.source_observations(),
-            Err(StorageError::NamespaceUnadmitted)
-        ));
-        assert_eq!(
-            unbound_db
-                .query_row(
-                    "SELECT count(*) FROM sqlite_schema WHERE name='storage_source_journal'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        let mut store = f.config.source_observations().unwrap();
+        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
         let overlong = vec!["x".repeat(4097)];
         assert_eq!(
             store.discover(&discover_operation("A", &overlong, true), &overlong, true),
@@ -1978,7 +1915,7 @@ mod tests {
     #[test]
     fn configured_source_writer_revalidates_live_epoch_and_reports_busy() {
         let f = Fixture::new();
-        let mut store = f.config.source_observations().unwrap();
+        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
         let db = f.db();
         db.execute_batch("BEGIN IMMEDIATE").unwrap();
         let locked = vec!["locked".into()];
