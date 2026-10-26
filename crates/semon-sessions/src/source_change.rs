@@ -226,11 +226,6 @@ impl SessionSourceWrite {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn intent(&self) -> WriteIntent {
-        self.intent.clone()
-    }
-
     pub fn complete(mut self, to: u64) -> io::Result<()> {
         let after = Stat::of(&self.input.full_path(&self.options))?;
         let evidence = append_plan(
@@ -485,10 +480,6 @@ impl SessionFactsWrite {
             options: options.clone(),
             _lock: source_lock,
         })
-    }
-    #[cfg(test)]
-    pub(crate) fn intent(&self) -> FactsIntent {
-        self.intent.clone()
     }
     pub fn complete(mut self) -> io::Result<()> {
         self.store

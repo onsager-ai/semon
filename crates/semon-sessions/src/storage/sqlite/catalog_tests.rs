@@ -487,6 +487,11 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
                     if error.kind() == io::ErrorKind::WouldBlock
                         && error.to_string().contains("projection repair pending") =>
                 {
+                    assert_eq!(
+                        db.query_row("SELECT count(*) FROM storage_event_operations WHERE namespace=semon_namespace() AND state='intent'", [], |r| r.get::<_, i64>(0)).unwrap(),
+                        0,
+                        "deferred representation repair must not orphan an ingest intent"
+                    );
                     false
                 }
                 Err(error) => panic!("semantic repair failed: {error}"),
