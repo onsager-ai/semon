@@ -488,7 +488,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &generation,
             |snapshot| {
-                use crate::storage::catalog::CatalogSnapshot;
                 let request =
                     crate::catalog::Request::parse("scope=retained_history&limit=50").unwrap();
                 let rows = snapshot
@@ -2112,7 +2111,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .filter(|(key, _)| !current_keys.contains(key))
         .map(|(key, _)| key.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(!removed.is_empty(), "connected withdrawal removed no Current session");
+    assert!(
+        !removed.is_empty(),
+        "connected withdrawal removed no Current session"
+    );
     assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
     // Membership and lifecycle are exact; removed rows come from custody.
     let mut expected_retained = current
@@ -2123,6 +2125,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     expected_retained.sort();
     retained.sort();
     assert_eq!(retained, expected_retained);
+    // Owner-side filters: the withdrawn Claude sessions stay Retained under
+    // the harness filter and are absent under another harness.
+    let claude = scoped(&caught, "scope=retained_history&harness=claude&");
+    let codex = scoped(&caught, "scope=retained_history&harness=codex&");
+    for key in &removed {
+        assert!(
+            claude.contains(&(key.clone(), true)),
+            "{key} under harness=claude"
+        );
+        assert!(codex.iter().all(|(other, _)| other != key));
+    }
+    assert!(claude.len() + codex.len() <= retained.len());
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
