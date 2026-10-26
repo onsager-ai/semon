@@ -58,3 +58,21 @@ mod native_recovery_tests;
 
 #[cfg(test)]
 mod proxy_test;
+
+pub(crate) fn configured_query_catalog(
+    options: &crate::Options,
+    config: &super::StoreConfig,
+    pool: PgPool,
+    control: PgCancellation,
+) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
+    let generation = pool.transaction(&config.namespace, txn::TxnKind::ReadSnapshot, &control, |tx| {
+        let binding = model_cache::binding(tx)?;
+        if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+            return Err(super::StorageError::ScopeChanged);
+        }
+        model_cache::generation(tx)?.ok_or(super::StorageError::ScopeChanged)
+    })?;
+    Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
+        pool, namespace: config.namespace.clone(), control, generation, options: options.clone(),
+    }))
+}

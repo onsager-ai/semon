@@ -22,6 +22,10 @@ pub struct PgSourceJournal {
 }
 
 impl PgSourceJournal {
+    pub(crate) fn configured(pool: PgPool, namespace: LogicalSourceNamespace, control: PgCancellation) -> Self {
+        Self { pool, namespace, control }
+    }
+
     fn read<T>(
         &self,
         f: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,

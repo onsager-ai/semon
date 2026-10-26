@@ -67,7 +67,7 @@ impl SqliteMetadataStore {
         if namespace != &self.0.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
-        let StoreBackend::Sqlite { database } = &self.0.backend;
+        let database = self.0.backend.sqlite_database()?;
         let flags = if write {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         } else {
