@@ -6738,6 +6738,9 @@ fn validate_prior_reported(
     let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
     if let Some(stamp) = stamp {
         from_json::<ReportedFileStamp>(0, &stamp)?;
+    } else {
+        let exists = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE {scope}1=1 LIMIT 1)"), [], |row| row.get::<_, bool>(0))?;
+        if exists { return Err(rusqlite::Error::InvalidQuery); }
     }
     Ok(())
 }

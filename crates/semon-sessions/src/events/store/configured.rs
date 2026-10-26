@@ -447,6 +447,16 @@ type CompletionRow = (String, String, Option<i64>, Option<i64>, String);
 #[cfg(test)]
 thread_local! {
     static FAIL_EFFECT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static REPORTED_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn reported_effect() -> rusqlite::Result<()> {
+    REPORTED_FAIL_AFTER.with(|point| match point.get() {
+        Some(1) => { point.set(None); Err(rusqlite::Error::InvalidQuery) }
+        Some(n) => { point.set(Some(n - 1)); Ok(()) }
+        None => Ok(()),
+    })
 }
 
 #[cfg(test)]
@@ -1112,11 +1122,15 @@ impl Writer {
                 put_run(&mut put, &row.run).map_err(failed)?;
                 #[cfg(test)]
                 effect("reported_run").map_err(failed)?;
+                #[cfg(test)]
+                reported_effect().map_err(failed)?;
             }
         }
         tx.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),'claude_json_stamp',?1) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", [stamp]).map_err(failed)?;
         #[cfg(test)]
         effect("reported_stamp").map_err(failed)?;
+        #[cfg(test)]
+        reported_effect().map_err(failed)?;
         let all = match selected {
             Some(ids) => read_runs_selected(&tx, ids),
             None => read_runs(&tx),
@@ -2777,6 +2791,14 @@ mod tests {
             last_session_id: "new".into(),
             ..Default::default()
         };
+        let changes = (0..3).map(|n| ReportedRunSnapshot { last_session_id: format!("new-{n}"), ..run.clone() }).collect::<Vec<_>>();
+        let original_state = shared_state(&a);
+        for point in 1..=4 {
+            REPORTED_FAIL_AFTER.with(|flag| flag.set(Some(point)));
+            assert!(writer.save_reported_runs(&changes, &changed, None).is_err());
+            assert_eq!(REPORTED_FAIL_AFTER.with(|flag| flag.get()), None, "unreached boundary {point}");
+            assert_eq!(shared_state(&a), original_state);
+        }
         for point in ["reported_run", "reported_stamp"] {
             FAIL_EFFECT.with(|flag| flag.set(Some(point)));
             assert!(
