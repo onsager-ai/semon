@@ -908,15 +908,30 @@ pub(crate) fn verify_relocation_prefix(
     expected: &str,
 ) -> io::Result<bool> {
     #[cfg(feature = "postgres")]
-    if options.source.selected_store().is_some_and(|config| matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })) {
+    if options.source.selected_store().is_some_and(|config| {
+        matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        )
+    }) {
         let store = source_write_store(options)?;
-        if let Some(ledger) = store.ledger(&path.to_string_lossy()).map_err(io::Error::other)?
-            && ledger.stat == *stat && ledger.offset == length {
-            return Ok(format!("{:x}", sha2::digest::generic_array::GenericArray::from(ledger.prefix)) == expected);
+        if let Some(ledger) = store
+            .ledger(&path.to_string_lossy())
+            .map_err(io::Error::other)?
+            && ledger.stat == *stat
+            && ledger.offset == length
+        {
+            return Ok(format!(
+                "{:x}",
+                sha2::digest::generic_array::GenericArray::from(ledger.prefix)
+            ) == expected);
         }
         let mut file = crate::sealed::LogFile::open(path)?;
         let (prefix, _) = super::consumed_hashes(&mut file, length)?;
-        return Ok(format!("{:x}", sha2::digest::generic_array::GenericArray::from(prefix)) == expected);
+        return Ok(format!(
+            "{:x}",
+            sha2::digest::generic_array::GenericArray::from(prefix)
+        ) == expected);
     }
     let binding =
         crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;

@@ -97,7 +97,7 @@ pub(crate) fn catalog_work_pending(config: &StoreConfig) -> Result<bool, Storage
     pool.transaction(&config.namespace, TxnKind::ReadSnapshot, control, |tx| {
         binding(tx, config)?;
         let ns = config.namespace.as_str().as_bytes();
-        Ok(tx.driver.query_one("SELECT semantic_pending OR backfill_state<>'complete' OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0))
+        Ok(tx.driver.query_one("SELECT semantic_pending OR backfill_state IS DISTINCT FROM 'complete' OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0))
     })
 }
 pub(crate) fn indexed_codex_sources(
