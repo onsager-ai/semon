@@ -13,6 +13,26 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "catalog_trace_headers",
+        columns: "generation bytea,key_digest bytea,session_key bytea,trace_generation bytea,source_generation bytea,metadata bytea",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_trace_turns",
+        columns: "generation bytea,key_digest bytea,session_key bytea,turn_digest bytea,turn_id bytea,start_id bytea?,metadata bytea",
+        key: "generation,key_digest,turn_digest",
+    },
+    Table {
+        name: "catalog_trace_edges",
+        columns: "generation bytea,key_digest bytea,session_key bytea,edge_digest bytea,edge_id bytea,metadata bytea",
+        key: "generation,key_digest,edge_digest",
+    },
+    Table {
+        name: "catalog_trace_bookmarks",
+        columns: "generation bytea,key_digest bytea,session_key bytea,target_digest bytea,target bytea,edge_digest bytea,edge_id bytea",
+        key: "generation,key_digest,target_digest,edge_digest",
+    },
+    Table {
         name: "catalog_rows",
         columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea",
         key: "generation,key_digest",
