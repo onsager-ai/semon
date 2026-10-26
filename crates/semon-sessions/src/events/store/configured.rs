@@ -7649,6 +7649,10 @@ mod tests {
             let capability =
                 crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
             let mut cache = EventCache::open_semantic(capability).unwrap();
+            assert!(matches!(
+                cache.store.as_mut().unwrap().select_reported_runs(&BTreeSet::new()),
+                Err(StoreError::Configured(StorageError::NamespaceUpgradePending))
+            ));
             let inputs = (0..65)
                 .map(|i| crate::Input {
                     root: crate::InputRoot::Codex,

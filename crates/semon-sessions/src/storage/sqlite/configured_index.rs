@@ -51,7 +51,7 @@ pub(crate) fn open_semantic(
 pub(crate) fn open_semantic_with_stamp(
     capability: super::semantic::SemanticStaging,
 ) -> Result<(Box<dyn IndexStore>, Option<ReportedFileStamp>), StorageError> {
-    let stamp = capability.writer().reported_stamp()?;
+    let stamp = capability.reported_stamp()?;
     Ok((open_semantic(capability)?, stamp))
 }
 
