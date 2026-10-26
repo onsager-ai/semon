@@ -27,13 +27,6 @@ pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "catalog_backfill_sources",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CatalogAssignmentProgress {
-    pub table: String,
-    pub copied: usize,
-    pub complete: bool,
-}
-
 fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -128,6 +121,50 @@ mod current_navigation_tests {
         }
         fn db(&self) -> &Connection { &self.db }
     }
+    #[test]
+    fn current_owner_navigation_pins_epoch_namespace_and_refuses_without_mutation() {
+        use super::super::navigation::SqliteNavigation;
+        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
+        use crate::events::store::configured::NativeOwnership;
+        let f = Fixture::new();
+        let db = f.db();
+        for (key, edge) in [("d", "1"), ("b", "1"), ("a", "1"), ("c", "1"), ("a", "2")] {
+            db.execute("INSERT INTO main.session_trace_bookmarks(namespace,target,session_key,edge_id) VALUES('A','target',?1,?2)", (key, edge)).unwrap();
+        }
+        db.execute("INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','same','current','codex','native-same','relative/same.jsonl')", []).unwrap();
+        let owner = NativeOwnership::restore(&f.config).unwrap();
+        let binding = NativeReaderBinding::Semantic(owner);
+        let store = SqliteNavigation(binding.clone());
+        let generation = store.catalog_generation().unwrap();
+        let StoreBackend::Sqlite { database } = &f.config.backend;
+        let wal = database.with_extension("sqlite3-wal");
+        let state = || {
+            [database.as_path(), wal.as_path()].map(|path| (
+                std::fs::read(path).ok(),
+                std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
+            ))
+        };
+        let before = state();
+        let changes = db.total_changes();
+        assert_eq!(store.bookmarked_target_keys("target").unwrap(), ["a", "b", "c"]);
+        assert!(store.bookmarked_target_keys("missing").unwrap().is_empty());
+        assert_eq!(store.bookmarked_target_keys(&"x".repeat(4097)), Err(StorageError::InvalidArguments));
+        let observation = store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&generation)).unwrap();
+        assert_eq!(observation.keys, ["same"]);
+        assert_eq!(observation.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
+        assert_eq!(observation.generation.as_deref(), Some(generation.as_str()));
+        assert!(matches!(store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&"b".repeat(64))), Err(StorageError::ScopeChanged)));
+        assert!(matches!(binding.validate(db, &LogicalSourceNamespace::new("foreign").unwrap()), Err(StorageError::NamespaceMismatch)));
+        let mut stale = f.config.clone();
+        stale.expected_stream_epoch = Some("f".repeat(64));
+        assert!(matches!(NativeOwnership::restore(&stale), Err(StorageError::ScopeChanged)));
+        let mut foreign = f.config.clone();
+        foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
+        assert!(NativeOwnership::restore(&foreign).is_err());
+        assert_eq!(db.total_changes(), changes);
+        assert_eq!(state(), before);
+    }
+
     #[test]
     fn qualified_navigation_uses_retained_metadata_fallback_bounds_and_indexes() {
         use super::super::navigation::SqliteNavigation;
@@ -232,16 +269,16 @@ mod current_navigation_tests {
         assert_eq!(ambiguous.keys, ["same", "tail"]);
 
         for (index, sql) in [
-            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='ambiguous' ORDER BY session_key LIMIT 2",
-            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness='codex' AND native_id='retained-history' ORDER BY session_key LIMIT 2",
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='ambiguous' ORDER BY session_key LIMIT 2",
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness='codex' AND native_id='retained-history' ORDER BY session_key LIMIT 2",
         ]
         .iter()
         .enumerate()
         {
             let plan: String = db.query_row(sql, [], |row| row.get(3)).unwrap();
             let expected = [
-                "COVERING INDEX storage_ns_session_catalog_current_native",
-                "COVERING INDEX storage_ns_session_catalog_native",
+                "COVERING INDEX session_catalog_current_native",
+                "COVERING INDEX session_catalog_native",
             ][index];
             assert!(plan.contains(expected), "{plan}");
         }
