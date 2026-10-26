@@ -136,7 +136,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "native_dependencies",
         columns: "source_path bytea,harness bytea,native_id bytea",
-        key: "source_path,harness,native_id",
+        key: "source_path_digest,harness_digest,native_id_digest",
     },
     Table {
         name: "usage_sources",
@@ -146,7 +146,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "usage_current",
         columns: "source_path bytea,source_id bigint",
-        key: "source_path",
+        key: "source_path_digest",
     },
     Table {
         name: "usage_facts",
@@ -156,12 +156,12 @@ const TABLES: &[Table] = &[
     Table {
         name: "usage_identities",
         columns: "source_id bigint,scope bytea,identity bytea,native_offset numeric",
-        key: "source_id,scope,identity",
+        key: "source_id,scope_digest,identity_digest",
     },
     Table {
         name: "usage_dimensions",
         columns: "source_id bigint,kind bytea,dimension bytea,value bytea",
-        key: "source_id,kind,dimension",
+        key: "source_id,kind_digest,dimension_digest",
     },
     Table {
         name: "tree_generations",
@@ -272,14 +272,14 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
         "usage_source_path",
         "usage_sources",
-        "source_path,source_id",
+        "source_path_digest,source_id",
         false,
     ),
     ("usage_current_source", "usage_current", "source_id", true),
     (
         "usage_observations",
         "usage_facts",
-        "source_id,identity,native_offset",
+        "source_id,identity_digest,native_offset",
         false,
     ),
     (
@@ -303,7 +303,7 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
         "dependency_native",
         "native_dependencies",
-        "harness,native_id,source_path",
+        "harness_digest,native_id_digest,source_path_digest",
         false,
     ),
 ];
@@ -325,6 +325,7 @@ fn contract_hash() -> Vec<u8> {
     }
     hash.update(POLICY);
     hash.update(native_keys::MATCH_BODY);
+    hash.update(native_keys::DIGEST_BODY);
     for body in super::super::native_usage_identity::contract() {
         hash.update((body.len() as u64).to_be_bytes());
         hash.update(body.as_bytes());
@@ -333,6 +334,7 @@ fn contract_hash() -> Vec<u8> {
 }
 
 pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    tx.driver.batch_execute(&format!("CREATE FUNCTION semon_pg_native_digest(ns bytea,value bytea,domain text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS '{}';", native_keys::DIGEST_BODY.replace('\'', "''"))).map_err(sqlstate::error)?;
     tx.driver.batch_execute(&format!("CREATE FUNCTION semon_pg_native_key_matches(stored bytea,digest bytea,expected bytea) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS '{}';", native_keys::MATCH_BODY.replace('\'', "''"))).map_err(sqlstate::error)?;
     tx.driver.batch_execute("ALTER TABLE semon_pg_schema ADD COLUMN native_contract bytea NOT NULL DEFAULT ''::bytea").map_err(sqlstate::error)?;
     tx.driver
@@ -369,6 +371,16 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    let digest = tx.driver.query("SELECT p.prosrc,p.prosecdef,p.proisstrict AND p.provolatile='i' AND p.prokind='f' AND p.prorettype='bytea'::regtype AND p.proargtypes='17 17 25'::oidvector AND l.lanname='plpgsql',p.proconfig FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.pronamespace=current_schema()::regnamespace AND p.proname='semon_pg_native_digest'", &[]).map_err(sqlstate::error)?;
+    if digest.len() != 1
+        || digest[0].get::<_, String>(0) != native_keys::DIGEST_BODY
+        || digest[0].get::<_, bool>(1)
+        || !digest[0].get::<_, bool>(2)
+        || digest[0].get::<_, Option<Vec<String>>>(3)
+            != Some(vec!["search_path=pg_catalog".into()])
+    {
+        return Err(StorageError::ScopeChanged);
+    }
     let function = tx.driver.query("SELECT p.prosrc,p.prosecdef,p.proisstrict AND p.provolatile='i' AND p.prokind='f' AND p.prorettype='boolean'::regtype AND p.proargtypes='17 17 17'::oidvector AND l.lanname='plpgsql',p.proconfig FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.pronamespace=current_schema()::regnamespace AND p.proname='semon_pg_native_key_matches'", &[]).map_err(sqlstate::error)?;
     if function.len() != 1
         || function[0].get::<_, String>(0) != native_keys::MATCH_BODY
