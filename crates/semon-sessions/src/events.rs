@@ -1762,6 +1762,22 @@ impl EventCache {
             .map_err(|_| crate::storage::StorageError::Unavailable)?;
         Ok(cache)
     }
+    /// Explicit authorized PG native capability. No public backend readiness,
+    /// SQLite coordinates, Options-derived path or alternate-engine fallback.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)] // Private integration until complete backend qualification.
+    pub(crate) fn open_pg_native(
+        pool: crate::storage::postgres::PgPool,
+        namespace: crate::storage::LogicalSourceNamespace,
+        control: crate::storage::postgres::PgCancellation,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let observation_namespace = namespace.as_str().to_owned();
+        let (store, claude_json_stamp) = crate::storage::postgres::index_store::open(pool, namespace, control)?;
+        let mut cache = Self { store: Some(store), claude_json_stamp, observation_namespace,
+            scoped: true, explicit_store: true, ..Self::default() };
+        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
+    }
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
     /// No store is attached, so native projection cannot mutate global rows.

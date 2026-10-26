@@ -7,6 +7,7 @@ on:
     branches:
       - task/479-pg-foundation-20261025
       - task/479-pg-facts-20261026
+      - task/479-pg-native-ingest-20261026
 
 permissions:
   contents: read
@@ -104,6 +105,8 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Actual native EventCache PostgreSQL integration
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native126 -- --nocapture
       - name: Strict published Tree scalar and deferred interpretation qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
