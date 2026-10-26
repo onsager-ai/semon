@@ -7,7 +7,7 @@ struct Inbox<'a, 'b>(&'a mut PgTxn<'b>);
 impl InboxTransaction for Inbox<'_, '_> {
     fn get(&mut self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, StorageError> {
         self.0.check()?;
-        let rows = self.0.driver.query("SELECT key=$2,CASE WHEN octet_length(value)<=$3 THEN value END FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea)", &[&self.0.namespace.as_str().as_bytes(), &key.as_bytes(), &(limit as i64)]).map_err(sqlstate::error)?;
+        let rows = self.0.driver.query("SELECT key=$2,CASE WHEN octet_length(value)<=$3::bigint THEN value END FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea)", &[&self.0.namespace.as_str().as_bytes(), &key.as_bytes(), &(limit as i64)]).map_err(sqlstate::error)?;
         let Some(row) = rows.first() else { return Ok(None); };
         if !row.get::<_, bool>(0) { return Err(StorageError::ScopeChanged); }
         row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged).map(Some)
@@ -22,7 +22,8 @@ impl InboxTransaction for Inbox<'_, '_> {
 }
 
 fn transaction<T>(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, operation: impl FnOnce(&mut Inbox<'_, '_>) -> Result<T, StorageError>) -> Result<T, StorageError> {
-    pool.transaction(&config.namespace, TxnKind::Write, control, |tx| {
+    let bounded = control.bounded(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    pool.transaction(&config.namespace, TxnKind::Write, &bounded, |tx| {
         let binding = model_cache::binding(tx)?;
         if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) { return Err(StorageError::ScopeChanged); }
         operation(&mut Inbox(tx))
@@ -39,6 +40,10 @@ pub(crate) fn stage(config: &StoreConfig, pool: &PgPool, control: &PgCancellatio
 
 pub(crate) fn page(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
     transaction(config, pool, control, |tx| transfer::page_tx(tx, manifest, sequence))
+}
+
+pub(crate) fn checkpoint(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    transaction(config, pool, control, |tx| transfer::checkpoint_tx(tx, manifest))
 }
 
 #[cfg(test)]
