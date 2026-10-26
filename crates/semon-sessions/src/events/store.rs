@@ -689,11 +689,16 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    _runtime: &str,
+    runtime: &str,
 ) -> io::Result<Option<String>> {
-    let journal = host_journal(options).map_err(io::Error::other)?;
+    let config = options.source.config(&options.cache).map_err(io::Error::other)?;
+    let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
+    let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
+        .runtime_binding().map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
+    let observations = crate::native_evidence::RuntimeObservations::bound(&runtime_binding, runtime)?;
+    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let db = journal.connection().map_err(io::Error::other)?;
-    let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
