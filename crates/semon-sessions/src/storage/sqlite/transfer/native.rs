@@ -42,7 +42,7 @@ pub(super) fn capture_native(
                 |r| r.get(0),
             )
             .map_err(failed)?;
-        if size < 0 || size > ((transfer::MAX_PAGE_BYTES - 4096) / 6) as i64 {
+        if size < 0 || size > (transfer::MAX_PAGE_BYTES - 4096) as i64 {
             return Err(StorageError::Busy);
         }
         let mut values =
@@ -93,8 +93,8 @@ pub(super) fn capture_native(
         for size in &sizes {
             let size = usize::try_from(*size)
                 .map_err(|_| StorageError::ScopeChanged)?
-                .checked_mul(6)
-                .and_then(|n| n.checked_add(path.len() * 6 + 1024))
+                .checked_add(path.len())
+                .and_then(|n| n.checked_add(1024))
                 .ok_or(StorageError::Busy)?;
             if bytes
                 .checked_add(size)
@@ -125,14 +125,19 @@ pub(super) fn capture_native(
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .map_err(failed)?;
             let mut records = Vec::new();
+            let mut encoded_bytes = 4096usize;
             for values in rows {
                 let record = TransferRecord::NativeEvent {
                     path: path.clone(),
                     values: values.0,
                 };
                 record.validate_native()?;
+                let size = transfer::encode_bounded(&record, transfer::MAX_PAGE_BYTES)?.len() + 1;
+                if encoded_bytes.checked_add(size).is_none_or(|n| n > transfer::MAX_PAGE_BYTES) { break; }
+                encoded_bytes += size;
                 records.push(record);
             }
+            if records.is_empty() { return Err(StorageError::Busy); }
             let last = match records.last().ok_or(StorageError::ScopeChanged)? {
                 TransferRecord::NativeEvent { values, .. } => {
                     values[1].as_i64().ok_or(StorageError::ScopeChanged)?
