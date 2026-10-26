@@ -2397,6 +2397,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     expected_retained.sort();
     retained.sort();
     assert_eq!(retained, expected_retained);
+    // The same metadata-only resolver serves retained native aliases after
+    // their Current row disappears. Expected generation fencing stays active.
+    super::super::snapshot::with_admitted_snapshot(
+        &pool, &namespace, &control, &caught, |snapshot| {
+            use crate::storage::navigation::NativeNavigationStore;
+            assert_eq!(snapshot.catalog_generation()?, caught);
+            for row in prepared.rows.iter().filter(|row| removed.contains(&row.key)) {
+                for native in &row.native_ids {
+                    let current = snapshot.native_resolution(
+                        &row.harness, native, crate::CatalogReadScope::Current, Some(&caught),
+                    )?;
+                    assert!(current.keys.is_empty());
+                    let retained = snapshot.native_resolution(
+                        &row.harness, native, crate::CatalogReadScope::RetainedHistory, Some(&caught),
+                    )?;
+                    assert_eq!(retained.keys, vec![row.key.clone()]);
+                    let resolved: CatalogRow = serde_json::from_str(retained.metadata.as_deref().unwrap()).unwrap();
+                    assert_eq!(resolved.key, row.key);
+                }
+            }
+            assert!(snapshot.native_resolution("claude", "one", crate::CatalogReadScope::Current, Some(&generation)).is_err());
+            Ok(())
+        },
+    ).unwrap();
     // Owner-side filters: the withdrawn Claude sessions stay Retained under
     // the harness filter and are absent under another harness.
     let claude = scoped(&caught, "scope=retained_history&harness=claude&");
