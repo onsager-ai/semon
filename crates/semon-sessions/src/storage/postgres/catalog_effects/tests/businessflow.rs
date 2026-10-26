@@ -675,10 +675,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     config.create_native_store().unwrap();
     let mut wrong = config.clone();
     wrong.namespace = ns("different-host224");
-    assert_eq!(options.source.clone().with_store(wrong).unwrap_err(), StorageError::NamespaceMismatch);
+    assert_eq!(
+        options.source.clone().with_store(wrong).unwrap_err(),
+        StorageError::NamespaceMismatch
+    );
     let mut wrong = config.clone();
     wrong.expected_stream_epoch = Some("b".repeat(64));
-    assert_eq!(options.source.clone().with_store(wrong).unwrap_err(), StorageError::ScopeChanged);
+    assert_eq!(
+        options.source.clone().with_store(wrong).unwrap_err(),
+        StorageError::ScopeChanged
+    );
     let mut options = options;
     options.source = options.source.with_store(config.clone()).unwrap();
     assert_eq!(
@@ -1028,8 +1034,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(query_list["total"].as_u64(), Some(all_total));
     let proof_owner = &prepared.rows[0];
     let proof_source = &proof_owner.sources[0];
-    let proof_relative = crate::catalog::source_relative(&options, &proof_owner.harness, proof_source).unwrap();
-    let proof = crate::session_source_proof(&options, &proof_owner.harness, &proof_relative).unwrap().unwrap();
+    let proof_relative =
+        crate::catalog::source_relative(&options, &proof_owner.harness, proof_source).unwrap();
+    let proof = crate::session_source_proof(&options, &proof_owner.harness, &proof_relative)
+        .unwrap()
+        .unwrap();
     assert_eq!(proof.source.offset, proof_source.offset);
     assert_eq!(proof.source.prefix_sha256, proof_source.prefix_sha256);
     assert_eq!(proof.source.tail_sha256, proof_source.tail_sha256);
@@ -2278,6 +2287,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(page.status, 200, "ordinary bound Catalog renderer");
     assert!(String::from_utf8_lossy(&page.body).contains("source-write-after158"));
+    let workspace = crate::session_catalog_union(
+        &[crate::OverviewSource {
+            key: namespace.as_str().into(),
+            label: "Recorded PG source".into(),
+            options: facts_options.clone(),
+            up: false,
+        }],
+        "authorized-workspace224",
+        "limit=50",
+    );
+    assert_eq!(workspace.status, 200);
+    let workspace: serde_json::Value = serde_json::from_slice(&workspace.body).unwrap();
+    assert_eq!(workspace["items"].as_array().unwrap().len(), facts_rows.len());
 
     let facts_store =
         crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
