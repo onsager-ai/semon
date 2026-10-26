@@ -73,10 +73,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"related-spawn","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"}})).unwrap();
     let child_id = "21234567-89ab-4cde-8123-456789abcdef";
-    let child = options.codex_home.join(format!("sessions/2026/10/01/rollout-{child_id}.jsonl"));
+    let child = options
+        .codex_home
+        .join(format!("sessions/2026/10/01/rollout-{child_id}.jsonl"));
     fs::write(&child, [
-        serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:02Z","payload":{"id":child_id,"cwd":"/synthetic/project","originator":"codex_exec","parent_thread_id":codex_id,"thread_source":"subagent","agent_path":"root/worker","agent_nickname":"worker","timestamp":"2026-10-01T00:00:02Z"}}),
-        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:03Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized related codex input"}]}}),
+        serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":child_id,"cwd":"/synthetic/project","originator":"codex_exec","parent_thread_id":codex_id,"thread_source":"subagent","agent_path":"root/worker","agent_nickname":"worker","timestamp":"2026-10-01T00:00:00Z"}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized related codex input"}]}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut sqlite_options = options.clone();
@@ -235,6 +237,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
+    let component = pg.catalog_component_paths(
+        &[codex.to_string_lossy().into_owned()], &[], &[("codex".into(), codex_id.into())]
+    ).unwrap().unwrap();
+    assert!(component.contains(&codex.to_string_lossy().into_owned()));
+    assert!(component.contains(&child.to_string_lossy().into_owned()));
+
     // A lost response retries the identical full request, even though its
     // expected head and acknowledged claims have advanced.
     assert_eq!(

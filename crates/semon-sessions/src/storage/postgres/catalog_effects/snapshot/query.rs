@@ -3,7 +3,10 @@
 use super::*;
 use crate::{
     Options, QueryError,
-    storage::{catalog::CatalogSnapshot, query::{Part, QueryCatalogStore}},
+    storage::{
+        catalog::CatalogSnapshot,
+        query::{Part, QueryCatalogStore},
+    },
 };
 use std::collections::{BTreeMap, BTreeSet};
 
