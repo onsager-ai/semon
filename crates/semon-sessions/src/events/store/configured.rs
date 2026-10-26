@@ -1028,6 +1028,15 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn note_catalog_audit(&self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        let ready = super::note_catalog_audit_tx(&tx, expected, now).map_err(failure)?;
+        tx.commit().map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(ready)
+    }
+
     pub(crate) fn catalog_generation(&self) -> Result<Option<String>, StoreError> {
         let db = self.snapshot().map_err(StoreError::Configured)?;
         db.query_row(
