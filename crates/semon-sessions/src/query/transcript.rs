@@ -231,7 +231,15 @@ fn render_edge(
         let mut recipe = content
             .get(name)
             .cloned()
-            .ok_or_else(|| unavailable(format!("Native {field} recipe unavailable ({id})")))?;
+            .ok_or_else(|| {
+                #[cfg(test)]
+                eprintln!(
+                    "native_query_recipe_missing field={field} observations={} brief_constant={brief_constant:?} content_brief={} content_result={} content_answer={}",
+                    recipes.len(), content.contains_key("brief"),
+                    content.contains_key("result"), content.contains_key("answer")
+                );
+                unavailable(format!("Native {field} recipe unavailable ({id})"))
+            })?;
         if field == "answers" {
             recipe["kind"] = json!("answers");
         }
