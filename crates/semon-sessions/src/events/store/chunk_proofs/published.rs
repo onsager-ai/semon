@@ -131,7 +131,10 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
                     params![from, to, format!("{from}~")],
                 )?;
             }
-            tx.execute(native_metadata_put(tx)?, params![format!("{retained}source"),source.to_string()])?;
+            tx.execute(
+                native_metadata_put(tx)?,
+                params![format!("{retained}source"), source.to_string()],
+            )?;
             saved.insert(digest);
         }
     }

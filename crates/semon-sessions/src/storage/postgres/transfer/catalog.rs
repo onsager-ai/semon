@@ -494,15 +494,35 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         .map_err(sqlstate::error)?;
     if *kind == CatalogRowKind::ProofSource {
         let saved = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND id=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&tx.0.namespace.as_str().as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
-        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&saved.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?).map_err(|_|StorageError::ScopeChanged)?;
-        let source = metadata.sources.iter().find(|source| source.path.to_str() == text(2).ok() && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)) == text(3).unwrap_or("")).ok_or(StorageError::ScopeChanged)?;
+        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(
+            &saved
+                .get::<_, Option<Vec<u8>>>(0)
+                .ok_or(StorageError::Busy)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
+        let source = metadata
+            .sources
+            .iter()
+            .find(|source| {
+                source.path.to_str() == text(2).ok()
+                    && crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source))
+                        == text(3).unwrap_or("")
+            })
+            .ok_or(StorageError::ScopeChanged)?;
         let ledger = crate::source_carrier::ledger(source);
         let receipt = crate::events::store::header_ledger(&ledger);
         let backing = tx.0.driver.query("SELECT generation FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND ledger=$3 LIMIT 65", &[&tx.0.namespace.as_str().as_bytes(),&text(2)?.as_bytes(),&receipt.as_bytes()]).map_err(sqlstate::error)?;
-        if backing.is_empty() || backing.len()>64 { return Err(StorageError::ScopeChanged); }
+        if backing.is_empty() || backing.len() > 64 {
+            return Err(StorageError::ScopeChanged);
+        }
         for row in backing {
-            let id = String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
-            super::super::native_pages::open(tx.0,text(2)?,&ledger,crate::storage::proof_lifetime::ProofGenerationId(id))?;
+            let id = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
+            super::super::native_pages::open(
+                tx.0,
+                text(2)?,
+                &ledger,
+                crate::storage::proof_lifetime::ProofGenerationId(id),
+            )?;
         }
         // The selected edge names an original publication and exact Native
         // ledger. Bind only backing generations actually carried above; this
@@ -624,7 +644,7 @@ mod tests {
                 if let TransferRecord::NativeSource(source) = &record {
                     retained_backing |= source.backing.is_some();
                 }
-                if let TransferRecord::NativePage {backing,..} = &record {
+                if let TransferRecord::NativePage { backing, .. } = &record {
                     retained_page |= backing.is_some();
                 }
                 if let TransferRecord::CatalogRow {
@@ -655,7 +675,10 @@ mod tests {
             retained_ref,
             "successor must retain the original selected generation"
         );
-        assert!(retained_backing && retained_page, "retained selected references require original Native backing pages");
+        assert!(
+            retained_backing && retained_page,
+            "retained selected references require original Native backing pages"
+        );
         assert!(
             checked_forgery,
             "real publisher must contribute original selected proof authority"

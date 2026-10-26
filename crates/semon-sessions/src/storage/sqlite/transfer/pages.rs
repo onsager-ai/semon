@@ -17,7 +17,10 @@ fn backing_prefix(path: &str, kind: NativePageKind, backing: Option<&str>) -> St
     match backing {
         None => prefix(path, kind),
         Some(digest) => {
-            let chunks = format!("native_published_chunks:{:x}:{digest}:", Sha256::digest(path.as_bytes()));
+            let chunks = format!(
+                "native_published_chunks:{:x}:{digest}:",
+                Sha256::digest(path.as_bytes())
+            );
             match kind {
                 NativePageKind::Chunks => chunks,
                 NativePageKind::Tree => format!("native_proof_tree:{chunks}:"),
@@ -43,11 +46,49 @@ pub(super) fn capture(
         .clone()
         .ok_or(StorageError::ScopeChanged)?;
     if state.native_family == 3 {
-        let chunks_header = metadata(tx, &format!("{}header", backing_prefix(&path, NativePageKind::Chunks, state.native_backing.as_deref())))?.ok_or(StorageError::ScopeChanged)?;
-        let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&chunks_header).map_err(|_| StorageError::ScopeChanged)?;
-        let (generation,receipt,checkpoint,parser_version,usage_ready):(i64,String,i64,u32,bool)=if state.native_backing.is_some() {
-            let generation = metadata(tx, &format!("{}source", backing_prefix(&path, NativePageKind::Chunks, state.native_backing.as_deref())))?.ok_or(StorageError::ScopeChanged)?.parse::<i64>().map_err(|_|StorageError::ScopeChanged)?;
-            (generation,header.ledger.clone(),i64::try_from(header.consumed_offset.ok_or(StorageError::ScopeChanged)?).map_err(|_|StorageError::ScopeChanged)?,header.parser_version,false)
+        let chunks_header = metadata(
+            tx,
+            &format!(
+                "{}header",
+                backing_prefix(
+                    &path,
+                    NativePageKind::Chunks,
+                    state.native_backing.as_deref()
+                )
+            ),
+        )?
+        .ok_or(StorageError::ScopeChanged)?;
+        let header: crate::events::native_pages::chunks::Header =
+            serde_json::from_str(&chunks_header).map_err(|_| StorageError::ScopeChanged)?;
+        let (generation, receipt, checkpoint, parser_version, usage_ready): (
+            i64,
+            String,
+            i64,
+            u32,
+            bool,
+        ) = if state.native_backing.is_some() {
+            let generation = metadata(
+                tx,
+                &format!(
+                    "{}source",
+                    backing_prefix(
+                        &path,
+                        NativePageKind::Chunks,
+                        state.native_backing.as_deref()
+                    )
+                ),
+            )?
+            .ok_or(StorageError::ScopeChanged)?
+            .parse::<i64>()
+            .map_err(|_| StorageError::ScopeChanged)?;
+            (
+                generation,
+                header.ledger.clone(),
+                i64::try_from(header.consumed_offset.ok_or(StorageError::ScopeChanged)?)
+                    .map_err(|_| StorageError::ScopeChanged)?,
+                header.parser_version,
+                false,
+            )
         } else {
             tx.0.query_row("SELECT s.source_id,s.receipt,s.checkpoint,s.parser_version,s.usage_ready FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=?1 AND c.source_path=?2",params![tx.1,path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(failed)?
         };
@@ -62,7 +103,14 @@ pub(super) fn capture(
             chunks_header,
             launch_header: metadata(
                 tx,
-                &format!("{}header", backing_prefix(&path, NativePageKind::Launch, state.native_backing.as_deref())),
+                &format!(
+                    "{}header",
+                    backing_prefix(
+                        &path,
+                        NativePageKind::Launch,
+                        state.native_backing.as_deref()
+                    )
+                ),
             )?,
         };
         let record = TransferRecord::NativeSource(source);
@@ -149,9 +197,24 @@ pub(super) fn capture(
             native_pages::append(tx, state, Category::PageBlobs, records)?;
         }
     } else {
-        let manifest_key = format!("native_published_chunks_manifest:{:x}", Sha256::digest(path.as_bytes()));
+        let manifest_key = format!(
+            "native_published_chunks_manifest:{:x}",
+            Sha256::digest(path.as_bytes())
+        );
         let next: Option<String> = tx.0.query_row("SELECT j.value FROM meta m,json_each(m.value) j WHERE m.namespace=?1 AND m.key=?2 AND (?3 IS NULL OR j.value>?3) ORDER BY j.value LIMIT 1", params![tx.1,manifest_key,state.native_backing], |r|r.get(0)).optional().map_err(failed)?;
         if let Some(next) = next {
+            let current_header = metadata(tx, &format!("{}header", prefix(&path, NativePageKind::Chunks)))?.ok_or(StorageError::ScopeChanged)?;
+            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&current_header).map_err(|_|StorageError::ScopeChanged)?;
+            if crate::source_carrier::ledger_digest_value(&header.ledger) == next {
+                let retained = metadata(tx, &format!("{}header", backing_prefix(&path, NativePageKind::Chunks, Some(&next))))?.ok_or(StorageError::ScopeChanged)?;
+                let original = metadata(tx, &format!("{}source", backing_prefix(&path, NativePageKind::Chunks, Some(&next))))?.ok_or(StorageError::ScopeChanged)?;
+                let current: i64 = tx.0.query_row("SELECT source_id FROM native_usage_current WHERE namespace=?1 AND source_path=?2",params![tx.1,path],|r|r.get(0)).map_err(failed)?;
+                if retained != current_header || original != current.to_string() {return Err(StorageError::ScopeChanged);}
+                state.native_backing = Some(next);
+                state.native_key = None;
+                transfer::reported::save_capture(tx, state)?;
+                return Ok(state.progress());
+            }
             state.native_backing = Some(next);
             state.native_family = 3;
             state.native_key = None;
@@ -197,10 +260,10 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             }
             if source.backing.is_none() {
                 let (_, ledger) = crate::events::store::ledger_row(tx.0, &source.path)
-                .map_err(failed)?
-                .ok_or(StorageError::ScopeChanged)?;
+                    .map_err(failed)?
+                    .ok_or(StorageError::ScopeChanged)?;
                 native_pages::validate_source_ledger(source, &ledger)?;
-            tx.0.execute("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![tx.1,source.generation as i64,source.path,source.receipt,source.checkpoint as i64,source.parser_version,source.usage_ready]).map_err(|error| {
+                tx.0.execute("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![tx.1,source.generation as i64,source.path,source.receipt,source.checkpoint as i64,source.parser_version,source.usage_ready]).map_err(|error| {
                 #[cfg(test)]
                 eprintln!("transfer SQLite NativeSource apply failed: table=native_usage_sources");
                 failed(error)
@@ -212,21 +275,52 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             })?;
             }
             tx.put(
-                &format!("{}header", backing_prefix(&source.path, NativePageKind::Chunks, source.backing.as_deref())),
+                &format!(
+                    "{}header",
+                    backing_prefix(
+                        &source.path,
+                        NativePageKind::Chunks,
+                        source.backing.as_deref()
+                    )
+                ),
                 source.chunks_header.as_bytes(),
             )?;
             if let Some(header) = &source.launch_header {
                 tx.put(
-                    &format!("{}header", backing_prefix(&source.path, NativePageKind::Launch, source.backing.as_deref())),
+                    &format!(
+                        "{}header",
+                        backing_prefix(
+                            &source.path,
+                            NativePageKind::Launch,
+                            source.backing.as_deref()
+                        )
+                    ),
                     header.as_bytes(),
                 )?;
             }
             if let Some(digest) = &source.backing {
-                tx.put(&format!("{}source", backing_prefix(&source.path, NativePageKind::Chunks, Some(digest))), source.generation.to_string().as_bytes())?;
-                let key = format!("native_published_chunks_manifest:{:x}", Sha256::digest(source.path.as_bytes()));
-                let mut saved: std::collections::BTreeSet<String> = metadata(tx, &key)?.map(|s|serde_json::from_str(&s).map_err(|_|StorageError::ScopeChanged)).transpose()?.unwrap_or_default();
+                tx.put(
+                    &format!(
+                        "{}source",
+                        backing_prefix(&source.path, NativePageKind::Chunks, Some(digest))
+                    ),
+                    source.generation.to_string().as_bytes(),
+                )?;
+                let key = format!(
+                    "native_published_chunks_manifest:{:x}",
+                    Sha256::digest(source.path.as_bytes())
+                );
+                let mut saved: std::collections::BTreeSet<String> = metadata(tx, &key)?
+                    .map(|s| serde_json::from_str(&s).map_err(|_| StorageError::ScopeChanged))
+                    .transpose()?
+                    .unwrap_or_default();
                 saved.insert(digest.clone());
-                tx.put(&key, serde_json::to_string(&saved).map_err(|_|StorageError::ScopeChanged)?.as_bytes())?;
+                tx.put(
+                    &key,
+                    serde_json::to_string(&saved)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                        .as_bytes(),
+                )?;
             }
         }
         TransferRecord::NativePage {
@@ -235,7 +329,10 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             kind,
             key,
             payload,
-        } => tx.put(&format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())), payload.as_bytes())?,
+        } => tx.put(
+            &format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())),
+            payload.as_bytes(),
+        )?,
         TransferRecord::NativeMetadata { key, value, .. } => tx.put(key, value.as_bytes())?,
         _ => return Err(StorageError::InvalidArguments),
     }

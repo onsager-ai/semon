@@ -100,7 +100,11 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             key,
             payload,
         } => {
-            if path.is_empty() || backing.as_ref().is_some_and(|v| v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit())) {
+            if path.is_empty()
+                || backing
+                    .as_ref()
+                    .is_some_and(|v| v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
                 return Err(bad());
             }
             match kind {

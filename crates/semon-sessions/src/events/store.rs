@@ -6638,7 +6638,10 @@ mod tests {
             &serde_json::to_vec(&(&paths, true)).unwrap(),
         );
         journal.discover(&operation, &paths, true).unwrap();
-        assert_eq!(journal.backfill_state().unwrap().as_deref(), Some("draining"));
+        assert_eq!(
+            journal.backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
         db.execute_batch("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         db.execute(
             "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key=?1",
