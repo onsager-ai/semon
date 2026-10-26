@@ -41,7 +41,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "catalog_proofs",
         columns: "generation bytea,path_digest bytea,source_path bytea,page_generation bytea,usage_generation bigint,usage_ready boolean",
-        key: "generation,path_digest",
+        key: "generation,path_digest,page_generation",
     },
     Table {
         name: "catalog_changes",

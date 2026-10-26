@@ -125,6 +125,9 @@ fn history(
         };
         after = Some(last.get(0));
         let digests = page.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
+        // The leased successor owns the Native prefixes of its linked history,
+        // even when a newer Current prefix has the same physical source path.
+        tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT DISTINCT p.namespace,$2,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_sources s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest JOIN semon_pg_native_catalog_proofs p ON p.namespace_digest=s.namespace_digest AND p.namespace=s.namespace AND p.generation=s.generation AND p.path_digest=s.path_digest AND p.source_path=s.source_path WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$3 AND o.key_digest=ANY($4::bytea[]) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &previous.as_bytes(), &digests]).map_err(sqlstate::error)?;
         retained_search(tx, generation, previous, &digests)?;
     }
 }
