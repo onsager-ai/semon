@@ -552,7 +552,7 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
     // The selected edge names an original publication and exact Native
     // ledger. Bind only backing generations actually carried above; this
     // grants neither a publication operation nor an ordinary reader lease.
-    let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,namespace,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
+    let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
     if changed == 0 {
         let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_selected_generations s ON s.namespace_digest=p.namespace_digest AND s.namespace=p.namespace AND s.publication=p.generation JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5)", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
         if !exists {
@@ -565,6 +565,7 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::transfer::reported::tests::selected_receipts::{originals, selected_receipts};
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
 
     #[test]
@@ -620,7 +621,15 @@ mod tests {
         let (options, _) = seed_catalog(&source, &root);
         let expected =
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
-        let (pool, _) = super::super::super::tests::fixture(|_| {});
+        // The supported SQLite proof contract predates the optional physical
+        // source-ID hint. Its original ledger/header/root remain authoritative.
+        let host = originals(&source, &options);
+        let original_selected = selected_receipts(&source, &options, &host);
+        // Capturing the SQLite source performs no PG work. Discard an idle
+        // fixture connection before the server's ten-second idle-session cap.
+        let (pool, _) = super::super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
         let control = PgCancellation::default();
         let config = StoreConfig {
             backend: crate::storage::StoreBackend::Postgres {
@@ -796,6 +805,11 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        assert_eq!(
+            selected_receipts(&reverse, &options, &host),
+            original_selected,
+            "formal current/retained reader must use exact original receipts after reverse with Raw absent"
+        );
         assert_eq!(
             crate::storage::transfer::reported::tests::cache(&reverse)
                 .session_description(&expected[0].key, 1, "transfer-inputs")

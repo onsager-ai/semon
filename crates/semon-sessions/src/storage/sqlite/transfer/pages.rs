@@ -133,7 +133,7 @@ pub(super) fn capture(
             u32,
             bool,
         ) = if state.native_backing.is_some() {
-            let generation = metadata(
+            let original = metadata(
                 tx,
                 &format!(
                     "{}source",
@@ -143,10 +143,23 @@ pub(super) fn capture(
                         state.native_backing.as_deref()
                     )
                 ),
-            )?
-            .ok_or(StorageError::ScopeChanged)?
-            .parse::<i64>()
-            .map_err(|_| StorageError::ScopeChanged)?;
+            )?;
+            let generation = match original {
+                Some(original) => original
+                    .parse::<i64>()
+                    .map_err(|_| StorageError::ScopeChanged)?,
+                None => {
+                    // Existing qualified SQLite prefixes bind their ledger and
+                    // chunk root, not a historical adapter-local Usage row ID.
+                    // Translate that physical address without inventing usage
+                    // authority: retained usage_ready stays false. The target
+                    // page ID additionally binds the path and original header.
+                    let digest = Sha256::digest(chunks_header.as_bytes());
+                    let mut address = [0; 8];
+                    address.copy_from_slice(&digest[..8]);
+                    (u64::from_be_bytes(address) & i64::MAX as u64).max(1) as i64
+                }
+            };
             (
                 generation,
                 header.ledger.clone(),
@@ -285,16 +298,7 @@ pub(super) fn capture(
                     ),
                 )?
                 .ok_or(StorageError::ScopeChanged)?;
-                let original = metadata(
-                    tx,
-                    &format!(
-                        "{}source",
-                        backing_prefix(&path, NativePageKind::Chunks, Some(&next))
-                    ),
-                )?
-                .ok_or(StorageError::ScopeChanged)?;
-                let current: i64 = tx.0.query_row("SELECT source_id FROM native_usage_current WHERE namespace=?1 AND source_path=?2",params![tx.1,path],|r|r.get(0)).map_err(failed)?;
-                if retained != current_header || original != current.to_string() {
+                if retained != current_header {
                     return Err(StorageError::ScopeChanged);
                 }
                 state.native_backing = Some(next);
