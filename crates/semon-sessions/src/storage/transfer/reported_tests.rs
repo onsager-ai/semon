@@ -531,14 +531,38 @@ fn current_transfer246_occupied_description_refused_before_native_pages_commit()
     let mut writer = cache(&target);
     writer.save_session_description("existing", 1, "inputs", "owned destination");
     writer.publish_session_descriptions();
-    assert_eq!(writer.session_description("existing", 1, "inputs").as_deref(), Some("owned destination"));
+    assert_eq!(
+        writer
+            .session_description("existing", 1, "inputs")
+            .as_deref(),
+        Some("owned destination")
+    );
     drop(writer);
     let manifest = stage(&source, &target, &[122; 32]);
-    assert_eq!(target.transfer_inbox().apply_page(&manifest, 1), Err(StorageError::Conflict));
-    let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
-    assert_eq!(crate::events::store::read_session_description(&db, "existing", 1, "inputs").unwrap().as_deref(), Some("owned destination"));
-    assert_eq!(db.query_row("SELECT count(*) FROM main.files WHERE namespace=?1", [target.namespace.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        target.transfer_inbox().apply_page(&manifest, 1),
+        Err(StorageError::Conflict)
+    );
+    let owner =
+        crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
+    assert_eq!(
+        crate::events::store::read_session_description(&db, "existing", 1, "inputs")
+            .unwrap()
+            .as_deref(),
+        Some("owned destination")
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM main.files WHERE namespace=?1",
+            [target.namespace.as_str()],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
