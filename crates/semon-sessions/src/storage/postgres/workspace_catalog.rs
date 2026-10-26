@@ -1,6 +1,11 @@
 //! One bounded workspace selection over explicitly admitted namespaces.
 use super::*;
-use crate::{OverviewSource, catalog::Request, model::summary::CatalogRow, storage::{StoreBackend, StoreConfig, StorageError}};
+use crate::{
+    OverviewSource,
+    catalog::Request,
+    model::summary::CatalogRow,
+    storage::{StorageError, StoreBackend, StoreConfig},
+};
 use std::sync::Arc;
 
 pub(crate) struct Page {
@@ -11,29 +16,61 @@ pub(crate) struct Page {
 }
 
 pub(crate) fn read(
-    sources: &[&OverviewSource], request: &Request, after: Option<(i64, &str, &str)>,
+    sources: &[&OverviewSource],
+    request: &Request,
+    after: Option<(i64, &str, &str)>,
 ) -> Result<Option<Page>, StorageError> {
-    let configs = sources.iter().map(|source| source.options.source.config(&source.options.cache)).collect::<Result<Vec<_>, _>>()?;
-    if !configs.iter().any(|config| matches!(config.backend, StoreBackend::Postgres { .. })) {
+    let configs = sources
+        .iter()
+        .map(|source| source.options.source.config(&source.options.cache))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !configs
+        .iter()
+        .any(|config| matches!(config.backend, StoreBackend::Postgres { .. }))
+    {
         return Ok(None);
     }
-    let Some(StoreConfig { backend: StoreBackend::Postgres { pool, control }, .. }) = configs.first() else {
+    let Some(StoreConfig {
+        backend: StoreBackend::Postgres { pool, control },
+        ..
+    }) = configs.first()
+    else {
         return Err(StorageError::MultiSourceUnqualified);
     };
     let mut bindings = Vec::new();
     let mut generations = Vec::new();
     for config in &configs {
-        let StoreBackend::Postgres { pool: other, control: source_control } = &config.backend else { return Err(StorageError::MultiSourceUnqualified); };
+        let StoreBackend::Postgres {
+            pool: other,
+            control: source_control,
+        } = &config.backend
+        else {
+            return Err(StorageError::MultiSourceUnqualified);
+        };
         if !Arc::ptr_eq(&pool.inner, &other.inner) {
             return Err(StorageError::MultiSourceUnqualified);
         }
-        let bound = other.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), source_control)?;
+        let bound = other.bind_source(
+            &config.namespace,
+            config.expected_stream_epoch.as_deref(),
+            source_control,
+        )?;
         bindings.push(bound.source_binding.ok_or(StorageError::ScopeChanged)?);
         generations.push(super::configured_generation(config, other, source_control)?);
     }
-    let names = configs.iter().map(|config| config.namespace.as_str().as_bytes().to_vec()).collect::<Vec<_>>();
-    let machines = sources.iter().map(|source| source.key.as_bytes().to_vec()).collect::<Vec<_>>();
-    let scope = configs.iter().map(|config| super::namespace_context(&config.namespace)).collect::<Vec<_>>().join(",");
+    let names = configs
+        .iter()
+        .map(|config| config.namespace.as_str().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let machines = sources
+        .iter()
+        .map(|source| source.key.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let scope = configs
+        .iter()
+        .map(|config| super::namespace_context(&config.namespace))
+        .collect::<Vec<_>>()
+        .join(",");
     let rows = pool.transaction(&configs[0].namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
         tx.driver.query_one("SELECT set_config('semon.read_scope',$1,true)", &[&scope]).map_err(sqlstate::error)?;
         // Every namespace is validated in this same repeatable-read snapshot;
@@ -70,8 +107,17 @@ pub(crate) fn read(
         }).collect::<Result<Vec<_>, _>>()
     })?;
     let scanned = rows.len();
-    let more = if request.q.is_some() { scanned == crate::catalog_search::MAX_CANDIDATES } else { scanned > request.limit };
-    Ok(Some(Page { generations, rows, scanned, more }))
+    let more = if request.q.is_some() {
+        scanned == crate::catalog_search::MAX_CANDIDATES
+    } else {
+        scanned > request.limit
+    };
+    Ok(Some(Page {
+        generations,
+        rows,
+        scanned,
+        more,
+    }))
 }
 
 #[cfg(test)]
@@ -86,10 +132,19 @@ mod tests {
         let generation = "a".repeat(64);
         let mut sources = Vec::new();
         let mut configs = Vec::new();
-        for (name, machine) in [("workspace-a", "machine-z"), ("workspace-b", "machine-a"), ("workspace-hidden", "machine-hidden")] {
+        for (name, machine) in [
+            ("workspace-a", "machine-z"),
+            ("workspace-b", "machine-a"),
+            ("workspace-hidden", "machine-hidden"),
+        ] {
             let namespace = LogicalSourceNamespace::new(name.to_owned()).unwrap();
             let source = HostSource::new(namespace.clone(), "e".repeat(64)).unwrap();
-            let config = source.store_config(StoreBackend::Postgres { pool: pool.clone(), control: control.clone() }).unwrap();
+            let config = source
+                .store_config(StoreBackend::Postgres {
+                    pool: pool.clone(),
+                    control: control.clone(),
+                })
+                .unwrap();
             config.create_native_store().unwrap();
             let mut options = crate::Options::default();
             options.source = source.with_store(config.clone()).unwrap();
@@ -101,8 +156,12 @@ mod tests {
                     let row = CatalogRow {
                         overview:None,trace:None,query:None,lifecycle:Default::default(),
                         key:key.into(),name:format!("Écho {name}"),harness:"claude".into(),kind:"session".into(),presentation_kind:None,
-                        native_ids:vec![],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
-                        start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![],
+                        native_ids:vec![key.into()],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
+                        start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![crate::model::summary::CatalogSource {
+                            path: options.claude_home.join(format!("projects/workspace/{key}.jsonl")),
+                            native_id: key.into(), dev: 0, ino: 0, size: 0, modified_ns: 0,
+                            changed_ns: None, offset: 0, prefix_sha256: [0;32], tail_sha256: [0;32], native_role: None,
+                        }],
                     };
                     let metadata = serde_json::to_vec(&row).unwrap();
                     tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude',$7,$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes(),&repo.as_bytes()]).map_err(sqlstate::error)?;
@@ -111,34 +170,90 @@ mod tests {
                 tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256('raw-fixture'::bytea),'raw-fixture','page',1,false)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(())
             }).unwrap();
-            sources.push(OverviewSource { key:machine.into(),label:name.into(),options,up:true });
+            sources.push(OverviewSource {
+                key: machine.into(),
+                label: name.into(),
+                options,
+                up: true,
+            });
             configs.push(config);
         }
-        let authorized = vec![&sources[0],&sources[1]];
+        let authorized = vec![&sources[0], &sources[1]];
         let request = Request::parse("limit=1&harness=claude&repo=repo&model=m").unwrap();
-        let first = read(&authorized,&request,None).unwrap().unwrap();
-        assert_eq!(first.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(1,"tie"),(0,"tie")]);
-        let second = read(&authorized,&request,Some((100,"tie","machine-a"))).unwrap().unwrap();
-        assert_eq!(second.rows.iter().map(|(index,row)|(*index,row.key.as_str())).collect::<Vec<_>>(),vec![(0,"tie")]);
-        let no_repo = read(&authorized,&Request::parse("no_repo=1&limit=10").unwrap(),None).unwrap().unwrap();
-        assert_eq!(no_repo.rows.len(),2);
-        assert!(no_repo.rows.iter().all(|(_,row)| row.key == "older" && row.repo.is_none()));
-        let first = crate::session_catalog_union(&sources[..2], "workspace-machines", "limit=1&harness=claude&repo=repo&model=m");
-        assert_eq!(first.status,200);
+        let first = read(&authorized, &request, None).unwrap().unwrap();
+        assert_eq!(
+            first
+                .rows
+                .iter()
+                .map(|(index, row)| (*index, row.key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "tie"), (0, "tie")]
+        );
+        let second = read(&authorized, &request, Some((100, "tie", "machine-a")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|(index, row)| (*index, row.key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "tie")]
+        );
+        let no_repo = read(
+            &authorized,
+            &Request::parse("no_repo=1&limit=10").unwrap(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(no_repo.rows.len(), 2);
+        assert!(
+            no_repo
+                .rows
+                .iter()
+                .all(|(_, row)| row.key == "older" && row.repo.is_none())
+        );
+        let first = crate::session_catalog_union(
+            &sources[..2],
+            "workspace-machines",
+            "limit=1&harness=claude&repo=repo&model=m",
+        );
+        assert_eq!(first.status, 200);
         let first: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
-        assert_eq!(first["items"][0]["machine"]["key"],"machine-a");
+        assert_eq!(first["items"][0]["machine"]["key"], "machine-a");
         let cursor = first["next_cursor"].as_str().unwrap();
-        let second = crate::session_catalog_union(&sources[..2], "workspace-machines", &format!("limit=1&harness=claude&repo=repo&model=m&cursor={}",crate::viewer::percent_encode(cursor)));
-        assert_eq!(second.status,200);
+        let second = crate::session_catalog_union(
+            &sources[..2],
+            "workspace-machines",
+            &format!(
+                "limit=1&harness=claude&repo=repo&model=m&cursor={}",
+                crate::viewer::percent_encode(cursor)
+            ),
+        );
+        assert_eq!(second.status, 200);
         let second: serde_json::Value = serde_json::from_slice(&second.body).unwrap();
-        assert_eq!(second["items"][0]["machine"]["key"],"machine-z");
+        assert_eq!(second["items"][0]["machine"]["key"], "machine-z");
         assert!(second["next_cursor"].is_null());
-        let no_repo = crate::session_catalog_union(&sources[..2], "workspace-machines", "no_repo=1&limit=10");
-        assert_eq!(no_repo.status,200);
+        let no_repo =
+            crate::session_catalog_union(&sources[..2], "workspace-machines", "no_repo=1&limit=10");
+        assert_eq!(no_repo.status, 200);
         let no_repo: serde_json::Value = serde_json::from_slice(&no_repo.body).unwrap();
-        assert_eq!(no_repo["items"].as_array().unwrap().len(),2);
-        assert!(no_repo["items"].as_array().unwrap().iter().all(|row| row["key"] == "older" && row["repo"].is_null()));
-        let scope = authorized.iter().map(|source| super::super::namespace_context(&source.options.source.namespace().unwrap())).collect::<Vec<_>>().join(",");
+        assert_eq!(no_repo["items"].as_array().unwrap().len(), 2);
+        assert!(
+            no_repo["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["key"] == "older" && row["repo"].is_null())
+        );
+        let scope = authorized
+            .iter()
+            .map(|source| {
+                super::super::namespace_context(&source.options.source.namespace().unwrap())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         pool.transaction(&configs[0].namespace,txn::TxnKind::Write,&control,|tx| {
             tx.driver.query_one("SELECT set_config('semon.read_scope',$1,true)", &[&scope]).map_err(sqlstate::error)?;
             let rows = tx.driver.query("SELECT namespace FROM semon_pg_native_meta WHERE key='workspace-probe' ORDER BY namespace", &[]).map_err(sqlstate::error)?;
@@ -157,6 +272,9 @@ mod tests {
         }).is_err());
         let admission = configs[1].admit_namespace().unwrap();
         configs[1].unenroll_namespace(&admission).unwrap();
-        assert_eq!(read(&authorized,&request,None).err(),Some(StorageError::NamespaceUnadmitted));
+        assert_eq!(
+            read(&authorized, &request, None).err(),
+            Some(StorageError::NamespaceUnadmitted)
+        );
     }
 }
