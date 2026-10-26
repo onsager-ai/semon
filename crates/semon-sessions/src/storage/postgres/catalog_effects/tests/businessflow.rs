@@ -139,6 +139,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         std::collections::BTreeSet::from(["claude", "codex", "copilot"])
     );
     sqlite.publish_partial_catalog_fenced(&expected).unwrap();
+    // Selected body/field reads consume the fully published ordinary Query
+    // profile, including its completion and reader binding, not a partial head.
+    crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+        vec![("vertical140-oracle".into(), sqlite_options.clone())],
+    )))
+    .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+    .expect("SQLite fully published body/field oracle");
     let expected_bodies = expected
         .rows
         .iter()
