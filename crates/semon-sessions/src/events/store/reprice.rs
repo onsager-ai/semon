@@ -1835,10 +1835,7 @@ mod tests {
             db.execute_batch(copied_usage_schema()).unwrap();
             db.execute_batch(tree_state::schema(true)).unwrap();
             bind_fixture(&db, "a");
-            assert_eq!(
-                copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                "scoped"
-            );
+            assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
             {
                 let tx = db.transaction().unwrap();
                 tx.execute_batch(
@@ -1846,15 +1843,9 @@ mod tests {
                 )
                 .unwrap();
                 tx.execute_batch(copied_usage_schema()).unwrap();
-                assert_eq!(
-                    copied_usage_sql(&tx, "legacy", "scoped").unwrap(),
-                    "scoped"
-                );
+                assert_eq!(copied_usage_sql(&tx, "legacy", "scoped").unwrap(), "scoped");
                 tx.rollback().unwrap();
-                assert_eq!(
-                    copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                    "scoped"
-                );
+                assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
             }
             // Invalidate an already cached decision with a partial family DDL.
             db.execute_batch("DROP TABLE codex_usage; CREATE TABLE codex_usage(file_id INTEGER NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(file_id,seq)) STRICT, WITHOUT ROWID;").unwrap();

@@ -144,7 +144,8 @@ impl IndexStore for ConfiguredIndex {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.native.publish_catalog(publication, expected_generation, None, false)
+        self.native
+            .publish_catalog(publication, expected_generation, None, false)
     }
     fn publish_partial_catalog(
         &mut self,
@@ -152,7 +153,8 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.native.publish_catalog(publication, expected_generation, Some(claims), false)
+        self.native
+            .publish_catalog(publication, expected_generation, Some(claims), false)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
@@ -160,9 +162,15 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        self.native.publish_catalog(publication, expected_generation, Some(claims), true).map(|result| {
-            if result.0 == Outcome::Conflict { None } else { Some(result) }
-        })
+        self.native
+            .publish_catalog(publication, expected_generation, Some(claims), true)
+            .map(|result| {
+                if result.0 == Outcome::Conflict {
+                    None
+                } else {
+                    Some(result)
+                }
+            })
     }
     fn resolve_catalog_input(
         &mut self,

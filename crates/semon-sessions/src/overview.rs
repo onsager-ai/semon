@@ -206,8 +206,10 @@ pub(crate) fn publish_current_owned(
                 measurements.record("trace_update", started, 1);
             }
             let started = measurements.start();
-            tx.prepare_cached("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1")?
-                .execute([format!("overview_needed:{}", row.key)])?;
+            tx.prepare_cached(
+                "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+            )?
+            .execute([format!("overview_needed:{}", row.key)])?;
             measurements.record("cleanup", started, 1);
         } else {
             let started = measurements.start();

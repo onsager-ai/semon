@@ -1010,7 +1010,13 @@ pub(crate) struct Writer {
 impl Writer {
     pub(crate) fn catalog_generation(&self) -> Result<Option<String>, StoreError> {
         let db = self.snapshot().map_err(StoreError::Configured)?;
-        db.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'", [self.config.namespace.as_str()], |r|r.get(0)).optional().map_err(failure)
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+            [self.config.namespace.as_str()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(failure)
     }
 
     pub(crate) fn publish_catalog(
@@ -1020,18 +1026,39 @@ impl Writer {
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        let owner = self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?;
+        let owner = self.owner.as_ref().ok_or(StoreError::Configured(
+            StorageError::NamespaceUpgradePending,
+        ))?;
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
-        connection.create_scalar_function("semon_semantic_publisher", 0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_|Ok(1i64)).map_err(failure)?;
+        connection
+            .create_scalar_function(
+                "semon_semantic_publisher",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1i64),
+            )
+            .map_err(failure)?;
         let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
-            connection, discovery, path: database.clone(), selected_runs: None, semantic_rejection: None,
-            #[cfg(test)] traversal_observation: None,
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
         };
-        store.publish_catalog_owned(publication, expected, claims, closed, None, super::CatalogWriter::Auto, Some(owner))
+        store.publish_catalog_owned(
+            publication,
+            expected,
+            claims,
+            closed,
+            None,
+            super::CatalogWriter::Auto,
+            Some(owner),
+        )
     }
 
     pub(crate) fn relocate_codex(
@@ -3342,8 +3369,45 @@ mod tests {
         panic!("real model did not reach publication")
     }
 
+    fn ordinary_catalog_publication_lifecycle() {
+        let f = Fixture::current("ordinary-publication");
+        let source = crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
+        let options = crate::Options {
+            source: source.clone(), cache: f.root.join("index.json"), codex_home: f.root.clone(),
+            claude_home: f.root.join("claude"), claude_json: f.root.join("claude.json"),
+            copilot_home: f.root.join("copilot"), proc_root: f.root.join("proc"),
+            all: true, ..Default::default()
+        };
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        let input = crate::Input { root: crate::InputRoot::Codex, path: f.raw.file_name().unwrap().to_str().unwrap().to_owned() };
+        let mut cache = EventCache::open_scoped(&options.cache, &source).unwrap();
+        let prepared = crate::model::prepare_sources(&options, &mut cache, &[input.clone()], 1_790_000_000_000).unwrap();
+        assert!(!prepared.rows.is_empty());
+        let native = cache.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap();
+        let publication = crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) };
+        let (outcome, partial) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert_eq!(outcome, Outcome::Written);
+        let full = cache.publish_catalog_projection_fenced(&publication, partial.as_deref()).unwrap().unwrap();
+        assert_eq!(cache.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap(), native);
+        let claims = cache.catalog_claims(&[f.raw.to_string_lossy().into_owned()]).unwrap();
+        let closed = cache.store.as_mut().unwrap().publish_closed_catalog_fenced(&publication, Some(&full), &claims).unwrap().expect("ordinary closed publication");
+        assert_eq!(closed.0, Outcome::Written);
+        // A stale publisher remains a conflict, with the admitted native ledger intact.
+        assert_eq!(cache.store.as_mut().unwrap().publish_partial_catalog(&publication, None, &claims).unwrap().0, Outcome::Conflict);
+        drop(cache);
+        let restored = EventCache::open_scoped(&options.cache, &source).unwrap();
+        assert_eq!(restored.session_catalog_generation(), closed.1);
+        assert_eq!(restored.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap(), native);
+        let db = connection(&f.config).unwrap();
+        let current: i64 = db.query_row("SELECT count(*) FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current'", [f.config.namespace.as_str()], |r|r.get(0)).unwrap();
+        assert_eq!(current, prepared.rows.len() as i64);
+        assert!(prepared.rows.iter().any(|row|row.overview.is_some()));
+    }
+
     #[test]
     fn default_current_source_admission_preserves_restart_replay_and_isolation() {
+        ordinary_catalog_publication_lifecycle();
         use crate::storage::native_events::NativeEventStore;
         let f = Fixture::current("source-a");
         let source =
@@ -7299,8 +7363,17 @@ mod tests {
             // not native transcript content. Derive that bit independently from
             // the qualified baseline; all native slots remain reference values.
             for projection in &mut expected.transcripts {
-                projection.repair = expected.rows.iter().find(|row| row.key == projection.key)
-                    .and_then(|row| cache.session_slots(row, prepared.base_generation.as_deref(), projection.slots.len()))
+                projection.repair = expected
+                    .rows
+                    .iter()
+                    .find(|row| row.key == projection.key)
+                    .and_then(|row| {
+                        cache.session_slots(
+                            row,
+                            prepared.base_generation.as_deref(),
+                            projection.slots.len(),
+                        )
+                    })
                     .is_none();
             }
             assert_eq!(

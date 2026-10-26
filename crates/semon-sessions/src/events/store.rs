@@ -3335,7 +3335,15 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.publish_catalog_owned(publication, expected_generation, claims, preserve_complete, semantic, writer, None)
+        self.publish_catalog_owned(
+            publication,
+            expected_generation,
+            claims,
+            preserve_complete,
+            semantic,
+            writer,
+            None,
+        )
     }
 
     fn publish_catalog_owned(
@@ -3395,7 +3403,10 @@ impl SqliteStore {
             .map(json)
             .collect::<Result<_, _>>()
             .map_err(failure)?;
-        let batch_bytes = owner.is_none().then(|| catalog_batch_bytes(rows, &metadata, writer)).flatten();
+        let batch_bytes = owner
+            .is_none()
+            .then(|| catalog_batch_bytes(rows, &metadata, writer))
+            .flatten();
         self.connection
             .busy_timeout(Duration::ZERO)
             .map_err(failure)?;
@@ -3405,20 +3416,32 @@ impl SqliteStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            let admitted = owner.cloned().map(crate::storage::sqlite::semantic::AdmittedSource::native);
+            let admitted = owner
+                .cloned()
+                .map(crate::storage::sqlite::semantic::AdmittedSource::native);
             if let Some(owner) = owner {
-                owner.validate_ready(&transaction).map_err(StoreError::Configured)?;
+                owner
+                    .validate_ready(&transaction)
+                    .map_err(StoreError::Configured)?;
                 crate::storage::NativeReaderBinding::Semantic(owner.clone())
-                    .validate(&transaction, &owner.config().namespace).map_err(StoreError::Configured)?;
+                    .validate(&transaction, &owner.config().namespace)
+                    .map_err(StoreError::Configured)?;
             }
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
             use crate::storage::catalog::CatalogPublicationHead;
-            let publication_head: Box<dyn CatalogPublicationHead> = if let Some(source) = &admitted {
-                Box::new(crate::storage::sqlite::publication::admitted_head(&transaction, source).map_err(publication_storage_failure)?)
+            let publication_head: Box<dyn CatalogPublicationHead> = if let Some(source) = &admitted
+            {
+                Box::new(
+                    crate::storage::sqlite::publication::admitted_head(&transaction, source)
+                        .map_err(publication_storage_failure)?,
+                )
             } else {
-                Box::new(crate::storage::sqlite::publication::transitional_head(&transaction).map_err(publication_storage_failure)?)
+                Box::new(
+                    crate::storage::sqlite::publication::transitional_head(&transaction)
+                        .map_err(publication_storage_failure)?,
+                )
             };
             let previous = publication_head
                 .base_generation()
@@ -3534,8 +3557,11 @@ impl SqliteStore {
             }
             stage("fences", &transaction);
             let history = if let Some(source) = &admitted {
-                crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, source).map_err(StoreError::Configured)?
-            } else { crate::storage::sqlite::history::OriginalHistory::unbound(&transaction) };
+                crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, source)
+                    .map_err(StoreError::Configured)?
+            } else {
+                crate::storage::sqlite::history::OriginalHistory::unbound(&transaction)
+            };
             #[cfg(test)]
             let preserved = if matches!(writer, CatalogWriter::OriginalPorts) {
                 crate::history_projection::legacy_reference::preserve_replacements(
@@ -3559,10 +3585,20 @@ impl SqliteStore {
                 crate::history_projection::publish_original(&transaction, publication)
                     .map_err(failure)?;
             } else {
-                crate::storage::catalog::publish_history_rows(&history, publication.rows, publication.transcripts).map_err(failure)?;
+                crate::storage::catalog::publish_history_rows(
+                    &history,
+                    publication.rows,
+                    publication.transcripts,
+                )
+                .map_err(failure)?;
             }
             #[cfg(not(test))]
-            crate::storage::catalog::publish_history_rows(&history, publication.rows, publication.transcripts).map_err(failure)?;
+            crate::storage::catalog::publish_history_rows(
+                &history,
+                publication.rows,
+                publication.transcripts,
+            )
+            .map_err(failure)?;
             stage("history", &transaction);
             let mut metadata_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
@@ -3625,13 +3661,27 @@ impl SqliteStore {
                         None
                     };
                     let current_effects = if let Some(source) = &admitted {
-                        crate::storage::sqlite::publication::CurrentWriter::admitted(&transaction, source).map_err(StoreError::Configured)?
-                    } else { crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction) };
+                        crate::storage::sqlite::publication::CurrentWriter::admitted(
+                            &transaction,
+                            source,
+                        )
+                        .map_err(StoreError::Configured)?
+                    } else {
+                        crate::storage::sqlite::publication::CurrentWriter::unbound(&transaction)
+                    };
                     #[cfg(test)]
-                    let mut remove_sources = if matches!(writer, CatalogWriter::OriginalPorts) { Some(transaction
-                        .prepare("UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE session_key=?1").map_err(failure)?) } else { None };
+                    let mut remove_sources = if matches!(writer, CatalogWriter::OriginalPorts) {
+                        Some(transaction
+                        .prepare("UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE session_key=?1").map_err(failure)?)
+                    } else {
+                        None
+                    };
                     #[cfg(test)]
-                    let mut put_source = if matches!(writer, CatalogWriter::OriginalPorts) { Some(transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?) } else { None };
+                    let mut put_source = if matches!(writer, CatalogWriter::OriginalPorts) {
+                        Some(transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?)
+                    } else {
+                        None
+                    };
                     metadata_measurements.record("statements", statements_started, 1);
                     let bulk_changed = if batch_bytes.is_some() {
                         if producer.is_some() {
@@ -3656,8 +3706,13 @@ impl SqliteStore {
                                 )
                                 .map_err(failure)?;
                             } else {
-                                crate::overview::publish_current_owned(&transaction, row, &mut overview_measurements, owner)
-                                    .map_err(failure)?;
+                                crate::overview::publish_current_owned(
+                                    &transaction,
+                                    row,
+                                    &mut overview_measurements,
+                                    owner,
+                                )
+                                .map_err(failure)?;
                             }
                             metadata_measurements.record("overview", started, 1);
                             let started = metadata_measurements.start();
@@ -3713,8 +3768,13 @@ impl SqliteStore {
                                 )
                                 .map_err(failure)?;
                             } else {
-                                crate::overview::publish_current_owned(&transaction, row, &mut overview_measurements, owner)
-                                    .map_err(failure)?;
+                                crate::overview::publish_current_owned(
+                                    &transaction,
+                                    row,
+                                    &mut overview_measurements,
+                                    owner,
+                                )
+                                .map_err(failure)?;
                             }
                             metadata_measurements.record("overview", started, 1);
                             if let Some(sample) = sample.as_mut() {
@@ -3792,7 +3852,11 @@ impl SqliteStore {
                             let started = metadata_measurements.start();
                             #[cfg(test)]
                             if matches!(writer, CatalogWriter::OriginalPorts) {
-                                remove_sources.as_mut().expect("reference writer").execute([&row.key]).map_err(failure)?;
+                                remove_sources
+                                    .as_mut()
+                                    .expect("reference writer")
+                                    .execute([&row.key])
+                                    .map_err(failure)?;
                                 metadata_measurements.record("source_retirement", started, 1);
                                 if let Some(sample) = sample.as_mut() {
                                     sample.stage("source_retirement", &transaction);
@@ -3834,7 +3898,9 @@ impl SqliteStore {
                                     }
                                     metadata_measurements.record("native_dependencies", started, 1);
                                     let started = metadata_measurements.start();
-                                    put_source.as_mut().expect("reference writer")
+                                    put_source
+                                        .as_mut()
+                                        .expect("reference writer")
                                         .execute(params![
                                             row.key,
                                             row.harness,
@@ -3905,69 +3971,101 @@ impl SqliteStore {
             if let Some(source) = &admitted {
                 // Physical effects are namespace-owned; metadata tokenization,
                 // retained recipes and posting counts use the existing producer.
-                let search = crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source).map_err(StoreError::Configured)?;
+                let search =
+                    crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source)
+                        .map_err(StoreError::Configured)?;
                 let mut encoded = Vec::new();
                 if claims.is_none() {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
-                    let mut statement = transaction.prepare("SELECT metadata FROM session_catalog ORDER BY session_key").map_err(failure)?;
-                    encoded = statement.query_map([], |r|r.get::<_, String>(0)).map_err(failure)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failure)?;
+                    let mut statement = transaction
+                        .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                        .map_err(failure)?;
+                    encoded = statement
+                        .query_map([], |r| r.get::<_, String>(0))
+                        .map_err(failure)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(failure)?;
                 } else {
                     let mut keys = affected.clone();
-                    keys.extend(rows.iter().map(|row|row.key.clone()));
+                    keys.extend(rows.iter().map(|row| row.key.clone()));
                     for key in keys {
-                        if let Some(value) = transaction.query_row("SELECT metadata FROM session_catalog WHERE session_key=?1", [&key], |r|r.get::<_, String>(0)).optional().map_err(failure)? { encoded.push(value); }
+                        if let Some(value) = transaction
+                            .query_row(
+                                "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                                [&key],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(failure)?
+                        {
+                            encoded.push(value);
+                        }
                     }
                 }
-                let refreshed = encoded.iter().map(|value|serde_json::from_str::<crate::model::summary::CatalogRow>(value).map_err(|_|failure(rusqlite::Error::InvalidQuery))).collect::<Result<Vec<_>,_>>()?;
+                let refreshed = encoded
+                    .iter()
+                    .map(|value| {
+                        serde_json::from_str::<crate::model::summary::CatalogRow>(value)
+                            .map_err(|_| failure(rusqlite::Error::InvalidQuery))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let refs = refreshed.iter().collect::<Vec<_>>();
-                crate::catalog_search::publish_current_rows_with_store(&transaction, &refs, &search).map_err(failure)?;
-                transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;
-            } else {
-            #[cfg(test)]
-            if let CatalogWriter::Traversal { owners, measured } = writer {
-                crate::catalog_search::publish_current_rows_probe(
+                crate::catalog_search::publish_current_rows_with_store(
                     &transaction,
-                    &search_rows,
-                    owners,
-                    measured.then_some(&mut search_observation),
+                    &refs,
+                    &search,
                 )
                 .map_err(failure)?;
-            } else if matches!(writer, CatalogWriter::OriginalPorts) {
-                crate::catalog_search::publish_current_rows_original(&transaction, &search_rows)
-                    .map_err(failure)?;
+                transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;
             } else {
-                crate::catalog_search::publish_current_rows(&transaction, &search_rows)
+                #[cfg(test)]
+                if let CatalogWriter::Traversal { owners, measured } = writer {
+                    crate::catalog_search::publish_current_rows_probe(
+                        &transaction,
+                        &search_rows,
+                        owners,
+                        measured.then_some(&mut search_observation),
+                    )
                     .map_err(failure)?;
-            }
-            #[cfg(not(test))]
-            crate::catalog_search::publish_current_rows(&transaction, &search_rows)
-                .map_err(failure)?;
-            stage("search_rows", &transaction);
-            if rebuild_search {
-                crate::catalog_search::begin_backfill(&transaction).map_err(failure)?;
-                let mut statement = transaction
-                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                } else if matches!(writer, CatalogWriter::OriginalPorts) {
+                    crate::catalog_search::publish_current_rows_original(
+                        &transaction,
+                        &search_rows,
+                    )
                     .map_err(failure)?;
-                let mut encoded = statement.query([]).map_err(failure)?;
-                while let Some(value) = encoded.next().map_err(failure)? {
-                    let encoded: String = value.get(0).map_err(failure)?;
-                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
-                        .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                    crate::catalog_search::backfill_catalog_row(&transaction, &row)
+                } else {
+                    crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                         .map_err(failure)?;
                 }
-            }
-            if rebuild_search {
-                crate::catalog_search::finish_backfill(&transaction).map_err(failure)?;
-                transaction.execute(configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1')").map_err(failure)?,[]).map_err(failure)?;
-            }
-            if claims.is_none() {
-                crate::catalog_search::retire_missing(&transaction).map_err(failure)?;
-            } else {
-                for key in &affected {
-                    crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
+                #[cfg(not(test))]
+                crate::catalog_search::publish_current_rows(&transaction, &search_rows)
+                    .map_err(failure)?;
+                stage("search_rows", &transaction);
+                if rebuild_search {
+                    crate::catalog_search::begin_backfill(&transaction).map_err(failure)?;
+                    let mut statement = transaction
+                        .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                        .map_err(failure)?;
+                    let mut encoded = statement.query([]).map_err(failure)?;
+                    while let Some(value) = encoded.next().map_err(failure)? {
+                        let encoded: String = value.get(0).map_err(failure)?;
+                        let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
+                            .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                        crate::catalog_search::backfill_catalog_row(&transaction, &row)
+                            .map_err(failure)?;
+                    }
                 }
-            }
+                if rebuild_search {
+                    crate::catalog_search::finish_backfill(&transaction).map_err(failure)?;
+                    transaction.execute(configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1')").map_err(failure)?,[]).map_err(failure)?;
+                }
+                if claims.is_none() {
+                    crate::catalog_search::retire_missing(&transaction).map_err(failure)?;
+                } else {
+                    for key in &affected {
+                        crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
+                    }
+                }
             }
             stage("search", &transaction);
             let generation = {
@@ -4028,25 +4126,20 @@ impl SqliteStore {
             }
             stage("generation", &transaction);
             let slot_effects = if let Some(source) = &admitted {
-                crate::storage::sqlite::publication::SlotWriter::admitted(&transaction, source).map_err(StoreError::Configured)?
-            } else { crate::storage::sqlite::publication::SlotWriter::unbound(&transaction) };
+                crate::storage::sqlite::publication::SlotWriter::admitted(&transaction, source)
+                    .map_err(StoreError::Configured)?
+            } else {
+                crate::storage::sqlite::publication::SlotWriter::unbound(&transaction)
+            };
             if let Some(projections) = publication.transcripts {
                 #[cfg(test)]
                 if matches!(writer, CatalogWriter::OriginalPorts) {
                     original_slot_publication_reference(&transaction, rows, projections)?;
                 } else {
-                    crate::storage::catalog::publish_slot_rows(
-                        &slot_effects,
-                        rows,
-                        projections,
-                    )?;
+                    crate::storage::catalog::publish_slot_rows(&slot_effects, rows, projections)?;
                 }
                 #[cfg(not(test))]
-                crate::storage::catalog::publish_slot_rows(
-                    &slot_effects,
-                    rows,
-                    projections,
-                )?;
+                crate::storage::catalog::publish_slot_rows(&slot_effects, rows, projections)?;
                 if claims.is_none() {
                     transaction.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
                     transaction.execute("DELETE FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
