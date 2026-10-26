@@ -14,6 +14,21 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "catalog_search_documents",
+        columns: "generation bytea,scope bytea,key_digest bytea,session_key bytea,fields bytea,complete boolean",
+        key: "generation,scope,key_digest",
+    },
+    Table {
+        name: "catalog_search_memberships",
+        columns: "generation bytea,key_digest bytea,session_key bytea,gram bytea,last_ms bigint",
+        key: "generation,key_digest,gram",
+    },
+    Table {
+        name: "catalog_search_counts",
+        columns: "generation bytea,scope bytea,gram bytea,members bigint",
+        key: "generation,scope,gram",
+    },
+    Table {
         name: "catalog_trace_headers",
         columns: "generation bytea,key_digest bytea,session_key bytea,trace_generation bytea,source_generation bytea,metadata bytea",
         key: "generation,key_digest",
