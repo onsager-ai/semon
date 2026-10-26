@@ -128,7 +128,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"receipt203-send","parentUuid":"related191-agent-result","timestamp":"2026-10-01T00:00:04Z","message":{"id":"receipt203-send","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"receipt203-call","name":"SendMessage","input":{"to":"related154","message":"sanitized matched receipt203"}}]}}),
         serde_json::json!({"type":"user","sessionId":"one","uuid":"receipt203-result","parentUuid":"receipt203-send","timestamp":"2026-10-01T00:00:04Z","toolUseResult":{"success":true,"msg_id":"receipt203-message"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"receipt203-call","content":"sent","is_error":false}]}}),
     ] {
-        writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{line}").unwrap();
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&claude_parent)
+                .unwrap(),
+            "{line}"
+        )
+        .unwrap();
     }
     writeln!(fs::OpenOptions::new().append(true).open(&claude_agent).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"receipt203-peer","parentUuid":"related-answer","timestamp":"2026-10-01T00:00:05Z","origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/203.sock","name":"sanitized sender203","msg_id":"receipt203-message","body":"sanitized matched receipt203"},"message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/203.sock\" from-name=\"sanitized sender203\">sanitized matched receipt203</cross-session-message>"}})).unwrap();
@@ -142,14 +149,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"copy203-original","uuid":"copy203-send","parentUuid":"copy203-user","timestamp":"2026-10-01T00:00:01Z","message":{"id":"copy203-send","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"copy203-call","name":"SendMessage","input":{"to":"sanitized external203","message":"sanitized external203 request"}}]}}),
         serde_json::json!({"type":"user","sessionId":"copy203-original","uuid":"copy203-result","parentUuid":"copy203-send","timestamp":"2026-10-01T00:00:01Z","toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"copy203-call","content":"sent","is_error":false}]}}),
     ];
-    let original = options.claude_home.join("projects/project/copy203-original.jsonl");
-    let resumed = options.claude_home.join("projects/project/copy203-resumed.jsonl");
+    let original = options
+        .claude_home
+        .join("projects/project/copy203-original.jsonl");
+    let resumed = options
+        .claude_home
+        .join("projects/project/copy203-resumed.jsonl");
     let mut old = copied_records.to_vec();
     old.push(serde_json::json!({"type":"continued-in","continuedInSessionId":"copy203-resumed","sessionId":"copy203-original","timestamp":"2026-10-01T00:00:02Z"}));
     let mut copy = copied_records.to_vec();
     copy.push(serde_json::json!({"type":"user","sessionId":"copy203-resumed","uuid":"copy203-new","parentUuid":"copy203-result","timestamp":"2026-10-01T00:00:03Z","message":{"role":"user","content":"sanitized resumed203 input"}}));
     for (path, records) in [(original, old), (resumed, copy)] {
-        fs::write(path, records.iter().map(|record| format!("{record}\n")).collect::<String>()).unwrap();
+        fs::write(
+            path,
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
     }
     // Larger indexed history with a fixed small receiver append below.
     let padding = format!(
@@ -267,9 +285,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             (*since, list)
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let all_total = expected.rows.iter().flat_map(|row| {
-        row.query.as_ref().unwrap()["rows"].as_object().unwrap().keys().cloned()
-    }).collect::<std::collections::BTreeSet<_>>().len() as u64;
+    let all_total = expected
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.query.as_ref().unwrap()["rows"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
     assert_eq!(
         oracle_recent[&recent_windows[2]]["total"].as_u64(),
         Some(all_total)
@@ -364,8 +391,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
     let sqlite_before_current = page_keys(crate::catalog::session_catalog_page(
-        &withdraw_options, recent_machine, "limit=50",
-    )).into_iter().collect::<std::collections::BTreeSet<_>>();
+        &withdraw_options,
+        recent_machine,
+        "limit=50",
+    ))
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
     let sqlite_host = body_host(&options, &expected.rows);
     let parked = [
         (
@@ -429,8 +460,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // change when a sender disappears. Native Catalog custody is the exact
     // difference of the native Current key sets, not that Query total delta.
     assert_eq!(
-        oracle_withdrawn.iter().map(|row| row["key"].as_str().unwrap().to_owned()).collect::<std::collections::BTreeSet<_>>(),
-        sqlite_before_current.difference(&sqlite_current).cloned().collect(),
+        oracle_withdrawn
+            .iter()
+            .map(|row| row["key"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>(),
+        sqlite_before_current
+            .difference(&sqlite_current)
+            .cloned()
+            .collect(),
         "SQLite retained-only rows"
     );
     assert!(
@@ -450,26 +487,53 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     );
-    let oracle_retained_reads = oracle_withdrawn.iter().map(|row| {
-        let key = row["key"].as_str().unwrap();
-        let args = serde_json::json!({"id":key,"limit":100});
-        let body = crate::query::transcript::read(
-            &withdraw_options, key, &args, Some(&sqlite_host),
-            crate::SessionSourceReadMode::LocalThenProvider, 1790812802000,
-        ).unwrap().expect("SQLite retained body through preserved Raw custody");
-        let fields = crate::query::transcript::session(
-            &withdraw_options, key, &serde_json::json!({"id":key}), Some(&sqlite_host),
-            crate::SessionSourceReadMode::LocalThenProvider, 1790812802000,
-        ).unwrap().expect("SQLite retained fields through preserved Raw custody");
-        (key.to_owned(), serde_json::json!({"body":body,"fields":fields}))
-    }).collect::<std::collections::BTreeMap<_, _>>();
-    let oracle_retained_search = oracle_withdrawn.iter().map(|row| {
-        let key = row["key"].as_str().unwrap();
-        let query = format!("scope=retained_history&q={}&", crate::viewer::percent_encode(&key.to_lowercase()));
-        let keys = sqlite_scoped(&query, 50).iter().map(|item| item["key"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert!(keys.contains(&key.to_owned()));
-        (key.to_owned(), keys)
-    }).collect::<std::collections::BTreeMap<_, _>>();
+    let oracle_retained_reads = oracle_withdrawn
+        .iter()
+        .map(|row| {
+            let key = row["key"].as_str().unwrap();
+            let args = serde_json::json!({"id":key,"limit":100});
+            let body = crate::query::transcript::read(
+                &withdraw_options,
+                key,
+                &args,
+                Some(&sqlite_host),
+                crate::SessionSourceReadMode::LocalThenProvider,
+                1790812802000,
+            )
+            .unwrap()
+            .expect("SQLite retained body through preserved Raw custody");
+            let fields = crate::query::transcript::session(
+                &withdraw_options,
+                key,
+                &serde_json::json!({"id":key}),
+                Some(&sqlite_host),
+                crate::SessionSourceReadMode::LocalThenProvider,
+                1790812802000,
+            )
+            .unwrap()
+            .expect("SQLite retained fields through preserved Raw custody");
+            (
+                key.to_owned(),
+                serde_json::json!({"body":body,"fields":fields}),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let oracle_retained_search = oracle_withdrawn
+        .iter()
+        .map(|row| {
+            let key = row["key"].as_str().unwrap();
+            let query = format!(
+                "scope=retained_history&q={}&",
+                crate::viewer::percent_encode(&key.to_lowercase())
+            );
+            let keys = sqlite_scoped(&query, 50)
+                .iter()
+                .map(|item| item["key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert!(keys.contains(&key.to_owned()));
+            (key.to_owned(), keys)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
@@ -497,10 +561,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
     assert_eq!(prepared.rows.len(), oracle.rows.len());
     assert_eq!(producer_rows(&prepared.rows), producer_rows(&oracle.rows));
-    let copied = prepared.rows.iter().find(|row| row.native_ids.iter().any(|id| id == "copy203-resumed")).unwrap();
+    let copied = prepared
+        .rows
+        .iter()
+        .find(|row| row.native_ids.iter().any(|id| id == "copy203-resumed"))
+        .unwrap();
     assert!(copied.native_ids.iter().any(|id| id == "copy203-original"));
     assert_eq!(copied.sources.len(), 2);
-    assert!(copied.query.as_ref().unwrap()["rows"].as_object().unwrap().values().any(|row| row["summary"]["kind"] == "stub"), "missing external recipient description");
+    assert!(
+        copied.query.as_ref().unwrap()["rows"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|row| row["summary"]["kind"] == "stub"),
+        "missing external recipient description"
+    );
     assert!(
         serde_json::to_string(&prepared.rows)
             .unwrap()
@@ -583,7 +658,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let received = pg
                 .semantic_select(
                     batch.epoch,
-                    &Selector::ClaudeReceipt { id: "receipt203-message".into() },
+                    &Selector::ClaudeReceipt {
+                        id: "receipt203-message".into(),
+                    },
                 )
                 .unwrap();
             assert_eq!(received.count, 1);
@@ -793,10 +870,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &query_store,
         )
         .unwrap();
-    assert_eq!(
-        query_list["total"].as_u64(),
-        Some(all_total)
-    );
+    assert_eq!(query_list["total"].as_u64(), Some(all_total));
     // Recent window (options.all=false): PG cohort equals the SQLite oracle.
     for since in recent_windows {
         let mut recent_options = options.clone();
@@ -2449,27 +2523,52 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // The same metadata-only resolver serves retained native aliases after
     // their Current row disappears. Expected generation fencing stays active.
     super::super::snapshot::with_admitted_snapshot(
-        &pool, &namespace, &control, &caught, |snapshot| {
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
             use crate::storage::navigation::NativeNavigationStore;
             assert_eq!(snapshot.catalog_generation()?, caught);
-            for row in prepared.rows.iter().filter(|row| removed.contains(&row.key)) {
+            for row in prepared
+                .rows
+                .iter()
+                .filter(|row| removed.contains(&row.key))
+            {
                 for native in &row.native_ids {
                     let current = snapshot.native_resolution(
-                        &row.harness, native, crate::CatalogReadScope::Current, Some(&caught),
+                        &row.harness,
+                        native,
+                        crate::CatalogReadScope::Current,
+                        Some(&caught),
                     )?;
                     assert!(current.keys.is_empty());
                     let retained = snapshot.native_resolution(
-                        &row.harness, native, crate::CatalogReadScope::RetainedHistory, Some(&caught),
+                        &row.harness,
+                        native,
+                        crate::CatalogReadScope::RetainedHistory,
+                        Some(&caught),
                     )?;
                     assert_eq!(retained.keys, vec![row.key.clone()]);
-                    let resolved: CatalogRow = serde_json::from_str(retained.metadata.as_deref().unwrap()).unwrap();
+                    let resolved: CatalogRow =
+                        serde_json::from_str(retained.metadata.as_deref().unwrap()).unwrap();
                     assert_eq!(resolved.key, row.key);
                 }
             }
-            assert!(snapshot.native_resolution("claude", "one", crate::CatalogReadScope::Current, Some(&generation)).is_err());
+            assert!(
+                snapshot
+                    .native_resolution(
+                        "claude",
+                        "one",
+                        crate::CatalogReadScope::Current,
+                        Some(&generation)
+                    )
+                    .is_err()
+            );
             Ok(())
         },
-    ).unwrap();
+    )
+    .unwrap();
     // Owner-side filters: the withdrawn Claude sessions stay Retained under
     // the harness filter and are absent under another harness.
     let claude = scoped(&caught, "scope=retained_history&harness=claude&");
@@ -2555,7 +2654,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
     for key in &removed {
-        assert_eq!(search(&caught, "scope=retained_history&", key), oracle_retained_search[key]);
+        assert_eq!(
+            search(&caught, "scope=retained_history&", key),
+            oracle_retained_search[key]
+        );
     }
     // Retained-only selected body: on the successor a withdrawn key has no
     // Current row, so its body is read through the proof-owned retained
@@ -2578,7 +2680,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .unwrap();
         assert_eq!(body, expected_bodies[key]["body"], "retained body {key}");
-        assert_eq!(body, oracle_retained_reads[key]["body"], "SQLite withdrawal body parity {key}");
+        assert_eq!(
+            body, oracle_retained_reads[key]["body"],
+            "SQLite withdrawal body parity {key}"
+        );
         assert!(body.to_string().contains("sanitized agent answer"));
         let fields = query
             .call_bound_selected_at(
@@ -2589,7 +2694,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &retained_host,
             )
             .unwrap();
-        assert_eq!(fields, oracle_retained_reads[key]["fields"], "SQLite withdrawal fields parity {key}");
+        assert_eq!(
+            fields, oracle_retained_reads[key]["fields"],
+            "SQLite withdrawal fields parity {key}"
+        );
     }
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
