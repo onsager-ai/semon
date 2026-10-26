@@ -501,7 +501,7 @@ pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate
     if input.full_path(options).to_str()!=Some(intent.path.as_str()) {return Err(StorageError::InvalidArguments);}
     let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if let Some(bytes)=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),32768)? {
+    if let Some(bytes)=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),131072)? {
         let prior:RawIntent=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
         if prior.request!=request {return Err(StorageError::Conflict);}return Ok((prior.revision,prior.previous));
     }
@@ -537,11 +537,11 @@ pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&cr
     use sha2::{Digest,Sha256};
     let request=raw_request(tx,input,intent)?;
     let ack=serde_json::to_vec(&(&request,revision,completion)).map_err(|_|StorageError::InvalidArguments)?;
-    if ack.len()>32768 {return Err(StorageError::Busy);}
+    if ack.len()>131072 {return Err(StorageError::Busy);}
     let ns=tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if let Some(prior)=super::native_keys::read_meta(tx,raw_ack_key(intent).as_bytes(),32768)? {return if prior==ack {Ok(())} else {Err(StorageError::Conflict)};}
-    let stored=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),32768)?.ok_or(StorageError::ScopeChanged)?;
+    if let Some(prior)=super::native_keys::read_meta(tx,raw_ack_key(intent).as_bytes(),131072)? {return if prior==ack {Ok(())} else {Err(StorageError::Conflict)};}
+    let stored=super::native_keys::read_meta(tx,raw_intent_key(intent).as_bytes(),131072)?.ok_or(StorageError::ScopeChanged)?;
     let state:RawIntent=serde_json::from_slice(&stored).map_err(|_|StorageError::ScopeChanged)?;
     let inflight=format!("raw-write-inflight:{}",intent.path);
     if state.request!=request || state.revision!=revision || super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.as_ref()!=Some(&request) || model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
