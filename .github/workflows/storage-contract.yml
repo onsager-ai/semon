@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - task/479-pg-facts-20261026
+      - task/479-pg-catalog-20261026
 permissions:
   contents: read
 concurrency:
