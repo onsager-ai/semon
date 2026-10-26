@@ -757,6 +757,14 @@ impl NativeOwnership {
                 |r| r.get(0),
             )
             .map_err(failed)?;
+        if bound {
+            let admission = tx.query_row("SELECT admission_generation FROM storage_namespaces WHERE namespace=?1", [config.namespace.as_str()], |r|r.get(0)).optional().map_err(failed)?;
+            if let Some(admission) = admission {
+                let owner = Self { config: config.clone(), admission };
+                owner.validate_ready(&tx)?;
+                return Ok(owner);
+            }
+        }
         if !bound {
             // Fresh profile only: existing native data requires migration.
             let source_meta: bool = tx
