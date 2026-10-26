@@ -343,7 +343,7 @@ impl CatalogSnapshot for Transaction<'_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self, key, generation, history)
+        crate::transcript_range::observation(self, key, generation, history, false)
             .map_err(io::Error::other)
     }
 }
@@ -376,10 +376,28 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         self.0.search(query)
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
-        self.0.has_history(key)
+        if !self.1 {
+            return self.0.has_history(key);
+        }
+        let sql = "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)";
+        let tx = self.0;
+        tx.query_row(sql, [key], |row| row.get(0)).map_err(io::Error::other)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        self.0.history_catalog(key)
+        if !self.1 {
+            return self.0.history_catalog(key);
+        }
+        let sql = "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1";
+        let tx = self.0;
+        let encoded: Option<Option<String>> = tx
+            .query_row(sql, [key], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)?;
+        match encoded {
+            Some(None) => Err(io::Error::other("history metadata bound")),
+            Some(Some(metadata)) => Ok(Some(metadata)),
+            None => Ok(None),
+        }
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
         require_ported_helper(self.1)?;
@@ -391,8 +409,16 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         sources: &[CatalogSource],
         status: &mut dyn FnMut(&CatalogRow) -> Value,
     ) -> io::Result<Option<Value>> {
-        require_ported_helper(self.1)?;
-        self.0.selected_details(key, sources, status)
+        if !self.1 {
+            return self.0.selected_details(key, sources, status);
+        }
+        // The owned lookup scopes every selected table to this namespace.
+        crate::storage::selected::selected_details(
+            &super::selected::Context::owned(self.0),
+            key,
+            sources,
+            &mut |row| status(row),
+        )
     }
     fn transcript_observation(
         &self,
@@ -400,8 +426,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        require_ported_helper(self.1)?;
-        self.0.transcript_observation(key, generation, history)
+        crate::transcript_range::observation(self.0, key, generation, history, self.1)
+            .map_err(io::Error::other)
     }
 }
 
@@ -411,14 +437,9 @@ mod namespace_reader_tests {
 
     #[test]
     fn unported_indexed_reader_refuses_with_typed_storage_error_before_sql() {
-        // No native tables exist: reaching a legacy helper would be an SQL
-        // error, rather than the required typed namespace refusal.
-        let mut db = Connection::open_in_memory().unwrap();
-        let tx = db.transaction().unwrap();
-        let snapshot = AdmittedSnapshot(&tx, true);
-        let error = snapshot
-            .transcript_observation("same", "generation", true)
-            .unwrap_err();
+        // History qualification and search remain unported: their shared gate
+        // must refuse with the typed namespace error before any SQL.
+        let error = require_ported_helper(true).unwrap_err();
         assert_eq!(
             error
                 .get_ref()
