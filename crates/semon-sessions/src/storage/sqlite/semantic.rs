@@ -2072,11 +2072,11 @@ impl Stage {
             .owner
             .as_ref()
             .map(|owner| {
-                serde_json::to_string(&(
+                crate::storage::semantic_owner::bound_runtime(
                     self.source.config.namespace.as_str(),
-                    owner.admission(),
+                    &owner.admission(),
                     runtime,
-                ))
+                )
             })
             .transpose()
             .map_err(|_| refuse("semantic_runtime_binding"))?;
@@ -2135,14 +2135,29 @@ impl Stage {
             })
             .transpose()?
             .unwrap_or(false);
-        if invalid_authority || existing.as_ref().is_some_and(|(old, _)| old != runtime) {
-            if !self.reduction {
-                return Err(StoreError::Configured(
-                    StorageError::NamespaceUpgradePending,
-                ));
-            }
+        use crate::storage::semantic_owner::{self, Begin, Observed};
+        let plan = match semantic_owner::begin(
+            Observed {
+                epoch: actual_epoch,
+                runtime: existing.as_ref().map(|(runtime, _)| runtime.as_str()),
+                generation: existing
+                    .as_ref()
+                    .and_then(|(_, generation)| generation.as_deref()),
+                invalid_withdrawal: invalid_authority,
+            },
+            self.epoch,
+            self.begun,
+            self.source.generation.as_deref(),
+            runtime,
+            self.reduction,
+        ) {
+            Ok(plan) => plan,
+            Err(StorageError::Conflict) => return Ok(Outcome::Conflict),
+            Err(error) => return Err(StoreError::Configured(error)),
+        };
+        if plan == Begin::Reset {
             reset(&tx, ns, runtime).map_err(error)?;
-        } else if existing.is_some() && (!self.begun || self.epoch.is_none()) {
+        } else if plan == Begin::Resume {
             // Same-runtime crash resume retains valid reduction progress and
             // its exact model witness; only ownership changes. All updates
             // commit together, including overflow/fault rollback.
@@ -2150,7 +2165,7 @@ impl Stage {
             tx.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
             tx.execute("UPDATE storage_semantic_model_batches SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
         }
-        if existing.is_none() {
+        if plan == Begin::Create {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
             tx.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,generation,runtime,revision) SELECT ?1,1,epoch,'indexing',?2,?3,(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM storage_semantic_profiles WHERE namespace=?1", params![ns,self.source.generation,runtime]).map_err(error)?;
         }

@@ -5,6 +5,7 @@
 mod cancel;
 mod catalog_effects;
 pub(crate) mod index_store;
+mod model_cache;
 mod native_bundle;
 mod native_commit;
 mod native_core;

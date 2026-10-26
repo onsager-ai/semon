@@ -12,6 +12,7 @@ pub(crate) mod proof_codec;
 pub(crate) mod proof_lifetime;
 pub(crate) mod query;
 pub(crate) mod selected;
+pub(crate) mod semantic_owner;
 pub mod source_observations;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
