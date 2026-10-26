@@ -508,9 +508,12 @@ pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate
     if model_cache::generation(tx)?!=intent.head || super::native_reader::ledger(tx,&intent.path)?.map(|(_,l)|l)!=intent.ledger {return Err(StorageError::Conflict);}
     let actual=crate::events::Stat::of(&input.full_path(options)).ok();
     if actual!=intent.before {return Err(StorageError::Conflict);}
-    if let Some(before)=&intent.before {
-        if Some(crate::source_change::bytes_hash(&input.full_path(options),before.size).map_err(|_|StorageError::ScopeChanged)?)!=intent.before_hash {return Err(StorageError::Conflict);}
-    } else if intent.before_hash.is_some() {return Err(StorageError::ScopeChanged);}
+    if let Some(c)=&intent.continuation {
+        let ledger=intent.ledger.as_ref().ok_or(StorageError::ScopeChanged)?;
+        let pinned=super::native_pages::current(tx,&intent.path,ledger)?;
+        let header:crate::events::native_pages::chunks::Header=serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+        if pinned.id.0!=c.proof || header.resume.as_ref()!=Some(&c.state) || c.offset!=ledger.offset || c.prefix!=ledger.prefix || intent.before_hash!=Some(ledger.prefix) {return Err(StorageError::Conflict);}
+    }
     let inflight=format!("raw-write-inflight:{}",intent.path);
     if super::native_keys::read_meta(tx,inflight.as_bytes(),16384)?.is_some() {return Err(StorageError::Conflict);}
     let previous=model_cache::append_evidence(tx,&intent.path)?;
@@ -548,11 +551,11 @@ pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&cr
     let claims=tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?;
     if claims.first().map(|r|r.get::<_,i64>(0))!=Some(revision) {return Err(StorageError::Conflict);}
     let path=input.full_path(options);
-    if crate::events::Stat::of(&path).ok()!=Some(completion.after) || completion.after.size!=completion.to || crate::source_change::bytes_hash(&path,completion.to).map_err(|_|StorageError::ScopeChanged)?!=completion.hash {return Err(StorageError::ScopeChanged);}
+    if crate::events::Stat::of(&path).ok()!=Some(completion.after) || completion.after.size!=completion.to {return Err(StorageError::ScopeChanged);}
     if completion.evidence!=crate::source_change::append_plan(intent.generation.clone(),intent.before,state.previous,intent.from,completion.after,completion.to) {return Err(StorageError::ScopeChanged);}
     if let Some(evidence)=&completion.evidence {
         let before=intent.before.ok_or(StorageError::ScopeChanged)?;
-        if !evidence.qualifies(&evidence.before,&completion.after) || intent.generation.as_deref()!=Some(evidence.generation.as_str()) || before.size!=intent.from || crate::source_change::bytes_hash(&path,before.size).map_err(|_|StorageError::ScopeChanged)?!=intent.before_hash.ok_or(StorageError::ScopeChanged)? {return Err(StorageError::ScopeChanged);}
+        if !evidence.qualifies(&evidence.before,&completion.after) || intent.generation.as_deref()!=Some(evidence.generation.as_str()) || before.size!=intent.from {return Err(StorageError::ScopeChanged);}
     }
     let runtime=crate::native_evidence::query_runtime_generation(options).map_err(|_|StorageError::ScopeChanged)?;
     let facts=options.facts.as_ref().map(|p| {
