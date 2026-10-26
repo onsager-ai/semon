@@ -58,12 +58,13 @@ impl Writer<'_, '_> {
         self.tx.check()?;
         let ns = self.tx.namespace.as_str().as_bytes();
         if let Some(value) = value {
-            self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+            let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace", &[&ns,&key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+            if changed != 1 { return Err(StorageError::ScopeChanged); }
         } else {
             self.tx
                 .driver
                 .execute(
-                    "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+                    "DELETE FROM semon_pg_native_meta WHERE namespace_digest=sha256($1) AND namespace=$1 AND key=$2",
                     &[&ns, &key.as_bytes()],
                 )
                 .map_err(sqlstate::error)?;
@@ -84,17 +85,18 @@ impl Effects for Writer<'_, '_> {
         native_core::qualify(self.tx, input.path, input.expected)?;
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE relocation");
-        let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND new_path=$2 LIMIT 65", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
+        let pending = self.tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1) AND namespace=$1 AND new_path=$2 LIMIT 65", &[&self.tx.namespace.as_str().as_bytes(),&input.path.as_bytes()]).map_err(sqlstate::error)?;
         if pending.len() > 64 {
             return Err(StorageError::ScopeChanged);
         }
         // Qualification/reuse still belongs to the unported Raw+Catalog
         // producer. Only advance or retire its existing evidence here, using
         // the same algorithm as SQLite, within this borrowed transaction.
+        let mut relocations = Vec::with_capacity(pending.len());
         for row in pending {
             let old = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
             let key = format!("native_catalog_relocation:{old}");
-            let value = self.tx.driver.query("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
+            let value = self.tx.driver.query("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace_digest=sha256($1) AND namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
             let encoded = value.first()
                 .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
                 .map(String::from_utf8)
@@ -107,7 +109,7 @@ impl Effects for Writer<'_, '_> {
                 input.changes.is_some(),
             )
             .map_err(|_| StorageError::Unavailable)?;
-            self.metadata(&key, advanced)?;
+            relocations.push((key, advanced));
         }
         let mut usage = Usage::new(self.tx)?;
         #[cfg(test)]
@@ -127,6 +129,7 @@ impl Effects for Writer<'_, '_> {
             input.ledger,
             input.changes.is_some(),
         )?;
+        for (key, advanced) in relocations { self.metadata(&key, advanced)?; }
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE begin_complete");
         self.boundary()
