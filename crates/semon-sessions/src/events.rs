@@ -1457,7 +1457,7 @@ pub(crate) struct EventCache {
     host_source: Option<crate::storage::HostSource>,
     event_operation: Option<String>,
     retention_base: Vec<(String, Option<Ledger>)>,
-    /// Source fences for the lazy producer, independently of legacy reopen state.
+    /// Source fences for the admitted native producer.
     lock_cache: Option<PathBuf>,
     /// Cold ingestion advances complete records by a bounded byte slice.
     pub(crate) scan_byte_budget: Option<u64>,
