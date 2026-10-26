@@ -55,7 +55,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_owners",
-        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean",
+        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean,last_ms bigint,harness bytea,repo bytea,model bytea",
         key: "generation,key_digest",
     },
     Table {
@@ -350,6 +350,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         "catalog_history_order",
         "catalog_history_headers",
         "generation,last_ms,key_digest",
+        false,
+    ),
+    (
+        "catalog_history_owner_order",
+        "catalog_history_owners",
+        "generation,last_ms,session_key",
         false,
     ),
     (
