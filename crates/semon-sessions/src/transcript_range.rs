@@ -832,8 +832,7 @@ fn read_inner(
     let selection = Selection {
         render_time: None,
         proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(
-            connection,
-            binding,
+            connection, binding,
         )),
         identity,
         session,
