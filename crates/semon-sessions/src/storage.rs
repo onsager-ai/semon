@@ -516,7 +516,13 @@ impl StoreConfig {
             return Err(StorageError::InvalidArguments);
         };
         postgres::navigation::captured_source_proof(
-            self, pool, control, options, generation, key, reference,
+            self,
+            pool,
+            &control.for_selected_read(),
+            options,
+            generation,
+            key,
+            reference,
         )
     }
 
@@ -527,13 +533,27 @@ impl StoreConfig {
     pub fn call_captured_query_at(
         &self,
         options: &crate::Options,
+        machine: &str,
         generation: &str,
         tool: &str,
         args: &serde_json::Value,
         now: i64,
+        request: &crate::SelectedReadControl,
         provider: &crate::CatalogReaderFactory,
     ) -> Result<serde_json::Value, crate::QueryError> {
         crate::validate_query_call(tool, args)?;
+        let _scope = crate::selected_read::Scope::enter(request);
+        let check = || {
+            crate::selected_read::check()
+                .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))
+        };
+        check()?;
+        if machine.is_empty() {
+            return Err(crate::QueryError::new(
+                "invalid_arguments",
+                "Missing Machine key",
+            ));
+        }
         if !matches!(tool, "read_transcript" | "get_session") {
             return Err(crate::QueryError::new(
                 "invalid_arguments",
@@ -563,25 +583,26 @@ impl StoreConfig {
             self,
             generation,
             pool.clone(),
-            control.clone(),
+            control.for_selected_read(),
         )
         .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
+        crate::selected_read::checkpoint("captured_factory")
+            .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
         let id = args["id"]
             .as_str()
             .ok_or_else(|| crate::QueryError::new("invalid_arguments", "Missing selected id"))?;
-        let reader =
-            provider(self.namespace.as_str(), id).map_err(|error| crate::QueryError::io(&error))?;
-        let sources = crate::SessionSources::with_machines(vec![(
-            self.namespace.as_str().to_owned(),
-            options.clone(),
-        )]);
-        crate::Query::from_sources(std::sync::Arc::new(sources)).call_bound_selected_at(
-            tool,
-            args,
-            now,
-            store.as_ref(),
-            reader.as_ref(),
-        )
+        let reader = provider(self.namespace.as_str(), id);
+        check()?;
+        let reader = reader.map_err(|error| crate::QueryError::io(&error))?;
+        let sources =
+            crate::SessionSources::with_machines(vec![(machine.to_owned(), options.clone())]);
+        let mut selected_args = args.clone();
+        selected_args["_machine_alias"] = serde_json::json!(machine);
+        let answer = crate::Query::from_sources(std::sync::Arc::new(sources))
+            .call_bound_selected_at(tool, &selected_args, now, store.as_ref(), reader.as_ref());
+        crate::selected_read::checkpoint("captured_final")
+            .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
+        answer
     }
 
     /// Bounded native Query publication metadata from this configured source.
