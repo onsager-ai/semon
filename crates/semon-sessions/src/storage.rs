@@ -15,6 +15,7 @@ pub(crate) mod query;
 pub(crate) mod selected;
 pub(crate) mod semantic_owner;
 pub mod source_observations;
+pub mod transfer;
 pub use host_source::HostSource;
 
 fn local_database(cache: &std::path::Path) -> std::path::PathBuf {

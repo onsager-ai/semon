@@ -13,6 +13,7 @@ pub(crate) mod search;
 pub(crate) mod selected;
 pub(crate) mod source_journal;
 pub(crate) mod trace;
+pub(crate) mod transfer;
 pub(crate) use configured_index::open as open_configured_index;
 #[cfg(test)]
 pub(crate) use configured_index::open_private_semantic;

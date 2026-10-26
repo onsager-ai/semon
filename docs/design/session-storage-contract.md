@@ -116,6 +116,16 @@ keeps existing byte/deadline/cancellation and covering-block bounds.
 
 ## Snapshot/export and migration requirements (undelivered)
 
+`StoreConfig::transfer_inbox` now provides bounded typed transport staging on
+SQLite and PostgreSQL. `begin`, `stage_page`, `checkpoint` and `staged_page`
+persist/reconcile exact page operations and their cursor atomically. The current
+typed records are metadata, reported Facts and source-observation intents. This
+inbox does not materialize native destination state, freeze a source, qualify a
+snapshot or change ownership. Exhaustive codecs, source export, durable fencing,
+reader drain, final qualification and reverse transfer remain undelivered. The
+current physical inventory tests classify every actual table and fail on an
+unclassified table; classification does not establish a working row codec.
+
 A migration snapshot must include typed Event/ledger pages and all supported
 retained and non-rebuildable metadata: Facts/reported usage, custody and generation
 markers, Raw intents/completions, claims, staged work/checkpoints, Current/History,
