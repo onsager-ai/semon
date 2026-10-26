@@ -8930,8 +8930,17 @@ mod tests {
             options: &crate::Options,
             inputs: &[crate::Input],
         ) -> Batch {
-            assert!(!cache.explicit_store);
-            claude_ingest(cache, options, inputs);
+            assert_eq!(cache.observation_namespace, options.source.namespace().unwrap().as_str());
+            assert!(cache.host_source.is_some());
+            for input in inputs {
+                let path = input.full_path(options);
+                crate::events::scan_file(&path, "claude", cache, &mut false).unwrap();
+                let key = path.to_string_lossy();
+                let store = cache.store.as_ref().unwrap();
+                let receipt = store.event_receipt(&key).unwrap();
+                assert_eq!(receipt.operation_id.len(), 64);
+                assert!(store.load_file(&key).unwrap().is_some());
+            }
             let paths = inputs
                 .iter()
                 .map(|i| i.full_path(options).to_string_lossy().into_owned())

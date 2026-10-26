@@ -3291,6 +3291,26 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     cache.require_configured_store()?;
+    // Host-owned ordinary producers capture their own request identity. The
+    // configured writer persists it with the observed ledger and Source claim
+    // in prepare_file before any Raw parsing or publication decision. Explicit
+    // ingest retains its caller's identity; staged model readers remain reads.
+    if cache.host_source.is_some() && cache.event_operation.is_none() {
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &cache.observation_namespace,
+            "native_ingest",
+            path.as_os_str().as_encoded_bytes(),
+        );
+        cache.event_operation = Some(
+            crate::storage::source_observations::SourceOperation::digest(
+                "native_ingest_identity",
+                operation.id.as_bytes(),
+            ),
+        );
+        let result = scan_file(path, harness, cache, dirty);
+        cache.event_operation = None;
+        return result;
+    }
     let configured = cache.explicit_store;
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
