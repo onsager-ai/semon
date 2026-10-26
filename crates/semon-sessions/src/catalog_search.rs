@@ -1611,7 +1611,7 @@ mod sqlite_tests {
         assert_eq!(last.rows[0].key, "target-00002");
         assert!(last.next.is_none());
         assert_eq!(search(&connection, "écho", None, 2).rows.len(), 2);
-        let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT current_last_ms,session_key FROM session_search_memberships INDEXED BY session_search_current_order WHERE current_last_ms IS NOT NULL AND gram='nee' ORDER BY current_last_ms DESC,session_key ASC LIMIT 3",[],|row|row.get(3)).unwrap();
+        let plan = strings_plan(&connection, CatalogReadScope::Current).join("; ");
         assert!(
             plan.contains("COVERING INDEX session_search_current_order"),
             "{plan}"
