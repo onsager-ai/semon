@@ -7321,10 +7321,10 @@ mod tests {
         let path = root.join("index.sqlite3");
         for selected in [false, true] {
             let mut store = if selected {
-                SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace())
+                SqliteStore::attempt_selected(&path, &fixture_namespace())
                     .unwrap_or_else(|_| panic!("selected factory refused current store"))
             } else {
-                SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace())
+                SqliteStore::attempt_scoped(&path, true, &fixture_namespace())
                     .unwrap_or_else(|_| panic!("producer factory refused current store"))
                     .0
             };
@@ -7565,7 +7565,7 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path, &crate::events::store::fixture_namespace()) {
+        match SqliteStore::attempt(path, &fixture_namespace()) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -10094,7 +10094,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()) {
+                store = match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
                     Ok((store, _)) => store,
                     Err(error) => panic!("reopen transfer store: {error}"),
                 };
@@ -10260,7 +10260,7 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()) {
+                match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
                     Ok((store, loaded)) => {
                         assert!(loaded.files.is_empty());
                         assert!(loaded.reported_runs.is_empty());
@@ -12016,13 +12016,13 @@ mod tests {
                 }
                 _ => panic!("{name} must be explicitly unsupported"),
             };
-            fail(SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()));
+            fail(SqliteStore::attempt(&path, &fixture_namespace()));
             unchanged();
-            fail(SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()));
+            fail(SqliteStore::attempt_scoped(&path, true, &fixture_namespace()));
             unchanged();
             if name != "archive" {
                 assert!(
-                    SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace()).is_err(),
+                    SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err(),
                     "selected {name}"
                 );
                 assert!(focused_unbound_connection(&path).is_err(), "focused {name}");
@@ -12085,14 +12085,14 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO session_history_catalog VALUES('retained','{\"custody\":\"retained custody\"}')",
+                "INSERT INTO session_history_catalog VALUES('fixture-source','retained','{\"custody\":\"retained custody\"}')",
                 [],
             )
             .unwrap();
         store
             .connection
             .execute(
-                "INSERT INTO meta VALUES('archive-custody','independent authority')",
+                "INSERT INTO meta VALUES('fixture-source','archive-custody','independent authority')",
                 [],
             )
             .unwrap();
@@ -12113,7 +12113,7 @@ mod tests {
             .collect::<Vec<_>>();
         for scoped in [false, true] {
             assert!(matches!(
-                SqliteStore::attempt_scoped(&path, scoped, &crate::events::store::fixture_namespace()),
+                SqliteStore::attempt_scoped(&path, scoped, &fixture_namespace()),
                 Err(Unopened::Unsupported(_))
             ));
             for (path, bytes) in paths.iter().zip(&before) {
@@ -12122,7 +12122,7 @@ mod tests {
                 assert_eq!(&actual, bytes);
             }
         }
-        assert!(SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace()).is_err());
+        assert!(SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err());
         assert!(focused_unbound_connection(&path).is_err());
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
@@ -12271,7 +12271,7 @@ mod tests {
                 *live_writer.borrow_mut() = Some(db);
             }));
         });
-        match SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()) {
+        match SqliteStore::attempt(&path, &fixture_namespace()) {
             Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
             _ => panic!("the concurrently committed WAL version must be refused"),
         }
@@ -12821,7 +12821,8 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()).unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(&path, &fixture_namespace())
+            .unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -12842,7 +12843,8 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()).unwrap_or_else(|error| panic!("{error}"));
+        let (store, _) = SqliteStore::attempt(&path, &fixture_namespace())
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")
