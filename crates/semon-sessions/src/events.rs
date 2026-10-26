@@ -3183,7 +3183,8 @@ impl EventCache {
                 self.unpersisted.remove(path);
                 Ok(false)
             }
-            Some(Ok(Outcome::Conflict | Outcome::Deferred)) => {
+            Some(Ok(Outcome::Conflict)) => Ok(true),
+            Some(Ok(Outcome::Deferred)) => {
                 Err(io::Error::other(crate::storage::StorageError::Conflict))
             }
             Some(Ok(Outcome::Stale)) => {
