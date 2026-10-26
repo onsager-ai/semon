@@ -146,8 +146,10 @@ mod tests {
                 })
                 .unwrap();
             config.create_native_store().unwrap();
-            let mut options = crate::Options::default();
-            options.source = source.with_store(config.clone()).unwrap();
+            let options = crate::Options {
+                source: source.with_store(config.clone()).unwrap(),
+                ..crate::Options::default()
+            };
             pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
                 let ns = namespace.as_str().as_bytes();
                 tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace=$1", &[&ns,&generation]).map_err(sqlstate::error)?;

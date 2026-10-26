@@ -86,10 +86,9 @@ pub(crate) fn admit(
             return Err(StorageError::ScopeChanged);
         }
         let prior = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
-        let admitted_at = if revoked || prior.is_none() {
-            crate::model::now_ms()
-        } else {
-            std::str::from_utf8(prior.as_ref().unwrap()).ok().and_then(|value| value.parse::<i64>().ok()).ok_or(StorageError::ScopeChanged)?
+        let admitted_at = match (revoked, prior.as_deref()) {
+            (false, Some(prior)) => std::str::from_utf8(prior).ok().and_then(|value| value.parse::<i64>().ok()).ok_or(StorageError::ScopeChanged)?,
+            _ => crate::model::now_ms(),
         };
         let generation = if revoked {
             let next = binding.admission.checked_add(1).and_then(|value| i64::try_from(value).ok()).ok_or(StorageError::ScopeChanged)?;

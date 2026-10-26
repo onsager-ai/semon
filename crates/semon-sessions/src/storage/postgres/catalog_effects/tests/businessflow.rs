@@ -1215,7 +1215,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             rows.iter()
                 .flat_map(|row| {
                     row.sources.iter().map(|source| {
-                        let path = crate::catalog::source_relative(&options, &row.harness, source)
+                        let path = crate::catalog::source_relative(options, &row.harness, source)
                             .unwrap();
                         let reference = crate::SessionSourceRef {
                             root: row.harness.clone(),

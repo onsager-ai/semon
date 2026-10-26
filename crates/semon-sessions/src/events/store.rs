@@ -706,11 +706,20 @@ pub(crate) fn audit_catalog_sources(
     let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let db = journal.connection().map_err(io::Error::other)?;
     let machine = crate::facts::MachineFacts::of(options);
-    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+    // Observe Raw metadata in a read snapshot. Acquire the write lock only
+    // after all physical observations, when consuming the exact ledgers below.
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Deferred)
         .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let mut changed = std::collections::BTreeSet::new();
+    let mut removed = Vec::new();
+    let mut source_locks = Vec::new();
     for input in discovered {
+        source_locks.push(crate::source_change::SourceLock::acquire(
+            options,
+            input.full_path(options).to_string_lossy().as_ref(),
+            false,
+        )?);
         if input.root == crate::InputRoot::Codex
             && !machine.codex_rollout_is_current(options, &input.full_path(options))
         {
@@ -789,6 +798,14 @@ pub(crate) fn audit_catalog_sources(
                 .as_ref()
                 .and_then(|query| query["runtime"].as_str());
             let recorded = ledger_row(&tx, &path).map_err(io::Error::other)?;
+            source_locks.push(crate::source_change::SourceLock::acquire(
+                options, &path, false,
+            )?);
+            let absent = fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+            if absent && let Some((_, ledger)) = &recorded {
+                removed.push((path.clone(), Some(ledger.clone())));
+            }
             if (row.harness == "codex"
                 && !machine.codex_rollout_is_current(options, Path::new(&path)))
                 || saved_runtime != expected.as_deref()
@@ -804,8 +821,13 @@ pub(crate) fn audit_catalog_sources(
             last = Some(path);
         }
     }
+    // These are real producer removals, qualified above under Source locks;
+    // the existing writer preserves retained indexes and compares each ledger.
+    remove_files_tx(&tx, &removed, config.namespace.as_str()).map_err(io::Error::other)?;
     for path in changed {
-        invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        if !removed.iter().any(|(removed, _)| removed == &path) {
+            invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        }
     }
     tx.commit().map_err(io::Error::other)?;
     Ok(last)
