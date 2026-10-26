@@ -21,3 +21,17 @@ No new test has actually passed yet. Catalog head is a physical fixture only.
 Remaining: admitted Catalog/runtime recovery prerequisites, full measured-effect,
 admission/profile/cancel/concurrency/noise qualification; full-scan Vec enumeration,
 retirement/removal and compact/deferred read. Public qualification remains zero.
+
+37ed77ea0237aeb215bc40cd53347fa472f05802 normal-pushed and remote verified.
+Exact run40261433441 native integration FAILED compilation: missing StorageError
+import in the new recovery test. The final revision fixes that import, applies
+CI-generated formatting to owned files, strengthens full key-digest equality and
+consumes re-captured exact committed intents on replay. No passing new oracle is
+claimed. Earlier fe74 run40260962848 existing native integration succeeded, but
+its native-key step failed and it predates the new recovery oracle.
+
+Final status: BLOCKED / unaccepted substantive WIP. A has an actual connected
+transactional implementation but lacks final CI/admission/resource qualification;
+D has a bounded recovery producer, while the full-scan ledger Vec API is open.
+B/E open, C inherited unqualified. No public backend readiness, mainline merge,
+deployment, publication or live data action. Final exact-head CI: Root collects.
