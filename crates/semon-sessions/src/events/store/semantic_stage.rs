@@ -233,28 +233,19 @@ fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub(crate) fn support_sql<'a>(
-    c: &Connection,
-    _singleton: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
+pub(crate) fn validate_support(c: &Connection) -> rusqlite::Result<()> {
     let version: i64 = c.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
     let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_support_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
     if cached {
         let layout: Option<bool> = c
             .prepare_cached("SELECT semon_semantic_support_layout(?1)")?
             .query_row([version], |r| r.get(0))?;
-        if let Some(composite) = layout {
-            return if composite {
-                Ok(scoped)
-            } else {
-                Err(rusqlite::Error::InvalidQuery)
-            };
+        if layout == Some(true) {
+            return Ok(());
         }
     }
     observation_shapes(c)?;
     stage_layout(c)?;
-    let mut composite = None;
     for (table, key) in [
         ("catalog_relocation_candidates", "old_path,new_path"),
         (
@@ -266,21 +257,16 @@ pub(crate) fn support_sql<'a>(
     ] {
         let pk: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1,'main') WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
         let ns = pk == format!("namespace,{key}");
-        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1,'main') WHERE name='namespace'")?.query_row(params![table, i64::from(ns)], |r| r.get(0))?;
+        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=1 AND min(pk=1 AND [notnull]=1 AND type='TEXT') FROM pragma_table_info(?1,'main') WHERE name='namespace'")?.query_row([table], |r| r.get(0))?;
         let physical: bool = c
             .prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
             )?
             .query_row([table], |r| r.get(0))?;
-        if !ns || !namespace_valid || !physical || composite.is_some_and(|prior| prior != ns) {
+        if !ns || !namespace_valid || !physical {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        composite = Some(ns);
     }
-    if composite != Some(true) {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let composite = true;
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(support_schema())?;
     for table in [
@@ -307,12 +293,7 @@ pub(crate) fn support_sql<'a>(
     ] {
         let actual: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_index_info(?1,'main') ORDER BY seqno)")?.query_row([name], |r| r.get(0))?;
         let owned: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name=?1 AND tbl_name=?2) AND EXISTS(SELECT 1 FROM pragma_index_list(?2,'main') WHERE name=?1 AND [unique]=0 AND partial=0)")?.query_row(params![name,table], |r| r.get(0))?;
-        let expected = if composite {
-            format!("namespace,{columns}")
-        } else {
-            columns.to_owned()
-        };
-        if actual != expected || !owned {
+        if actual != format!("namespace,{columns}") || !owned {
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
@@ -326,11 +307,11 @@ pub(crate) fn support_sql<'a>(
                 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
             move |context| {
                 let observed: i64 = context.get(0)?;
-                Ok((observed == version).then_some(composite))
+                Ok((observed == version).then_some(true))
             },
         )?;
     }
-    Ok(scoped)
+    Ok(())
 }
 pub(super) fn metadata_indexes() -> &'static str {
     "CREATE INDEX IF NOT EXISTS semantic_codex_header_native ON meta(namespace,json_extract(value,'$.header.id'),key)

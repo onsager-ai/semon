@@ -107,14 +107,6 @@ pub(crate) fn schema() -> [&'static str; 2] {
     [SCHEMA, REPAIR_SCHEMA]
 }
 
-pub(super) fn sql<'a>(
-    _db: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    Ok(scoped)
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Payload {
     // Option preserves the existing model consumer's unavailable-model rule.
@@ -165,9 +157,7 @@ pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
 }
 
 pub(super) fn source(c: &Connection, path: &str) -> rusqlite::Result<Option<(i64, String)>> {
-    c.query_row(sql(c,
-        "SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(source_id) WHERE c.source_path=?1 AND s.parser_version=?2",
-        "SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2")?, params![path,CACHE_VERSION], |r| Ok((r.get(0)?,r.get(1)?))).optional()
+    c.query_row("SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2", params![path,CACHE_VERSION], |r| Ok((r.get(0)?,r.get(1)?))).optional()
 }
 
 pub(super) fn normalized(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
@@ -176,8 +166,7 @@ pub(super) fn normalized(c: &Connection, path: &str, ledger: &Ledger) -> rusqlit
     };
     Ok(receipt == header_ledger(ledger)
         && c.query_row(
-            sql(c, "SELECT usage_ready FROM native_usage_sources WHERE source_id=?1",
-                "SELECT usage_ready FROM native_usage_sources WHERE namespace=semon_namespace() AND source_id=?1")?,
+            "SELECT usage_ready FROM native_usage_sources WHERE namespace=semon_namespace() AND source_id=?1",
             [id],
             |r| r.get::<_, bool>(0),
         )?)
@@ -204,9 +193,7 @@ pub(super) fn seen(
     if receipt != header_ledger(ledger) {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    c.query_row(sql(c,
-        "SELECT EXISTS(SELECT 1 FROM native_usage_identities WHERE source_id=?1 AND scope='tree' AND identity=?2),EXISTS(SELECT 1 FROM native_usage_identities WHERE source_id=?1 AND scope='model' AND identity=?2)",
-        "SELECT EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='tree' AND identity=?2),EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='model' AND identity=?2)")?,params![id,identity],|r|Ok(Seen { tree:r.get(0)?,model:r.get(1)? }))
+    c.query_row("SELECT EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='tree' AND identity=?2),EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='model' AND identity=?2)",params![id,identity],|r|Ok(Seen { tree:r.get(0)?,model:r.get(1)? }))
 }
 
 pub(super) fn restore(
@@ -228,9 +215,7 @@ pub(super) fn restore(
 fn restore_root(c: &Connection, id: i64, encoded: &str) -> rusqlite::Result<CodexNativeUsage> {
     let mut native = crate::events::native_decode::usage_root(encoded)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let mut statement = c.prepare(sql(c,
-        "SELECT kind,dimension,value FROM native_usage_dimensions WHERE source_id=?1 ORDER BY kind,dimension",
-        "SELECT kind,dimension,value FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 ORDER BY kind,dimension")?)?;
+    let mut statement = c.prepare("SELECT kind,dimension,value FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 ORDER BY kind,dimension")?;
     let mut rows = statement.query([id])?;
     while let Some(row) = rows.next()? {
         #[cfg(test)]
@@ -278,9 +263,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let id = tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id", params![path,receipt,CACHE_VERSION], |r| r.get::<_, i64>(0))?;
-            tx.execute(sql(tx,
-                "INSERT INTO native_usage_current VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET source_id=excluded.source_id",
-                "INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id")?,params![path,id])?;
+            tx.execute("INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id",params![path,id])?;
             Ok(id)
         })();
         self.result(result)
@@ -288,8 +271,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn receipt(&mut self, id: i64, receipt: &str) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.execute(sql(tx, "UPDATE native_usage_sources SET receipt=?2 WHERE source_id=?1",
-                "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,params![id,receipt])?;
+            tx.execute("UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1",params![id,receipt])?;
             Ok(())
         })();
         self.result(result)
@@ -297,9 +279,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn unblock(&mut self, path: &str, receipt: &str) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.execute(repair::sql(tx,
-                "UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",
-                "UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')")?,params![path,receipt])?;
+            tx.execute("UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",params![path,receipt])?;
             Ok(())
         })();
         self.result(result)
@@ -308,9 +288,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.query_row(sql(tx,
-                "SELECT payload,record FROM native_usage_facts WHERE source_id=?1 AND native_offset=?2",
-                "SELECT payload,record FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset=?2")?,params![id,offset],|r|Ok((r.get(0)?,r.get(1)?))).optional()
+            tx.query_row("SELECT payload,record FROM native_usage_facts WHERE namespace=semon_namespace() AND source_id=?1 AND native_offset=?2",params![id,offset],|r|Ok((r.get(0)?,r.get(1)?))).optional()
         })();
         self.result(result)
     }
@@ -322,9 +300,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     ) -> Result<Option<String>, StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.query_row(sql(tx,
-            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.source_id=?1 AND i.scope=?2 AND i.identity=?3",
-            "SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3")?,params![id,scope,identity],|r|r.get(0)).optional()
+            tx.query_row("SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3",params![id,scope,identity],|r|r.get(0)).optional()
         })();
         self.result(result)
     }
@@ -338,11 +314,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached(sql(
-                tx,
-                "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
-                "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
-            )?)?
+            tx.prepare_cached("INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)")?
             .execute(params![id, scope, identity, offset])?;
             Ok(())
         })();
@@ -352,11 +324,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(fact.offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached(sql(
-                tx,
-                "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
-            )?)?
+            tx.prepare_cached("INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)")?
             .execute(params![
                 fact.source,
                 offset,
@@ -379,9 +347,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     ) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.prepare_cached(sql(tx,
-                "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,kind,dimension) DO UPDATE SET value=excluded.value",
-                "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_id,kind,dimension) DO UPDATE SET value=excluded.value")?)?.execute(params![id,kind,key,value])?;
+            tx.prepare_cached("INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_id,kind,dimension) DO UPDATE SET value=excluded.value")?.execute(params![id,kind,key,value])?;
             Ok(())
         })();
         self.result(result)
@@ -391,8 +357,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let result = (|| {
             let checkpoint =
                 i64::try_from(checkpoint).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.execute(sql(tx, "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE source_id=?1",
-                "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,params![id,checkpoint])?;
+            tx.execute("UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE namespace=semon_namespace() AND source_id=?1",params![id,checkpoint])?;
             Ok(())
         })();
         self.result(result)
@@ -475,13 +440,11 @@ pub(super) fn relocate(
         return Err(rusqlite::Error::InvalidQuery);
     }
     tx.execute(
-        sql(tx, "UPDATE native_usage_current SET source_path=?2 WHERE source_path=?1",
-            "UPDATE native_usage_current SET source_path=?2 WHERE namespace=semon_namespace() AND source_path=?1")?,
+        "UPDATE native_usage_current SET source_path=?2 WHERE namespace=semon_namespace() AND source_path=?1",
         params![old, path],
     )?;
     tx.execute(
-        sql(tx, "UPDATE native_usage_sources SET receipt=?2 WHERE source_id=?1",
-            "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,
+        "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1",
         params![id, header_ledger(relocated)],
     )?;
     Ok(normalized_usage)
