@@ -91,13 +91,13 @@ fn explicit_usage(id: u64, input: u64) -> Value {
 }
 
 #[test]
-fn native_usage_memory_only_reader_keeps_deduplication_until_a_durable_checkpoint() {
+fn native_usage_current_reader_keeps_deduplication_across_durable_checkpoints() {
     let home = Home::new();
     let text = line(json!({"type":"session_meta","payload":{"id":"native"}}))
         + &line(json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}))
         + &line(explicit_usage(1, 7));
     let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
-    let mut cache = events::EventCache::default();
+    let mut cache = home.cache();
     assert_eq!(
         events::scan_file(&path, "codex", &mut cache, &mut false)
             .unwrap()
@@ -116,13 +116,14 @@ fn native_usage_memory_only_reader_keeps_deduplication_until_a_durable_checkpoin
                 .as_bytes(),
         )
         .unwrap();
-    let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    drop(cache);
+    let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
     assert_eq!(index.tokens("codex").input, 18);
     assert_eq!(
         index.tree_summary.as_ref().unwrap().tokens("codex").input,
         18
     );
-    assert!(!events::EventCache::path(&home.options.cache).exists());
+    assert!(events::EventCache::path(&home.options.cache).exists());
 }
 
 #[test]

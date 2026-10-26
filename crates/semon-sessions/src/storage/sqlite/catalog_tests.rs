@@ -352,9 +352,9 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
         let db = fixture.db();
         let revision = || {
             db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, i64>(0),
             )
             .unwrap()
         };
