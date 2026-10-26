@@ -1276,87 +1276,74 @@ mod tests {
         // Every table, index and trigger from all 22 dependencies is required,
         // including history, overview, support, slots, search and semantic stage.
         let required_objects = objects(&reference);
-        for copied in [true] {
-            for metadata in [true] {
-                for catalog in [true] {
-                    for _trace in [true] {
-                        let db = Connection::open_in_memory().unwrap();
-                        bind_fixture(&db, "a");
-                        db.pragma_update(None, "foreign_keys", true).unwrap();
-                        for ddl in authored_storage_ddl() {
-                            db.execute_batch(ddl).unwrap();
-                        }
-                        assert_eq!(objects(&db), required_objects);
-                        assert!(current_objects_present(&db).unwrap());
-                        // A matching object name cannot conceal a malformed
-                        // index, trigger body or table in this current profile.
-                        for drift in [
-                            "DROP INDEX files_cwd; CREATE INDEX files_cwd ON files(path);",
-                            "DROP TRIGGER catalog_changes_delete; CREATE TRIGGER catalog_changes_delete AFTER DELETE ON session_catalog BEGIN SELECT 1; END;",
-                            "ALTER TABLE native_usage_sources ADD COLUMN unexpected TEXT;",
-                        ] {
-                            let tx = db.unchecked_transaction().unwrap();
-                            tx.execute_batch(drift).unwrap();
-                            let before = tx.total_changes();
-                            assert!(!current_objects_present(&tx).unwrap(), "{drift}");
-                            assert_eq!(tx.total_changes(), before);
-                            tx.rollback().unwrap();
-                            assert!(current_objects_present(&db).unwrap());
-                        }
-                        assert_eq!(
-                            db.query_row(
-                                "SELECT count(*) FROM pragma_foreign_key_check",
-                                [],
-                                |r| r.get::<_, i64>(0)
-                            )
-                            .unwrap(),
-                            0
-                        );
-                        assert_eq!(
-                            copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                            if copied { "scoped" } else { "legacy" }
-                        );
-                        for table in ["usage_identity", "usage", "codex_usage"] {
-                            assert_eq!(
-                                db.query_row(
-                                    "SELECT count(*) FROM pragma_foreign_key_list(?1)",
-                                    [table],
-                                    |r| r.get::<_, i64>(0)
-                                )
-                                .unwrap(),
-                                if copied { 2 } else { 0 }
-                            );
-                        }
-                        if metadata {
-                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "DDL cannot enroll a Source");
-                            db.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA)
-                                .unwrap();
-                            db.execute("INSERT INTO storage_namespaces VALUES('a',1,0,1,0)", [])
-                                .unwrap();
-                            let tx = db.unchecked_transaction().unwrap();
-                            crate::storage::sqlite::changes::initialize_source_floors(
-                                &tx,
-                                &crate::storage::LogicalSourceNamespace::new("a").unwrap(),
-                            )
-                            .unwrap();
-                            tx.commit().unwrap();
-                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-                        }
-                        if catalog {
-                            // Catalog triggers use the row's owner, even when
-                            // the executing connection is bound to Source A.
-                            db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('b','same-session',1,'codex','{}')", []).unwrap();
-                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-                            db.execute("UPDATE session_catalog SET metadata='{\"changed\":true}' WHERE namespace='b'", []).unwrap();
-                            db.execute("DELETE FROM session_catalog WHERE namespace='b'", [])
-                                .unwrap();
-                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
-                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-                        }
-                    }
-                }
+        for _trace in [true] {
+            let db = Connection::open_in_memory().unwrap();
+            bind_fixture(&db, "a");
+            db.pragma_update(None, "foreign_keys", true).unwrap();
+            for ddl in authored_storage_ddl() {
+                db.execute_batch(ddl).unwrap();
             }
+            assert_eq!(objects(&db), required_objects);
+            assert!(current_objects_present(&db).unwrap());
+            // A matching object name cannot conceal a malformed
+            // index, trigger body or table in this current profile.
+            for drift in [
+                "DROP INDEX files_cwd; CREATE INDEX files_cwd ON files(path);",
+                "DROP TRIGGER catalog_changes_delete; CREATE TRIGGER catalog_changes_delete AFTER DELETE ON session_catalog BEGIN SELECT 1; END;",
+                "ALTER TABLE native_usage_sources ADD COLUMN unexpected TEXT;",
+            ] {
+                let tx = db.unchecked_transaction().unwrap();
+                tx.execute_batch(drift).unwrap();
+                let before = tx.total_changes();
+                assert!(!current_objects_present(&tx).unwrap(), "{drift}");
+                assert_eq!(tx.total_changes(), before);
+                tx.rollback().unwrap();
+                assert!(current_objects_present(&db).unwrap());
+            }
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM pragma_foreign_key_check",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            validate_copied_usage(&db).unwrap();
+            for table in ["usage_identity", "usage", "codex_usage"] {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM pragma_foreign_key_list(?1)",
+                        [table],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    2
+                );
+            }
+            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "DDL cannot enroll a Source");
+            db.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA)
+                .unwrap();
+            db.execute("INSERT INTO storage_namespaces VALUES('a',1,0,1,0)", [])
+                .unwrap();
+            let tx = db.unchecked_transaction().unwrap();
+            crate::storage::sqlite::changes::initialize_source_floors(
+                &tx,
+                &crate::storage::LogicalSourceNamespace::new("a").unwrap(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+            // Catalog triggers use the row's owner, even when
+            // the executing connection is bound to Source A.
+            db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('b','same-session',1,'codex','{}')", []).unwrap();
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+            db.execute("UPDATE session_catalog SET metadata='{\"changed\":true}' WHERE namespace='b'", []).unwrap();
+            db.execute("DELETE FROM session_catalog WHERE namespace='b'", [])
+                .unwrap();
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         }
     }
 
@@ -1786,7 +1773,7 @@ mod tests {
             db.execute_batch(copied_usage_schema()).unwrap();
             db.execute_batch(tree_state::schema()).unwrap();
             bind_fixture(&db, "a");
-            assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
+            validate_copied_usage(&db).unwrap();
             {
                 let tx = db.transaction().unwrap();
                 tx.execute_batch(
@@ -1794,9 +1781,9 @@ mod tests {
                 )
                 .unwrap();
                 tx.execute_batch(copied_usage_schema()).unwrap();
-                assert_eq!(copied_usage_sql(&tx, "legacy", "scoped").unwrap(), "scoped");
+                validate_copied_usage(&tx).unwrap();
                 tx.rollback().unwrap();
-                assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
+                validate_copied_usage(&db).unwrap();
             }
             // Invalidate an already cached decision with a partial family DDL.
             db.execute_batch("DROP TABLE codex_usage; CREATE TABLE codex_usage(file_id INTEGER NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(file_id,seq)) STRICT, WITHOUT ROWID;").unwrap();
@@ -1831,7 +1818,7 @@ mod tests {
             tx.rollback().unwrap();
             db.execute_batch("DROP TABLE codex_usage;").unwrap();
             assert!(matches!(
-                copied_usage_sql(&db, "legacy", "scoped"),
+                validate_copied_usage(&db),
                 Err(rusqlite::Error::InvalidQuery)
             ));
         }
@@ -1850,7 +1837,7 @@ mod tests {
                 db.execute_batch(ddl).unwrap();
             }
             // Cache the admitted shape, then invalidate a real authored schema.
-            assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
+            validate_copied_usage(&db).unwrap();
             db.execute_batch(corrupt).unwrap();
             let tx = db.transaction().unwrap();
             let before: i64 = tx
@@ -2045,9 +2032,7 @@ mod tests {
                             .unwrap();
                             native_usage::write(&tx, path, &ledger, &index).unwrap();
                         }
-                        tx.execute(native_usage::repair_sql(&tx,
-                            "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2)",
-                            "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)").unwrap(), params!["same/source.jsonl", header_ledger(&ledger)]).unwrap();
+                        tx.execute("INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)", params!["same/source.jsonl", header_ledger(&ledger)]).unwrap();
                         let (records, tokens, _) = tree_state::shared_usage(&tx, 1, 1).unwrap();
                         assert_eq!(records["same-message"].len(), 1);
                         assert_eq!(tokens["same-message"].input, amount);

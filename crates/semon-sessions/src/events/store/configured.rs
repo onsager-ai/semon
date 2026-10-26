@@ -8404,18 +8404,13 @@ mod tests {
             inputs: &[crate::Input],
         ) -> (Batch, crate::model::SemanticModelBatch) {
             for (i, input) in inputs.iter().enumerate() {
-                if cache.explicit_store {
-                    cache
-                        .ingest(
-                            &format!("{:064x}", 6800 + i),
-                            &input.full_path(options),
-                            "codex",
-                        )
-                        .unwrap();
-                } else {
-                    crate::events::scan_file(&input.full_path(options), "codex", cache, &mut false)
-                        .unwrap();
-                }
+                cache
+                    .ingest(
+                        &format!("{:064x}", 6800 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
             }
             let paths = inputs
                 .iter()
@@ -8453,14 +8448,12 @@ mod tests {
                 .unwrap();
                 // Ordinary publication consumes the prepared batch directly;
                 // its semantic_record contract accepts only earlier phases.
-                if cache.explicit_store || batch.phase != Phase::Publication {
-                    assert_eq!(
-                        cache
-                            .record_semantic_batch(&batch, model.prepared())
-                            .unwrap(),
-                        Outcome::Written
-                    );
-                }
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
                 if batch.phase == Phase::Publication {
                     return (batch, model);
                 }
@@ -9522,23 +9515,13 @@ mod tests {
             inputs: &[crate::Input],
         ) {
             for (i, input) in inputs.iter().enumerate() {
-                if cache.explicit_store {
-                    cache
-                        .ingest(
-                            &format!("{:064x}", 7200 + i),
-                            &input.full_path(options),
-                            "claude",
-                        )
-                        .unwrap();
-                } else {
-                    crate::events::scan_file(
+                cache
+                    .ingest(
+                        &format!("{:064x}", 7200 + i),
                         &input.full_path(options),
                         "claude",
-                        cache,
-                        &mut false,
                     )
                     .unwrap();
-                }
             }
         }
 
@@ -9660,7 +9643,7 @@ mod tests {
                 if batch.paths.is_empty() {
                     continue;
                 }
-                if cache.explicit_store && matches!(batch.phase, Phase::Indexing | Phase::Identity)
+                if matches!(batch.phase, Phase::Indexing | Phase::Identity)
                 {
                     let error = cache
                         .semantic_select(
@@ -9693,18 +9676,15 @@ mod tests {
                     1_790_000_000_000,
                 )
                 .unwrap();
-                if cache.explicit_store || batch.phase != Phase::Publication {
-                    assert_eq!(
-                        cache
-                            .record_semantic_batch(&batch, model.prepared())
-                            .unwrap(),
-                        Outcome::Written,
-                        "phase={:?}, admitted={}, rejection={:?}",
-                        batch.phase,
-                        cache.explicit_store,
-                        cache.semantic_rejection()
-                    );
-                }
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written,
+                    "phase={:?}, rejection={:?}",
+                    batch.phase,
+                    cache.semantic_rejection()
+                );
                 if batch.phase == Phase::Publication {
                     return (batch, model);
                 }

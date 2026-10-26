@@ -853,8 +853,8 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             "nativeall" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
-            "headerid" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
-            "headerparent" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+            "headerid" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4",
+            "headerparent" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4",
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
         };
         let mut q = c.prepare(sql).map_err(error)?;
