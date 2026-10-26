@@ -151,7 +151,8 @@ fn step_inner(
     table: Arc<EffectiveTable>,
     check_current: bool,
 ) -> rusqlite::Result<bool> {
-    let mut connection = configured::connection(owner.config()).map_err(owner_error)?;
+    let mut connection =
+        crate::storage::sqlite::semantic::pricing_connection(owner).map_err(owner_error)?;
     owner.validate_ready(&connection).map_err(owner_error)?;
     // A completed owner needs only metadata reads and never decodes payloads.
     if idle(&connection, &table.fingerprint)? {
@@ -988,25 +989,34 @@ mod tests {
             sources: vec![source(path, ledger)],
         }
     }
+    fn current_store(
+        path: &Path,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> SqliteStore {
+        let mut store = crate::events::store::current_test_store(path, namespace);
+        store.connection =
+            crate::storage::sqlite::semantic::pricing_connection(&store.owner).unwrap();
+        store
+    }
     fn publish(store: &SqliteStore, row: &CatalogRow) {
         let c = &store.connection;
         let generation = crate::retention::source_generation(&row.sources).unwrap();
         c.execute(
-            "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,1,?2,?3)",
+            "INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,1,?2,?3)",
             params![row.key, row.harness, json(row).unwrap()],
         )
         .unwrap();
         c.execute(
-            "INSERT INTO session_descriptions VALUES(?1,2,'fixture',?2)",
+            "INSERT INTO session_descriptions(namespace,session_key,version,inputs,description) VALUES(semon_namespace(),?1,2,'fixture',?2)",
             params![
                 row.key,
                 json(&serde_json::json!({"cost":row.cost})).unwrap()
             ],
         )
         .unwrap();
-        c.execute("INSERT INTO session_overview VALUES(?1,1,'off',?2)",params![row.key,json(&serde_json::json!({"source_generation":generation,"home":{"cost":row.cost.usd},"activity":null})).unwrap()]).unwrap();
+        c.execute("INSERT INTO session_overview(namespace,session_key,last_ms,state,summary) VALUES(semon_namespace(),?1,1,'off',?2)",params![row.key,json(&serde_json::json!({"source_generation":generation,"home":{"cost":row.cost.usd},"activity":null})).unwrap()]).unwrap();
         c.execute(
-            "INSERT INTO session_trace_headers VALUES(?1,'before',?2,?3)",
+            "INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,?3)",
             params![
                 row.key,
                 generation,
@@ -1703,6 +1713,9 @@ mod tests {
         for namespace in ["a", "b"] {
             bind_fixture(&db, namespace);
             let tx = db.transaction().unwrap();
+            // Published proof custody binds the current retained usage source
+            // receipt, as it does when the ordinary Index producer writes it.
+            native_usage::begin_source(&tx, "same.jsonl", None, &old, false).unwrap();
             chunk_proofs::write(&tx, "same.jsonl", &old, Some(&chunks)).unwrap();
             let metadata = if namespace == "a" {
                 json(&row("same.jsonl", &old, Cost::default(), "codex")).unwrap()
@@ -2328,17 +2341,18 @@ mod tests {
     fn completed_fingerprint_stays_idle_without_writes_or_payload_decodes() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let _store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let _store = current_store(&path, &crate::events::store::fixture_namespace());
         let table = table("anthropic", "claude-opus-5-5", 8.0, 1);
         drain(&path, &table);
-        let before: (i64, String) = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        // Current meta is WITHOUT ROWID. Keep one observer connection so its
+        // data_version also detects any writes committed by the step connections.
+        let observer = Connection::open(&path).unwrap();
+        let before: (i64, String) = observer
+            .query_row(
+                "SELECT (SELECT data_version FROM pragma_data_version),value FROM meta WHERE namespace='fixture-source' AND key=?1",
+                [WORK],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         let decoded = REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get);
         crate::pricing::runtime::register_index(owner(&path));
@@ -2346,11 +2360,12 @@ mod tests {
         for _ in 0..8 {
             assert!(!step_inner(&owner(&path), Arc::clone(&table), false).unwrap());
         }
-        let after: (i64, String) = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        let after: (i64, String) = observer
+            .query_row(
+                "SELECT (SELECT data_version FROM pragma_data_version),value FROM meta WHERE namespace='fixture-source' AND key=?1",
+                [WORK],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!(after, before);
         assert_eq!(REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get), decoded);
@@ -2373,10 +2388,7 @@ mod tests {
     fn pending_source_append_restarts_partial_batch_and_prices_all_retained_facts() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let mut store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let mut store = current_store(&path, &crate::events::store::fixture_namespace());
         let p = "/not-present/pending-append.jsonl";
         let unrelated = "/not-present/already-current.jsonl";
         let p_ledger = ledger();
@@ -2476,17 +2488,17 @@ mod tests {
         let appended_record =
             serde_json::json!({"type":"token_usage_record","payload":{"response_id":"append-129"}});
         tx.execute(
-            "INSERT INTO native_usage_identities VALUES(?1,'tree','append-129',129)",
+            "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,'tree','append-129',129)",
             [p_id],
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO native_usage_identities VALUES(?1,'model','append-129',129)",
+            "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,'model','append-129',129)",
             [p_id],
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO native_usage_facts VALUES(?1,129,'append-129',?2,?3,'accepted','accepted')",
+            "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,129,'append-129',?2,?3,'accepted','accepted')",
             params![p_id, appended_payload.to_string(), appended_record.to_string()],
         )
         .unwrap();
@@ -2608,10 +2620,7 @@ mod tests {
     fn pending_source_current_id_replacement_discards_old_partial_job() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let mut store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let mut store = current_store(&path, &crate::events::store::fixture_namespace());
         let native = "/not-present/pending-replacement.jsonl";
         let original_ledger = ledger();
         store
@@ -2671,22 +2680,22 @@ mod tests {
         });
         let replacement_record = serde_json::json!({"type":"token_usage_record","payload":{"response_id":"replacement-0"}});
         tx.execute(
-            "INSERT INTO native_usage_identities VALUES(?1,'tree','replacement-0',0)",
+            "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,'tree','replacement-0',0)",
             [replacement_id],
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO native_usage_identities VALUES(?1,'model','replacement-0',0)",
+            "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,'model','replacement-0',0)",
             [replacement_id],
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO native_usage_facts VALUES(?1,0,'replacement-0',?2,?3,'accepted','accepted')",
+            "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,0,'replacement-0',?2,?3,'accepted','accepted')",
             params![replacement_id, replacement_payload.to_string(), replacement_record.to_string()],
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO native_usage_dimensions VALUES(?1,'model','gpt-6.1-sol',?2)",
+            "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,'model','gpt-6.1-sol',?2)",
             params![
                 replacement_id,
                 json(&serde_json::json!({"input":300,"output":0,"cache_write":0,"cache_read":0}))
@@ -2782,10 +2791,7 @@ mod tests {
     fn a_new_stale_retained_owner_is_enqueued_and_repriced_without_rescanning_others() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let mut store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let mut store = current_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/new-retained-claude.jsonl";
         let usage = MessageUsage {
@@ -2885,10 +2891,7 @@ mod tests {
     fn unchanged_saved_session_overview_and_summary_reprice_without_native_files_across_restart() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let mut store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let mut store = current_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/retained-claude.jsonl";
         let used = MessageUsage {
@@ -2984,10 +2987,7 @@ mod tests {
     fn normalized_codex_cost_dimensions_resume_after_a_fact_batch() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let mut store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let mut store = current_store(&path, &crate::events::store::fixture_namespace());
         let ledger = ledger();
         let native = "/not-present/retained-codex.jsonl";
         let mut index = FileIndex {
@@ -3073,10 +3073,7 @@ mod tests {
     fn missing_or_changed_retained_facts_keep_the_previous_price_fingerprint() {
         let root = root();
         let path = root.join("index.sqlite3");
-        let store = crate::events::store::current_test_store(
-            &path,
-            &crate::events::store::fixture_namespace(),
-        );
+        let store = current_store(&path, &crate::events::store::fixture_namespace());
         let cost = crate::pricing::Cost::default();
         let old = cost.pricing_fingerprint.clone();
         publish(&store, &row("/missing/native", &ledger(), cost, "claude"));
