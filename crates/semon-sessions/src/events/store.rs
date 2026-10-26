@@ -2469,7 +2469,7 @@ impl IndexStore for SqliteStore {
                 None,
                 None,
                 &mut row_measurements,
-                None,
+                self.owner.namespace(),
                 &layout,
                 &mut usage_deletes,
             )
