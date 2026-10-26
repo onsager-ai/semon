@@ -93,6 +93,20 @@ pub(crate) fn create_native_store(
     })
 }
 
+pub(crate) fn require_configured(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<(), super::StorageError> {
+    pool.transaction(&config.namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
+        let binding = model_cache::binding(tx)?;
+        if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+            return Err(super::StorageError::ScopeChanged);
+        }
+        Ok(())
+    })
+}
+
 fn configured_generation(
     config: &super::StoreConfig,
     pool: &PgPool,

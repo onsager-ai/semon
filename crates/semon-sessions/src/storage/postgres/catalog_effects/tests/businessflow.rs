@@ -2117,17 +2117,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(facts_generation.len(), 64);
     let facts_store = crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
     let mut facts_query =
-        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-            vec![(namespace.as_str().into(), facts_options.clone())],
-        )));
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_configured_machines(
+            vec![(namespace.as_str().into(), facts_options.clone(), config.clone())],
+        ).unwrap()));
     let list = facts_query
-        .call_bound_catalog_at(
-            "list_sessions",
-            &serde_json::json!({}),
-            1790812805000,
-            facts_store.as_ref(),
-        )
+        .call_catalog_at("list_sessions", &serde_json::json!({}), None, crate::SessionSourceReadMode::LocalThenProvider, 1790812805000)
         .unwrap();
+    let bound_list = facts_query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812805000, facts_store.as_ref()).unwrap();
+    assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
     assert_eq!(
         fs::read(&path).unwrap(),

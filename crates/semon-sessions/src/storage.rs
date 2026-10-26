@@ -264,9 +264,12 @@ impl StoreConfig {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::source_journal::open(self),
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { pool, control } => Ok(Box::new(postgres::PgSourceJournal::configured(
-                pool.clone(), self.namespace.clone(), control.clone(),
-            ))),
+            StoreBackend::Postgres { pool, control } => {
+                postgres::require_configured(self, pool, control)?;
+                Ok(Box::new(postgres::PgSourceJournal::configured(
+                    pool.clone(), self.namespace.clone(), control.clone(),
+                )))
+            },
         }
     }
 
