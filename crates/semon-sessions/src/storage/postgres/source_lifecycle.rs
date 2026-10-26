@@ -374,6 +374,7 @@ pub(super) fn relocation_candidate(
     Ok(Some(old))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn relocate(
     tx: &mut PgTxn<'_>,
     old: &str,
