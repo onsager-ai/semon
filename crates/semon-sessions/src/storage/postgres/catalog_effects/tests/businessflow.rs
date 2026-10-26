@@ -166,10 +166,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // fully publishes a fresh oracle cache; its exact lists are saved before
     // the PG no-SQLite phase.
     let recent_windows = [
-        Duration::from_secs(1),
-        Duration::from_secs(2),
+        Duration::from_secs(86400),
+        Duration::from_secs(86401),
         Duration::from_secs(86400 * 365 * 100),
     ];
+    // One day after the fixtures: the cutoffs fall between fixture times.
+    let recent_now = 1790812802000 + 86_400_000;
     let recent_machine = "vertical140\0🦀";
     let mut closed_options = options.clone();
     closed_options.cache = oracle.root.join("oracle-query177");
@@ -182,7 +184,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let list = crate::Query::from_sources(std::sync::Arc::new(
                 crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
             ))
-            .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+            .call_at("list_sessions", &serde_json::json!({}), recent_now)
             .expect("SQLite recent-window list");
             (*since, list)
         })
@@ -447,7 +449,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let recent = crate::Query::from_sources(std::sync::Arc::new(
             crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
         ))
-        .call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &recent_store)
+        .call_bound_catalog_at("list_sessions", &serde_json::json!({}), recent_now, &recent_store)
         .unwrap();
         let expected = &oracle_recent[&since];
         let ids = |list: &serde_json::Value| {
