@@ -9,6 +9,7 @@ const L1: &str = "11111111111111111111111111111111111111111111111111111111111111
 const L2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const TABLES: &[&str] = &[
     "catalog_rows", "catalog_sources", "catalog_dependencies", "catalog_recipe_headers", "catalog_recipe_rows",
+    "catalog_trace_headers", "catalog_trace_turns", "catalog_trace_edges", "catalog_trace_bookmarks",
 ];
 
 struct Input {
@@ -16,6 +17,7 @@ struct Input {
     projections: Vec<crate::slot_projection::Projection>,
     metadata: Vec<Vec<u8>>,
     slots: Vec<Vec<u8>>,
+    trace: Vec<Vec<Vec<u8>>>,
 }
 impl Input {
     fn publication(&self) -> crate::slot_projection::Publication<'_> {
@@ -55,6 +57,9 @@ fn oracle() -> Input {
     for row in &prepared.rows {
         writer.current(row, &serde_json::to_string(row).unwrap()).unwrap();
         catalog::publish_current_sources(&writer, row).unwrap();
+        if let Some(trace) = &row.trace {
+            crate::causal_trace::publish_with_store(&crate::storage::sqlite::trace::TraceWriter::unbound(&db), row, trace).unwrap();
+        }
     }
     catalog::publish_slot_rows(&SlotWriter::unbound(&db), &prepared.rows, &prepared.transcripts).unwrap();
     db.execute_batch("COMMIT").unwrap();
@@ -63,10 +68,15 @@ fn oracle() -> Input {
     };
     let metadata = read("SELECT metadata FROM session_catalog ORDER BY session_key");
     let slots = read("SELECT metadata FROM session_slots ORDER BY session_key,slot");
+    let trace = [
+        "SELECT metadata FROM session_trace_headers ORDER BY session_key",
+        "SELECT metadata FROM session_trace_turns ORDER BY session_key,turn_id",
+        "SELECT metadata FROM session_trace_edges ORDER BY session_key,edge_id",
+    ].iter().map(|sql| read(sql)).collect();
     assert!(!slots.is_empty());
     drop(db);
     fs::remove_dir_all(root).unwrap();
-    Input { rows: prepared.rows, projections: prepared.transcripts, metadata, slots }
+    Input { rows: prepared.rows, projections: prepared.transcripts, metadata, slots, trace }
 }
 
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
@@ -86,6 +96,14 @@ fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() 
         assert_eq!(rows.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.metadata);
         let slots = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_recipe_rows ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
         assert_eq!(slots.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.slots);
+        for (index, (table, order)) in [
+            ("catalog_trace_headers", "session_key"),
+            ("catalog_trace_turns", "session_key,turn_id"),
+            ("catalog_trace_edges", "session_key,edge_id"),
+        ].iter().enumerate() {
+            let rows = tx.driver.query(&format!("SELECT metadata FROM semon_pg_native_{table} ORDER BY {order}"), &[]).map_err(sqlstate::error)?;
+            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.trace[index]);
+        }
         Ok(())
     }).unwrap();
     let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), snapshot).unwrap();

@@ -7,7 +7,7 @@ use crate::{
     model::summary::{CatalogRow, CatalogSource},
     storage::{
         StorageError,
-        catalog::{self, CurrentPublicationStore, SlotPublicationHeader, SlotPublicationStore},
+        catalog::{self, CurrentPublicationStore, SlotPublicationHeader, SlotPublicationStore, TracePublicationStore},
     },
 };
 use sha2::{Digest, Sha256};
@@ -76,7 +76,7 @@ impl Effects<'_, '_> {
     ) -> Result<(), StorageError> {
         let mut tx = self.tx.borrow_mut();
         tx.check()?;
-        let ns = tx.namespace.as_str().as_bytes();
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
         let generation = self.generation.as_bytes();
         let mut args: Vec<&(dyn ToSql + Sync)> = vec![&ns, &generation];
         args.extend_from_slice(values);
@@ -89,6 +89,40 @@ impl Effects<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         boundary(&tx)
+    }
+}
+
+impl TracePublicationStore for Effects<'_, '_> {
+    type Error = StorageError;
+    fn invalid(_: std::io::Error) -> StorageError { StorageError::Unavailable }
+    fn matches_header(&self, key: &str, generation: &str, source: &str) -> Result<bool, StorageError> {
+        let mut tx = self.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let rows = tx.driver.query("SELECT session_key=$4 AND trace_generation=$5 AND source_generation=$6 FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &generation.as_bytes(), &source.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(rows.first().is_some_and(|row| row.get(0)))
+    }
+    fn header(&self, key: &str, generation: &str, source: &str, metadata: &str) -> Result<bool, StorageError> {
+        if metadata.len() > MAX { return Err(StorageError::Busy); }
+        self.put("semon_pg_native_catalog_trace_headers", &["key_digest", "session_key", "trace_generation", "source_generation", "metadata"], "key_digest", &[&digest(key.as_bytes()), &key.as_bytes(), &generation.as_bytes(), &source.as_bytes(), &metadata.as_bytes()])?;
+        Ok(true)
+    }
+    fn clear(&self, _key: &str) -> Result<(), StorageError> {
+        // Immutable generations never delete an outgoing trace cohort.
+        self.tx.borrow().check()
+    }
+    fn turn(&self, key: &str, id: Option<&str>, start: Option<&str>, metadata: &str) -> Result<(), StorageError> {
+        let id = id.ok_or(StorageError::InvalidArguments)?;
+        if metadata.len() > MAX { return Err(StorageError::Busy); }
+        self.put("semon_pg_native_catalog_trace_turns", &["key_digest", "session_key", "turn_digest", "turn_id", "start_id", "metadata"], "key_digest,turn_digest", &[&digest(key.as_bytes()), &key.as_bytes(), &digest(id.as_bytes()), &id.as_bytes(), &start.map(str::as_bytes), &metadata.as_bytes()])
+    }
+    fn edge(&self, key: &str, id: Option<&str>, metadata: &str) -> Result<(), StorageError> {
+        let id = id.ok_or(StorageError::InvalidArguments)?;
+        if metadata.len() > MAX { return Err(StorageError::Busy); }
+        self.put("semon_pg_native_catalog_trace_edges", &["key_digest", "session_key", "edge_digest", "edge_id", "metadata"], "key_digest,edge_digest", &[&digest(key.as_bytes()), &key.as_bytes(), &digest(id.as_bytes()), &id.as_bytes(), &metadata.as_bytes()])
+    }
+    fn bookmark(&self, key: &str, target: &str, edge: &str) -> Result<(), StorageError> {
+        self.put("semon_pg_native_catalog_trace_bookmarks", &["key_digest", "session_key", "target_digest", "target", "edge_digest", "edge_id"], "key_digest,target_digest,edge_digest", &[&digest(key.as_bytes()), &key.as_bytes(), &digest(target.as_bytes()), &target.as_bytes(), &digest(edge.as_bytes()), &edge.as_bytes()])
     }
 }
 
@@ -192,6 +226,9 @@ pub(super) fn stage(
         let metadata = std::str::from_utf8(&metadata).map_err(|_| StorageError::Unavailable)?;
         effects.current(row, metadata)?;
         catalog::publish_current_sources(&effects, row)?;
+        if let Some(trace) = &row.trace {
+            crate::causal_trace::publish_with_store(&effects, row, trace)?;
+        }
     }
     if let Some(projections) = publication.transcripts {
         catalog::publish_slot_rows(&effects, publication.rows, projections)?;
