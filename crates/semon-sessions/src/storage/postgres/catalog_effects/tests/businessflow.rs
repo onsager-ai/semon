@@ -1675,11 +1675,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .prepare_semantic_model_batch(&facts_options, inputs, &batch, at)
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
-                let ack = cache
-                    .publish_semantic_catalog(&batch, model.prepared())
-                    .unwrap();
+                // Each bounded custody advance commits as a Deferred checkpoint;
+                // the qualified head is unchanged until the final CAS publishes.
+                let head = cache.session_catalog_generation().unwrap();
+                let mut deferred = 0;
+                let ack = loop {
+                    let ack = cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap();
+                    if ack.0 != crate::events::Outcome::Deferred {
+                        break ack;
+                    }
+                    assert_eq!(ack.1, None);
+                    assert_eq!(cache.session_catalog_generation().unwrap(), head);
+                    deferred += 1;
+                    assert!(deferred < 64, "custody makes bounded progress");
+                };
+                assert_eq!(ack.0, crate::events::Outcome::Written);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
-                break (ack.1.unwrap(), batch, model);
+                break (ack.1.unwrap(), batch, model, deferred);
             }
         }
     };
@@ -2021,8 +2035,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap(), qualified);
-    // The ordinary semantic catch-up claims the `removed` invalidation and
-    // republishes the connected parent without the withdrawn Source.
+    // A second never-retained session leaves Current in the same catch-up, so
+    // its custody needs more than the one bounded advance of an attempt.
+    let second = bulk[69].full_path(&facts_options);
+    let second_path = second.to_str().unwrap().to_owned();
+    let second_removal = vec![(second_path.clone(), store.ledger(&second_path).unwrap())];
+    fs::rename(&second, oracle.root.join("retained-bulk169-069.jsonl")).unwrap();
+    assert_eq!(
+        store.remove_files(&second_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    // The ordinary semantic catch-up claims the `removed` invalidations and
+    // republishes the connected parent without the withdrawn Sources.
     let mut catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let connected = [
@@ -2034,8 +2059,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             root: crate::InputRoot::Claude,
             path: "projects/project/one/subagents/agent-related154.jsonl".into(),
         },
+        bulk[69].clone(),
     ];
-    let caught = stage_publish(&mut catchup, &connected, 1790812809000).0;
+    let (caught, _, _, deferred) = stage_publish(&mut catchup, &connected, 1790812809000);
+    assert!(deferred >= 1, "two new custodies need more than one attempt");
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
