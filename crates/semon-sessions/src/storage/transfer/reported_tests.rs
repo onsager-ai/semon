@@ -418,13 +418,22 @@ fn finish_catalog(
             );
             let mut published = false;
             for _ in 0..256 {
-                match cache.publish_semantic_catalog(&batch,model.prepared()).unwrap() {
-                    (crate::events::Outcome::Deferred,None) => continue,
-                    (crate::events::Outcome::Written,Some(_)) => {published=true;break;},
+                match cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                {
+                    (crate::events::Outcome::Deferred, None) => continue,
+                    (crate::events::Outcome::Written, Some(_)) => {
+                        published = true;
+                        break;
+                    }
                     result => panic!("real publication failed: {result:?}"),
                 }
             }
-            assert!(published,"real retained custody must finish before transfer");
+            assert!(
+                published,
+                "real retained custody must finish before transfer"
+            );
             let key = &model.prepared().rows[0].key;
             cache.save_session_description(
                 key,
