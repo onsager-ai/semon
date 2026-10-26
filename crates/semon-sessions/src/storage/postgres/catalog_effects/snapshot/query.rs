@@ -30,7 +30,6 @@ impl QueryCatalogStore for QueryCatalog {
         let runtime = crate::native_evidence::query_runtime_generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_generation(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
-            use crate::storage::catalog::CatalogSnapshot;
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
             let observations = crate::native_evidence::RuntimeObservations::bound(&tx_snapshot, &runtime).map_err(|_| StorageError::ScopeChanged)?;
             let request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
@@ -68,13 +67,16 @@ impl QueryCatalogStore for QueryCatalog {
             let (edges, turns) = self.pool.transaction(namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
                 let mut sets = Vec::new();
                 for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
-                    let values = tx.driver.query(&format!("SELECT {column} FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error)?;
+                    let values = tx.driver.query(&format!("SELECT CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error)?;
                     if values.len() > 64 { return Err(StorageError::Busy); }
-                    let values = values.iter().map(|row| text(row.get(0))).collect::<Result<BTreeSet<_>, _>>()?;
+                    let values = values.iter().map(|row| text(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)).collect::<Result<BTreeSet<_>, _>>()?;
                     sets.push(values);
                 }
                 Ok((sets.remove(0), sets.remove(0)))
             })?;
+            for id in edges.iter().chain(turns.iter()) {
+                *bytes_left = bytes_left.checked_sub(id.len()).ok_or(StorageError::Busy)?;
+            }
             Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns })
         }).map_err(unavailable)
     }
