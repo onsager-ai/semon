@@ -26,14 +26,14 @@ pub(super) fn capture(
         .clone()
         .ok_or(StorageError::ScopeChanged)?;
     if state.native_family == 3 {
-        let row=tx.0.driver.query_one("SELECT s.source_id,s.receipt,s.checkpoint::text,s.parser_version,s.usage_ready,g.generation,CASE WHEN octet_length(g.chunks_header)<=1048576 THEN g.chunks_header END,CASE WHEN octet_length(g.launch_header)<=1048576 THEN g.launch_header END,g.launch_header IS NULL FROM semon_pg_native_page_generations g JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND (($3::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current c WHERE c.namespace=g.namespace AND c.namespace_digest=g.namespace_digest AND c.source_path=g.source_path AND c.generation=g.generation)) OR ($3::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')=$3))",&[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?;
+        let row=tx.0.driver.query_one("SELECT g.source_id,g.ledger,coalesce(s.checkpoint::text,'0'),coalesce(s.parser_version,0),coalesce(s.usage_ready,false),g.generation,CASE WHEN octet_length(g.chunks_header)<=1048576 THEN g.chunks_header END,CASE WHEN octet_length(g.launch_header)<=1048576 THEN g.launch_header END,g.launch_header IS NULL FROM semon_pg_native_page_generations g LEFT JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND (($3::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current c WHERE c.namespace=g.namespace AND c.namespace_digest=g.namespace_digest AND c.source_path=g.source_path AND c.generation=g.generation)) OR ($3::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')=$3))",&[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?;
         let launch: Option<Vec<u8>> = row.get(7);
         if launch.is_none() && !row.get::<_, bool>(8) {
             return Err(StorageError::Busy);
         }
         let text =
             |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged);
-        let source = NativeSource {
+        let mut source = NativeSource {
             path: path.clone(),
             backing: state.native_backing.clone(),
             generation: u64::try_from(row.get::<_, i64>(0))
@@ -49,6 +49,12 @@ pub(super) fn capture(
             chunks_header: text(row.get::<_, Option<Vec<u8>>>(6).ok_or(StorageError::Busy)?)?,
             launch_header: launch.map(text).transpose()?,
         };
+        if source.backing.is_some() {
+            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&source.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+            source.checkpoint = header.consumed_offset.ok_or(StorageError::ScopeChanged)?;
+            source.parser_version = header.parser_version;
+            source.usage_ready = false;
+        }
         if source.id(tx.0.namespace.as_str())?.0.as_bytes() != row.get::<_, Vec<u8>>(5) {
             return Err(StorageError::ScopeChanged);
         }
@@ -163,9 +169,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             let (_, ledger) = super::super::native_reader::ledger(tx.0, &source.path)?
                 .ok_or(StorageError::ScopeChanged)?;
             native_pages::validate_source_ledger(source, &ledger)?;
-            }
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
-            if source.backing.is_none() {
                 tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
             }
             let id = source.id(tx.0.namespace.as_str())?;
