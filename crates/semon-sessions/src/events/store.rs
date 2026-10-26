@@ -6402,7 +6402,7 @@ pub(crate) fn ledger_row(
 
 fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
     crate::events::native_decode::ledger(&native_decode::values(row, &[])?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 /// The per-file child queries, prepared once per read.
@@ -6493,7 +6493,7 @@ fn read_file(
         }
         signals.push(
             crate::events::native_decode::signal(&native_decode::values(signal_row, &[])?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .map_err(|_| native_decode::malformed(0, Type::Text))?
                 .1,
         );
     }
@@ -6515,7 +6515,7 @@ fn read_file(
         }
         codex_usage_events.push(
             crate::events::native_decode::codex_usage(&native_decode::values(codex_row, &[])?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .map_err(|_| native_decode::malformed(0, Type::Text))?
                 .1,
         );
     }
@@ -6551,20 +6551,20 @@ fn read_file(
         )?,
     };
     let index = crate::events::native_decode::file(&native_decode::values(row, &[13])?, children)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        .map_err(|_| native_decode::malformed(0, Type::Text))?;
     Ok((path, ledger, index))
 }
 
 /// One `events` row, selected as [`EVENT_COLUMNS`].
 fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
     crate::events::native_decode::event(&native_decode::values(row, &[0, 8, 9, 14, 18, 22])?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 /// One `usage` row, selected as [`USAGE_COLUMNS`].
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
     crate::events::native_decode::usage(&native_decode::values(row, &[21])?)
-        .map_err(|_| rusqlite::Error::InvalidQuery)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {

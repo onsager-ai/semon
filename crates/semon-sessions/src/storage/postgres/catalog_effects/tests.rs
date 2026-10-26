@@ -325,7 +325,10 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                     let retained = view
                         .catalog(&current.key, true)?
                         .ok_or(StorageError::ScopeChanged)?;
-                    assert_eq!(serde_json::to_vec(&retained).unwrap(), data.composite[index]);
+                    assert_eq!(
+                        serde_json::to_vec(&retained).unwrap(),
+                        data.composite[index]
+                    );
                     let (_, slots) = view
                         .recipe(&current.key, true, 0, 64)?
                         .ok_or(StorageError::ScopeChanged)?;
