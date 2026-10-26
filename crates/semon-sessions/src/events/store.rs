@@ -2121,6 +2121,15 @@ pub(crate) fn focused_connection(
     Ok(db)
 }
 
+/// Home/Query readers open the local store only through its restored reader
+/// binding, which registers `semon_namespace()`; each reader then qualifies
+/// the sole current admission with `require_current` inside its own snapshot.
+pub(crate) fn local_reader(options: &crate::Options) -> io::Result<Connection> {
+    crate::storage::local_navigation_binding(options, "")
+        .and_then(|binding| binding.connection())
+        .map_err(io::Error::other)
+}
+
 /// Held legacy-fixture tests only; the current runtime has no unbound reader.
 #[cfg(test)]
 pub(crate) fn focused_unbound_connection(path: &Path) -> io::Result<Connection> {
