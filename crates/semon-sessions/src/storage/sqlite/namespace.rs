@@ -194,9 +194,6 @@ pub(crate) fn unenroll(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     let actual = require_admitted(&tx, &config.namespace)?;
-    if super::catalog_namespace::started(&tx).map_err(failed)? {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
     if actual != *expected {
         return Err(StorageError::ScopeChanged);
     }

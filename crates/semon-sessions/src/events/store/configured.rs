@@ -2384,66 +2384,21 @@ mod tests {
     }
 
     #[test]
-    fn existing_singleton_store_refuses_without_native_changes() {
+    fn existing_noncurrent_store_refuses_without_native_changes() {
         let f = Fixture::new();
-        // The create-new contract refuses even an already initialized file.
-        assert_eq!(
-            f.config.create_native_store(),
-            Err(StorageError::Unavailable)
-        );
-        let legacy = f.root.join("legacy.json");
-        drop(EventCache::open_scoped(&legacy, &crate::Options::default().source).unwrap());
+        assert_eq!(f.config.create_native_store(), Err(StorageError::Unavailable));
+        let path = f.root.join("unsupported.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('original-custody','keep');").unwrap();
+        drop(db);
+        let before = fs::read(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
         let mut config = f.config.clone();
-        config.backend = StoreBackend::Sqlite {
-            database: EventCache::path(&legacy),
-        };
-        let StoreBackend::Sqlite { database } = &config.backend;
-        let db = Connection::open(database).unwrap();
-        config.expected_stream_epoch = Some(
-            db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap(),
-        );
-        db.execute("INSERT INTO meta VALUES('original-custody','keep')", [])
-            .unwrap();
-        config.admit_namespace().unwrap();
-        for _ in 0..128 {
-            if config.assign_catalog_namespace(64).unwrap().complete {
-                break;
-            }
-        }
-        assert!(matches!(
-            config.native_events(),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
-        assert_eq!(
-            db.query_row(
-                "SELECT value FROM meta WHERE key='original-custody'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-            "keep"
-        );
-        assert!(
-            !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')",
-                [],
-                |r| r.get::<_, bool>(0)
-            )
-            .unwrap()
-        );
-        assert!(
-            !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace')",
-                [],
-                |r| r.get::<_, bool>(0)
-            )
-            .unwrap()
-        );
+        config.backend = StoreBackend::Sqlite { database: path.clone() };
+        assert!(NativeOwnership::restore(&config).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert!(!path.with_extension("sqlite3-wal").exists());
     }
 
     #[test]
@@ -2576,11 +2531,6 @@ mod tests {
                 NativeOwnership::admit(&config).unwrap();
             } else {
                 config.admit_namespace().unwrap();
-                for _ in 0..128 {
-                    if config.assign_catalog_namespace(64).unwrap().complete {
-                        break;
-                    }
-                }
             }
             fs::write(&raw, concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\",\"cwd\":\"/sanitized\"}}\n",
