@@ -267,7 +267,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             (*since, list)
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let all_total = expected.rows.len() as u64;
+    let all_total = expected.rows.iter().flat_map(|row| {
+        row.query.as_ref().unwrap()["rows"].as_object().unwrap().keys().cloned()
+    }).collect::<std::collections::BTreeSet<_>>().len() as u64;
     assert_eq!(
         oracle_recent[&recent_windows[2]]["total"].as_u64(),
         Some(all_total)
@@ -793,7 +795,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(
         query_list["total"].as_u64(),
-        Some(prepared.rows.len() as u64)
+        Some(all_total)
     );
     // Recent window (options.all=false): PG cohort equals the SQLite oracle.
     for since in recent_windows {
