@@ -1014,7 +1014,7 @@ mod tests {
             ],
         )
         .unwrap();
-        c.execute("INSERT INTO session_overview(namespace,session_key,version,inputs,summary) VALUES(semon_namespace(),?1,1,'off',?2)",params![row.key,json(&serde_json::json!({"source_generation":generation,"home":{"cost":row.cost.usd},"activity":null})).unwrap()]).unwrap();
+        c.execute("INSERT INTO session_overview(namespace,session_key,last_ms,state,summary) VALUES(semon_namespace(),?1,1,'off',?2)",params![row.key,json(&serde_json::json!({"source_generation":generation,"home":{"cost":row.cost.usd},"activity":null})).unwrap()]).unwrap();
         c.execute(
             "INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,?3)",
             params![
@@ -1713,6 +1713,9 @@ mod tests {
         for namespace in ["a", "b"] {
             bind_fixture(&db, namespace);
             let tx = db.transaction().unwrap();
+            // Published proof custody binds the current retained usage source
+            // receipt, as it does when the ordinary Index producer writes it.
+            native_usage::begin_source(&tx, "same.jsonl", None, &old, false).unwrap();
             chunk_proofs::write(&tx, "same.jsonl", &old, Some(&chunks)).unwrap();
             let metadata = if namespace == "a" {
                 json(&row("same.jsonl", &old, Cost::default(), "codex")).unwrap()
@@ -2341,11 +2344,15 @@ mod tests {
         let _store = current_store(&path, &crate::events::store::fixture_namespace());
         let table = table("anthropic", "claude-opus-5-5", 8.0, 1);
         drain(&path, &table);
-        let before: (i64, String) = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        // Current meta is WITHOUT ROWID. Keep one observer connection so its
+        // data_version also detects any writes committed by the step connections.
+        let observer = Connection::open(&path).unwrap();
+        let before: (i64, String) = observer
+            .query_row(
+                "SELECT (SELECT data_version FROM pragma_data_version),value FROM meta WHERE namespace='fixture-source' AND key=?1",
+                [WORK],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         let decoded = REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get);
         crate::pricing::runtime::register_index(owner(&path));
@@ -2353,11 +2360,12 @@ mod tests {
         for _ in 0..8 {
             assert!(!step_inner(&owner(&path), Arc::clone(&table), false).unwrap());
         }
-        let after: (i64, String) = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        let after: (i64, String) = observer
+            .query_row(
+                "SELECT (SELECT data_version FROM pragma_data_version),value FROM meta WHERE namespace='fixture-source' AND key=?1",
+                [WORK],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!(after, before);
         assert_eq!(REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get), decoded);
