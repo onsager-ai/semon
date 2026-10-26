@@ -3474,13 +3474,18 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
 fn unsupported_storage_is_observable_at_product_read_entrypoints() {
     for change in [
         "PRAGMA user_version=2147483647",
-        "DELETE FROM meta WHERE key='cache_version'",
-        "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+        "DELETE FROM main.storage_semantic_profiles WHERE namespace=semon_namespace()",
+        "UPDATE main.storage_semantic_profiles SET recipe='unsupported' WHERE namespace=semon_namespace()",
     ] {
         let fixture = Fixture::new();
         fixture.publish(1);
         let path = EventCache::path(&fixture.options.cache);
-        let db = fixture.db();
+        let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute_batch(change).unwrap();
         drop(db);
         let original = fs::read(&path).unwrap();

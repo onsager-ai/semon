@@ -874,7 +874,10 @@ fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
         return Err(refuse("semantic_native_key_component_budget"));
     }
     for (harness, native) in pairs {
-        let collision: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 AND harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND harness<>?3 AND lifecycle='current')",params![ns,native,harness],|r|r.get(0)).map_err(error)?;
+        // An outgoing source already observed in this epoch is replaced by
+        // the staged input cohort. Its old Current row is custody, not a live
+        // collision. The publication CAS still owns its history transfer.
+        let collision: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 AND harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources existing WHERE existing.namespace=?1 AND existing.native_id=?2 AND existing.harness<>?3 AND existing.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources observed WHERE observed.namespace=existing.namespace AND observed.source_path=existing.source_path AND observed.index_done=1))",params![ns,native,harness],|r|r.get(0)).map_err(error)?;
         if collision {
             return Err(refuse("semantic_cross_harness_native_key_pending"));
         }

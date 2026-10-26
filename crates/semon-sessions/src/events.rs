@@ -330,6 +330,8 @@ impl DirtyRows {
 /// only (risk:secret).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
+    /// Exact local carrier when the private text Index key cannot encode it.
+    pub(crate) native_path: Option<PathBuf>,
     pub(crate) dirty_rows: Option<DirtyRows>,
     /// Only this parse batch; durable facts and identities stay in the Event Index.
     pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
@@ -3507,7 +3509,10 @@ pub(crate) fn scan_file(
             trace("unchanged");
             {
                 let ledger = ledger.clone();
-                let index = Arc::clone(index);
+                let mut index = Arc::clone(index);
+                if path.to_str().is_none() {
+                    Arc::make_mut(&mut index).native_path = Some(path.to_owned());
+                }
                 if cache.commit(&key, Some(&ledger), None, &ledger, &index)? {
                     trace("conflict");
                     if last {
@@ -3711,6 +3716,7 @@ pub(crate) fn scan_file(
         }
         let (prefix, tail) = (captured.prefix, captured.tail);
         writable.source_chunks = Some(Arc::new(captured.chunks));
+        writable.native_path = path.to_str().is_none().then(|| path.to_owned());
         if let Some(header) = header_bytes {
             let started = cache.scan_measurements.start();
             file.seek(SeekFrom::Start(0))?;
