@@ -3970,6 +3970,7 @@ mod tests {
                     hostname: format!("machine-{i}"),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             let options = crate::Options {
@@ -6459,6 +6460,7 @@ mod tests {
                     ]),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             for (config, foreign) in [(&f.config, "source-b"), (&b, "source-a")] {
@@ -6622,6 +6624,7 @@ mod tests {
                     codex_rollouts: Some(Default::default()),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             let mut cache = EventCache::open_semantic(
@@ -6642,6 +6645,7 @@ mod tests {
                     codex_rollouts: Some(Default::default()),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             assert_eq!(
@@ -7767,6 +7771,7 @@ mod tests {
                     codex_locks: BTreeMap::from([("parent".into(), 77), ("child".into(), 88)]),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             for config in [&f.config, &foreign_config] {
@@ -7824,6 +7829,7 @@ mod tests {
                     codex_locks: BTreeMap::from([("successor".into(), 99), ("child".into(), 88)]),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             let mut cache = open(&f.config);
@@ -7885,6 +7891,7 @@ mod tests {
                     hostname: "domain52".into(),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             assert_eq!(
@@ -7941,6 +7948,7 @@ mod tests {
                     codex_rollouts: Some(std::collections::BTreeSet::from([moved.path.clone()])),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             cache
@@ -8016,6 +8024,7 @@ mod tests {
                     hostname: "machine-0".into(),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             assert_eq!(
@@ -8795,6 +8804,7 @@ mod tests {
                     hostname: "selector-new-authority".into(),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
             let mut replacement = open(&f.config);
@@ -10078,6 +10088,7 @@ mod tests {
                             hostname: "reopened-event-source".into(),
                             ..Default::default()
                         },
+                        &crate::Options::default().source,
                     )
                     .unwrap();
                     let mut next = open(&f.config);

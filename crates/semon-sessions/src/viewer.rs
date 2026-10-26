@@ -5242,7 +5242,7 @@ mod tests {
             .unwrap()
             .offline(1_790_000_000_000);
         recorded.hostname = "twin".into();
-        crate::write_facts(&facts, &recorded).unwrap();
+        crate::write_facts(&facts, &recorded, &crate::Options::default().source).unwrap();
         let mut offline = second.options.clone();
         offline.facts = Some(facts);
         let core = ViewerCore::with_machines(vec![
@@ -5307,6 +5307,7 @@ mod tests {
                     hostname: host.into(),
                     ..Default::default()
                 },
+                &crate::Options::default().source,
             )
             .unwrap();
         }
@@ -5498,6 +5499,7 @@ mod tests {
                 hostname: "bravo-host".into(),
                 ..Default::default()
             },
+            &crate::Options::default().source,
         )
         .unwrap();
         let model = native_home(&core);
@@ -5571,6 +5573,7 @@ mod tests {
                 proc_starts: BTreeMap::from([(77, 5)]),
                 ..Default::default()
             },
+            &crate::Options::default().source,
         )
         .unwrap();
         let projects = outside.root.join("claude/projects/project");
@@ -5607,6 +5610,7 @@ mod tests {
                 hostname: "outside".into(),
                 ..Default::default()
             },
+            &crate::Options::default().source,
         )
         .unwrap();
         symlink(&facts, charlie.join("facts.json")).unwrap();
@@ -5655,7 +5659,7 @@ mod tests {
     /// `facts` as machine `name`'s received facts.
     fn received_facts(dir: &Path, name: &str, facts: crate::Facts) -> PathBuf {
         let path = dir.join("machines").join(name).join("facts.json");
-        crate::write_facts(&path, &facts).unwrap();
+        crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         path
     }
 

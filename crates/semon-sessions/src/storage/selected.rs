@@ -640,6 +640,14 @@ pub(crate) struct ImmutableCatalog<'a> {
     pub(crate) snapshot: &'a crate::storage::proof_lifetime::ReaderSnapshot,
 }
 impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
+    fn facts_authority<'a>(
+        &'a self,
+        _: &std::path::Path,
+    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
+        Err(io::Error::other(
+            "immutable presentation has no live Facts authority",
+        ))
+    }
     fn presentation_observations(&self) -> Option<&PresentationObservations> {
         Some(&self.witness.observations)
     }

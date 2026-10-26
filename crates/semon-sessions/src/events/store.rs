@@ -2020,6 +2020,9 @@ pub(crate) fn write_session_descriptions(
 }
 
 impl IndexStore for SqliteStore {
+    fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
+        crate::facts::source_authority::Sources::sqlite(path)
+    }
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -8419,6 +8422,7 @@ mod tests {
                 mirror_sequence: Some(1),
                 ..crate::Facts::default()
             },
+            &options.source,
         )
         .unwrap();
         let inputs = crate::inputs::inputs(&options)
