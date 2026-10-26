@@ -3216,8 +3216,8 @@ fn trace(_what: &'static str) {
     LEDGER.with(|ledger| ledger.borrow_mut().push(_what));
 }
 
-/// How often a file's change is redone when other processes keep moving it
-/// on first; past that it stays in memory until the file changes again.
+/// Maximum attempts to reconcile a file moved by another process. Exhaustion
+/// refuses the scan; an uncommitted in-memory index is never returned.
 const COMMIT_ATTEMPTS: usize = 3;
 
 /// Indexes one file: shares the recorded index when the file didn't change,
@@ -3348,6 +3348,7 @@ pub(crate) fn scan_file(
                 Err(StoreError::Configured(crate::storage::StorageError::Conflict))
                     if host_operation.is_some() && !last =>
                 {
+                    trace("prepare_conflict");
                     continue;
                 }
                 result => result.map_err(store_io_error)?,
@@ -10474,7 +10475,8 @@ mod tests {
                         );
                         append_lines(&logs[writer], &[claude_result(&id)]);
                         for log in &logs {
-                            scan_file(log, "claude", &mut cache, &mut false).unwrap();
+                            scan_file(log, "claude", &mut cache, &mut false)
+                                .unwrap_or_else(|error| panic!("{error:?}: {:?}", ledger_trace()));
                         }
                     }
                 })
