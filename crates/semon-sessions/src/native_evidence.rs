@@ -393,6 +393,14 @@ impl NativeEvidence {
             }?);
         }
         let cache = work.events.as_mut().expect("event cache initialized");
+        #[cfg(feature = "postgres")]
+        if self.store_config.as_ref().is_some_and(|config| {
+            matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })
+        }) {
+            // Facts consumption belongs to this producer, before any semantic
+            // transaction. Later runtime checks reuse its bounded PG header.
+            cache.prepare_facts_authority(&self.options)?;
+        }
         // The index commits each file's change as it reads it: nothing is
         // left to save.
         let mut dirty = false;
@@ -545,7 +553,7 @@ impl NativeEvidence {
                     if self.begin_catalog_stage(
                         cache,
                         &paths,
-                        &query_runtime_generation(&self.options)?,
+                        &self.query_runtime()?,
                     )? != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
@@ -662,7 +670,7 @@ impl NativeEvidence {
         if !cache.is_scoped() {
             return Ok(false);
         }
-        let runtime = query_runtime_generation(&self.options)?;
+        let runtime = self.query_runtime()?;
         match self.begin_catalog_stage(cache, &[], &runtime)? {
             crate::events::Outcome::Conflict => return Ok(false),
             crate::events::Outcome::Written => {}
@@ -1128,7 +1136,7 @@ impl NativeEvidence {
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
-                    &query_runtime_generation(&self.options)?,
+                    &self.query_runtime()?,
                 )?;
                 if let Some(last) = last {
                     audit.after = last;
@@ -1237,7 +1245,7 @@ impl NativeEvidence {
             if self.begin_catalog_stage(
                 cache,
                 &staged_paths,
-                &query_runtime_generation(&self.options)?,
+                &self.query_runtime()?,
             )? != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
@@ -1330,7 +1338,7 @@ impl NativeEvidence {
                 if self.begin_catalog_stage(
                     cache,
                     &staged_paths,
-                    &query_runtime_generation(&self.options)?,
+                    &self.query_runtime()?,
                 )? != crate::events::Outcome::Written
                 {
                     return Err(io::Error::new(
