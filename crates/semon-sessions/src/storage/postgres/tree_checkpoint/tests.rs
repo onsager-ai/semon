@@ -496,6 +496,9 @@ fn capture_fixture_at(
     let index = scan_file(&path, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     let mut oracle = index.tree_summary.clone().unwrap();
+    if let Some(snapshot) = &mut oracle.stored {
+        snapshot.bind_configured(source.config(&cache_path).unwrap());
+    }
     oracle.load_shared_usage().unwrap();
     let config = source.config(&cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();

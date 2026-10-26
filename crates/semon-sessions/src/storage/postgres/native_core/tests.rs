@@ -237,6 +237,7 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
     let cache = root.join("cache.json");
     // The complete real SQLite producer runs before any PG fixture or writer.
     let oracle = phase(&cache, &path, "claude");
+    let carrier = EventCache::path(&cache);
     let config = fixture_host_source().config(&cache).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
     let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
