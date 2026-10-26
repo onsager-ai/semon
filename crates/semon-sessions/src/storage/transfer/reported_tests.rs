@@ -359,14 +359,18 @@ fn current_transfer225_usage_multi_page_absent_raw_exact_native_reader() {
 fn current_transfer225_normalized_usage_facts_cross_pages_and_reverse() {
     let root=root();let source=sqlite(&root,"normalized-source");let target=sqlite(&root,"normalized-target");let reverse=sqlite(&root,"normalized-reverse");
     let path=root.join("native-codex.jsonl");
-    let mut body=format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":"transfer-thread","cwd":"/sanitized"}}));
-    body.push_str(&format!("{}\n",serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5"}})));
-    for i in 0..70 {body.push_str(&format!("{}\n",serde_json::json!({"type":"token_usage_record","payload":{"thread_id":"transfer-thread","session_id":"transfer-session","turn_id":format!("turn-{i}"),"response_id":format!("response-{i}"),"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"cache_write_input_tokens":2,"reasoning_output_tokens":0}}})));}
-    std::fs::write(&path,body).unwrap();let mut cache=cache(&source);cache.ingest(&"5".repeat(64),&path,"codex").unwrap();cache.flush_cold_writes().unwrap();drop(cache);
+    seed_codex_usage(&source,&path);
     let load=|config:&StoreConfig| {let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();let reader=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();let (ledger,index)=reader.load_file(path.to_str().unwrap()).unwrap().unwrap();serde_json::json!({"ledger":crate::events::store::header_ledger(&ledger),"usage":index.codex_usage(),"events":index.codex_usage_events(),"chunks":index.source_chunks.as_ref().unwrap().hashes})};
     let expected=load(&source);assert!(!expected["usage"].as_object().unwrap().is_empty());
     let manifest=stage(&source,&target,&[101;32]);let pages=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;let mut facts=0;
     for sequence in 1..=pages {for record in source.transfer_inbox().staged_page(&manifest,sequence).unwrap().records {if matches!(record,TransferRecord::NativeRow{kind:super::super::NativeRowKind::UsageFact,..}){facts+=1;}}}assert_eq!(facts,70);
     std::fs::remove_file(&path).unwrap();apply(&target,&manifest);assert_eq!(load(&target),expected);
     let manifest=stage(&target,&reverse,&[102;32]);apply(&reverse,&manifest);assert_eq!(load(&reverse),expected);std::fs::remove_dir_all(root).unwrap();
+}
+
+pub(crate) fn seed_codex_usage(config:&StoreConfig,path:&Path) {
+    let mut body=format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":"transfer-thread","cwd":"/sanitized"}}));
+    body.push_str(&format!("{}\n",serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5"}})));
+    for i in 0..70 {body.push_str(&format!("{}\n",serde_json::json!({"type":"token_usage_record","payload":{"thread_id":"transfer-thread","session_id":"transfer-session","turn_id":format!("turn-{i}"),"response_id":format!("response-{i}"),"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"cached_input_tokens":1,"cache_write_input_tokens":2,"reasoning_output_tokens":0}}})));}
+    std::fs::write(path,body).unwrap();let mut cache=cache(config);cache.ingest(&"5".repeat(64),path,"codex").unwrap();cache.flush_cold_writes().unwrap();drop(cache);
 }
