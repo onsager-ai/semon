@@ -1117,7 +1117,11 @@ fn pg_tree_scalar119_published_record_and_authority_refuse_without_payload() {
             tx.driver
                 .execute(
                     "UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2",
-                    &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &original],
+                    &[
+                        &tx.namespace.as_str().as_bytes(),
+                        &key.as_bytes(),
+                        &original,
+                    ],
                 )
                 .map_err(sqlstate::error)?;
             for mutation in [
@@ -1273,8 +1277,18 @@ fn pg_tree_scalar119_equal_ids_isolate_unsupported_record_without_rewriting() {
         TxnKind::ReadSnapshot,
         &PgCancellation::default(),
         |tx| {
-            let after: Vec<u8> = tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?.get(0);
-            assert_eq!(after, unsupported, "unsupported bytes must remain untouched");
+            let after: Vec<u8> = tx
+                .driver
+                .query_one(
+                    "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1",
+                    &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
+            assert_eq!(
+                after, unsupported,
+                "unsupported bytes must remain untouched"
+            );
             Ok(())
         },
     )
@@ -1284,7 +1298,10 @@ fn pg_tree_scalar119_equal_ids_isolate_unsupported_record_without_rewriting() {
         other.tool_name("tool\0🦀").unwrap(),
         Some("Bash'\0🦀".into())
     );
-    assert!(!sqlite_path.exists(), "no hidden SQLite in either PG namespace");
+    assert!(
+        !sqlite_path.exists(),
+        "no hidden SQLite in either PG namespace"
+    );
     std::fs::remove_dir_all(data.root).unwrap();
 }
 
