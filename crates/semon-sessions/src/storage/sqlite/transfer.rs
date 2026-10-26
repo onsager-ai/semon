@@ -37,7 +37,8 @@ fn transaction<T>(
     let deadline = Instant::now() + Duration::from_secs(2);
     let owner = crate::events::store::configured::NativeOwnership::restore(config)?;
     let mut db = super::source_journal::SourceJournal::owned(owner.clone()).connection()?;
-    db.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    db.progress_handler(1000, Some(move || Instant::now() >= deadline))
+        .map_err(failed)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -84,10 +85,165 @@ pub(crate) fn checkpoint(
     transaction(config, |tx| transfer::checkpoint_tx(tx, manifest))
 }
 
+pub(crate) fn snapshot_reported(
+    config: &StoreConfig,
+    operation: &[u8; 32],
+) -> Result<SnapshotManifest, StorageError> {
+    transaction(config, |tx| {
+        if let Some(manifest) = transfer::reported::saved_reported(tx, config, operation)? {
+            return Ok(manifest);
+        }
+        // Probe all selected cell sizes before decoding the bounded family.
+        let sizes = tx.0.prepare("SELECT octet_length(session_id)+octet_length(model_usage)+512 FROM reported_runs WHERE namespace=?1 ORDER BY session_id,start LIMIT 65").map_err(failed)?.query_map([tx.1], |row| row.get::<_, i64>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        if sizes.len() > transfer::MAX_PAGE_ROWS
+            || sizes
+                .iter()
+                .try_fold(0_i64, |sum, size| sum.checked_add(*size))
+                .is_none_or(|sum| sum > 120000)
+        {
+            return Err(StorageError::Busy);
+        }
+        let sql = format!(
+            "SELECT {} FROM reported_runs WHERE namespace=?1 ORDER BY session_id,start LIMIT 65",
+            crate::events::store::RUN_COLUMNS
+        );
+        let runs =
+            tx.0.prepare(&sql)
+                .map_err(failed)?
+                .query_map([tx.1], crate::events::store::read_run)
+                .map_err(failed)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(failed)?;
+        let stamp: Option<Option<String>> = tx.0.query_row("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM main.meta WHERE namespace=?1 AND key='claude_json_stamp'", [tx.1], |row| row.get(0)).optional().map_err(failed)?;
+        let stamp = stamp
+            .map(|value| {
+                crate::events::reported_rows::decode_stamp(
+                    value.ok_or(StorageError::ScopeChanged)?.as_bytes(),
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            })
+            .transpose()?;
+        let (binding, revision): (i64, i64) = tx.0.query_row("SELECT n.admission_generation,j.revision FROM storage_namespaces n JOIN storage_source_journal j USING(namespace) WHERE n.namespace=?1", [tx.1], |row| Ok((row.get(0)?,row.get(1)?))).map_err(failed)?;
+        transfer::reported::capture_reported(
+            tx,
+            config,
+            operation,
+            u64::try_from(binding).map_err(|_| StorageError::ScopeChanged)?,
+            u64::try_from(revision).map_err(|_| StorageError::ScopeChanged)?,
+            runs,
+            stamp,
+        )
+    })
+}
+
+pub(crate) fn materialize_reported(
+    config: &StoreConfig,
+    manifest: &SnapshotManifest,
+) -> Result<TransferCheckpoint, StorageError> {
+    transaction(config, |tx| {
+        let materialization = transfer::reported::reported_materialization(tx, manifest)?;
+        if materialization.replayed {
+            return Ok(materialization.checkpoint);
+        }
+        let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp') OR EXISTS(SELECT 1 FROM files WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_history_catalog WHERE namespace=?1)", [tx.1], |row| row.get(0)).map_err(failed)?;
+        if occupied {
+            return Err(StorageError::Conflict);
+        }
+        let mut put =
+            tx.0.prepare(crate::events::store::PUT_RUN_SCOPED)
+                .map_err(failed)?;
+        for run in &materialization.runs {
+            crate::events::store::put_run(&mut put, run).map_err(failed)?;
+        }
+        drop(put);
+        if let Some(stamp) = &materialization.stamp {
+            let bytes = crate::events::reported_rows::encode_stamp(stamp)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            tx.put("claude_json_stamp", &bytes)?;
+        }
+        transfer::reported::acknowledge_reported(tx, &materialization.checkpoint)?;
+        Ok(materialization.checkpoint)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
+
+    #[test]
+    fn current_transfer225_reported_source_limits_refuse_without_snapshot_effects() {
+        use transfer::reported::tests::{observe, read, root, sqlite};
+        let root = root();
+        let config = sqlite(&root, "limits");
+        observe(&config, &root.join(".claude.json"), 100, 101);
+        let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+        let db = super::super::source_journal::SourceJournal::owned(owner)
+            .connection()
+            .unwrap();
+        let mut run = read(&config).pop().unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let mut put = db.prepare(crate::events::store::PUT_RUN_SCOPED).unwrap();
+            for start in 0..64 {
+                run.last_start_time = start;
+                crate::events::store::put_run(&mut put, &run).unwrap();
+            }
+        }
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(read(&config).len(), 65);
+        let inbox = config.transfer_inbox();
+        assert!(matches!(
+            inbox.snapshot_reported_facts(&[8; 32]),
+            Err(StorageError::Busy)
+        ));
+        let snapshots: i64 = db
+            .query_row(
+                "SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_transfer_v1:*'",
+                [config.namespace.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snapshots, 0,
+            "row-limit refusal must not persist a partial snapshot"
+        );
+        db.execute(
+            "DELETE FROM reported_runs WHERE namespace=?1 AND start=100",
+            [config.namespace.as_str()],
+        )
+        .unwrap();
+        let manifest = inbox.snapshot_reported_facts(&[8; 32]).unwrap();
+        assert_eq!(
+            manifest
+                .categories
+                .iter()
+                .find(|c| c.category == transfer::Category::ReportedFacts)
+                .unwrap()
+                .rows,
+            64
+        );
+        let saved = inbox.checkpoint(&manifest).unwrap();
+        db.execute(
+            "UPDATE reported_runs SET model_usage=?2 WHERE namespace=?1 AND start=0",
+            params![
+                config.namespace.as_str(),
+                "x".repeat(transfer::MAX_PAGE_BYTES)
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            inbox.snapshot_reported_facts(&[9; 32]),
+            Err(StorageError::Busy)
+        ));
+        assert_eq!(
+            inbox.checkpoint(&manifest).unwrap(),
+            saved,
+            "oversize later source must not damage the earlier immutable capture"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn current_transfer225_sqlite_current_inventory_and_atomic_checkpoint_failure() {

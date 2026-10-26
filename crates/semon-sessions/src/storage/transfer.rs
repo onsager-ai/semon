@@ -1,5 +1,5 @@
-//! Current-format transfer inbox. Staging is durable, but is deliberately not
-//! an ownership flip or an acknowledgement that native state is qualified.
+//! Current-format transfer inbox and bounded reported-Facts materialization.
+//! Neither is an ownership flip or a claim that all native state is qualified.
 //! Adapters keep the inbox in the namespace-owned metadata region; they never
 //! interpret a page as SQL or replay Raw bodies.
 use super::{StorageError, StoreBackend, StoreConfig};
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 pub(crate) mod inventory;
+pub(crate) mod reported;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_PAGE_ROWS: usize = 64;
@@ -109,6 +110,8 @@ pub struct CategoryManifest {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotManifest {
     pub version: u32,
+    /// Host-retained identity of this capture, distinct from a content digest.
+    pub snapshot_id: [u8; 32],
     pub namespace: String,
     pub stream_epoch: String,
     pub binding_epoch: u64,
@@ -127,6 +130,7 @@ impl SnapshotManifest {
         hash(&(
             "semon-current-transfer-manifest-v1",
             self.version,
+            self.snapshot_id,
             &self.namespace,
             &self.stream_epoch,
             self.binding_epoch,
@@ -310,9 +314,10 @@ impl TransferCheckpoint {
     }
 }
 
-/// Durable transport inbox only. No `finish_import` exists until exhaustive
+/// Durable transport inbox. No `finish_import` exists until exhaustive
 /// native materialization, proof qualification and ownership fencing exist.
-/// Staged pages never become Catalog or native read state through this API.
+/// Staging alone never changes Catalog or native read state. The explicit
+/// reported-Facts operation materializes only that complete bounded family.
 pub struct TransferInbox(StoreConfig);
 
 impl StoreConfig {
@@ -537,6 +542,7 @@ pub(crate) mod tests {
     pub(crate) fn manifest() -> SnapshotManifest {
         let mut manifest = SnapshotManifest {
             version: FORMAT_VERSION,
+            snapshot_id: [9; 32],
             namespace: "transfer225".into(),
             stream_epoch: "a".repeat(64),
             binding_epoch: 1,
@@ -663,7 +669,11 @@ pub(crate) mod tests {
             },
         )];
         foreign_intent.seal().unwrap();
-        assert!(restarted.stage_page(&intent_manifest, &foreign_intent).is_err());
+        assert!(
+            restarted
+                .stage_page(&intent_manifest, &foreign_intent)
+                .is_err()
+        );
         assert!(restarted.checkpoint(&intent_manifest).is_err());
     }
 
