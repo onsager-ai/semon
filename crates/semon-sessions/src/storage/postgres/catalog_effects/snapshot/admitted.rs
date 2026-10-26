@@ -13,7 +13,7 @@ fn unavailable<T>() -> io::Result<T> {
 impl CatalogSnapshot for Snapshot<'_, '_> {
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         let mut tx = self.tx.lock().ok()?;
-        super::super::super::model_cache::binding(&mut **tx).ok()
+        super::super::super::model_cache::binding(&mut tx).ok()
     }
     fn require_current(&self) -> io::Result<()> {
         let tx = self

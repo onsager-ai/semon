@@ -524,12 +524,11 @@ pub(super) fn write_begin(tx:&mut PgTxn<'_>,options:&crate::Options,input:&crate
     if mutation && previous.is_none() {return Err(StorageError::Conflict);}
     super::source_journal::invalidate(tx,&intent.path)?;
     let revision:i64=tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&intent.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/") {
-        if let Some(facts)=options.facts.as_ref().map(|p|crate::read_facts(p)).transpose().map_err(|_|StorageError::ScopeChanged)? {
+    if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/")
+        && let Some(facts)=options.facts.as_ref().map(|p|crate::read_facts(p)).transpose().map_err(|_|StorageError::ScopeChanged)? {
             let evidence=crate::source_change::RuntimeInputEvidence{unaffected:crate::native_evidence::recorded_runtime_fingerprint_excluding(options,&facts,Some(std::path::Path::new(&intent.path))).map_err(|_|StorageError::ScopeChanged)?};
             let bytes=serde_json::to_vec(&evidence).map_err(|_|StorageError::Unavailable)?;
             tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&intent.path.as_bytes(),&bytes]).map_err(sqlstate::error)?;
-        }
     }
     if input.root==crate::InputRoot::Claude && input.path.starts_with("sessions/") {
         let old=crate::read_regular_at_most(&input.full_path(options),65536).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v|v["sessionId"].as_str().map(str::to_owned));
