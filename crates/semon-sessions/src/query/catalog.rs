@@ -284,7 +284,8 @@ impl Query {
             "local".to_owned()
         } else {
             source_key.clone()
-        }).map_err(|_| unavailable("Invalid selected Source namespace"))?;
+        })
+        .map_err(|_| unavailable("Invalid selected Source namespace"))?;
         store.selected_body(
             &namespace,
             args["id"].as_str().expect("validated selected id"),
