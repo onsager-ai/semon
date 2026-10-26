@@ -70,7 +70,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_sources",
-        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea,native_digest bytea",
         key: "generation,key_digest,path_digest",
     },
     Table {
@@ -374,6 +374,18 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         "catalog_source_native",
         "catalog_sources",
         "generation,native_digest",
+        false,
+    ),
+    (
+        "catalog_history_source_native",
+        "catalog_history_sources",
+        "native_digest,generation,key_digest",
+        false,
+    ),
+    (
+        "catalog_bookmark_target",
+        "catalog_trace_bookmarks",
+        "generation,target_digest,session_key",
         false,
     ),
     (
