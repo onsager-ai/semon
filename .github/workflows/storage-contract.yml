@@ -74,7 +74,7 @@ jobs:
           lines = []
           for line in (root / 'native-tree-test.log').open():
               line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
-              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'test result:')):
+              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source journal recovery', 'storage_sqlite_failure ', 'test result:')):
                   lines.append(line)
           (root / 'native-tree-diagnostic.txt').write_text('\n'.join(lines[:30]))
           PYSAFE
