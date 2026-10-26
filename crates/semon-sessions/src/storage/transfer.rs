@@ -644,6 +644,27 @@ pub(crate) mod tests {
         }];
         assert!(oversized.seal().is_err());
         assert_eq!(restarted.checkpoint(&manifest).unwrap(), after_second);
+        let mut intent_manifest = manifest.clone();
+        let index = Category::ALL
+            .iter()
+            .position(|c| *c == Category::SourceObservations)
+            .unwrap();
+        intent_manifest.categories[index].rows = 1;
+        intent_manifest.seal().unwrap();
+        let operation = super::super::source_observations::SourceOperation::capture(
+            "foreign", "recover", b"null",
+        );
+        let mut foreign_intent = page(&intent_manifest, 1, [0; 32]);
+        foreign_intent.category = Category::SourceObservations;
+        foreign_intent.records = vec![TransferRecord::SourceIntent(
+            super::super::source_observations::SourceIntent::Recover {
+                operation,
+                cursor: None,
+            },
+        )];
+        foreign_intent.seal().unwrap();
+        assert!(restarted.stage_page(&intent_manifest, &foreign_intent).is_err());
+        assert!(restarted.checkpoint(&intent_manifest).is_err());
     }
 
     #[test]
