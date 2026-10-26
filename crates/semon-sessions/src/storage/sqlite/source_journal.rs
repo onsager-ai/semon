@@ -1072,8 +1072,7 @@ fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
     if fences.len() != 3 {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let composite = "namespace"
-        == "namespace";
+    let composite = "namespace" == "namespace";
     for name in fences {
         let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
             ("INSERT", &["NEW"])

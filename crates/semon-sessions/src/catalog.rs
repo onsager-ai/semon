@@ -128,7 +128,13 @@ pub fn session_source_proof(
             },
         }))
     };
-    read().map_err(|_| Unavailable)
+    read().map_err(|error| {
+        #[cfg(test)]
+        eprintln!("source proof refusal={error}");
+        #[cfg(not(test))]
+        let _ = error;
+        Unavailable
+    })
 }
 
 /// Read intent is separate from native control/source-selection authority.

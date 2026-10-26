@@ -198,12 +198,12 @@ pub(super) fn compact(
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failed)?;
-    if !crate::events::store::current(&tx).map_err(failed)? {
+    if !crate::events::store::current_contract(&tx).map_err(failed)? {
         return Err(StorageError::Unavailable);
     }
     let version: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE namespace='' AND key='catalog_version'",
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_version'",
             [],
             |r| r.get(0),
         )
@@ -234,7 +234,7 @@ pub(super) fn compact(
         .map_err(|_| StorageError::Unavailable)?;
     let head: i64 = tx
         .query_row(
-            "SELECT coalesce(max(revision),0) FROM session_catalog_changes WHERE read_scope=?1",
+            "SELECT coalesce(max(revision),0) FROM main.session_catalog_changes WHERE namespace=semon_namespace() AND read_scope=?1",
             [key],
             |r| r.get(0),
         )
@@ -243,7 +243,7 @@ pub(super) fn compact(
         return Err(StorageError::ScopeChanged);
     }
     let revisions = tx
-        .prepare("SELECT revision FROM session_catalog_changes WHERE read_scope=?1 AND revision<=?2 AND revision<?3 ORDER BY revision LIMIT ?4")
+        .prepare("SELECT revision FROM main.session_catalog_changes WHERE namespace=semon_namespace() AND read_scope=?1 AND revision<=?2 AND revision<?3 ORDER BY revision LIMIT ?4")
         .map_err(failed)?
         .query_map((key, acknowledged as i64, head, limit as i64 + 1), |r| r.get::<_, i64>(0))
         .map_err(failed)?
@@ -257,7 +257,7 @@ pub(super) fn compact(
         .unwrap_or(floor);
     if removed > 0 {
         tx.execute(
-            "DELETE FROM session_catalog_changes WHERE read_scope=?1 AND revision<=?2",
+            "DELETE FROM main.session_catalog_changes WHERE namespace=semon_namespace() AND read_scope=?1 AND revision<=?2",
             (key, through as i64),
         )
         .map_err(failed)?;

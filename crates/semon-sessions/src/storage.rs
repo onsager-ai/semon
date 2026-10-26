@@ -339,25 +339,6 @@ impl StoreConfig {
             serde_json::json!({"source_key":self.namespace.as_str(),"generation":part.generation,"runtime":part.runtime,"rows":part.rows}),
         )
     }
-
-    pub(crate) fn open_local(self) -> Result<Box<dyn SessionMetadataStore>, StorageError> {
-        Ok(Box::new(sqlite::SqliteMetadataStore::legacy_local(self)))
-    }
-
-    /// Transitional one-source local binding. Only this existing API bridge
-    /// derives coordinates from Options.cache; the contract never receives it.
-    pub(crate) fn local_metadata(
-        options: &crate::Options,
-        namespace: LogicalSourceNamespace,
-    ) -> Self {
-        Self {
-            backend: StoreBackend::Sqlite {
-                database: crate::events::EventCache::path(&options.cache),
-            },
-            namespace,
-            expected_stream_epoch: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

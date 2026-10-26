@@ -1329,10 +1329,14 @@ pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
         counts.rows += paths.len();
     });
     for path in paths {
-        let bytes: Option<i64> = tx.query_row(
-            "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1",
-            [archive_index_key(path)], |row| row.get(0),
-        ).optional().map_err(io::Error::other)?;
+        let bytes: Option<i64> = tx
+            .query_row(
+                "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                [archive_index_key(path)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
         page_bytes = page_bytes
             .checked_add(usize::try_from(bytes.unwrap_or(0)).map_err(io::Error::other)?)
             .ok_or_else(|| io::Error::other(StorageError::Busy))?;
@@ -5747,11 +5751,15 @@ fn native_metadata_value(_: &Connection) -> rusqlite::Result<&'static str> {
 }
 
 fn native_metadata_put(_: &Connection) -> rusqlite::Result<&'static str> {
-    Ok("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value")
+    Ok(
+        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+    )
 }
 
 fn metadata_increment(_: &Connection) -> rusqlite::Result<&'static str> {
-    Ok("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)")
+    Ok(
+        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+    )
 }
 
 fn native_metadata_delete(_: &Connection) -> rusqlite::Result<&'static str> {
@@ -12052,7 +12060,11 @@ mod tests {
             };
             fail(SqliteStore::attempt(&path, &fixture_namespace()));
             unchanged();
-            fail(SqliteStore::attempt_scoped(&path, true, &fixture_namespace()));
+            fail(SqliteStore::attempt_scoped(
+                &path,
+                true,
+                &fixture_namespace(),
+            ));
             unchanged();
             if name != "archive" {
                 assert!(
