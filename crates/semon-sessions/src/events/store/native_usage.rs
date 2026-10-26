@@ -59,45 +59,7 @@ pub(super) use repair::advance;
 pub(super) use repair::pending as repair_pending;
 pub(super) use repair::sql as repair_sql;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS native_usage_sources (
- source_id INTEGER PRIMARY KEY AUTOINCREMENT, source_path TEXT NOT NULL,
- receipt TEXT NOT NULL, checkpoint INTEGER NOT NULL, parser_version INTEGER NOT NULL,
- usage_ready INTEGER NOT NULL DEFAULT 0
-) STRICT;
-CREATE INDEX IF NOT EXISTS native_usage_source_path ON native_usage_sources(source_path,source_id);
-CREATE TABLE IF NOT EXISTS native_usage_current (
- source_path TEXT PRIMARY KEY, source_id INTEGER NOT NULL UNIQUE
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_usage_facts (
- source_id INTEGER NOT NULL, native_offset INTEGER NOT NULL, identity TEXT NOT NULL,
- payload TEXT NOT NULL, record TEXT NOT NULL, outcome TEXT NOT NULL,
- model_outcome TEXT NOT NULL CHECK(model_outcome IN ('unavailable','accepted','duplicate','conflict')),
- CHECK(outcome IN ('accepted','duplicate','conflict')),
- PRIMARY KEY(source_id,native_offset)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_usage_identity_observations ON native_usage_facts(source_id,identity,native_offset);
-CREATE TABLE IF NOT EXISTS native_usage_identities (
- source_id INTEGER NOT NULL, scope TEXT NOT NULL CHECK(scope IN ('tree','model')),
- identity TEXT NOT NULL, native_offset INTEGER NOT NULL,
- PRIMARY KEY(source_id,scope,identity)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_usage_dimensions (
- source_id INTEGER NOT NULL, kind TEXT NOT NULL, dimension TEXT NOT NULL, value TEXT NOT NULL,
- PRIMARY KEY(source_id,kind,dimension)
-) STRICT, WITHOUT ROWID;
-";
-
-pub(super) const REPAIR_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS native_tree_repairs (
- source_path TEXT PRIMARY KEY, receipt TEXT NOT NULL, source_id INTEGER,
- cursor INTEGER NOT NULL DEFAULT 0, projection_id INTEGER, last_model TEXT,
- tree_root TEXT, state TEXT NOT NULL DEFAULT 'ready', last_attempt INTEGER NOT NULL DEFAULT 0
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(state,last_attempt,source_path);
-";
-
-const COMPOSITE_SCHEMA: &str = "
+const SCHEMA: &str = "
 CREATE TABLE native_usage_sources (
  namespace TEXT NOT NULL,source_id INTEGER NOT NULL,source_path TEXT NOT NULL,
  receipt TEXT NOT NULL,checkpoint INTEGER NOT NULL,parser_version INTEGER NOT NULL,
@@ -130,7 +92,7 @@ CREATE TABLE native_usage_dimensions (
 ) STRICT, WITHOUT ROWID;
 ";
 
-const COMPOSITE_REPAIR_SCHEMA: &str = "
+const REPAIR_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_tree_repairs (
  namespace TEXT NOT NULL,source_path TEXT NOT NULL,receipt TEXT NOT NULL,source_id INTEGER,
  cursor INTEGER NOT NULL DEFAULT 0,projection_id INTEGER,last_model TEXT,
@@ -141,24 +103,16 @@ CREATE TABLE IF NOT EXISTS native_tree_repairs (
 CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(namespace,state,last_attempt,source_path);
 ";
 
-pub(crate) fn schema(composite: bool) -> [&'static str; 2] {
-    if composite {
-        [COMPOSITE_SCHEMA, COMPOSITE_REPAIR_SCHEMA]
-    } else {
-        [SCHEMA, REPAIR_SCHEMA]
-    }
+pub(crate) fn schema() -> [&'static str; 2] {
+    [SCHEMA, REPAIR_SCHEMA]
 }
 
 pub(super) fn sql<'a>(
-    c: &Connection,
-    legacy: &'a str,
+    _db: &Connection,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    Ok(if composite(c)? { scoped } else { legacy })
-}
-
-fn composite(c: &Connection) -> rusqlite::Result<bool> {
-    c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_usage_sources') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))
+    Ok(scoped)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -323,12 +277,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn create(&mut self, path: &str, receipt: &str) -> Result<i64, StorageError> {
         let tx = self.tx;
         let result = (|| {
-            let id = if composite(tx)? {
-                tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id", params![path,receipt,CACHE_VERSION], |r| r.get(0))?
-            } else {
-                tx.execute("INSERT INTO native_usage_sources(source_path,receipt,checkpoint,parser_version) VALUES(?1,?2,0,?3)", params![path,receipt,CACHE_VERSION])?;
-                tx.last_insert_rowid()
-            };
+            let id = tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id", params![path,receipt,CACHE_VERSION], |r| r.get::<_, i64>(0))?;
             tx.execute(sql(tx,
                 "INSERT INTO native_usage_current VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET source_id=excluded.source_id",
                 "INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id")?,params![path,id])?;
@@ -548,7 +497,7 @@ mod namespace_tests {
         // Exercise usage and repair queue isolation. Tree/pricing and retained
         // readers still prevent public multi-source qualification.
         let mut db = Connection::open_in_memory().unwrap();
-        for ddl in schema(true) {
+        for ddl in schema() {
             db.execute_batch(ddl).unwrap();
         }
         db.pragma_update(None, "foreign_keys", true).unwrap();
@@ -820,7 +769,7 @@ mod file_namespace_tests {
 
         let mut db = Connection::open(&path).unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        for ddl in schema(true) {
+        for ddl in schema() {
             db.execute_batch(ddl).unwrap();
         }
         let tx = db

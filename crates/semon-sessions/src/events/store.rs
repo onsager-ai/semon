@@ -5094,7 +5094,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 /// The single current physical contract. Every source-owned family uses a
 /// namespace-leading key; store-global metadata uses the reserved empty scope.
 fn authored_storage_ddl() -> [&'static str; 22] {
-    let [usage, repair] = native_usage::schema(true);
+    let [usage, repair] = native_usage::schema();
     [
         crate::storage::sqlite::publication::SLOT_SCHEMA,
         catalog_schema(true),
@@ -5104,7 +5104,7 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         copied_usage_schema(),
         usage,
         repair,
-        tree_state::schema(true),
+        tree_state::schema(),
         semantic_stage::schema(),
         semantic_stage::SEMANTIC_CORE_INDEXES_NS,
         semantic_stage::metadata_indexes(),
