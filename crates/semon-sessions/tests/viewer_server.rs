@@ -32,6 +32,7 @@ const LATE_BOUND: Duration = Duration::from_secs(15);
 
 fn options(root: &Path) -> Options {
     let options = Options {
+        source: semon_sessions::storage::HostSource::load_or_create(&root.join("source.json")).unwrap(),
         claude_home: root.join("claude"),
         claude_json: root.join(".claude.json"),
         codex_home: root.join("codex"),

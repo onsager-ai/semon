@@ -3323,14 +3323,7 @@ pub(crate) fn scan_file(
         .or(cache.v1_cache.as_ref())
         .filter(|_| cache.store.is_some())
         .map(|v1| {
-            crate::source_change::SourceLock::acquire(
-                &crate::Options {
-                    cache: v1.clone(),
-                    ..crate::Options::from_host()?
-                },
-                &key,
-                false,
-            )
+            crate::source_change::SourceLock::acquire_cache(v1, &key, false)
         })
         .transpose()?;
     cache.scan_measurements.record("source_lock", started, 1);

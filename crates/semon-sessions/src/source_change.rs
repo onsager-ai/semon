@@ -154,14 +154,17 @@ pub(crate) fn lock_key(options: &Options, input: &Input) -> String {
 /// the OS lock, leaving its durable intent available for conservative replay.
 pub(crate) struct SourceLock(#[cfg(unix)] std::fs::File);
 impl SourceLock {
-    #[cfg(unix)]
     pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
+        Self::acquire_cache(&options.cache, path, exclusive)
+    }
+    #[cfg(unix)]
+    pub(crate) fn acquire_cache(cache: &std::path::Path, path: &str, exclusive: bool) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
             io::AsRawFd,
         };
-        let directory = options.cache.with_extension("source-locks");
+        let directory = cache.with_extension("source-locks");
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         builder.create(&directory)?;
@@ -190,8 +193,8 @@ impl SourceLock {
         Ok(Self(file))
     }
     #[cfg(not(unix))]
-    pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
-        let _ = (options, path);
+    pub(crate) fn acquire_cache(cache: &std::path::Path, path: &str, exclusive: bool) -> io::Result<Self> {
+        let _ = (cache, path);
         if exclusive {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
