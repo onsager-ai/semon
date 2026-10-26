@@ -471,7 +471,11 @@ pub(super) fn relocate(
             &serde_json::to_vec(&evidence).map_err(|_| StorageError::Unavailable)?,
         )?;
     }
-    super::native_keys::put_meta(tx,format!("source-retired:{old}").as_bytes(),&serde_json::to_vec(&Some(prior)).map_err(|_|StorageError::Unavailable)?)?;
+    super::native_keys::put_meta(
+        tx,
+        format!("source-retired:{old}").as_bytes(),
+        &serde_json::to_vec(&Some(prior)).map_err(|_| StorageError::Unavailable)?,
+    )?;
     tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
     super::native_keys::put_meta(tx, key.as_bytes(), &request)?;
     tx.check()?;
