@@ -155,14 +155,6 @@ pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
     sql(db, "", "namespace=semon_namespace() AND ")
 }
 
-pub(crate) fn metadata_sql<'a>(
-    _db: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    Ok(scoped)
-}
-
 /// Entry qualification retained by current open/admission and WriterLayout.
 /// Its schema-cookie guard detects controlled DDL after writer construction.
 pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
@@ -322,22 +314,12 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
         tx.execute_batch(chunk).map_err(failed)?;
     }
     tx.execute(
-        metadata_sql(
-            &tx,
-            "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
-            "INSERT INTO meta(namespace,key,value) VALUES('','cache_version',?1)",
-        )
-        .map_err(failed)?,
+        "INSERT INTO meta(namespace,key,value) VALUES('','cache_version',?1)",
         [CACHE_VERSION.to_string()],
     )
     .map_err(failed)?;
     tx.execute(
-        metadata_sql(
-            &tx,
-            "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
-            "UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'",
-        )
-        .map_err(failed)?,
+        "UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'",
         [epoch],
     )
     .map_err(failed)?;
@@ -584,7 +566,7 @@ impl NativeOwnership {
         validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
-        if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
+        if "composite" != "composite"
             || semantic_stage::support_sql(db, "singleton", "composite").map_err(failed)?
                 != "composite"
             || copied_usage_sql(db, "singleton", "composite").map_err(failed)? != "composite"

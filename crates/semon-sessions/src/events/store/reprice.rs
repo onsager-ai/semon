@@ -160,16 +160,8 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
 fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
     queue_sql(
         c,
-        configured::metadata_sql(
-            c,
-            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-        )?,
-        configured::metadata_sql(
-            c,
-            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
-            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
-        )?,
+        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
     )
 }
 
@@ -1733,7 +1725,7 @@ mod tests {
         let db = Connection::open(&database).unwrap();
         db.execute_batch("DROP TABLE meta; CREATE TABLE meta(namespace TEXT NOT NULL,key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;").unwrap();
         assert!(
-            configured::metadata_sql(&db, "legacy", "scoped").is_err(),
+            configured::validate_statement_layout(&db).is_err(),
             "a namespace column without the composite key is corrupt, not singleton"
         );
         drop(db);
@@ -2309,9 +2301,7 @@ mod tests {
                     assert_eq!(usage_family_state(&tx, "b"), b);
                     tx.commit().unwrap();
                     assert_eq!(usage_family_state(&db, "b"), b);
-                    let target: String = db.query_row(configured::metadata_sql(&db,
-                        "SELECT value FROM meta WHERE key='pricing_recompute_target'",
-                        "SELECT value FROM meta WHERE namespace='' AND key='pricing_recompute_target'").unwrap(), [], |r| r.get(0)).unwrap();
+                    let target: String = db.query_row("SELECT value FROM meta WHERE namespace='' AND key='pricing_recompute_target'", [], |r| r.get(0)).unwrap();
                     assert_eq!(target, "target");
                     bind_fixture(&db, "b");
                     assert_eq!(
