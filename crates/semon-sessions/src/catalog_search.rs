@@ -341,7 +341,7 @@ pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublic
     Ok(())
 }
 
-fn publish_current_rows_effects<
+pub(crate) fn publish_current_rows_effects<
     P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
 >(
     transaction: &Transaction<'_>,

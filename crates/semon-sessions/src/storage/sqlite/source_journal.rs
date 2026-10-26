@@ -503,9 +503,15 @@ impl SourceObservationStore for SourceJournal {
                 let _ = error;
                 StorageError::Unavailable
             })?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("recovery_receipt").map_err(failed)?;
         insert_recovery_receipt(&tx, namespace, operation, applied, done)?;
         acknowledge_intent_sql(&tx, namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        #[cfg(test)]
+        if crate::events::store::configured::effect("recovery_commit_reply").is_err() {
+            return Err(StorageError::CommitUncertain);
+        }
         Ok((
             if applied {
                 SourceMutationReceipt::Applied

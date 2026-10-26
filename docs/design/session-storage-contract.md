@@ -588,7 +588,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
+| `events/store/configured.rs` | direct | Current namespace-native Event/Facts writer and admitted owner qualification. Public backend qualification remains incomplete. |
+| `events/store/history_custody_tests.rs` | direct | Current admitted publisher custody tests retain row/byte budgets, rollback, original recipes and immutable history. |
 | `events/store/configured_selected60.rs` | direct | Test-only committed-publication assertions for selected facts, retained-generation witnesses, independent private-witness binding, tamper-before-Raw refusal, negative reference/lease GC and real native multi-window range oracles; writer qualification remains zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |

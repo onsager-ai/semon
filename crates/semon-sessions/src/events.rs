@@ -1364,7 +1364,7 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
         if !matches!(harness, "claude" | "codex" | "copilot") {
             return Err(crate::storage::StorageError::InvalidArguments);
         }
-        self.require_configured_store().map_err(|error| {
+        self.require_current_store().map_err(|error| {
             error
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
@@ -2675,7 +2675,7 @@ impl EventCache {
         self.replaced.contains(path.to_string_lossy().as_ref())
     }
 
-    fn require_configured_store(&self) -> io::Result<()> {
+    fn require_current_store(&self) -> io::Result<()> {
         if self.store.is_none() {
             return Err(io::Error::other(crate::storage::StorageError::Unavailable));
         }
@@ -2686,7 +2686,7 @@ impl EventCache {
     }
 
     pub(crate) fn begin_scan(&mut self) -> io::Result<()> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         self.cold_writes.clear();
         self.index_clone = Duration::ZERO;
         self.scan_timing = crate::native_timing::enabled();
@@ -2793,7 +2793,7 @@ impl EventCache {
         crate::model::summary::CatalogSource,
         crate::native_tree::Metadata,
     )> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         let key = path.to_string_lossy();
         let stat = Stat::of(path)?;
         if !self.unpersisted.contains(key.as_ref()) {
@@ -2840,7 +2840,7 @@ impl EventCache {
         capture_at: i64,
         dirty: &mut bool,
     ) -> io::Result<()> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         let Ok(metadata) = fs::metadata(path) else {
             return Ok(());
         };
@@ -2897,7 +2897,7 @@ impl EventCache {
         runs: &[crate::facts::ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> io::Result<()> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         if self.store.is_none() {
             return Ok(());
         }
@@ -2925,7 +2925,7 @@ impl EventCache {
 
     /// Drops files that are gone, so the index doesn't grow without bound.
     pub(crate) fn retain(&mut self, seen: &BTreeSet<String>, dirty: &mut bool) -> io::Result<()> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         let mut gone: Vec<(String, Option<Ledger>)> = self
             .files
             .iter()
@@ -3147,7 +3147,7 @@ impl EventCache {
         ledger: &Ledger,
         index: &FileIndex,
     ) -> io::Result<bool> {
-        self.require_configured_store()?;
+        self.require_current_store()?;
         if self.store.is_none() {
             return Ok(false);
         }
@@ -3220,7 +3220,7 @@ pub(crate) fn scan_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
-    cache.require_configured_store()?;
+    cache.require_current_store()?;
     // Host-owned ordinary producers capture their own request identity. The
     // configured writer persists it with the observed ledger and Source claim
     // in prepare_file before any Raw parsing or publication decision. Explicit
@@ -7034,14 +7034,14 @@ mod tests {
         );
         assert!(cache.files.is_empty());
         assert!(!dirty);
-        let error = cache.require_configured_store().unwrap_err();
+        let error = cache.require_current_store().unwrap_err();
         assert_eq!(
             error
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<crate::storage::StorageError>()),
             Some(&crate::storage::StorageError::Unavailable)
         );
-        assert!(EventCache::default().require_configured_store().is_ok());
+        assert!(EventCache::default().require_current_store().is_err());
     }
 
     #[test]

@@ -339,7 +339,7 @@ fn validate_writer(
 }
 
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
-    let text = crate::history_projection::admitted_catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
+    let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
     text.map(|text| {
         crate::selected_read::charge(512, text.len())?;
         serde_json::from_str(&text).map_err(failure)
@@ -362,11 +362,11 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
 }
 
 fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
-    if crate::history_projection::admitted_catalog(db, &row.key)
+    if crate::history_projection::catalog(db, &row.key)
         .map_err(failure)?
         .is_some()
     {
-        return crate::history_projection::qualified(db, row, true).map_err(failure);
+        return crate::history_projection::qualified(db, row).map_err(failure);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
@@ -1022,7 +1022,7 @@ pub fn repair_session_overview_with_control(
             crate::causal_trace::publish_owned(&tx, &owner, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
-            let table = if crate::history_projection::admitted_catalog(&tx, &row.key)
+            let table = if crate::history_projection::catalog(&tx, &row.key)
                 .map_err(failure)?
                 .is_some()
             {
@@ -1069,7 +1069,7 @@ fn publish_projection(
         .map_err(failure)?;
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     let generation = crate::slot_projection::generation(&texts, &row.sources).map_err(failure)?;
-    let history = crate::history_projection::admitted_catalog(tx, &row.key)
+    let history = crate::history_projection::catalog(tx, &row.key)
         .map_err(failure)?
         .is_some();
     let slots = if history {

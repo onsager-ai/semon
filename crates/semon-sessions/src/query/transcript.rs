@@ -39,7 +39,7 @@ fn unchanged(
     slot_generation: &str,
 ) -> Result<(), QueryError> {
     let current = if history {
-        crate::history_projection::admitted_catalog(db, key).map_err(unavailable)?
+        crate::history_projection::catalog(db, key).map_err(unavailable)?
     } else {
         db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row|row.get::<_,Option<String>>(0)).optional().map_err(unavailable)?.flatten()
     };
@@ -715,7 +715,7 @@ fn read_inner(
     if projection_generation.as_deref() != Some(&catalog_generation) {
         return Ok(None);
     }
-    let history = crate::history_projection::admitted_catalog(&tx, key).map_err(unavailable)?;
+    let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
     let text = match history.as_ref() {
         Some(text) => Some(text.clone()),
         None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row|row.get::<_,Option<String>>(0))
@@ -1499,7 +1499,7 @@ mod namespace_isolation_tests {
         assert!(!edge_kept(&db, "edge", 100).unwrap());
         assert!(!window_member(&db, "shared", &stale, 100).unwrap());
         assert_eq!(
-            crate::history_projection::admitted_catalog(&db, "shared").unwrap(),
+            crate::history_projection::catalog(&db, "shared").unwrap(),
             None
         );
         bind(&db, "b");
@@ -1508,7 +1508,7 @@ mod namespace_isolation_tests {
         assert!(edge_timed(&db, "b-only", 100).unwrap());
         assert!(window_member(&db, "shared", &stale, 100).unwrap());
         assert_eq!(
-            crate::history_projection::admitted_catalog(&db, "shared")
+            crate::history_projection::catalog(&db, "shared")
                 .unwrap()
                 .as_deref(),
             Some("{\"key\":\"shared\"}")

@@ -6928,12 +6928,7 @@ fn selected_native_index_preserves_membership_and_native_semantics() {
     fixture.publish(3);
     let connection = fixture.db();
     let transaction = connection.unchecked_transaction().unwrap();
-    let metadata = rows(
-        &transaction,
-        &Request::parse("sid=session-00000").unwrap(),
-        false,
-    )
-    .unwrap();
+    let metadata = rows(&transaction, &Request::parse("sid=session-00000").unwrap()).unwrap();
     let source = &metadata[0];
     let ids = source.native_ids.iter().cloned().collect();
     let selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
@@ -7041,7 +7036,7 @@ fn focused_catalog_keyset_server_work_is_constant_with_unrelated_history() {
         .ok()
         .unwrap();
     SQL_STEPS.with(|steps| steps.set(0));
-    let small = rows(&connection, &request, false).unwrap();
+    let small = rows(&connection, &request).unwrap();
     let small_steps = SQL_STEPS.with(|steps| steps.get());
     // Add unrelated, equal-time metadata to expose an accidental OFFSET
     // or whole-catalog preparation without reading any transcript bodies.
@@ -7058,7 +7053,7 @@ fn focused_catalog_keyset_server_work_is_constant_with_unrelated_history() {
     }
     transaction.commit().unwrap();
     SQL_STEPS.with(|steps| steps.set(0));
-    let large = rows(&connection, &request, false).unwrap();
+    let large = rows(&connection, &request).unwrap();
     let large_steps = SQL_STEPS.with(|steps| steps.get());
     assert_eq!(
         serde_json::to_value(small).unwrap(),
@@ -7090,7 +7085,7 @@ fn focused_catalog_keyset_server_work_is_constant_with_unrelated_history() {
         }),
     };
     SQL_STEPS.with(|steps| steps.set(0));
-    let late = rows(&connection, &request, false).unwrap();
+    let late = rows(&connection, &request).unwrap();
     let late_steps = SQL_STEPS.with(|steps| steps.get());
     assert_eq!(late[0].key, "session-19001");
     assert!(
