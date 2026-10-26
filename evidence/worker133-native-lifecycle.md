@@ -18,3 +18,10 @@ replay are added to the existing CI integration test. Not yet verified.
 Recovery, retirement/remove_files, paged Source producer contract and shared
 compact/deferred reader restoration remain open. Concurrency/ACK-loss/cancel
 qualification beyond existing tests remains open. No full lifecycle claim.
+
+The integration suite additionally covers stale Source claims, competing batch
+writers with the same/different IDs, and COMMIT ACK loss after all parser inputs
+are prepared. These are unverified authored cases. CI40259168655 at eb1207ed
+failed compilation on a missing test import; b23bb358 fixes it. Its exact CI
+40259539246/job121368696537 was in progress at handover. Final-head CI is
+pending and must be collected independently. No green claim or acceptance.
