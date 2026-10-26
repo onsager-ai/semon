@@ -2054,7 +2054,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // sessions need new retained custody in one catch-up publication.
     let agent191 = claude_agent191.to_str().unwrap().to_owned();
     let agent191_removal = vec![(agent191.clone(), store.ledger(&agent191).unwrap())];
-    fs::rename(&claude_agent191, oracle.root.join("retained-agent191.jsonl")).unwrap();
+    fs::rename(
+        &claude_agent191,
+        oracle.root.join("retained-agent191.jsonl"),
+    )
+    .unwrap();
     assert_eq!(
         store.remove_files(&agent191_removal).unwrap(),
         crate::events::Outcome::Written
@@ -2096,7 +2100,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // checkpoint's ACK is lost with the process; a restarted producer resumes
     // the same operation from the durable checkpoint, not from scratch.
     assert_eq!(
-        catchup.publish_semantic_catalog(&batch, model.prepared()).unwrap(),
+        catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
         (crate::events::Outcome::Deferred, None)
     );
     assert_eq!(catchup.session_catalog_generation().unwrap(), qualified);
@@ -2119,12 +2125,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(ack.0, crate::events::Outcome::Written);
     // A lost Written ACK replays the exact operation and its generation.
     assert_eq!(
-        catchup.publish_semantic_catalog(&batch, model.prepared()).unwrap(),
+        catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
         ack
     );
     catchup.finish_semantic_stage(batch.epoch).unwrap();
     let caught = ack.1.unwrap();
-    assert_eq!(catchup.session_catalog_generation().unwrap(), Some(caught.clone()));
+    assert_eq!(
+        catchup.session_catalog_generation().unwrap(),
+        Some(caught.clone())
+    );
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
