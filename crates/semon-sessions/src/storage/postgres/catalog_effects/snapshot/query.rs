@@ -89,7 +89,7 @@ impl QueryCatalogStore for QueryCatalog {
                 .map_err(|_| StorageError::ScopeChanged)?
                 {
                     #[cfg(test)]
-                    eprintln!("pg_selected_runtime_mismatch key={key:?} history={history} saved={:?} expected={expected:?}", row.query.as_ref().map(|q| &q["runtime"]));
+                    eprintln!("pg_selected_runtime_mismatch history={history} saved_present={} expected_present={} runtime_matches={}", row.query.as_ref().and_then(|q| q["runtime"].as_str()).is_some(), expected.is_some(), row.query.as_ref().and_then(|q| q["runtime"].as_str()) == expected.as_deref());
                     return Err(StorageError::ScopeChanged);
                 }
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
