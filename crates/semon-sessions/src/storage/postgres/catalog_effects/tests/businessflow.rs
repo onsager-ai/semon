@@ -48,19 +48,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         facts: None,
         scan_window: false,
     };
-    let codex = options.codex_home.join("sessions/one.jsonl");
+    // Use the ordinary harness contracts, including Copilot's UUID directory
+    // and versioned session.start payload (model/tests.rs fixtures).
+    let codex_id = "01234567-89ab-4cde-8123-456789abcdef";
+    let copilot_id = "11234567-89ab-4cde-8123-456789abcdef";
+    let codex = options.codex_home.join(format!("sessions/2026/10/01/rollout-{codex_id}.jsonl"));
     let copilot = options
         .copilot_home
-        .join("session-state/copilot140/events.jsonl");
+        .join(format!("session-state/{copilot_id}/events.jsonl"));
     fs::create_dir_all(codex.parent().unwrap()).unwrap();
     fs::create_dir_all(copilot.parent().unwrap()).unwrap();
     fs::write(&codex, [
-        serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"codex140","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z"}}),
+        serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":codex_id,"cwd":"/synthetic/project","originator":"codex_exec","thread_source":"user","timestamp":"2026-10-01T00:00:00Z"}}),
         serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5","cwd":"/synthetic/project"}}),
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized codex input"}]}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(&copilot, [
-        serde_json::json!({"id":"start","type":"session.start","timestamp":"2026-10-01T00:00:00Z","data":{"sessionId":"copilot140","context":{"cwd":"/synthetic/project"}}}),
+        serde_json::json!({"id":"start","type":"session.start","timestamp":"2026-10-01T00:00:00Z","data":{"version":1,"copilotVersion":"1.0.91","sessionId":copilot_id,"context":{"cwd":"/synthetic/project"}}}),
         serde_json::json!({"id":"user","type":"user.message","timestamp":"2026-10-01T00:00:01Z","data":{"content":"sanitized copilot input"}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
