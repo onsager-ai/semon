@@ -2137,7 +2137,10 @@ mod tests {
                             // not at the target price yet, so it preserves the
                             // owner without a write rather than refusing every
                             // Catalog operation before reading its evidence.
-                            assert!(!catalog_step(&tx, &mut Work::default(), &target, Some(family_key)).unwrap());
+                            assert!(
+                                !catalog_step(&tx, &mut Work::default(), &target, Some(family_key))
+                                    .unwrap()
+                            );
                             assert_eq!(
                                 tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
                                     .unwrap(),
