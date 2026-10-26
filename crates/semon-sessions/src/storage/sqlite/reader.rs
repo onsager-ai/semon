@@ -27,6 +27,9 @@ impl NativeReaderBinding {
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         super::catalog_namespace::register(&db, &config.namespace)?;
+        // Cache only a committed layout. Payload snapshots still check the
+        // DDL cookie below, including a change between open and BEGIN.
+        crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
         Ok(db)
     }
 
