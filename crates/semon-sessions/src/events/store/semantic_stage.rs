@@ -1167,6 +1167,7 @@ pub(crate) fn project_native_event(
         seq: i64::try_from(seq).map_err(|_| rusqlite::Error::InvalidQuery)?,
     })
 }
+#[cfg(feature = "postgres")]
 pub(crate) fn projects_event(event: &Event) -> bool {
     matches!(
         event.k,
