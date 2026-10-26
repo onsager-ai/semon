@@ -583,10 +583,14 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_physical(db: &Connection) -> Result<(), StorageError> {
-        let version: i64 = db.pragma_query_value(None, "schema_version", |r| r.get(0)).map_err(failed)?;
+        let version: i64 = db
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .map_err(failed)?;
         let cached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)", [], |r| r.get(0)).map_err(failed)?;
         if cached {
-            let layout: Option<bool> = db.query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0)).map_err(failed)?;
+            let layout: Option<bool> = db
+                .query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0))
+                .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
             }
@@ -5636,6 +5640,29 @@ mod tests {
         assert!(semantic_stage::validate_support(&tx).is_err());
         tx.rollback().unwrap();
         semantic_stage::validate_support(&db).unwrap();
+    }
+
+    #[test]
+    fn native_usage_current_layout_refuses_drift_and_rolled_back_cookie_reuse() {
+        let mut db = Connection::open_in_memory().unwrap();
+        tree_state::register(&db).unwrap();
+        for ddl in authored_storage_ddl() {
+            db.execute_batch(ddl).unwrap();
+        }
+        NativeOwnership::validate_physical(&db).unwrap();
+        let tx = db.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE transient_layout_probe(value INTEGER)")
+            .unwrap();
+        NativeOwnership::validate_physical(&tx).unwrap();
+        tx.rollback().unwrap();
+        // This transaction reuses the rolled-back cookie for different DDL.
+        let tx = db.transaction().unwrap();
+        tx.execute_batch("DROP INDEX session_trace_starts").unwrap();
+        assert!(NativeOwnership::validate_physical(&tx).is_err());
+        tx.rollback().unwrap();
+        NativeOwnership::validate_physical(&db).unwrap();
+        db.execute_batch("DROP INDEX session_trace_starts").unwrap();
+        assert!(NativeOwnership::validate_physical(&db).is_err());
     }
 
     #[test]
