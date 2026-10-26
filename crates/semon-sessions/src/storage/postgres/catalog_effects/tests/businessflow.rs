@@ -383,6 +383,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut withdraw_options = history_options.clone();
     withdraw_options.cache = oracle.root.join("oracle-withdraw201");
     let refresh = |options: &Options| {
+        // Query's private listing completion does not finish Catalog/search
+        // publication. Run the ordinary observer to completion before saving
+        // the exact retained-search oracle, rather than forging its markers.
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        evidence.request_metadata_audit();
+        let mut work = evidence.work.lock().unwrap();
+        let mut complete = false;
+        for _ in 0..64 {
+            if evidence.refresh_catalog(&mut work, recent_now).unwrap() {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "SQLite ordinary Catalog oracle did not finish");
+        drop(work);
         crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
             vec![(recent_machine.into(), options.clone())],
         )))
@@ -868,14 +883,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: generation.clone(),
         options: options.clone(),
     };
-    let long_recipe = prepared.transcripts.iter().find(|row| row.key == "related191").unwrap();
+    let long_recipe = prepared
+        .transcripts
+        .iter()
+        .find(|row| row.key == "related191")
+        .unwrap();
     assert_eq!(long_recipe.slots.len(), 152);
-    assert!(crate::storage::query::QueryCatalogStore::has_search_slots(
-        &query_store, &namespace, &long_recipe.key, None,
-    ).unwrap());
-    assert!(!crate::storage::query::QueryCatalogStore::has_search_slots(
-        &query_store, &namespace, &long_recipe.key, Some(i64::MAX),
-    ).unwrap());
+    assert!(
+        crate::storage::query::QueryCatalogStore::has_search_slots(
+            &query_store,
+            &namespace,
+            &long_recipe.key,
+            None,
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::storage::query::QueryCatalogStore::has_search_slots(
+            &query_store,
+            &namespace,
+            &long_recipe.key,
+            Some(i64::MAX),
+        )
+        .unwrap()
+    );
     let mut query = crate::Query::from_sources(std::sync::Arc::new(
         crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
     ));
