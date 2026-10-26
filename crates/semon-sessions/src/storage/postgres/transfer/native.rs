@@ -20,6 +20,7 @@ pub(super) fn capture_native(
         })
         .transpose()?
         .unwrap_or(0);
+    if state.native_family >= 3 { return super::pages::capture(tx,state); }
     if state.native_family == 0 {
         let rows = native_reader::transfer_rows(
             tx.0,
@@ -57,7 +58,7 @@ pub(super) fn capture_native(
             &[&ns, &id, &extra, &ordinal],
         )?;
         if rows.is_empty() {
-            state.native_family = if extra { 0 } else { 2 };
+            state.native_family = if extra { 3 } else { 2 };
             state.cursor = Some((id.to_be_bytes().to_vec(), -1));
         } else {
             let path = state

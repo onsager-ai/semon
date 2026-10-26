@@ -1,5 +1,6 @@
 //! Namespace-owned durable transfer transport, separate from native publication.
 mod native;
+mod pages;
 use native::{capture_native, apply_native};
 use super::failed;
 use crate::storage::{
@@ -288,6 +289,7 @@ pub(crate) fn apply(
                 transfer::TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                     tx.put(key, value.as_bytes())?
                 }
+                transfer::TransferRecord::NativeSource(_) | transfer::TransferRecord::NativePage { .. } | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx,record)?,
                 transfer::TransferRecord::NativeFile { .. } | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
             }

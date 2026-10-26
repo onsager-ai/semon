@@ -1,5 +1,6 @@
 //! RLS-bound transfer inbox. Uses the ordinary admission/publication lock order.
 mod native;
+mod pages;
 use super::{
     PgCancellation, PgPool, model_cache, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -233,6 +234,7 @@ pub(crate) fn apply(
                 transfer::TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                     tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&value.as_bytes()]).map_err(sqlstate::error)?;
                 }
+                transfer::TransferRecord::NativeSource(_) | transfer::TransferRecord::NativePage { .. } | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx,record)?,
                 transfer::TransferRecord::NativeFile { .. }
                 | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
@@ -257,6 +259,12 @@ mod tests {
         let path = root.join("old.jsonl");
         seed_native(&source, &path, 130, '2');
         let expected = sqlite_core(&source, &path);
+        let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&source).unwrap();
+        let sqlite_reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (expected_ledger, expected_native) = sqlite_reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        let expected_chunks = expected_native.source_chunks.as_ref().unwrap();
+        let expected_launch = serde_json::to_value(expected_native.handoff_index.as_ref().unwrap()).unwrap();
+        drop(sqlite_reader);
         let (pool, _) = super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig {
@@ -275,6 +283,19 @@ mod tests {
             .unwrap()
             .sequence;
         apply(&config, &manifest);
+        pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            // The actual production native reader verifies immutable page roots,
+            // chunk payloads and launch fingerprints; no Raw carrier is involved.
+            let (ledger, native) = super::super::native_reader::file(tx,path.to_str().unwrap())?.ok_or(StorageError::ScopeChanged)?;
+            assert_eq!(ledger, expected_ledger);
+            assert_eq!(serde_json::to_value(&native.events).unwrap(),serde_json::to_value(&expected_native.events).unwrap());
+            assert_eq!(serde_json::to_value(&native.extras).unwrap(),serde_json::to_value(&expected_native.extras).unwrap());
+            let chunks = native.source_chunks.as_ref().unwrap();
+            assert_eq!(chunks.hashes,expected_chunks.hashes);
+            assert_eq!(chunks.fingerprint(),expected_chunks.fingerprint());
+            assert_eq!(serde_json::to_value(native.handoff_index.as_ref().unwrap()).unwrap(),expected_launch);
+            Ok(())
+        }).unwrap();
         // Compare every normalized native row against authoritative SQL through
         // the existing native decoder, rather than trusting the transfer inbox.
         for sequence in 1..=pages {
