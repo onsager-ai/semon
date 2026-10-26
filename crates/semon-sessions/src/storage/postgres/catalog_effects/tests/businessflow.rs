@@ -2550,8 +2550,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         facts_authority.validate().is_err(),
         "exact canonical replacement invalidates the old authority"
     );
-    moved_cache.prepare_facts_authority(&facts_options).unwrap();
-    let selected = moved_cache.facts_authority(&facts_path).unwrap();
+    cold_cache.prepare_facts_authority(&facts_options).unwrap();
+    let selected = cold_cache.facts_authority(&facts_path).unwrap();
     assert_eq!(
         selected
             .codex_current(&format!("archived_sessions/rollout-{codex_id}.jsonl"))
