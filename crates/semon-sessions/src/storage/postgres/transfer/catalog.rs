@@ -550,7 +550,8 @@ mod tests {
         let root = root();
         let source = sqlite(&root, "pg-catalog-source");
         let reverse = sqlite(&root, "pg-catalog-reverse");
-        let (options, expected) = seed_catalog(&source, &root);
+        let (options, _) = seed_catalog(&source, &root);
+        let expected = crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
         let (pool, _) = super::super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig {
@@ -586,6 +587,7 @@ mod tests {
             .unwrap()
             .sequence;
         let mut checked_forgery = false;
+        let mut retained_ref = false;
         for sequence in 1..=pages {
             for mut record in source
                 .transfer_inbox()
@@ -594,6 +596,15 @@ mod tests {
                 .records
             {
                 if let TransferRecord::CatalogRow {
+                    kind: CatalogRowKind::ProofRef,
+                    values,
+                    ..
+                } = &record
+                {
+                    retained_ref |= values[1].as_str() == Some("history");
+                }
+                if !checked_forgery
+                    && let TransferRecord::CatalogRow {
                     kind: CatalogRowKind::ProofGeneration,
                     values,
                     ..
@@ -605,13 +616,13 @@ mod tests {
                         Err(StorageError::ScopeChanged)
                     ));
                     checked_forgery = true;
-                    break;
                 }
             }
-            if checked_forgery {
-                break;
-            }
         }
+        assert!(
+            retained_ref,
+            "successor must retain the original selected generation"
+        );
         assert!(
             checked_forgery,
             "real publisher must contribute original selected proof authority"
