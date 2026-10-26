@@ -4,7 +4,7 @@
 use super::failed;
 use crate::events::store::configured::NativeOwnership;
 use crate::model::summary::CatalogRow;
-use crate::storage::proof_codec::{self, LEASE_CAP, TTL_MAX};
+use crate::storage::proof_codec::{self, LEASE_CAP, PresentationManifest, TTL_MAX};
 use crate::storage::proof_lifetime::{
     ProofGenerationId, ProofReaderLease, ReaderPage, ReaderSnapshot,
 };
@@ -670,13 +670,6 @@ fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
     proof_codec::presentation_digest(base, manifest)
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PresentationManifest {
-    entries: Vec<(String, String)>,
-    observations: Option<crate::storage::selected::PresentationObservations>,
-}
-
 /// The caller has completed every producer write in the same publication TX.
 /// Capture typed metadata, never Raw bodies, before committing the proof root.
 pub(super) fn capture_presentations(
@@ -827,18 +820,8 @@ fn validate_presentation(
         return Err(StorageError::ScopeChanged);
     }
     proof_codec::verify_presentation_digest(&base, &manifest, &joined)?;
-    let manifest: PresentationManifest =
-        serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-    let entry = proof_codec::presentation_entry(&metadata, &slots, &text)?;
-    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest
-            .entries
-            .iter()
-            .any(|(k, d)| k == key && *d == entry)
-    {
-        return Err(StorageError::ScopeChanged);
-    }
+    proof_codec::verify_presentation_entry(key, &metadata, &slots, &text, &manifest)?;
     Ok(text)
 }
 

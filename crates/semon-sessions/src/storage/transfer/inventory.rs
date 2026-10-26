@@ -155,6 +155,10 @@ fn native(name: &str) -> Option<Disposition> {
             Checkpoints,
         ],
         "descriptions" => &[Metadata],
+        "semantic_publications" => &[Operations, Generations],
+        "selected_roots" | "selected_refs" => &[ProofReferences],
+        "selected_generations" | "selected_sources" => &[Proofs],
+        "selected_presentations" => &[Metadata],
         "semantic_runtime" => &[Generations],
         "catalog_rows" | "catalog_sources" | "catalog_links" | "catalog_dependencies" => {
             &[CatalogCurrent]
