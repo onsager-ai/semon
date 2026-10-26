@@ -47,9 +47,6 @@ impl PgSourceJournal {
         })
     }
     fn apply(&self, intent: &SourceIntent) -> Result<SourceMutationReceipt, StorageError> {
-        if matches!(intent, SourceIntent::Recover { .. }) {
-            return Err(StorageError::Unavailable);
-        }
         // Shared validation binds the namespace, kind, payload and operation ID.
         // Foreign/rebound operations return Conflict without acquiring a writer.
         if let Err(error) = validate_intent(Some(self.namespace.as_str()), intent) {
@@ -60,6 +57,9 @@ impl PgSourceJournal {
             };
         }
         self.write(|tx| {
+            if matches!(intent, SourceIntent::Recover { .. }) {
+                return super::native_recovery::recover(tx, intent).map(|(receipt, _)| receipt);
+            }
             let operation = intent.operation();
             if let Some(receipt) = receipt(tx, operation)? { return Ok(receipt); }
             let applied = match intent {
@@ -103,7 +103,7 @@ impl PgSourceJournal {
     }
 }
 
-fn receipt(
+pub(super) fn receipt(
     tx: &mut PgTxn<'_>,
     operation: &SourceOperation,
 ) -> Result<Option<SourceMutationReceipt>, StorageError> {
@@ -151,10 +151,22 @@ pub(super) fn invalidate(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageEr
 }
 
 impl SourceObservationStore for PgSourceJournal {
-    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
-        if matches!(intent, SourceIntent::Recover { .. }) {
-            return Err(StorageError::Unavailable);
+    fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
+        // There is no unchecked metadata-only ready cache: validate the current
+        // physical profile, then take the durable exact-operation path.
+        self.read(|tx| { tx.check()?; Ok(false) })
+    }
+    fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
+        self.read(super::native_recovery::cursor)
+    }
+    fn recover(&mut self, operation: &SourceOperation, cursor: Option<&str>) -> Result<(SourceMutationReceipt, bool), StorageError> {
+        let intent = SourceIntent::Recover { operation: operation.clone(), cursor: cursor.map(str::to_owned) };
+        if let Err(error) = validate_intent(Some(self.namespace.as_str()), &intent) {
+            return if error == StorageError::Conflict { Ok((SourceMutationReceipt::Conflict, false)) } else { Err(error) };
         }
+        self.write(|tx| super::native_recovery::recover(tx, &intent))
+    }
+    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
         validate_intent(Some(self.namespace.as_str()), intent)?;
         let payload = serde_json::to_string(intent).map_err(|_| StorageError::InvalidArguments)?;
         if payload.len() > 2 * 1024 * 1024 {

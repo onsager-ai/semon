@@ -12,6 +12,7 @@ mod native_ingest;
 mod native_keys;
 mod native_pages;
 mod native_reader;
+mod native_recovery;
 mod native_usage;
 mod native_usage_identity;
 mod operations;
