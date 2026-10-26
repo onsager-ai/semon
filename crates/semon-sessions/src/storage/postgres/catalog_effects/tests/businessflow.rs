@@ -1322,6 +1322,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }).collect::<std::collections::BTreeMap<_, _>>()
     };
     assert_eq!(captured_bodies(&pool), expected_bodies);
+    let denied_capture = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "capture denied"))
+    };
+    assert!(config.call_captured_query_at(&options, &generation, "read_transcript", &serde_json::json!({"id":prepared.rows[0].key,"limit":100}), 1790812802000, &denied_capture).is_err());
     struct DeniedHost;
     impl crate::SessionSourceReader for DeniedHost {
         fn read_range(
