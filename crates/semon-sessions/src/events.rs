@@ -3315,6 +3315,7 @@ pub(crate) fn scan_file(
     *dirty = true;
     let mut attempt = 0;
     let mut force_replace = false;
+    let mut verify_prefix = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
@@ -3366,14 +3367,14 @@ pub(crate) fn scan_file(
         let started = cache.scan_measurements.start();
         let recorded = prepared_ledger;
         let trusted_receiver = match recorded.as_ref() {
-            Some(ledger) => cache
+            Some(ledger) if !verify_prefix => cache
                 .store
                 .as_ref()
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
                 .append_evidence(&key)
                 .map_err(store_io_error)?
                 .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat)),
-            None => false,
+            _ => false,
         };
         let mut trusted_append = false;
         let mut base = None;
@@ -3616,7 +3617,7 @@ pub(crate) fn scan_file(
                             error.downcast_ref::<crate::storage::StorageError>()
                         }) == Some(&crate::storage::StorageError::Conflict) =>
                 {
-                    force_replace = true;
+                    verify_prefix = true;
                     continue;
                 }
                 Err(error) => return Err(error),
