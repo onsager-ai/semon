@@ -47,7 +47,7 @@ impl PgPool {
                     .batch_execute(
                         "
                 CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY);
-                INSERT INTO semon_pg_schema VALUES (6);
+                INSERT INTO semon_pg_schema VALUES (7);
                 CREATE TABLE semon_pg_operations(
                     namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
                     namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
