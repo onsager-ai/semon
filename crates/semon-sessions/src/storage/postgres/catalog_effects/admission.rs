@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 pub(super) struct NativeReference {
     pub(super) path: String,
     pub(super) usage_generation: i64,
+    /// Native usage availability is a fact, not generic publication readiness.
+    /// Claude may have no native Usage observations in an otherwise valid file.
+    pub(super) usage_ready: bool,
     pub(super) pages: ProofGenerationId,
 }
 
@@ -101,7 +104,7 @@ fn bind(
         // before a size check. The actual Usage generation must be both ready
         // and the owner of the exact native page generation (not any old row).
         let rows = tx.driver.query(
-            "SELECT s.source_id FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) JOIN semon_pg_native_page_generations p USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.source_path_digest=c.source_path_digest AND semon_pg_native_key_matches(s.source_path,sha256($2::bytea),$2) AND s.parser_version=$3 AND s.usage_ready AND s.receipt=$4 AND p.generation=$5 AND p.source_path=$2 AND p.ledger=$4 LIMIT 2",
+            "SELECT s.source_id,s.usage_ready FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) JOIN semon_pg_native_page_generations p USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.source_path_digest=c.source_path_digest AND semon_pg_native_key_matches(s.source_path,sha256($2::bytea),$2) AND s.parser_version=$3 AND s.receipt=$4 AND p.generation=$5 AND p.source_path=$2 AND p.ledger=$4 LIMIT 2",
             &[&tx.namespace.as_str().as_bytes(), &path.as_bytes(), &i64::from(crate::events::CACHE_VERSION), &receipt.as_bytes(), &pinned.id.0.as_bytes()],
         ).map_err(sqlstate::error)?;
         if rows.len() != 1 {
@@ -111,7 +114,7 @@ fn bind(
         if usage_generation <= 0 {
             return Err(StorageError::ScopeChanged);
         }
-        refs.push(NativeReference { path: path.to_owned(), usage_generation, pages: pinned.id });
+        refs.push(NativeReference { path: path.to_owned(), usage_generation, usage_ready: rows[0].get(1), pages: pinned.id });
         tx.check()?;
     }
     Ok(refs)
