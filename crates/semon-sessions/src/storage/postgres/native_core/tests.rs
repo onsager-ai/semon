@@ -271,10 +271,11 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                 for n in batch..(batch + 64).min(noise) {
                     let key = format!("unrelated-history-{n}");
-                    super::super::native_keys::put_meta(tx,key.as_bytes(),b"retained")?;
+                    super::super::native_keys::put_meta(tx, key.as_bytes(), b"retained")?;
                 }
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
         let measurement = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
             let _scope = crate::selected_read::Scope::ensure();
@@ -291,9 +292,12 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
             }
             Ok((visited(&plan[0]["Plan"]), value.len()))
         }).unwrap();
-        assert!(measurement.0 <= 32, "selected physical scan must stay bounded: {noise} {measurement:?}");
+        assert!(
+            measurement.0 <= 32,
+            "selected physical scan must stay bounded: {noise} {measurement:?}"
+        );
         assert_eq!(measurement.1, metadata[0].1.len());
-        measurements.push((noise,measurement));
+        measurements.push((noise, measurement));
         previous = noise;
     }
     eprintln!("KEYS125_META_PHYSICAL_ROWS_AND_RETURNED_BYTES {measurements:?}");
