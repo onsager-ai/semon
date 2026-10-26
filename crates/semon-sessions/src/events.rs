@@ -3359,9 +3359,7 @@ pub(crate) fn scan_file(
                                 .source_chunks
                                 .as_ref()
                                 .is_some_and(|chunks| chunks.resume.is_some());
-                        if ledger.stat == stat
-                            || trusted_append
-                            || ledger.resumes(&stat, &mut file)
+                        if ledger.stat == stat || trusted_append || ledger.resumes(&stat, &mut file)
                         {
                             base = Some(index);
                         }

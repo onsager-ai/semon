@@ -1,10 +1,7 @@
 //! Producer-materialized history context. Current catalog/native authority stays
 //! independent. Missing source paths retain their original generation recipes;
 //! rewrites at the same path are not silently treated as that original source.
-use crate::{
-    model::summary::CatalogRow,
-    slot_projection::VERSION,
-};
+use crate::{model::summary::CatalogRow, slot_projection::VERSION};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) const SCHEMA: &str = crate::storage::sqlite::history::SCHEMA;

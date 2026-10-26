@@ -185,36 +185,13 @@ CREATE TABLE session_catalog_invalidations(namespace TEXT,source_path TEXT);")?;
     cache.get().ok_or(rusqlite::Error::InvalidQuery)
 }
 
-pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<bool> {
-    let version: i64 = c.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
-    let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_stage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
-    if cached {
-        let layout: Option<bool> = c
-            .prepare_cached("SELECT semon_semantic_stage_layout(?1)")?
-            .query_row([version], |r| r.get(0))?;
-        if let Some(layout) = layout {
-            return Ok(layout);
-        }
-    }
-    let composite: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace')", [], |r| r.get(0))?;
+pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<()> {
     for (table, expected) in STAGE_TABLES.iter().zip(stage_shapes()?) {
         if stage_shape(c, table)? != *expected {
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
-    if c.is_autocommit() {
-        c.create_scalar_function(
-            "semon_semantic_stage_layout",
-            1,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            move |context| {
-                let observed: i64 = context.get(0)?;
-                Ok((observed == version).then_some(composite))
-            },
-        )?;
-    }
-    Ok(composite)
+    Ok(())
 }
 
 fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {

@@ -43,7 +43,6 @@ impl<'a> OriginalHistory<'a> {
             namespace: source.namespace(),
         })
     }
-
 }
 
 impl OriginalHistoryStore for OriginalHistory<'_> {
@@ -172,7 +171,14 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
             None => None,
         };
         // Preserve the original eager Current read and its corruption errors.
-        let current = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|r.get(0)).optional()?;
+        let current = self
+            .db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![self.namespace, key],
+                |r| r.get(0),
+            )
+            .optional()?;
         Ok(history.or(current))
     }
     fn history_exists(&self, key: &str) -> rusqlite::Result<bool> {
@@ -205,7 +211,9 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
             "DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2",
             "DELETE FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2",
             "DELETE FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
-        ] { self.db.execute(sql,params![self.namespace,key])?; }
+        ] {
+            self.db.execute(sql, params![self.namespace, key])?;
+        }
         Ok(())
     }
     fn previous_recipe(
