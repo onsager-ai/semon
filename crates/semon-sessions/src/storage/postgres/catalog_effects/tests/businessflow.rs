@@ -2195,6 +2195,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::native_evidence::query_runtime_generation(&options).unwrap() != stage_runtime,
         "the shared PID mutation must invalidate the old local runtime witness"
     );
+    assert_eq!(
+        read_selected(),
+        expected_field,
+        "the retained native field proof survives an independent runtime mutation"
+    );
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
     let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded).unwrap();
