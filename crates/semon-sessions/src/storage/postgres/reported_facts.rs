@@ -951,6 +951,41 @@ mod tests {
     }
 
     #[test]
+    fn pg_reported_facts_corrupt_state_refuses_without_replacement_or_receipt() {
+        for poison in [
+            "UPDATE semon_pg_native_reported_runs SET record=decode('00','hex')",
+            "UPDATE semon_pg_native_reported_stamp SET stamp=decode('00','hex')",
+            "DELETE FROM semon_pg_native_reported_stamp",
+            "DELETE FROM semon_pg_source_state",
+            "UPDATE semon_pg_source_state SET revision=revision+1",
+            "ALTER TABLE semon_pg_store_owner DISABLE ROW LEVEL SECURITY; DELETE FROM semon_pg_store_owner; ALTER TABLE semon_pg_store_owner ENABLE ROW LEVEL SECURITY",
+        ] {
+            let (pool, factory) = fixture(|_| {});
+            let source = ns("corrupt-facts");
+            seed(&pool, &source);
+            let control = PgCancellation::default();
+            let run = ReportedRunSnapshot { last_session_id: "same\0原生".into(), last_duration: Some(u64::MAX), ..Default::default() };
+            save(&pool, &source, 0, &"a".repeat(64), std::slice::from_ref(&run), &stamp(), &control).unwrap();
+            let mut client = factory.client();
+            client.query_one("SELECT set_config('semon.namespace',$1,false)", &[&super::super::namespace_context(&source)]).unwrap();
+            client.batch_execute(poison).unwrap();
+            let state = |client: &mut ::postgres::Client| {
+                [
+                    "SELECT row_to_json(r)::text FROM (SELECT namespace,session_digest,session_id,start,record FROM semon_pg_native_reported_runs ORDER BY namespace_digest,session_digest,start) r",
+                    "SELECT row_to_json(r)::text FROM (SELECT namespace,singleton,stamp FROM semon_pg_native_reported_stamp ORDER BY namespace_digest,singleton) r",
+                    "SELECT row_to_json(r)::text FROM (SELECT namespace,operation_id,request_digest,outcome FROM semon_pg_operations ORDER BY namespace_digest,operation_id) r",
+                ].into_iter().map(|sql| client.query(sql, &[]).unwrap().into_iter().map(|r| r.get::<_,String>(0)).collect::<Vec<_>>()).collect::<Vec<_>>()
+            };
+            let before = state(&mut client);
+            assert!(save(&pool, &source, 0, &"b".repeat(64), std::slice::from_ref(&run), &stamp(), &control).is_err(), "{poison}");
+            assert_eq!(state(&mut client), before, "{poison}");
+            if !poison.starts_with("UPDATE semon_pg_source_state") {
+                assert!(load(&pool, &source, None, &control).is_err(), "{poison}");
+            }
+        }
+    }
+
+    #[test]
     fn pg_reported_facts_warm_schema_drift_and_missing_namespace_refuse() {
         let (pool, factory) = fixture(|_| {});
         let source = ns("drift");
