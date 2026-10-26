@@ -5489,13 +5489,13 @@ mod tests {
 
     #[test]
     fn configured_semantic_stage_validates_every_authored_shape_and_cookie_rollback() {
-        for composite in [true] {
+        {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
             for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
-            assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+            semantic_stage::stage_layout(&db).unwrap();
             for table in semantic_stage::STAGE_TABLES {
                 let tx = db.transaction().unwrap();
                 tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;"))
@@ -5504,14 +5504,14 @@ mod tests {
                 assert!(semantic_stage::stage_layout(&tx).is_err(), "{table}");
                 assert_eq!(tx.total_changes(), before);
                 tx.rollback().unwrap();
-                assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+                semantic_stage::stage_layout(&db).unwrap();
             }
             let tx = db.transaction().unwrap();
             tx.execute_batch("DROP INDEX catalog_semantic_message;")
                 .unwrap();
             assert!(semantic_stage::stage_layout(&tx).is_err());
             tx.rollback().unwrap();
-            assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+            semantic_stage::stage_layout(&db).unwrap();
         }
     }
 

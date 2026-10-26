@@ -3718,6 +3718,9 @@ impl SqliteStore {
             .map_err(|error| Unopened::Unsupported(error.to_string()))?;
         let connection =
             configured::connection(&config).map_err(|error| Unopened::Other(error.to_string()))?;
+        crate::storage::NativeReaderBinding::Semantic(owner.clone())
+            .validate(&connection, namespace)
+            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
         let store = Self {
             owner,
             connection,
@@ -3827,6 +3830,9 @@ impl SqliteStore {
             .map_err(|error| Unopened::Unsupported(error.to_string()))?;
         let connection =
             configured::connection(&config).map_err(|error| Unopened::Other(error.to_string()))?;
+        crate::storage::NativeReaderBinding::Semantic(owner.clone())
+            .validate(&connection, namespace)
+            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
         let store = Self {
             owner,
             connection,
@@ -8882,9 +8888,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(history.harness, "codex");
-            assert!(
-                crate::history_projection::qualified(&store.connection, &history).unwrap()
-            );
+            assert!(crate::history_projection::qualified(&store.connection, &history).unwrap());
             assert_eq!(
                 store
                     .connection

@@ -8,10 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 pub(crate) const SCHEMA: &str = crate::storage::sqlite::history::SCHEMA;
 
 /// Selected history metadata of the bound namespace for admitted readers.
-pub(crate) fn catalog(
-    connection: &Connection,
-    key: &str,
-) -> rusqlite::Result<Option<String>> {
+pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     match connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row| row.get::<_, Option<String>>(0)).optional()? {
         Some(None) => Err(rusqlite::Error::InvalidQuery),
         Some(Some(metadata)) => Ok(Some(metadata)),
@@ -21,10 +18,7 @@ pub(crate) fn catalog(
 
 /// An explicit older harness observation must carry its own complete recipe
 /// header and consumed-source cohort, independently of the Current owner.
-pub(crate) fn qualified(
-    connection: &Connection,
-    row: &CatalogRow,
-) -> rusqlite::Result<bool> {
+pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::Result<bool> {
     if row.sources.is_empty() || row.sources.len() > 64 {
         return Ok(false);
     }

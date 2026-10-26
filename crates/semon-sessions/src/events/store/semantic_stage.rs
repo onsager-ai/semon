@@ -3572,18 +3572,11 @@ mod tests {
         NATIVE_OCCUPANCY_PROBES.with(|count| count.set(0));
         assert!(native_keys_page(&connection).unwrap());
         assert_eq!(NATIVE_OCCUPANCY_PROBES.with(|count| count.get()), 18);
-        let mut store = SqliteStore {
-            connection,
-            path,
-            selected_runs: None,
-            semantic_rejection: None,
-            traversal_observation: None,
-        };
         NATIVE_OCCUPANCY_PROBES.with(|count| count.set(0));
         for _ in 0..100 {
-            let result = store
-                .semantic_selection(
-                    7,
+            let mut lookup = OrdinaryLookup { db: &connection, replay: Vec::new() };
+            let result = crate::model::relation_stage::select_with(
+                    &mut lookup,
                     &Selector::NativeKey {
                         native: "same".into(),
                         harness: "codex".into(),
@@ -3592,11 +3585,11 @@ mod tests {
                 .unwrap();
             assert_eq!(result.key, Some(format!("{}codex:same", ":".repeat(80))));
             assert_eq!(
-                native_key(&store.connection, "same", "claude").unwrap(),
+                native_key(&connection, "same", "claude").unwrap(),
                 "claude:same"
             );
             assert_eq!(
-                native_key(&store.connection, "codex:same", "codex").unwrap(),
+                native_key(&connection, "codex:same", "codex").unwrap(),
                 "codex:same"
             );
         }
@@ -3607,23 +3600,22 @@ mod tests {
         );
         // New primitive evidence invalidates keys logically. Old rows remain
         // unreachable until overwritten or reclaimed by bounded GC.
-        store.connection.execute("UPDATE catalog_semantic_stage SET key_epoch=key_epoch+1,key_after_harness='',key_after_native='',key_candidate='',keys_done=0",[]).unwrap();
-        assert!(native_key(&store.connection, "same", "codex").is_err());
+        connection.execute("UPDATE catalog_semantic_stage SET key_epoch=key_epoch+1,key_after_harness='',key_after_native='',key_candidate='',keys_done=0",[]).unwrap();
+        assert!(native_key(&connection, "same", "codex").is_err());
         assert_eq!(
-            store
-                .connection
+            connection
                 .query_row("SELECT count(*) FROM catalog_semantic_keys", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
             2
         );
-        assert!(!native_keys_page(&store.connection).unwrap());
-        assert!(native_keys_page(&store.connection).unwrap());
+        assert!(!native_keys_page(&connection).unwrap());
+        assert!(native_keys_page(&connection).unwrap());
         assert_eq!(
-            native_key(&store.connection, "same", "codex").unwrap(),
+            native_key(&connection, "same", "codex").unwrap(),
             format!("{}codex:same", ":".repeat(80))
         );
-        drop(store);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 }

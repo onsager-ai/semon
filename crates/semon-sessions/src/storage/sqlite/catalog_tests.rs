@@ -6928,11 +6928,7 @@ fn selected_native_index_preserves_membership_and_native_semantics() {
     fixture.publish(3);
     let connection = fixture.db();
     let transaction = connection.unchecked_transaction().unwrap();
-    let metadata = rows(
-        &transaction,
-        &Request::parse("sid=session-00000").unwrap(),
-    )
-    .unwrap();
+    let metadata = rows(&transaction, &Request::parse("sid=session-00000").unwrap()).unwrap();
     let source = &metadata[0];
     let ids = source.native_ids.iter().cloned().collect();
     let selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
