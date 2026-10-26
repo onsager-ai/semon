@@ -144,14 +144,6 @@ pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-pub(super) fn sql<'a>(
-    _db: &Connection,
-    _legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
-    Ok(scoped)
-}
-
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     db: PathBuf,
@@ -242,7 +234,7 @@ impl Snapshot {
         }
         let actual: (i64, String, i64) = tx
             .query_row(
-                sql(&tx, "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE source_path=?1", "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1").map_err(io::Error::other)?,
+                "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
                 [&self.path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -258,7 +250,7 @@ impl Snapshot {
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
         self.with(|c, _, projection_id| {
             c.query_row(
-                sql(c, "SELECT name FROM native_tree_tools WHERE projection_id=?1 AND tool_id=?2", "SELECT name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND tool_id=?2")?,
+                "SELECT name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND tool_id=?2",
                 params![projection_id, id],
                 |r| r.get::<_, Option<String>>(0),
             )
@@ -276,11 +268,7 @@ pub(super) fn shared_usage(
     id: i64,
     projection_id: i64,
 ) -> rusqlite::Result<SharedUsage> {
-    let query = sql(
-        c,
-        "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid",
-        "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid",
-    )?;
+    let query = "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid";
     let mut statement = c.prepare(query)?;
     let mut rows = statement.query([id])?;
     let mut records = crate::claude_usage::Records::new();
@@ -291,9 +279,9 @@ pub(super) fn shared_usage(
     let mut tokens = BTreeMap::new();
     let mut models = BTreeMap::new();
     for message in records.keys() {
-        let used = c.query_row(copied_usage_sql(c, "SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE file_id=?1 AND message_id=?2", "SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?,params![id,message],|r|Ok(Tokens {input:uint(r.get(0)?),cached_input:uint(r.get(1)?),output:uint(r.get(2)?),reasoning_output:uint(r.get(3)?),total:uint(r.get(4)?)}))?;
+        let used = c.query_row("SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",params![id,message],|r|Ok(Tokens {input:uint(r.get(0)?),cached_input:uint(r.get(1)?),output:uint(r.get(2)?),reasoning_output:uint(r.get(3)?),total:uint(r.get(4)?)}))?;
         tokens.insert(message.clone(), used);
-        if let Some(model) = c.query_row(sql(c, "SELECT model FROM native_tree_usage_models WHERE projection_id=?1 AND message_id=?2", "SELECT model FROM native_tree_usage_models WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2")?,params![projection_id,message],|r|r.get::<_,String>(0)).optional()? {
+        if let Some(model) = c.query_row("SELECT model FROM native_tree_usage_models WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2",params![projection_id,message],|r|r.get::<_,String>(0)).optional()? {
             models.insert(message.clone(), model);
         }
     }
@@ -307,26 +295,22 @@ pub(super) fn write(
     summary: &Summary,
 ) -> rusqlite::Result<()> {
     let id: i64 = tx.query_row(
-        configured::sql(
-            tx,
-            "SELECT file_id FROM files WHERE path=?1",
-            "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
-        )?,
+        "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
         [path],
         |r| r.get(0),
     )?;
     let source_id = native_usage::source(tx, path)?
         .ok_or(rusqlite::Error::InvalidQuery)?
         .0;
-    let previous:Option<i64>=tx.query_row(sql(tx, "SELECT g.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) WHERE h.source_path=?1 AND g.source_id=?2 AND g.version=3", "SELECT g.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.source_id=?2 AND g.version=3")?,params![path,source_id],|r|r.get(0)).optional()?;
+    let previous:Option<i64>=tx.query_row("SELECT g.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.source_id=?2 AND g.version=3",params![path,source_id],|r|r.get(0)).optional()?;
     let projection_id = match previous {
         Some(id) => id,
         None => new_generation(tx, source_id, ledger)?,
     };
-    tx.execute(sql(tx, "INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", "INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?,params![path,id,projection_id,header_ledger(ledger)])?;
+    tx.execute("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
     write_values(tx, projection_id, summary).map_err(|error| diagnose("write_values", error))?;
     tx.execute(
-        sql(tx, "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?,
+        "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1",
         params![projection_id, header_ledger(ledger)],
     )?;
     Ok(())
@@ -347,19 +331,15 @@ pub(super) fn bind_generation(
     projection_id: i64,
 ) -> rusqlite::Result<()> {
     let id: i64 = tx.query_row(
-        configured::sql(
-            tx,
-            "SELECT file_id FROM files WHERE path=?1",
-            "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
-        )?,
+        "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
         [path],
         |r| r.get(0),
     )?;
     tx.execute(
-        sql(tx, "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?,
+        "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1",
         params![projection_id, header_ledger(ledger)],
     )?;
-    tx.execute(sql(tx, "INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", "INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?,params![path,id,projection_id,header_ledger(ledger)])?;
+    tx.execute("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
     Ok(())
 }
 
@@ -371,27 +351,23 @@ pub(super) fn write_values(
     let rows = crate::events::tree_rows::TreeRows::new(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let turn = &rows.codex_turn;
-    tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,'codex_turn',?2) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,'codex_turn',?2) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,turn])?;
+    tx.prepare_cached("INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,'codex_turn',?2) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?.execute(params![id,turn])?;
     for (label, value) in rows.labels() {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,?2,?3) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,label,value])?;
+        tx.prepare_cached("INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?.execute(params![id,label,value])?;
     }
     for model in rows.models {
-        tx.prepare_cached(sql(
-            tx,
-            "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING",
-            "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
-        )?)?
+        tx.prepare_cached("INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING")?
         .execute(params![id, model])
         .map_err(|error| diagnose("model_insert", error))?;
     }
     for (tool, name) in rows.tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name]).map_err(|error| diagnose("tool_open_upsert", error))?;
+        tx.prepare_cached("INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?.execute(params![id,tool,name]).map_err(|error| diagnose("tool_open_upsert", error))?;
     }
     for tool in rows.closed_tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool]).map_err(|error| diagnose("tool_closed_upsert", error))?;
+        tx.prepare_cached("INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?.execute(params![id,tool]).map_err(|error| diagnose("tool_closed_upsert", error))?;
     }
     for (message, model) in rows.usage_models {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_usage_models VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET model=excluded.model", "INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?)?.execute(params![id,message,model])?;
+        tx.prepare_cached("INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?.execute(params![id,message,model])?;
     }
     Ok(())
 }
@@ -402,7 +378,7 @@ pub(super) fn restore_labels(
     summary: &mut Summary,
 ) -> rusqlite::Result<()> {
     let mut statement = c.prepare(
-        sql(c, "SELECT label,value FROM native_tree_labels WHERE projection_id=?1 ORDER BY label", "SELECT label,value FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label")?,
+        "SELECT label,value FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
     )?;
     let mut rows = statement.query([id])?;
     while let Some(row) = rows.next()? {
@@ -437,7 +413,7 @@ pub(super) fn restore(
 ) -> rusqlite::Result<bool> {
     let header: Option<(i64, String, i64)> = c
         .query_row(
-            sql(c, "SELECT h.file_id,h.ledger,h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id WHERE h.source_path=?1 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger", "SELECT h.file_id,h.ledger,h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) JOIN native_usage_current c ON c.namespace=h.namespace AND c.source_path=h.source_path AND c.source_id=g.source_id WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger")?,
+            "SELECT h.file_id,h.ledger,h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) JOIN native_usage_current c ON c.namespace=h.namespace AND c.source_path=h.source_path AND c.source_id=g.source_id WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger",
             [path],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -450,11 +426,11 @@ pub(super) fn restore(
     }
     restore_labels(c, projection_id, summary)?;
     let mut models =
-        c.prepare(sql(c, "SELECT model FROM native_tree_models WHERE projection_id=?1 ORDER BY model", "SELECT model FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model")?)?;
+        c.prepare("SELECT model FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model")?;
     summary.models = models
         .query_map([projection_id], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    let mut tools = c.prepare(sql(c, "SELECT tool_id,name FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id", "SELECT tool_id,name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id")?)?;
+    let mut tools = c.prepare("SELECT tool_id,name FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id")?;
     summary.tools = tools
         .query_map([projection_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
@@ -500,7 +476,7 @@ pub(super) fn witness(
         return Ok(None);
     }
     let projection: Option<i64> = c.query_row(
-        sql(c, "SELECT h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current u ON u.source_path=h.source_path AND u.source_id=g.source_id JOIN native_usage_sources s ON s.source_id=g.source_id WHERE h.source_path=?1 AND h.file_id=?2 AND h.ledger=?3 AND g.receipt=h.ledger AND g.complete=1 AND g.version=3 AND s.parser_version=?4", "SELECT h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) JOIN native_usage_current u ON u.namespace=h.namespace AND u.source_path=h.source_path AND u.source_id=g.source_id JOIN native_usage_sources s ON s.namespace=g.namespace AND s.source_id=g.source_id WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND h.file_id=?2 AND h.ledger=?3 AND g.receipt=h.ledger AND g.complete=1 AND g.version=3 AND s.parser_version=?4")?,
+        "SELECT h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) JOIN native_usage_current u ON u.namespace=h.namespace AND u.source_path=h.source_path AND u.source_id=g.source_id JOIN native_usage_sources s ON s.namespace=g.namespace AND s.source_id=g.source_id WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND h.file_id=?2 AND h.ledger=?3 AND g.receipt=h.ledger AND g.complete=1 AND g.version=3 AND s.parser_version=?4",
         params![path, file_id, header_ledger(ledger), CACHE_VERSION],
         |r| r.get(0),
     ).optional()?;
@@ -510,19 +486,10 @@ pub(super) fn witness(
     // The stored digest indexes stream the current authenticated order. `row`
     // admits each encoded cell before allocation; no dimension is collected.
     let mut writer = crate::events::tree_rows::witness::Writer::new();
-    for (family, (plain, scoped)) in [
-        (
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
-        ),
-        (
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
-            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
-        ),
-        (
-            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
-            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
-        ),
+    for (family, scoped) in [
+        "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+        "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
+        "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
     ]
     .into_iter()
     .enumerate()
@@ -532,7 +499,7 @@ pub(super) fn witness(
             1 => writer.models(),
             _ => writer.tools(),
         }
-        let mut statement = c.prepare(sql(c, plain, scoped)?)?;
+        let mut statement = c.prepare(scoped)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
@@ -547,7 +514,7 @@ pub(super) fn witness(
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
     c.query_row(
-        sql(c, "SELECT EXISTS(SELECT 1 FROM native_tree_generations WHERE complete=1 AND work_pending=1)", "SELECT EXISTS(SELECT 1 FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1)")?,
+        "SELECT EXISTS(SELECT 1 FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1)",
         [],
         |r| r.get(0),
     )
@@ -565,7 +532,7 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
 
 // The caller validates its writer authority in this same transaction.
 pub(super) fn cleanup_work_tx(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
-    let selected:Option<i64>=tx.query_row(sql(&tx, "SELECT projection_id FROM native_tree_generations WHERE complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1", "SELECT projection_id FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1")?,[],|r|r.get(0)).optional()?;
+    let selected:Option<i64>=tx.query_row("SELECT projection_id FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1",[],|r|r.get(0)).optional()?;
     if let Some(id) = selected {
         for (table, key) in [
             ("native_tree_usage_work", "message_id"),
@@ -574,7 +541,7 @@ pub(super) fn cleanup_work_tx(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
             let predicate = "namespace=semon_namespace() AND ";
             tx.execute(&format!("DELETE FROM {table} WHERE {predicate}projection_id=?1 AND {key} IN (SELECT {key} FROM {table} WHERE {predicate}projection_id=?1 ORDER BY {key} LIMIT 512)"),[id])?;
         }
-        tx.execute(sql(&tx, "UPDATE native_tree_generations SET work_pending=0 WHERE projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE projection_id=?1)", "UPDATE native_tree_generations SET work_pending=0 WHERE namespace=semon_namespace() AND projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1)")?,[id])?;
+        tx.execute("UPDATE native_tree_generations SET work_pending=0 WHERE namespace=semon_namespace() AND projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1)",[id])?;
     }
     work_pending(tx)
 }
