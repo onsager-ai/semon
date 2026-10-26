@@ -19,7 +19,7 @@ pub(crate) struct Withdrawal {
 
 impl Withdrawal {
     pub(crate) fn authority_current(&self) -> io::Result<bool> {
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
+        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
         let identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
         if identity != self.facts_identity || !authority.selection_known() {
@@ -41,7 +41,7 @@ impl Withdrawal {
         if before != self.stat {
             return Ok(false);
         }
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
+        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
         let withdrawn = authority.codex_current(&self.relative)? == Some(false);
         authority.validate()?;
         let current_source = crate::open_input(Path::new(&self.path))?;
@@ -146,9 +146,11 @@ impl LifecycleAuthority {
             {
                 return Ok(false);
             }
-            let facts = crate::facts::source_authority::CurrentSources::open(path)?;
-            facts.validate()?;
-            if !facts.facts_known() {
+            // Facts are canonical Raw input on both backends. A model fence
+            // binds that exact file, not SQLite's derived selected projection.
+            let bytes = crate::read_regular_at_most(path, 64 * 1024 * 1024)?;
+            let facts: crate::Facts = serde_json::from_slice(&bytes)?;
+            if facts.version != crate::facts::FACTS_VERSION {
                 return Ok(false);
             }
             Some(facts)
@@ -171,14 +173,16 @@ impl LifecycleAuthority {
             session: None,
             scan_window: false,
         };
-        let mut current =
-            crate::native_evidence::query_runtime_generation(&options)? == self.runtime;
+        let runtime = match facts {
+            Some(ref facts) => {
+                crate::native_evidence::recorded_runtime_fingerprint(&options, facts)?
+            }
+            None => crate::native_evidence::query_runtime_generation(&options)?,
+        };
+        let mut current = runtime == self.runtime;
         if let Some((path, identity)) = &self.facts {
             current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
                 == *identity;
-        }
-        if let Some(facts) = facts {
-            facts.validate()?;
         }
         Ok(current)
     }

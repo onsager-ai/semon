@@ -152,7 +152,7 @@ mod current_navigation_tests {
         let binding = NativeReaderBinding::Semantic(owner);
         let store = SqliteNavigation(binding.clone());
         let generation = store.catalog_generation().unwrap();
-        let StoreBackend::Sqlite { database } = &f.config.backend;
+        let database = f.config.backend.sqlite_database().unwrap();
         let wal = database.with_extension("sqlite3-wal");
         let state = || {
             [database.as_path(), wal.as_path()].map(|path| {

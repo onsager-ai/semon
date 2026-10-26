@@ -1247,7 +1247,7 @@ mod tests {
             expected_stream_epoch: Some("a".repeat(64)),
         };
         config.create_native_store().unwrap();
-        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let database = config.backend.sqlite_database().unwrap();
         let configured_actual = Connection::open(database).unwrap();
         assert_eq!(
             full_objects(&configured_actual),

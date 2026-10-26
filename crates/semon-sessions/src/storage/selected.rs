@@ -368,7 +368,7 @@ pub(crate) struct PresentationObservations {
 }
 struct PresentationAuthority {
     options: crate::Options,
-    recorded: Option<std::sync::Mutex<crate::facts::source_authority::CurrentSources>>,
+    recorded: Option<std::sync::Mutex<crate::facts::source_authority::RawSources>>,
 }
 impl std::fmt::Debug for PresentationAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -397,7 +397,7 @@ impl PresentationObservations {
         let recorded = options
             .facts
             .as_ref()
-            .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+            .and_then(|path| crate::facts::source_authority::RawSources::open(path).ok());
         let mut facts_known =
             options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
         let mut selection_known = options.facts.is_none()

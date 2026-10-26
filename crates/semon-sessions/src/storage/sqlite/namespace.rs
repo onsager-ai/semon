@@ -1,9 +1,7 @@
 //! Durable first-source admission and a closed multi-source writer gate.
 //! Enrollment is opt-in, content-free and atomic. Native rows are never reset.
 use super::failed;
-use crate::storage::{
-    LogicalSourceNamespace, NamespaceAdmission, StorageError, StoreBackend, StoreConfig,
-};
+use crate::storage::{LogicalSourceNamespace, NamespaceAdmission, StorageError, StoreConfig};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -71,7 +69,7 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         .as_deref()
         .filter(|epoch| epoch.len() == 64 && epoch.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or(StorageError::InvalidArguments)?;
-    let StoreBackend::Sqlite { database } = &config.backend;
+    let database = config.backend.sqlite_database()?;
     let mut db = Connection::open_with_flags(
         database,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -196,7 +194,7 @@ pub(crate) fn unenroll(
         .expected_stream_epoch
         .as_deref()
         .ok_or(StorageError::InvalidArguments)?;
-    let StoreBackend::Sqlite { database } = &config.backend;
+    let database = config.backend.sqlite_database()?;
     let mut db = Connection::open_with_flags(
         database,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -286,6 +284,7 @@ pub(crate) fn unenroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StoreBackend;
     use crate::{Options, events::EventCache};
     use std::{
         fs,
@@ -338,7 +337,7 @@ mod tests {
             Self { root, config }
         }
         fn db(&self) -> Connection {
-            let StoreBackend::Sqlite { database } = &self.config.backend;
+            let database = self.config.backend.sqlite_database().unwrap();
             Connection::open(database).unwrap()
         }
     }

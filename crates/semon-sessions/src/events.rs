@@ -1777,8 +1777,13 @@ impl EventCache {
     pub(crate) fn open_configured(
         config: &crate::storage::StoreConfig,
     ) -> Result<Self, crate::storage::StorageError> {
+        #[cfg(feature = "postgres")]
+        if let crate::storage::StoreBackend::Postgres { pool, control } = &config.backend {
+            crate::storage::postgres::require_configured(config, pool, control)?;
+            return Self::open_pg_native(pool.clone(), config.namespace.clone(), control.clone());
+        }
         let store = crate::storage::sqlite::open_configured_index(config)?;
-        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let database = config.backend.sqlite_database()?;
         let mut cache = Self {
             store: Some(store),
             source_observations: Some(crate::storage::sqlite::source_journal::configured(config)),

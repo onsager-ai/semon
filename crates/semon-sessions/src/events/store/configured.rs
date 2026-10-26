@@ -288,7 +288,7 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
         .as_deref()
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or(StorageError::InvalidArguments)?;
-    let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+    let database = config.backend.sqlite_database()?;
     if database.as_os_str().is_empty() || database == Path::new(":memory:") {
         return Err(StorageError::InvalidArguments);
     }
@@ -555,7 +555,7 @@ impl NativeOwnership {
     /// Restore the exact admitted capability for a reader without enrollment,
     /// schema mutation or a retry through another namespace.
     pub(crate) fn restore(config: &StoreConfig) -> Result<Self, StorageError> {
-        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let database = config.backend.sqlite_database()?;
         let db = Connection::open_with_flags(
             database,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -1147,7 +1147,11 @@ impl Writer {
                 |_| Ok(1i64),
             )
             .map_err(failure)?;
-        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
         let mut store = super::SqliteStore {
             owner: self
                 .owner
@@ -1195,7 +1199,11 @@ impl Writer {
             ));
         }
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
-        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
         let mut store = super::SqliteStore {
             owner: self
                 .owner
@@ -1226,7 +1234,11 @@ impl Writer {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
-        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(std::io::Error::other)?;
         let mut store = super::SqliteStore {
             owner: owner.clone(),
             connection,
@@ -2618,7 +2630,7 @@ mod tests {
                 expected_stream_epoch: Some("a".repeat(64)),
             };
             config.create_native_store().unwrap();
-            let StoreBackend::Sqlite { database } = &config.backend;
+            let database = config.backend.sqlite_database().unwrap();
             let db = Connection::open(database).unwrap();
             let raw = root.join("native.jsonl");
             setup(&db, &raw);
@@ -2640,7 +2652,7 @@ mod tests {
             Self { root, config, raw }
         }
         fn db(&self) -> Connection {
-            let StoreBackend::Sqlite { database } = &self.config.backend;
+            let database = self.config.backend.sqlite_database().unwrap();
             Connection::open(database).unwrap()
         }
         fn state(&self) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
