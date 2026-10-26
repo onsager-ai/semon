@@ -49,12 +49,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
 #[cfg(test)]
 use super::{BillingUsage, Peer, Reply, Yield};
-use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
 use super::{
-    CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
-    MessageUsage, ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
+    CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded, MessageUsage,
+    ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
 };
 use crate::storage::sqlite::source_journal;
 use crate::storage::{
@@ -5884,12 +5884,6 @@ fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
     }
 }
 
-fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T> {
-    serde_json::from_value(Value::String(text)).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
-}
-
 const NATIVE_METADATA_MAX: usize = 1024 * 1024;
 
 /// The composite shape is exercised privately with the connected proof
@@ -6450,8 +6444,11 @@ fn read_file(
         if seq_of(signal_row.get(0)?) != signals.len() {
             return Err(gap("signals"));
         }
-        signals.push(crate::events::native_decode::signal(&native_decode::values(signal_row, &[])?)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?.1);
+        signals.push(
+            crate::events::native_decode::signal(&native_decode::values(signal_row, &[])?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .1,
+        );
     }
 
     let mut usage_by_id = BTreeMap::new();
@@ -6469,8 +6466,11 @@ fn read_file(
         if seq_of(codex_row.get(0)?) != codex_usage_events.len() {
             return Err(gap("codex usage"));
         }
-        codex_usage_events.push(crate::events::native_decode::codex_usage(&native_decode::values(codex_row, &[])?)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?.1);
+        codex_usage_events.push(
+            crate::events::native_decode::codex_usage(&native_decode::values(codex_row, &[])?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .1,
+        );
     }
 
     let children = crate::events::native_decode::Children {
