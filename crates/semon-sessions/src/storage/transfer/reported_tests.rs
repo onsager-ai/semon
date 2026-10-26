@@ -350,7 +350,7 @@ pub(crate) fn seed_catalog(
             .unwrap(),
         crate::events::Outcome::Written
     );
-    let rows = finish_catalog(&mut cache, &options, &input);
+    let rows = finish_catalog(&mut cache, &options, std::slice::from_ref(&input));
     (options, rows)
 }
 
@@ -359,19 +359,44 @@ pub(crate) fn advance_catalog(
     config: &StoreConfig,
     options: &crate::Options,
 ) -> Vec<crate::model::summary::CatalogRow> {
-    use std::io::Write;
-    let input = crate::Input {
+    let old = crate::Input {
         root: crate::InputRoot::Claude,
         path: "projects/sanitized/catalog.jsonl".into(),
     };
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/sanitized/successor.jsonl".into(),
+    };
+    let old_path = old.full_path(options);
     let path = input.full_path(options);
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(file, "{}", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})).unwrap();
-    drop(file);
+    // A second path for the same native session withdraws the old source.
+    // Same-path append has no missing source and legitimately clears history.
+    let mut body = std::fs::read_to_string(&old_path).unwrap();
+    body.push_str(&format!("{}\n", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})));
+    std::fs::remove_file(&old_path).unwrap();
     let mut cache = cache(config);
+    cache
+        .retire_scoped_sources(
+            options,
+            std::slice::from_ref(&old),
+            &BTreeSet::new(),
+            &crate::facts::MachineFacts::Local,
+        )
+        .unwrap();
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(
+                &[old_path.to_str().unwrap().to_owned()],
+                "transfer-real-model",
+                true,
+            )
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert!(finish_catalog(&mut cache, options, std::slice::from_ref(&old)).is_empty());
+    // Complete the ordinary withdrawal before the same native identity returns.
+    // This retains the paged original recipe rather than composing a short one.
+    std::fs::write(&path, body).unwrap();
     cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
     assert_eq!(
@@ -384,13 +409,13 @@ pub(crate) fn advance_catalog(
             .unwrap(),
         crate::events::Outcome::Written
     );
-    finish_catalog(&mut cache, options, &input)
+    finish_catalog(&mut cache, options, std::slice::from_ref(&input))
 }
 
 fn finish_catalog(
     cache: &mut crate::events::EventCache,
     options: &crate::Options,
-    input: &crate::Input,
+    inputs: &[crate::Input],
 ) -> Vec<crate::model::summary::CatalogRow> {
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
@@ -398,23 +423,18 @@ fn finish_catalog(
             continue;
         }
         let model = cache
-            .prepare_semantic_model_batch(
-                options,
-                std::slice::from_ref(input),
-                &batch,
-                1_790_000_000_000,
-            )
+            .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
-            assert!(!model.prepared().rows.is_empty());
             assert!(
-                model
-                    .prepared()
-                    .transcripts
-                    .iter()
-                    .map(|p| p.slots.len())
-                    .sum::<usize>()
-                    > 64
+                model.prepared().rows.is_empty()
+                    || model
+                        .prepared()
+                        .transcripts
+                        .iter()
+                        .map(|p| p.slots.len())
+                        .sum::<usize>()
+                        > 64
             );
             let mut published = false;
             for _ in 0..256 {
@@ -434,21 +454,22 @@ fn finish_catalog(
                 published,
                 "real retained custody must finish before transfer"
             );
-            let key = &model.prepared().rows[0].key;
-            cache.save_session_description(
-                key,
-                1,
-                "transfer-inputs",
-                "sanitized transfer description",
-            );
-            cache.publish_session_descriptions();
+            if let Some(row) = model.prepared().rows.first() {
+                cache.save_session_description(
+                    &row.key,
+                    1,
+                    "transfer-inputs",
+                    "sanitized transfer description",
+                );
+                cache.publish_session_descriptions();
+                assert_eq!(
+                    cache
+                        .session_description(&row.key, 1, "transfer-inputs")
+                        .as_deref(),
+                    Some("sanitized transfer description")
+                );
+            }
             cache.finish_semantic_stage(batch.epoch).unwrap();
-            assert_eq!(
-                cache
-                    .session_description(key, 1, "transfer-inputs")
-                    .as_deref(),
-                Some("sanitized transfer description")
-            );
             return model.prepared().rows.clone();
         }
     }
@@ -782,6 +803,7 @@ pub(crate) fn seed_codex_usage(config: &StoreConfig, path: &Path) {
 #[cfg(feature = "postgres")]
 pub(crate) mod selected_receipts {
     use super::*;
+    #[derive(Clone, Default)]
     pub(crate) struct AuthorizedOriginals(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
 
     impl crate::SessionSourceReader for AuthorizedOriginals {
@@ -876,20 +898,25 @@ pub(crate) mod selected_receipts {
             .collect()
     }
 
-    pub(crate) fn originals(source: &StoreConfig, options: &crate::Options) -> AuthorizedOriginals {
+    pub(crate) fn originals(
+        source: &StoreConfig,
+        options: &crate::Options,
+        saved: &mut AuthorizedOriginals,
+    ) {
         let owner =
             crate::events::store::configured::NativeOwnership::restore_transfer(source).unwrap();
         let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
             .connection()
             .unwrap();
-        let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
-        assert!(removed > 0);
+        if !saved.0.is_empty() {
+            let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
+            assert!(removed > 0);
+        }
         // Host authority is captured from the admitted original Source,
         // never inferred from copied target metadata or a missing Raw path.
         let rows = db.prepare("SELECT metadata FROM storage_proof_generations WHERE namespace=?1 ORDER BY id,session_key LIMIT 65").unwrap()
             .query_map([source.namespace.as_str()], |row| row.get::<_,String>(0)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let mut originals = Vec::new();
         for metadata in rows {
             let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
             for original in &row.sources {
@@ -901,12 +928,14 @@ pub(crate) mod selected_receipts {
                     prefix_sha256: original.prefix_sha256,
                     tail_sha256: original.tail_sha256,
                 };
-                originals.push((
+                if saved.0.iter().any(|(original, _)| original == &reference) {
+                    continue;
+                }
+                saved.0.push((
                     reference,
                     std::sync::Arc::from(std::fs::read(&original.path).unwrap()),
                 ));
             }
         }
-        AuthorizedOriginals(originals)
     }
 }
