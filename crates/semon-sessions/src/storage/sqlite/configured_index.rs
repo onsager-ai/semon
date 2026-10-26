@@ -146,6 +146,7 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         self.native
             .publish_catalog(publication, expected_generation, None, false)
+            .and_then(|result|result.ok_or(StoreError::Configured(StorageError::Unavailable)))
     }
     fn publish_partial_catalog(
         &mut self,
@@ -155,6 +156,7 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         self.native
             .publish_catalog(publication, expected_generation, Some(claims), false)
+            .and_then(|result|result.ok_or(StoreError::Configured(StorageError::Unavailable)))
     }
     fn publish_closed_catalog_fenced(
         &mut self,
@@ -164,13 +166,7 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         self.native
             .publish_catalog(publication, expected_generation, Some(claims), true)
-            .map(|result| {
-                if result.0 == Outcome::Conflict {
-                    None
-                } else {
-                    Some(result)
-                }
-            })
+
     }
     fn resolve_catalog_input(
         &mut self,

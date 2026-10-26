@@ -165,7 +165,7 @@ pub(crate) fn metadata_sql<'a>(
 
 /// Entry qualification retained by current open/admission and WriterLayout.
 /// Its schema-cookie guard detects controlled DDL after writer construction.
-pub(super) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
     let started = WriterShapeProbe::start("core_shape_calls");
     let core: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)")?.query_row([], |row| row.get(0))?;
     WriterShapeProbe::finish("core_shape_query", started);
@@ -210,8 +210,6 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
 ];
 const STORE_METADATA_KEYS: &[&str] = &[
     "cache_version",
-    "catalog_version",
-    "search_version",
     "catalog_changes_epoch",
     "native_tree_repair_clock",
     "pricing_recompute_target",
@@ -219,6 +217,8 @@ const STORE_METADATA_KEYS: &[&str] = &[
 // These describe completed/ongoing work for one logical source, rather than
 // the shared SQL schema or physical-store incarnation.
 const SOURCE_METADATA_KEYS: &[&str] = &[
+    "catalog_version",
+    "search_version",
     "catalog_semantic_recipe",
     "catalog_generation",
     "catalog_source_revision",
@@ -444,6 +444,17 @@ fn failed(error: rusqlite::Error) -> StorageError {
         {
             eprintln!("configured SQL contract failure: {message}");
         }
+    }
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
+        let kind = if message.contains("ON CONFLICT clause does not match") { "conflict_target" }
+            else if message.contains("view") { "view_effect" }
+            else if message.contains("no such column") { "missing_column" }
+            else if message.contains("no such function") { "missing_function" }
+            else if message.contains("has no column named") { "insert_column" }
+            else if message.contains("constraint failed") { "constraint" }
+            else { "other_sql_contract" };
+        eprintln!("configured SQL failure category={kind}");
     }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
@@ -804,7 +815,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -1025,7 +1036,7 @@ impl Writer {
         expected: Option<&str>,
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
-    ) -> Result<(Outcome, Option<String>), StoreError> {
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         let owner = self.owner.as_ref().ok_or(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))?;
@@ -1050,15 +1061,10 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        store.publish_catalog_owned(
-            publication,
-            expected,
-            claims,
-            closed,
-            None,
-            super::CatalogWriter::Auto,
-            Some(owner),
-        )
+        let result = store.publish_catalog_owned(
+            publication, expected, claims, closed, None, super::CatalogWriter::Auto, Some(owner),
+        )?;
+        Ok(if closed && store.semantic_rejection == Some("closed_scope") { None } else { Some(result) })
     }
 
     pub(crate) fn relocate_codex(
