@@ -10064,7 +10064,8 @@ mod tests {
             let root = scratch(name);
             let v1 = root.join("index.json");
             let path = v1.with_extension("sqlite3");
-            let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+            let source =
+                crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
             let native = root.join("original.jsonl");
             fs::write(&native, "{\"type\":\"user\",\"uuid\":\"original\",\"sessionId\":\"original\",\"message\":{\"role\":\"user\",\"content\":\"original native input\"}}\n").unwrap();
             let mut cache = super::super::EventCache::open_scoped(&v1, &source).unwrap();
@@ -10183,7 +10184,8 @@ mod tests {
         let raw = root.join("native.jsonl");
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
         let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
-        let mut cache = super::super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap();
+        let mut cache =
+            super::super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap();
         super::super::scan_file(&raw, "claude", &mut cache, &mut false).unwrap();
         drop(cache);
         let (mut store, _) = opened(&path);
