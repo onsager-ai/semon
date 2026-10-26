@@ -1190,6 +1190,18 @@ impl Query {
                 focused_args["_machine_alias"] = json!(label);
             }
         }
+        #[cfg(feature = "postgres")]
+        if evidence.store_config.as_ref().is_some_and(|config| matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })) {
+            let host = provider.ok_or_else(|| QueryError::new("unavailable", "Configured PostgreSQL selected reads require an authorized Source reader"))?;
+            focused_args["_session"] = Value::Bool(tool == "get_session");
+            let namespace = evidence.options.source.namespace().map_err(|error| QueryError::new("unavailable", error.to_string()))?;
+            let store = evidence.query_catalog().map_err(|error| QueryError::new("unavailable", error.to_string()))?;
+            let mut answer = store.selected_body(&namespace, catalog_key, &focused_args, now, host)?;
+            if self.sources.is_retired() { return Err(QueryError::new("io", "native query source is closed")); }
+            self.start = (!evidence.options.all).then(|| now.saturating_sub(i64::try_from(evidence.options.since.as_millis()).unwrap_or(i64::MAX)));
+            answer["window_start"] = json!(self.start);
+            return Ok(answer);
+        }
         // One bounded request budget spans semantic derivation, transcript or
         // search bytes, and the final authorization/generation recheck.
         let bounded =
