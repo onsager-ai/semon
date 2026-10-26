@@ -456,7 +456,7 @@ mod tests {
             } else {
                 facts.offline_since = Some(NOW);
             }
-            fs::write(&self.facts, serde_json::to_vec(&facts).unwrap()).unwrap();
+            crate::facts::write_facts(&self.facts, &facts).unwrap();
         }
         fn append(&self, record: Value) {
             writeln!(
