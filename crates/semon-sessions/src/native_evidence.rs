@@ -272,7 +272,11 @@ impl NativeEvidence {
             .as_ref()
             .and_then(|cache| cache.session_catalog_generation());
         if work.audit.is_some()
-            && !work.events.as_mut().expect("event cache initialized").note_catalog_audit(generation.as_deref(), now)?
+            && !work
+                .events
+                .as_mut()
+                .expect("event cache initialized")
+                .note_catalog_audit(generation.as_deref(), now)?
         {
             return Ok(true);
         }

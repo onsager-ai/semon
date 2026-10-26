@@ -425,6 +425,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         // Query's private listing completion does not finish Catalog/search
         // publication. Run the ordinary observer to completion before saving
         // the exact retained-search oracle, rather than forging its markers.
+        let listing = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), options.clone())]),
+        ))
+        .call_at("list_sessions", &serde_json::json!({}), recent_now)
+        .expect("SQLite withdrawal oracle list");
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         evidence.request_metadata_audit();
         let mut work = evidence.work.lock().unwrap();
@@ -452,11 +457,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
         assert!(complete, "SQLite ordinary Catalog oracle did not finish");
         drop(work);
-        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-            vec![(recent_machine.into(), options.clone())],
-        )))
-        .call_at("list_sessions", &serde_json::json!({}), recent_now)
-        .expect("SQLite withdrawal oracle list")
+        listing
     };
     let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
     let sqlite_before_current = page_keys(crate::catalog::session_catalog_page(
@@ -498,7 +499,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             };
             let reply =
                 crate::catalog::session_catalog_page(&withdraw_options, recent_machine, &query);
-            assert_eq!(reply.status, 200, "{query}");
+            assert_eq!(
+                reply.status,
+                200,
+                "{query} code={}",
+                serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["error"]["code"]
+            );
             let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
             items.extend(page["items"].as_array().unwrap().iter().cloned());
             match page["next_cursor"].as_str() {
@@ -795,7 +801,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         producer_rows(&semantic_model.prepared().rows),
         producer_rows(&oracle.rows)
     );
-    assert!(!pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "active semantic stage cannot acknowledge an audit");
+    assert!(pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "committed publication closed its active stage before the finish ACK");
     assert_eq!(
         pg.finish_semantic_stage(semantic_batch.epoch).unwrap(),
         crate::events::Outcome::Written

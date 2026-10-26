@@ -2594,9 +2594,16 @@ impl EventCache {
             .flatten()
     }
 
-    pub(crate) fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> io::Result<bool> {
-        self.store.as_mut().ok_or_else(|| io::Error::other("producer store unavailable"))?
-            .note_catalog_audit(expected, now).map_err(|error| io::Error::other(error.to_string()))
+    pub(crate) fn note_catalog_audit(
+        &mut self,
+        expected: Option<&str>,
+        now: i64,
+    ) -> io::Result<bool> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("producer store unavailable"))?
+            .note_catalog_audit(expected, now)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn session_slots(
