@@ -765,3 +765,58 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_native_bundle_relocation_advance_matches_sqlite_and_rolls_back() {
+    // Exercise advancement, not Raw/Catalog move qualification. The prior
+    // evidence is a supplement; the next bytes come from the real SQLite
+    // producer's append path before the PG phase begins.
+    let data = complete_fixture(parser_fixture("codex"), "codex");
+    let (_, ledger, index) = &data.sources[0];
+    let physical = data.path.strip_suffix("\0🦀").unwrap();
+    let old = "old\0🦀";
+    let key = format!("native_catalog_relocation:{old}");
+    let evidence = serde_json::to_string(&shared::CatalogRelocation {
+        version: 1, new_path: physical.to_owned(), native_id: "qualified-native".into(),
+        prior: ledger.clone(), catalog_before: None, after: ledger.clone(),
+    }).unwrap();
+    let db_path = crate::events::EventCache::path(&data.root.join("index.json"));
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute("INSERT INTO catalog_relocation_candidates(old_path,new_path,native_id) VALUES(?1,?2,?3)", rusqlite::params![old, physical, "qualified-native"]).unwrap();
+        db.execute("INSERT INTO meta(key,value) VALUES(?1,?2)", rusqlite::params![key, evidence]).unwrap();
+    }
+    let next = complete_fixture(append_fixture(&data, "codex"), "codex");
+    let oracle: String = {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0)).unwrap()
+    };
+    assert!(oracle != evidence, "actual SQLite producer advanced evidence");
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("relocation-advance\0🦀");
+    let control = PgCancellation::default();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)?;
+        let ns = tx.namespace.as_str().as_bytes();
+        tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path) VALUES($1,$2,$3)", &[&ns,&old.as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&key.as_bytes(),&evidence.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(())
+    }).unwrap();
+    let stable = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot).unwrap();
+    let (_, next_ledger, next_index) = &next.sources[0];
+    let changes = DirtyRows::between(index, next_index);
+    FAIL_AFTER.with(|point| point.set(Some(1)));
+    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, next_ledger, next_index, Some(ledger), Some(&changes)));
+    FAIL_AFTER.with(|point| point.set(None));
+    assert!(matches!(result, Err(StorageError::Unavailable)));
+    assert!(stable == pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot).unwrap(), "evidence and every native family roll back together");
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, next_ledger, next_index, Some(ledger), Some(&changes))?;
+        let row = tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
+        assert!(row.get::<_, Vec<u8>>(0) == oracle.as_bytes(), "independent SQLite advancement bytes");
+        Ok(())
+    }).unwrap();
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
+}

@@ -94,8 +94,8 @@ impl Effects for Writer<'_, '_> {
         for row in pending {
             let old = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
             let key = format!("native_catalog_relocation:{old}");
-            let value = self.tx.driver.query_opt("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
-            let encoded = value
+            let value = self.tx.driver.query("SELECT CASE WHEN octet_length(value)<=16384 THEN value END FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&self.tx.namespace.as_str().as_bytes(),&key.as_bytes()]).map_err(sqlstate::error)?;
+            let encoded = value.first()
                 .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
                 .map(String::from_utf8)
                 .transpose()
