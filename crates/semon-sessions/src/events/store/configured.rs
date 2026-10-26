@@ -3428,6 +3428,38 @@ mod tests {
         panic!("real model did not reach publication")
     }
 
+    #[test]
+    fn current_source_recovery_replays_terminal_done_and_keeps_other_sources() {
+        use crate::storage::source_observations::{SourceIntent, SourceObservationStore, SourceOperation};
+        let (a, b, _) = same_db_sources();
+        let mut journal = SourceJournal::owned(NativeOwnership::admit(&a.config).unwrap());
+        let mut other = SourceJournal::owned(NativeOwnership::admit(&b).unwrap());
+        assert!(!journal.recovery_is_current().unwrap());
+        let cursor = journal.recovery_cursor().unwrap();
+        let operation = SourceOperation::capture(a.config.namespace.as_str(), "recover", &serde_json::to_vec(&cursor).unwrap());
+        let intent = SourceIntent::Recover { operation: operation.clone(), cursor };
+        journal.persist_intent(&intent).unwrap();
+        assert_eq!(journal.recover(&operation, None).unwrap(), (crate::storage::source_observations::SourceMutationReceipt::Applied, true));
+        assert!(journal.pending_intents().unwrap().is_empty());
+        // A lost ACK must return its original Done after restart, even if a
+        // later recovery request has installed a different durable cursor.
+        let db = connection(&a.config).unwrap();
+        db.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'catalog_recovery_after','')", []).unwrap();
+        drop(journal);
+        let mut journal = SourceJournal::owned(NativeOwnership::restore(&a.config).unwrap());
+        journal.persist_intent(&intent).unwrap();
+        assert_eq!(journal.recover(&operation, None).unwrap(), (crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied, true));
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+        assert!(journal.pending_intents().unwrap().is_empty());
+        assert!(other.recover(&operation, None).is_err());
+        assert_eq!(other.recovery_cursor().unwrap(), None);
+        let conflict = SourceOperation::capture(a.config.namespace.as_str(), "recover", &serde_json::to_vec(&Option::<String>::None).unwrap());
+        journal.persist_intent(&SourceIntent::Recover { operation: conflict.clone(), cursor: None }).unwrap();
+        assert_eq!(journal.recover(&conflict, None).unwrap(), (crate::storage::source_observations::SourceMutationReceipt::Conflict, false));
+        assert!(journal.pending_intents().unwrap().is_empty());
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+    }
+
     fn ordinary_catalog_publication_lifecycle() {
         let f = Fixture::current("ordinary-publication");
         let source =
