@@ -251,7 +251,7 @@ fn pg_native_commit_relationships_faults_foreign_namespace_and_original_ack() {
 fn pg_native_commit_relationships_precancel_and_warm_drift_before_effects() {
     let root = fixture_root();
     let (index, expected) = parsed(&root, "claude", 0);
-    let (pool, factory) = fixture(|limits| limits.max_connections = 1);
+    let (pool, _) = fixture(|limits| limits.max_connections = 1);
     let namespace = ns("warm-dependencies\0🦀");
     let path = "same\0🦀";
     let cancelled = PgCancellation::default();
