@@ -289,7 +289,7 @@ impl SourceJournal {
         Ok(())
     }
 
-    /// Explicit bounded preparation after row assignment. Counter seeding keeps
+    /// Prepare the admitted current namespace. Counter seeding keeps
     /// the old high watermark even when an earlier claim was acknowledged.
     pub(crate) fn prepare(&self) -> Result<(), StorageError> {
         let mut db = self.connection()?;
@@ -1757,15 +1757,17 @@ mod tests {
     #[test]
     fn configured_discovery_rolls_back_mid_batch_and_keeps_foreign_rows_invisible() {
         let f = Fixture::new();
-        let mut store = f.config.source_observations().unwrap();
+        let owner = crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap();
+        let mut store = SourceJournal::owned(owner);
+        let mut foreign_config = f.config.clone();
+        foreign_config.namespace = LogicalSourceNamespace::new("B").unwrap();
+        let foreign_owner = crate::events::store::configured::NativeOwnership::admit(&foreign_config).unwrap();
+        let mut foreign = SourceJournal::owned(foreign_owner);
+        foreign.prepare().unwrap();
+        let foreign_paths = vec!["foreign".to_owned()];
+        foreign.discover(&discover_operation("B", &foreign_paths, true), &foreign_paths, true).unwrap();
+        let foreign_before = foreign.claims(&foreign_paths).unwrap();
         let db = f.db();
-        // Isolated adapter fixture only: the registry still admits exactly A.
-        catalog_namespace::register(&db, &LogicalSourceNamespace::new("B").unwrap()).unwrap();
-        db.execute(
-            "INSERT INTO session_catalog_invalidations VALUES('B','foreign',100,'changed',0)",
-            [],
-        )
-        .unwrap();
         db.execute_batch("CREATE TRIGGER journal_test_fault BEFORE INSERT ON catalog_backfill_sources WHEN NEW.source_path='fault' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
         let paths = vec!["first".into(), "fault".into()];
         let operation = discover_operation("A", &paths, false);
@@ -1789,6 +1791,7 @@ mod tests {
         let first:i64=db.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE namespace='A' AND source_path='first'",[],|r|r.get(0)).unwrap();
         assert_eq!(first, 0);
         assert_eq!(store.backfill_state().unwrap().as_deref(), Some("draining"));
+        assert_eq!(foreign.claims(&foreign_paths).unwrap(), foreign_before);
     }
 
     #[test]
