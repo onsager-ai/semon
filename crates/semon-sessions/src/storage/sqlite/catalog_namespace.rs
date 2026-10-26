@@ -108,4 +108,3 @@ pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
     }
     Ok(())
 }
-

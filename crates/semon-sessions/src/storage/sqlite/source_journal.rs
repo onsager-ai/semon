@@ -626,8 +626,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, self.config.namespace.as_str(), operation)?
-        {
+        if let Some(receipt) = stored_receipt(&tx, self.config.namespace.as_str(), operation)? {
             return Ok(receipt);
         }
         let generation: Option<String> = tx
@@ -1182,7 +1181,9 @@ mod tests {
             fs::create_dir(&root).unwrap();
             let cache_path = root.join("index.json");
             let config = StoreConfig {
-                backend: StoreBackend::Sqlite { database: EventCache::path(&cache_path) },
+                backend: StoreBackend::Sqlite {
+                    database: EventCache::path(&cache_path),
+                },
                 namespace: LogicalSourceNamespace::new(namespace).unwrap(),
                 expected_stream_epoch: Some("a".repeat(64)),
             };
@@ -1744,7 +1745,13 @@ mod tests {
         assert_eq!(restarted.claims(&paths).unwrap(), before_conflict);
         let db = f.db();
         assert_eq!(db.query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace='A' AND source_path='seed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert!(db.execute("DELETE FROM session_catalog_invalidations WHERE namespace='A'", []).is_err());
+        assert!(
+            db.execute(
+                "DELETE FROM session_catalog_invalidations WHERE namespace='A'",
+                []
+            )
+            .is_err()
+        );
     }
 
     #[test]
