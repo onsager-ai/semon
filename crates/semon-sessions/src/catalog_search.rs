@@ -703,10 +703,6 @@ const ADMITTED: Filter = Filter {
     using: "namespace,",
 };
 
-pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Result<Selection> {
-    read_filtered(connection, request, ADMITTED)
-}
-
 /// Search the current namespace of an admitted snapshot.
 pub(crate) fn read_admitted(
     connection: &Connection,
@@ -1117,7 +1113,7 @@ mod sqlite_tests {
         after: Option<Position>,
         limit: usize,
     ) -> Selection {
-        read(
+        read_admitted(
             connection,
             Query {
                 scope: CatalogReadScope::Current,
@@ -1564,7 +1560,7 @@ mod sqlite_tests {
             limit: 60,
             index_complete: true,
         };
-        let found = read(&connection, query()).unwrap();
+        let found = read_admitted(&connection, query()).unwrap();
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].key, "current");
         assert_eq!(found.rows[0].name, "Harbor queue");
@@ -1573,7 +1569,7 @@ mod sqlite_tests {
         connection
             .execute("DELETE FROM main.session_history_catalog", [])
             .unwrap();
-        let found = read(&connection, query()).unwrap();
+        let found = read_admitted(&connection, query()).unwrap();
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].key, "current");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Current);
@@ -1583,7 +1579,7 @@ mod sqlite_tests {
         connection
             .execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained')", [])
             .unwrap();
-        let found = read(&connection, query()).unwrap();
+        let found = read_admitted(&connection, query()).unwrap();
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].name, "Harbor queue");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Retained);
@@ -1591,7 +1587,7 @@ mod sqlite_tests {
         connection
             .execute("DELETE FROM main.session_history_catalog", [])
             .unwrap();
-        assert!(read(&connection, query()).is_err());
+        assert!(read_admitted(&connection, query()).is_err());
     }
 
     #[test]
@@ -1700,7 +1696,7 @@ mod sqlite_tests {
         transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
         transaction.commit().unwrap();
         assert!(search(&connection, "replacement", None, 2).rows.is_empty());
-        let history = read(
+        let history = read_admitted(
             &connection,
             Query {
                 scope: CatalogReadScope::RetainedHistory,
@@ -1733,7 +1729,7 @@ mod sqlite_tests {
                 .unwrap()
         };
         assert_eq!(incomplete(&connection, "current"), 1);
-        let response = read(
+        let response = read_admitted(
             &connection,
             Query {
                 scope: CatalogReadScope::Current,
