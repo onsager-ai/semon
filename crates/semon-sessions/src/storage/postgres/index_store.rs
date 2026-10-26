@@ -585,54 +585,185 @@ impl IndexStore for NativeIndex {
             })
             .map_err(err)
     }
-    fn facts_write_begin(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
-        let path=options.facts.as_ref().ok_or_else(||err(StorageError::InvalidArguments))?;
-        if path.to_string_lossy()!=intent.path {return Err(err(StorageError::InvalidArguments));}
-        let actual=match crate::read_facts(path) {Ok(f)=>f,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>crate::Facts::default(),Err(e)=>return Err(StoreError::Data(e.to_string()))};
-        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::facts_begin(tx,intent,&actual)).map_err(err)
+    fn facts_write_begin(
+        &mut self,
+        options: &crate::Options,
+        intent: &crate::source_change::FactsIntent,
+    ) -> Result<(), StoreError> {
+        let path = options
+            .facts
+            .as_ref()
+            .ok_or_else(|| err(StorageError::InvalidArguments))?;
+        if path.to_string_lossy() != intent.path {
+            return Err(err(StorageError::InvalidArguments));
+        }
+        let actual = match crate::read_facts(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => crate::Facts::default(),
+            Err(e) => return Err(StoreError::Data(e.to_string())),
+        };
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::source_lifecycle::facts_begin(tx, intent, &actual)
+            })
+            .map_err(err)
     }
-    fn facts_write_complete(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
-        let path=options.facts.as_ref().ok_or_else(||err(StorageError::InvalidArguments))?;
-        if path.to_string_lossy()!=intent.path {return Err(err(StorageError::InvalidArguments));}
-        let actual=crate::read_facts(path).map_err(|e|StoreError::Data(e.to_string()))?;
-        let pids=crate::model::pid_files(options,&crate::facts::MachineFacts::Recorded(Box::new(actual.clone()))).into_iter().map(|p|(p.pid,p.session)).collect::<Vec<_>>();
-        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::facts_complete(tx,options,intent,&actual,&pids)).map_err(err)
+    fn facts_write_complete(
+        &mut self,
+        options: &crate::Options,
+        intent: &crate::source_change::FactsIntent,
+    ) -> Result<(), StoreError> {
+        let path = options
+            .facts
+            .as_ref()
+            .ok_or_else(|| err(StorageError::InvalidArguments))?;
+        if path.to_string_lossy() != intent.path {
+            return Err(err(StorageError::InvalidArguments));
+        }
+        let actual = crate::read_facts(path).map_err(|e| StoreError::Data(e.to_string()))?;
+        let pids = crate::model::pid_files(
+            options,
+            &crate::facts::MachineFacts::Recorded(Box::new(actual.clone())),
+        )
+        .into_iter()
+        .map(|p| (p.pid, p.session))
+        .collect::<Vec<_>>();
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::source_lifecycle::facts_complete(tx, options, intent, &actual, &pids)
+            })
+            .map_err(err)
     }
-    fn source_write_prepare(&self,options:&crate::Options,input:&crate::Input,intent:&mut crate::source_change::WriteIntent)->Result<(),StoreError> {
-        let until=std::time::Instant::now()+std::time::Duration::from_secs(60);
-        let check=|| if self.control.is_cancelled() || std::time::Instant::now()>=until {Err(std::io::Error::new(std::io::ErrorKind::Interrupted,"source proof cancelled"))} else {Ok(())};
-        if let Some(before)=intent.before {
-            let continuation=if intent.generation.is_some() && intent.from==before.size && intent.ledger.as_ref().is_some_and(|l|l.stat==before && l.offset==before.size) {
-                let ledger=intent.ledger.as_ref().unwrap();
-                self.pool.transaction(&self.namespace,TxnKind::ReadSnapshot,&self.control,|tx| {
-                    let pinned=super::native_pages::current(tx,&intent.path,ledger)?;
-                    let header:crate::events::native_pages::chunks::Header=serde_json::from_str(&pinned.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
-                    let state=header.resume.ok_or(StorageError::ScopeChanged)?;
-                    Ok(Some(crate::source_change::AppendContinuation {proof:pinned.id.0,state,offset:ledger.offset,prefix:ledger.prefix}))
-                }).map_err(err)?
-            } else {None};
-            intent.before_hash=Some(if let Some(c)=&continuation {
-                let mut file=crate::sealed::LogFile::open(&input.full_path(options)).map_err(|e|StoreError::Data(e.to_string()))?;
-                crate::source_chunks::continue_prefix(&mut file,&c.state,c.offset,c.prefix,c.offset,check).map_err(|e|StoreError::Data(e.to_string()))?
-            } else {crate::source_change::bytes_hash(&input.full_path(options),before.size,check).map_err(|e|StoreError::Data(e.to_string()))?});
-            intent.continuation=continuation;
+    fn source_write_prepare(
+        &self,
+        options: &crate::Options,
+        input: &crate::Input,
+        intent: &mut crate::source_change::WriteIntent,
+    ) -> Result<(), StoreError> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let check = || {
+            if self.control.is_cancelled() || std::time::Instant::now() >= until {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "source proof cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        if let Some(before) = intent.before {
+            let continuation = if intent.generation.is_some()
+                && intent.from == before.size
+                && intent
+                    .ledger
+                    .as_ref()
+                    .is_some_and(|l| l.stat == before && l.offset == before.size)
+            {
+                let ledger = intent.ledger.as_ref().unwrap();
+                self.pool
+                    .transaction(
+                        &self.namespace,
+                        TxnKind::ReadSnapshot,
+                        &self.control,
+                        |tx| {
+                            let pinned = super::native_pages::current(tx, &intent.path, ledger)?;
+                            let header: crate::events::native_pages::chunks::Header =
+                                serde_json::from_str(&pinned.chunks_header)
+                                    .map_err(|_| StorageError::ScopeChanged)?;
+                            let state = header.resume.ok_or(StorageError::ScopeChanged)?;
+                            Ok(Some(crate::source_change::AppendContinuation {
+                                proof: pinned.id.0,
+                                state,
+                                offset: ledger.offset,
+                                prefix: ledger.prefix,
+                            }))
+                        },
+                    )
+                    .map_err(err)?
+            } else {
+                None
+            };
+            intent.before_hash = Some(if let Some(c) = &continuation {
+                let mut file = crate::sealed::LogFile::open(&input.full_path(options))
+                    .map_err(|e| StoreError::Data(e.to_string()))?;
+                crate::source_chunks::continue_prefix(
+                    &mut file, &c.state, c.offset, c.prefix, c.offset, check,
+                )
+                .map_err(|e| StoreError::Data(e.to_string()))?
+            } else {
+                crate::source_change::bytes_hash(&input.full_path(options), before.size, check)
+                    .map_err(|e| StoreError::Data(e.to_string()))?
+            });
+            intent.continuation = continuation;
         }
         Ok(())
     }
-    fn source_write_proofs(&self) -> bool { true }
-    fn source_write_begin(&mut self, options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<(i64,Option<crate::source_change::AppendEvidence>),StoreError> {
-        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::write_begin(tx,options,input,intent)).map_err(err)
+    fn source_write_proofs(&self) -> bool {
+        true
     }
-    fn source_write_complete(&mut self, options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent,revision:i64,completion:&crate::source_change::WriteCompletion)->Result<(),StoreError> {
-        let until=std::time::Instant::now()+std::time::Duration::from_secs(60);
-        let check=|| if self.control.is_cancelled() || std::time::Instant::now()>=until {Err(std::io::Error::new(std::io::ErrorKind::Interrupted,"source proof cancelled"))} else {Ok(())};
-        let mut completion=completion.clone();
-        completion.hash=if let Some(c)=&intent.continuation {
-            let mut file=crate::sealed::LogFile::open(&input.full_path(options)).map_err(|e|StoreError::Data(e.to_string()))?;
-            crate::source_chunks::continue_prefix(&mut file,&c.state,c.offset,c.prefix,completion.to,check).map_err(|e|StoreError::Data(e.to_string()))?
-        } else {crate::source_change::bytes_hash(&input.full_path(options),completion.to,check).map_err(|e|StoreError::Data(e.to_string()))?};
-        if Stat::of(&input.full_path(options)).ok()!=Some(completion.after) {return Err(err(StorageError::Conflict));}
-        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::write_complete(tx,options,input,intent,revision,&completion)).map_err(err)
+    fn source_write_begin(
+        &mut self,
+        options: &crate::Options,
+        input: &crate::Input,
+        intent: &crate::source_change::WriteIntent,
+    ) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::source_lifecycle::write_begin(tx, options, input, intent)
+            })
+            .map_err(err)
+    }
+    fn source_write_complete(
+        &mut self,
+        options: &crate::Options,
+        input: &crate::Input,
+        intent: &crate::source_change::WriteIntent,
+        revision: i64,
+        completion: &crate::source_change::WriteCompletion,
+    ) -> Result<(), StoreError> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let check = || {
+            if self.control.is_cancelled() || std::time::Instant::now() >= until {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "source proof cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let mut completion = completion.clone();
+        completion.hash = if let Some(c) = &intent.continuation {
+            let mut file = crate::sealed::LogFile::open(&input.full_path(options))
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            crate::source_chunks::continue_prefix(
+                &mut file,
+                &c.state,
+                c.offset,
+                c.prefix,
+                completion.to,
+                check,
+            )
+            .map_err(|e| StoreError::Data(e.to_string()))?
+        } else {
+            crate::source_change::bytes_hash(&input.full_path(options), completion.to, check)
+                .map_err(|e| StoreError::Data(e.to_string()))?
+        };
+        if Stat::of(&input.full_path(options)).ok() != Some(completion.after) {
+            return Err(err(StorageError::Conflict));
+        }
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::source_lifecycle::write_complete(
+                    tx,
+                    options,
+                    input,
+                    intent,
+                    revision,
+                    &completion,
+                )
+            })
+            .map_err(err)
     }
     fn resume_runtime_input(
         &mut self,
