@@ -498,7 +498,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             };
             let reply =
                 crate::catalog::session_catalog_page(&withdraw_options, recent_machine, &query);
-            assert_eq!(reply.status, 200, "{query}");
+            assert_eq!(reply.status, 200, "{query} code={}", serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["error"]["code"]);
             let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
             items.extend(page["items"].as_array().unwrap().iter().cloned());
             match page["next_cursor"].as_str() {
