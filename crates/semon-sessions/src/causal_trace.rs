@@ -393,23 +393,6 @@ pub(crate) fn update_current_observation(
     Ok(())
 }
 
-/// Exact selected metadata only; list pages never load usage breakdowns. These
-/// recorded facts grant neither runtime authority nor native control custody.
-pub(crate) fn selected_details(
-    tx: &Transaction<'_>,
-    key: &str,
-    sources: &[crate::model::summary::CatalogSource],
-    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
-) -> rusqlite::Result<Option<Value>> {
-    crate::storage::selected::selected_details(
-        &crate::storage::sqlite::selected::Context::owned(tx),
-        key,
-        sources,
-        relative_status,
-    )
-    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-}
-
 #[cfg(test)]
 fn selected_family(
     tx: &Transaction<'_>,
@@ -420,21 +403,6 @@ fn selected_family(
         &crate::storage::sqlite::selected::Context::owned(tx),
         key,
         relative_status,
-    )
-    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-}
-
-pub(crate) fn range_context(
-    tx: &Transaction<'_>,
-    key: &str,
-    slots: &[crate::slot_projection::SavedSlot],
-    sources: &[crate::model::summary::CatalogSource],
-) -> rusqlite::Result<Value> {
-    crate::storage::selected::range_context(
-        &crate::storage::sqlite::selected::Context::owned(tx),
-        key,
-        slots,
-        sources,
     )
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
