@@ -258,7 +258,7 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
 
 #[test]
 fn pg_catalog131_borrowed_snapshot_real_producer_mvcc_and_source_witness() {
-    let data = oracle();
+    let data = build_oracle(false, false);
     let (pool, _) = fixture(|b| b.max_connections = 2);
     let namespace = ns("catalog131\0🦀");
     let control = PgCancellation::default();
@@ -457,6 +457,9 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
         assert!(!slots.is_empty());
         drop(cache);
         drop(connection);
+        if !keep_raw {
+            fs::remove_dir_all(&root).unwrap();
+        }
         return Input {
             root,
             rows: prepared.rows,
@@ -719,7 +722,7 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
 
 #[test]
 fn pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects() {
-    let data = oracle();
+    let data = build_oracle(false, false);
     let (pool, _) = fixture(|_| {});
     let namespace = ns("catalog127-history-refuse");
     pool.transaction(
@@ -783,7 +786,7 @@ fn pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects() {
 
 #[test]
 fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() {
-    let data = oracle();
+    let data = build_oracle(false, false);
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog124\0🦀");
     pool.transaction(
@@ -998,7 +1001,7 @@ fn pg_catalog124_long_opaque_keys_namespaces_and_precancel() {
 
 #[test]
 fn pg_catalog124_injected_source_role_rls_and_namespace_reuse() {
-    let data = oracle();
+    let data = build_oracle(false, false);
     let (pool, factory) = fixture(|_| {});
     let source = crate::storage::postgres::tests::source_factory(&factory);
     let source_pool =
