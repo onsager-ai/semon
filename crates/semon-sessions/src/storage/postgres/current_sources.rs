@@ -47,7 +47,13 @@ fn load(tx: &mut PgTxn<'_>) -> Result<Option<Head>, StorageError> {
         .transpose()
 }
 fn key(stamp: &[u8], relative: &str) -> Vec<u8> {
-    [b"facts-current-member:".as_slice(), stamp, b"\0", relative.as_bytes()].concat()
+    [
+        b"facts-current-member:".as_slice(),
+        stamp,
+        b"\0",
+        relative.as_bytes(),
+    ]
+    .concat()
 }
 fn selected(tx: &mut PgTxn<'_>, head: &Head, relative: &str) -> Result<Option<bool>, StorageError> {
     if head.facts_version != FACTS_VERSION || !head.selection_known {
@@ -67,16 +73,19 @@ pub(super) fn prepare(
     control: &PgCancellation,
     options: &crate::Options,
 ) -> Result<(), StorageError> {
-    let path = options.facts.as_ref().ok_or(StorageError::InvalidArguments)?;
-    let activity = crate::native_evidence::recorded_activity_generation(options).map_err(|_| StorageError::Unavailable)?;
+    let path = options
+        .facts
+        .as_ref()
+        .ok_or(StorageError::InvalidArguments)?;
+    let activity = crate::native_evidence::recorded_activity_generation(options)
+        .map_err(|_| StorageError::Unavailable)?;
     let source = identity(path)?;
     let (prior, binding) = pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
         Ok((load(tx)?, model_cache::binding(tx)?))
     })?;
-    if prior
-        .as_ref()
-        .is_some_and(|head| head.path == *path && head.source == source && head.activity == activity)
-    {
+    if prior.as_ref().is_some_and(|head| {
+        head.path == *path && head.source == source && head.activity == activity
+    }) {
         return Ok(());
     }
     let bytes = crate::read_regular_at_most(path, 64 * 1024 * 1024)
@@ -87,8 +96,14 @@ pub(super) fn prepare(
         return Err(StorageError::Conflict);
     }
     let stamp = serde_json::to_vec(&source).map_err(|_| StorageError::Unavailable)?;
-    let runtime = crate::native_evidence::recorded_runtime_fingerprint(options, &facts).map_err(|_| StorageError::Unavailable)?;
-    if crate::native_evidence::recorded_activity_generation(options).map_err(|_| StorageError::Unavailable)? != activity { return Err(StorageError::Conflict); }
+    let runtime = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)
+        .map_err(|_| StorageError::Unavailable)?;
+    if crate::native_evidence::recorded_activity_generation(options)
+        .map_err(|_| StorageError::Unavailable)?
+        != activity
+    {
+        return Err(StorageError::Conflict);
+    }
     let members = facts
         .codex_rollouts
         .iter()
@@ -101,15 +116,29 @@ pub(super) fn prepare(
     // Immutable identity-addressed pages cannot change membership of the old
     // published header. Each SQL operation is at most 64 members / 1 MiB.
     for page in members.chunks(64) {
-        if page.iter().map(|key| key.len() + stamp.len()).sum::<usize>() > 1024 * 1024 {
+        if page
+            .iter()
+            .map(|key| key.len() + stamp.len())
+            .sum::<usize>()
+            > 1024 * 1024
+        {
             return Err(StorageError::Busy);
         }
         pool.transaction(namespace, TxnKind::Write, control, |tx| {
             let current = model_cache::binding(tx)?;
-            if current.admission != binding.admission || current.stream_epoch != binding.stream_epoch
-                || identity(path)? != source { return Err(StorageError::Conflict); }
-            for member in page { tx.check()?; native_keys::put_meta(tx, member, &stamp)?; }
-            if identity(path)? != source { return Err(StorageError::Conflict); }
+            if current.admission != binding.admission
+                || current.stream_epoch != binding.stream_epoch
+                || identity(path)? != source
+            {
+                return Err(StorageError::Conflict);
+            }
+            for member in page {
+                tx.check()?;
+                native_keys::put_meta(tx, member, &stamp)?;
+            }
+            if identity(path)? != source {
+                return Err(StorageError::Conflict);
+            }
             Ok(())
         })?;
     }
@@ -248,15 +277,32 @@ pub(super) fn withdrawal_current(
 /// only the exact canonical identity and independent runtime-file stamps.
 pub(super) struct Runtime(Option<CurrentSources>);
 impl Runtime {
-    pub(super) fn open(pool: &PgPool, namespace: &LogicalSourceNamespace, control: &PgCancellation, options: &crate::Options) -> Result<Self, StorageError> {
-        options.facts.as_ref().map(|path| CurrentSources::open(pool.clone(), namespace.clone(), control.clone(), path)).transpose().map(Self)
+    pub(super) fn open(
+        pool: &PgPool,
+        namespace: &LogicalSourceNamespace,
+        control: &PgCancellation,
+        options: &crate::Options,
+    ) -> Result<Self, StorageError> {
+        options
+            .facts
+            .as_ref()
+            .map(|path| {
+                CurrentSources::open(pool.clone(), namespace.clone(), control.clone(), path)
+            })
+            .transpose()
+            .map(Self)
     }
     pub(super) fn generation(&self, options: &crate::Options) -> io::Result<String> {
         match &self.0 {
             None => crate::native_evidence::query_runtime_generation(options),
             Some(source) => {
                 if identity(&source.head.path).map_err(io::Error::other)? != source.head.source
-                    || crate::native_evidence::recorded_activity_generation(options)? != source.head.activity {
+                    || crate::native_evidence::recorded_activity_generation(options)?
+                        != source.head.activity
+                {
+                    return Err(io::Error::other("Recorded runtime authority changed"));
+                }
+                if identity(&source.head.path).map_err(io::Error::other)? != source.head.source {
                     return Err(io::Error::other("Recorded runtime authority changed"));
                 }
                 Ok(source.head.runtime.clone())
