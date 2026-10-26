@@ -120,8 +120,13 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_sources",
-        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea,native_digest bytea",
         key: "generation,key_digest,path_digest",
+    },
+    Table {
+        name: "catalog_links",
+        columns: "generation bytea,key_digest bytea,session_key bytea,peer_digest bytea,peer bytea",
+        key: "generation,key_digest,peer_digest",
     },
     Table {
         name: "catalog_dependencies",
@@ -339,6 +344,24 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         "catalog_order",
         "catalog_rows",
         "generation,last_ms,key_digest",
+        false,
+    ),
+    (
+        "catalog_source_path",
+        "catalog_sources",
+        "generation,path_digest",
+        false,
+    ),
+    (
+        "catalog_source_native",
+        "catalog_sources",
+        "generation,native_digest",
+        false,
+    ),
+    (
+        "catalog_link_peer",
+        "catalog_links",
+        "generation,peer_digest",
         false,
     ),
     (
