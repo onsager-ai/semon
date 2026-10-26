@@ -63,16 +63,21 @@ jobs:
         id: production
         run: cargo check --locked --workspace --all-targets
       - name: Current owner recovery custody search and navigation
+        id: current_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           result=0
-          cargo test --locked -p semon-sessions --lib configured::tests::current_recovery:: -- --nocapture || result=$?
-          cargo test --locked -p semon-sessions --lib current_history_custody:: -- --nocapture || result=$?
-          cargo test --locked -p semon-sessions --lib catalog_namespace::current_navigation_tests:: -- --nocapture || result=$?
-          cargo test --locked -p semon-sessions --lib sqlite::navigation::tests:: -- --nocapture || result=$?
-          cargo test --locked -p semon-sessions --lib source_journal::tests:: -- --nocapture || result=$?
-          cargo test --locked -p semon-sessions --lib catalog_search::sqlite_tests:: -- --nocapture || result=$?
+          for group in configured::tests::current_recovery:: current_history_custody:: catalog_namespace::current_navigation_tests:: sqlite::navigation::tests:: source_journal::tests:: catalog_search::sqlite_tests::; do
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture >> "$RUNNER_TEMP/current-owner-tests.log" 2>&1 || result=$?
+          done
+          tail -150 "$RUNNER_TEMP/current-owner-tests.log"
           exit "$result"
+      - name: Retain current owner test failures
+        if: ${{ !cancelled() && steps.current_owner.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-owner-tests
+          path: ${{ runner.temp }}/current-owner-tests.log
       - name: Capture bounded native-tree append diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
