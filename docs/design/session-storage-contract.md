@@ -20,10 +20,17 @@ Options. Live Query continues to reject expired runtime context, including PID
 changes; it does not automatically select this capture path. This port's exact
 CI qualification remains pending.
 
+`StoreConfig::captured_source_proof_at` prepares the exact source proof for a
+selected captured publication before entering the body-reader lease. It checks
+the configured source binding and does not grant Raw access. Hosted consumers
+must retain their physical/generation, cancellation and final authority checks;
+the public interface alone is not retained-prefix acceptance.
+
 PG workspace listing now has a WIP native global SQL selection path for explicit
 authorized namespaces sharing one pool. Namespace/epoch/admission/head and
 revocation checks include sources without matching rows. Keyset ordering is
-last descending, key ascending, namespace ascending. Bounded metadata search
+last descending, key ascending, external Machine key ascending. Machine keys
+remain independent of the authorized storage namespaces. Bounded metadata search
 uses the existing Unicode lowercase field rules. Workspace RLS additions apply
 only to SELECT on the required Catalog/authority metadata tables; ordinary
 single-Source write policies and Native proof/Raw boundaries remain unchanged.
