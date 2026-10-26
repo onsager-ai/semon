@@ -2105,7 +2105,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap(),
         (crate::events::Outcome::Deferred, None)
     );
-    assert_eq!(catchup.session_catalog_generation().unwrap(), qualified);
+    assert_eq!(
+        catchup.session_catalog_generation().unwrap(),
+        qualified.as_deref().unwrap()
+    );
     drop(catchup);
     let mut catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
@@ -2118,7 +2121,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             break ack;
         }
         assert_eq!(ack.1, None);
-        assert_eq!(catchup.session_catalog_generation().unwrap(), qualified);
+        assert_eq!(
+            catchup.session_catalog_generation().unwrap(),
+            qualified.as_deref().unwrap()
+        );
         deferred += 1;
         assert!(deferred < 64, "custody makes bounded progress");
     };
@@ -2132,10 +2138,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     catchup.finish_semantic_stage(batch.epoch).unwrap();
     let caught = ack.1.unwrap();
-    assert_eq!(
-        catchup.session_catalog_generation().unwrap(),
-        Some(caught.clone())
-    );
+    assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
