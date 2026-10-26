@@ -108,3 +108,143 @@ pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod current_navigation_tests {
+    use super::*;
+    use crate::storage::{StoreBackend, StoreConfig};
+    struct Fixture { db: Connection, config: StoreConfig }
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!("semon-current-navigation-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            let ns = LogicalSourceNamespace::new("A").unwrap();
+            let db = crate::events::store::current_search_test_connection(&path, &ns);
+            let epoch = db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
+            for key in ["same", "tail", "third"] {
+                db.execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('A',?1,10,'codex','{\"owner\":\"A\"}')", [key]).unwrap();
+            }
+            Self { db, config: StoreConfig { backend: StoreBackend::Sqlite { database: path }, namespace: ns, expected_stream_epoch: Some(epoch) } }
+        }
+        fn db(&self) -> &Connection { &self.db }
+    }
+    #[test]
+    fn qualified_navigation_uses_retained_metadata_fallback_bounds_and_indexes() {
+        use super::super::navigation::SqliteNavigation;
+        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
+        let f = Fixture::new();
+        let generation = "a".repeat(64);
+        let db = f.db();
+        db.execute(
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_version'),'catalog_version',?1)",
+            [crate::model::summary::CATALOG_VERSION.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_generation'),'catalog_generation',?1)",
+            [&generation],
+        )
+        .unwrap();
+
+        let db = f.db();
+        register(&db, &f.config.namespace).unwrap();
+        db.execute(
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','same','retained','codex','retained-history','retained/same')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES('A','same','{\"owner\":\"history\"}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','tail','retained','codex','retained-fallback','retained/tail')",
+            [],
+        )
+        .unwrap();
+        let store = SqliteNavigation(NativeReaderBinding::Semantic(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap()));
+        let retained = store
+            .native_resolution(
+                "codex",
+                "retained-history",
+                crate::CatalogReadScope::RetainedHistory,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(retained.keys, ["same"]);
+        assert_eq!(
+            retained.metadata.as_deref(),
+            Some("{\"owner\":\"history\"}")
+        );
+        let fallback = store
+            .native_resolution(
+                "codex",
+                "retained-fallback",
+                crate::CatalogReadScope::RetainedHistory,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(fallback.keys, ["tail"]);
+        assert_eq!(fallback.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
+
+        let oversized = format!("\"{}\"", "x".repeat(1_048_577));
+        db.execute(
+            "UPDATE main.session_catalog SET metadata=?1 WHERE namespace='A' AND session_key='tail'",
+            [&oversized],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','tail','current','codex','bounded-metadata','current/tail')",
+            [],
+        )
+        .unwrap();
+        let bounded = store
+            .native_resolution(
+                "codex",
+                "bounded-metadata",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(bounded.keys, ["tail"]);
+        assert_eq!(bounded.metadata, None);
+
+        for (key, path) in [
+            ("same", "ambiguous/same"),
+            ("tail", "ambiguous/tail"),
+            ("third", "ambiguous/third"),
+        ] {
+            db.execute(
+                "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A',?1,'current','codex','ambiguous',?2)",
+                (key, path),
+            )
+            .unwrap();
+        }
+        let ambiguous = store
+            .native_resolution(
+                "codex",
+                "ambiguous",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(ambiguous.keys, ["same", "tail"]);
+
+        for (index, sql) in [
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='ambiguous' ORDER BY session_key LIMIT 2",
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness='codex' AND native_id='retained-history' ORDER BY session_key LIMIT 2",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let plan: String = db.query_row(sql, [], |row| row.get(3)).unwrap();
+            let expected = [
+                "COVERING INDEX storage_ns_session_catalog_current_native",
+                "COVERING INDEX storage_ns_session_catalog_native",
+            ][index];
+            assert!(plan.contains(expected), "{plan}");
+        }
+    }
+
+}
