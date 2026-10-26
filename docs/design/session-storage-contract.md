@@ -559,6 +559,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/configured_selected60.rs` | direct | Test-only committed-publication assertions for selected facts, retained-generation witnesses, independent private-witness binding, tamper-before-Raw refusal, negative reference/lease GC and real native multi-window range oracles; writer qualification remains zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |
+| `events/store/native_decode.rs` | direct | SQLite row adapter for shared current native decoders consumed by SQLite and private PostgreSQL native readers; full backend qualification remains incomplete. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/source_authority.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -590,6 +591,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
+| `storage/postgres/native_ingest_tests.rs` | direct | Independent ordinary SQLite parser oracle for the private PostgreSQL native EventCache integration; no complete backend qualification. |
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
 | `storage/postgres/reported_facts.rs` | direct | Test-only real reported-source SQLite producer/oracle; the private PG effects use no SQLite connection or path. Public backend qualification remains zero. |
