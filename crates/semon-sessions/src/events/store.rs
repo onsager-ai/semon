@@ -1279,8 +1279,10 @@ pub(crate) fn prioritize_projection_sources(
 
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
+/// Callers qualify `tx` before this page: the admitted SourceJournal through
+/// its owner/namespace/epoch validation, the unbound store through
+/// `require_current_sql`, which refuses every namespace-bound store.
 pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
-    require_current_sql(tx).map_err(io::Error::other)?;
     let after: Option<String> = tx
         .query_row(
             configured::metadata_sql(tx, "SELECT value FROM meta WHERE key='catalog_recovery_after'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
