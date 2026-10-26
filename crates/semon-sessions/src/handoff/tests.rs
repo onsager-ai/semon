@@ -74,7 +74,8 @@ impl Home {
     }
 
     fn count(&self, path: &Path) -> usize {
-        let mut cache = events::EventCache::open_scoped(&self.options().cache, &self.options().source).unwrap();
+        let mut cache =
+            events::EventCache::open_scoped(&self.options().cache, &self.options().source).unwrap();
         events::scan_file(path, "claude", &mut cache, &mut false)
             .unwrap()
             .handoff_index

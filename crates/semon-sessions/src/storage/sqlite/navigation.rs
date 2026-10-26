@@ -35,15 +35,7 @@ impl NativeNavigationStore for SqliteNavigation {
         scope: CatalogReadScope,
         expected_generation: Option<&str>,
     ) -> Result<NativeResolutionObservation, StorageError> {
-        let db = match self.0.snapshot(&self.0.config().namespace) {
-            Ok(db) => db,
-            Err(StorageError::Unavailable)
-                if matches!(self.0, NativeReaderBinding::TransitionalUnboundLocal(_)) =>
-            {
-                return Ok(NativeResolutionObservation::default());
-            }
-            Err(error) => return Err(error),
-        };
+        let db = self.0.snapshot(&self.0.config().namespace)?;
         let observation = read_observation(
             &db,
             db.qualified(),

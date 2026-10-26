@@ -10,7 +10,8 @@ use std::{collections::BTreeMap, sync::mpsc, time::Instant};
 fn publish(home: &Home) {
     crate::model::observe_catalog(
         &home.options,
-        &mut crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
+        &mut crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+            .unwrap(),
         &mut false,
         &mut crate::model::Texts::default(),
         NOW,

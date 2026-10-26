@@ -118,7 +118,8 @@ fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
     let paths = (0..40)
         .map(|n| fixture.source(&format!("history-{n:03}")))
         .collect::<Vec<_>>();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     for path in &paths {
         crate::events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
     }
@@ -335,7 +336,8 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
 
         // Persist, release every Index, and reopen before unchanged repair.
         {
-            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             let index = crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, count * 10);
         }
@@ -350,7 +352,8 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
         };
         let before = revision();
         for _ in 0..3 {
-            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             let index = crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, count * 10);
             assert_eq!(
@@ -1553,7 +1556,9 @@ fn home_native_previews_preserve_question_answers_and_archive_generation_without
     )
     .unwrap();
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
-    let migrated = crate::events::EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let migrated =
+        crate::events::EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+            .unwrap();
     drop(migrated);
     assert!(
         crate::overview_repair_candidates(&fixture.options, 8)
@@ -3993,7 +3998,8 @@ fn local_only_codex_fixture() -> (Fixture, PathBuf) {
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
     crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -4144,7 +4150,8 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
                 json!({"type":"synthetic_append","iteration":append})
             )
             .unwrap();
-            let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             // Commit Index/proofs and deliberately defer Catalog publication.
             let _prepared = crate::model::prepare_sources(
                 &fixture.options,
@@ -4534,7 +4541,9 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
             // Match a provisional selected owner while complete discovery
             // is still pending, with real source-qualified paged recipes.
             {
-                let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+                let mut cache =
+                    EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+                        .unwrap();
                 let prepared = crate::model::prepare_sources(
                     &fixture.options,
                     &mut cache,
@@ -5658,7 +5667,8 @@ fn successive_scoped_batches_preserve_unrelated_durable_source_membership() {
             }
         })
         .collect();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let first = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -5699,7 +5709,8 @@ fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
         root: crate::inputs::InputRoot::Claude,
         path: "projects/project/selected.jsonl".into(),
     };
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -6826,7 +6837,8 @@ fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
         for n in 0..unrelated {
             fixture.source(&format!("unrelated-{n:05}"));
         }
-        let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+        let mut cache =
+            EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         assert_eq!(cache.paths().count(), 0);
         assert!(
             crate::model::prepare_sources(
@@ -6888,7 +6900,8 @@ fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
             serde_json::to_vec(&body).unwrap().len()
         );
         // A fresh lazy producer restores no global file indexes or runs.
-        let reopened = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+        let reopened =
+            EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         assert_eq!(reopened.paths().count(), 0);
     }
 }

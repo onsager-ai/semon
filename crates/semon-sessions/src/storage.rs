@@ -46,7 +46,12 @@ pub(crate) fn local_query_catalog(
 ) -> Box<dyn query::QueryCatalogStore> {
     Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
-        binding: NativeReaderBinding::Admitted(options.source.config(&options.cache).expect("invalid host Source binding")),
+        binding: NativeReaderBinding::Admitted(
+            options
+                .source
+                .config(&options.cache)
+                .expect("invalid host Source binding"),
+        ),
     })
 }
 
@@ -99,7 +104,9 @@ pub(crate) fn local_navigation_binding(
 
 fn local_reader_binding(options: &crate::Options) -> Result<NativeReaderBinding, StorageError> {
     let config = options.source.config(&options.cache)?;
-    Ok(NativeReaderBinding::Semantic(crate::events::store::configured::NativeOwnership::restore(&config)?))
+    Ok(NativeReaderBinding::Semantic(
+        crate::events::store::configured::NativeOwnership::restore(&config)?,
+    ))
 }
 
 pub(crate) fn local_catalog_generation(

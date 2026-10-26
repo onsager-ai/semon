@@ -13,9 +13,8 @@ impl NativeReaderBinding {
             return Err(StorageError::InvalidArguments);
         }
         if config.expected_stream_epoch.as_ref().is_none_or(|epoch| {
-                epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        {
+            epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
             return Err(StorageError::InvalidArguments);
         }
         let db = Connection::open_with_flags(
