@@ -795,7 +795,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         producer_rows(&semantic_model.prepared().rows),
         producer_rows(&oracle.rows)
     );
-    assert!(!pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "active semantic stage cannot acknowledge an audit");
+    assert!(pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "committed publication closed its active stage before the finish ACK");
     assert_eq!(
         pg.finish_semantic_stage(semantic_batch.epoch).unwrap(),
         crate::events::Outcome::Written
