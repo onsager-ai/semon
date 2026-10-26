@@ -12017,9 +12017,9 @@ mod tests {
                     SqliteStore::attempt_selected(&path).is_err(),
                     "selected {name}"
                 );
-                assert!(focused_connection(&path).is_err(), "focused {name}");
+                assert!(focused_unbound_connection(&path).is_err(), "focused {name}");
             } else {
-                let db = focused_connection(&path).unwrap();
+                let db = focused_unbound_connection(&path).unwrap();
                 assert!(archived_index(&db, "original").is_err());
             }
             unchanged();
@@ -12115,7 +12115,7 @@ mod tests {
             }
         }
         assert!(SqliteStore::attempt_selected(&path).is_err());
-        assert!(focused_connection(&path).is_err());
+        assert!(focused_unbound_connection(&path).is_err());
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }
@@ -12160,7 +12160,7 @@ mod tests {
         store
             .write_one("original", None, None, &ledger(1), &full())
             .unwrap();
-        let reader = focused_connection(&path).unwrap();
+        let reader = focused_unbound_connection(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         assert_eq!(
             reader
