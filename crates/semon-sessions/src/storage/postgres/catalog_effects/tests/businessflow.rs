@@ -361,6 +361,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite withdrawal oracle list")
     };
     let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
+    let sqlite_before_current = page_keys(crate::catalog::session_catalog_page(
+        &withdraw_options, recent_machine, "limit=50",
+    )).into_iter().collect::<std::collections::BTreeSet<_>>();
     let sqlite_host = body_host(&options, &expected.rows);
     let parked = [
         (
@@ -420,9 +423,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .filter(|item| item["lifecycle"] == "retained")
         .map(stable)
         .collect::<Vec<_>>();
+    // Query totals also count virtual relationship stubs, whose membership can
+    // change when a sender disappears. Native Catalog custody is the exact
+    // difference of the native Current key sets, not that Query total delta.
     assert_eq!(
-        oracle_withdrawn.len() as u64,
-        before_withdrawal - after_withdrawal,
+        oracle_withdrawn.iter().map(|row| row["key"].as_str().unwrap().to_owned()).collect::<std::collections::BTreeSet<_>>(),
+        sqlite_before_current.difference(&sqlite_current).cloned().collect(),
         "SQLite retained-only rows"
     );
     assert!(

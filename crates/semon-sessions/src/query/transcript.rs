@@ -452,11 +452,14 @@ fn virtual_read(
     drop(tx);
     let sources = sources.into_values().collect::<Vec<_>>();
     let sources = match &binding {
-        crate::storage::NativeReaderBinding::Semantic(owner) =>
-            crate::query_source::Sources::capture_bound_snapshot(options, &sources, db, owner),
-        crate::storage::NativeReaderBinding::Admitted(_) =>
-            crate::query_source::Sources::capture_focused_snapshot(options, &sources, db),
-    }.map_err(|error| proof_unavailable(&error))?;
+        crate::storage::NativeReaderBinding::Semantic(owner) => {
+            crate::query_source::Sources::capture_bound_snapshot(options, &sources, db, owner)
+        }
+        crate::storage::NativeReaderBinding::Admitted(_) => {
+            crate::query_source::Sources::capture_focused_snapshot(options, &sources, db)
+        }
+    }
+    .map_err(|error| proof_unavailable(&error))?;
     let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
     let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
@@ -905,11 +908,19 @@ fn read_inner(
     tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(tx);
     let sources = match &binding {
-        crate::storage::NativeReaderBinding::Semantic(owner) =>
-            crate::query_source::Sources::capture_bound_snapshot(options, &selected_sources, db, owner),
-        crate::storage::NativeReaderBinding::Admitted(_) =>
-            crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db),
-    }.map_err(|error| proof_unavailable(&error))?;
+        crate::storage::NativeReaderBinding::Semantic(owner) => {
+            crate::query_source::Sources::capture_bound_snapshot(
+                options,
+                &selected_sources,
+                db,
+                owner,
+            )
+        }
+        crate::storage::NativeReaderBinding::Admitted(_) => {
+            crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
+        }
+    }
+    .map_err(|error| proof_unavailable(&error))?;
     let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
