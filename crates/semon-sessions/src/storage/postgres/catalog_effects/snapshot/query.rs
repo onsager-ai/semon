@@ -67,7 +67,11 @@ impl QueryCatalogStore for QueryCatalog {
                 // Bodies still come only from authorized Raw Source bytes.
                 let history = snapshot.owner(key)?.is_some();
                 let (row, header, _) = snapshot
-                    .selected(key, history, 0, 1)?
+                    .selected(key, history, 0, 1)
+                    .inspect_err(|_error| {
+                        #[cfg(test)]
+                        eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
+                    })?
                     .ok_or(StorageError::ScopeChanged)?;
                 let binding = snapshot
                     .runtime_binding()

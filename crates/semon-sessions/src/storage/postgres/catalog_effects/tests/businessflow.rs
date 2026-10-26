@@ -764,8 +764,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         // Reopen mid-stage: resume must preserve the exact phase and epoch.
         if batch.phase == crate::model::relation_stage::Phase::Identity {
             drop(pg);
-            pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
-                .unwrap();
+            pg = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             assert_eq!(
                 pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(),
                 crate::events::Outcome::Written
@@ -1378,7 +1377,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     assert_eq!(read_selected(), expected_field);
     drop(pg);
-    let mut resumed = EventCache::open_configured(&config).unwrap();
+    let mut resumed = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let after = resumed.query_runtime_binding().unwrap().unwrap();
     assert_eq!(binding.admission, after.admission);
     assert_eq!(binding.stream_epoch, after.stream_epoch);

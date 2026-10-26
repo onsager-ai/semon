@@ -685,8 +685,8 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
     Ok(facts)
 }
 
-/// Writes canonical Facts atomically and publishes the selected backend's
-/// derived authority. PG preparation is journaled by SessionFactsWrite and
+/// Writes canonical Facts atomically using the host's backend selection.
+/// PG preparation is journaled by SessionFactsWrite and
 /// consumed by its ordinary producer, without a SQLite projection side effect.
 pub fn write_facts(
     path: &Path,
