@@ -211,6 +211,7 @@ pub(crate) fn bookmark_identity(
     source: &str,
     key: &str,
 ) -> Result<Option<crate::CatalogSessionIdentity>, crate::CatalogIdentityError> {
+    let control = &control.for_selected_read();
     let generation =
         configured_generation(config, pool, control).map_err(crate::CatalogIdentityError::from)?;
     snapshot::with_admitted_generation(pool, &config.namespace, control, &generation, |snapshot| {
