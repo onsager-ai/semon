@@ -11,10 +11,7 @@ use std::{
     fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -1364,7 +1361,7 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
         path: &Path,
         harness: &str,
     ) -> Result<crate::storage::native_events::EventReceipt, crate::storage::StorageError> {
-        if !matches!(harness, "claude" | "codex" | "copilot") || !self.explicit_store {
+        if !matches!(harness, "claude" | "codex" | "copilot") {
             return Err(crate::storage::StorageError::InvalidArguments);
         }
         self.require_configured_store().map_err(|error| {
@@ -1452,7 +1449,6 @@ pub(crate) struct EventCache {
     reconciled_recovery: Option<bool>,
     deferred_source_operations: bool,
     scoped: bool,
-    explicit_store: bool,
     host_source: Option<crate::storage::HostSource>,
     event_operation: Option<String>,
     retention_base: Vec<(String, Option<Ledger>)>,
@@ -1464,8 +1460,6 @@ pub(crate) struct EventCache {
     atomic_cold: bool,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
-    /// Without a store: when opening it is tried again.
-    reopen_at: Option<Instant>,
     /// The store was busy in this refresh (reported runs, then the scan):
     /// its other writes wait for the next, so a refresh waits at most once.
     busy: bool,
@@ -1489,8 +1483,6 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
 }
 
-/// How often an index without its store tries to open it again.
-const REOPEN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1553,26 +1545,6 @@ pub(crate) fn current_reported_runs(path: &Path) -> Vec<crate::facts::ReportedRu
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Says once per process that the index runs in memory, and why.
-fn warn_unavailable(what: &str, error: &dyn std::fmt::Display) {
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    if !WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "semon: the session index {what} is unavailable ({error}); the index is kept in memory for this run"
-        );
-    }
-}
-
-/// Says once per process that a change waits for its file's next one.
-fn warn_busy(what: &str, error: &dyn std::fmt::Display) {
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    if !WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "semon: the session index {what} is busy ({error}); a change is kept in memory until its file changes again"
-        );
-    }
 }
 
 /// Where a file's unchanged index comes from.
@@ -1793,7 +1765,6 @@ impl EventCache {
             observation_namespace,
             observation_path,
             scoped: true,
-            explicit_store: true,
             ..Self::default()
         };
         cache
@@ -1812,7 +1783,6 @@ impl EventCache {
             observation_namespace: config.namespace.as_str().to_owned(),
             observation_path: Some(database.clone()),
             scoped: true,
-            explicit_store: true,
             ..Self::default()
         };
         cache
@@ -1837,7 +1807,6 @@ impl EventCache {
             claude_json_stamp,
             observation_namespace,
             scoped: true,
-            explicit_store: true,
             ..Self::default()
         };
         cache
@@ -1904,7 +1873,6 @@ impl EventCache {
         cache.v1_cache = Some(v1_cache.to_owned());
         cache.host_source = Some(source.clone());
         cache.scoped = true;
-        cache.explicit_store = true;
         cache.observation_namespace = source
             .namespace()
             .map_err(|error| error.to_string())?
@@ -1930,7 +1898,6 @@ impl EventCache {
         cache.source_observations = Some(Box::new(journal));
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
-        cache.explicit_store = true;
         cache.observation_namespace = source
             .namespace()
             .map_err(|error| error.to_string())?
@@ -2561,10 +2528,6 @@ impl EventCache {
         self.scan_measurements.emit(producer, "scan");
     }
 
-    /// Starts a scan: an index kept in memory tries its store again, at most
-    /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
-    /// process's: a file the store lacks or holds at another ledger is read
-    /// again when next scanned.
     pub(crate) fn revision(&self, path: &Path) -> Option<FileRevision> {
         self.files
             .get(path.to_string_lossy().as_ref())
@@ -2714,13 +2677,11 @@ impl EventCache {
     }
 
     fn require_configured_store(&self) -> io::Result<()> {
-        if self.explicit_store {
-            if self.store.is_none() {
-                return Err(io::Error::other(crate::storage::StorageError::Unavailable));
-            }
-            if self.busy {
-                return Err(io::Error::other(crate::storage::StorageError::Busy));
-            }
+        if self.store.is_none() {
+            return Err(io::Error::other(crate::storage::StorageError::Unavailable));
+        }
+        if self.busy {
+            return Err(io::Error::other(crate::storage::StorageError::Busy));
         }
         Ok(())
     }
@@ -2734,45 +2695,6 @@ impl EventCache {
         self.index_write_duration = Duration::ZERO;
         self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
-        if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
-            return Ok(());
-        }
-        let Some(v1_cache) = self.v1_cache.clone() else {
-            return Ok(());
-        };
-        let source = self
-            .host_source
-            .clone()
-            .ok_or_else(|| io::Error::other("host Source admission unavailable"))?;
-        match store::open(&Self::path(&v1_cache), &source) {
-            Ok((store, loaded, journal)) => {
-                let runs: Vec<_> = self.reported_runs().cloned().collect();
-                let stamp = self.claude_json_stamp.take();
-                *self = Self::from_loaded(loaded);
-                self.store = Some(store);
-                self.observation_namespace = journal.namespace().to_owned();
-                self.source_observations = Some(Box::new(journal));
-                self.observation_path = Some(Self::path(&v1_cache));
-                self.v1_cache = Some(v1_cache);
-                self.host_source = Some(source);
-                self.reconcile_pending_source_operation()?;
-                // Runs read from `~/.claude.json` meanwhile are kept.
-                if let Some(stamp) = stamp
-                    && !runs.is_empty()
-                {
-                    for run in &runs {
-                        self.reported_runs
-                            .entry(run.last_session_id.clone())
-                            .or_default()
-                            .insert(run.last_start_time, run.clone());
-                    }
-                    self.claude_json_stamp = Some(stamp.clone());
-                    self.save_runs(&runs, &stamp)?;
-                }
-            }
-            Err(store::Unopened::Unsupported(reason)) => return Err(io::Error::other(reason)),
-            Err(_) => self.reopen_at = Some(Instant::now() + REOPEN_EVERY),
-        }
         Ok(())
     }
 
@@ -2812,44 +2734,15 @@ impl EventCache {
         }
     }
 
-    /// Stops writing to the store, says so once, and tries it again after
-    /// [`REOPEN_EVERY`].
-    fn lose_store(&mut self, error: &dyn std::fmt::Display) {
-        if let Some(store) = self.store.take() {
-            warn_unavailable(&store.describe(), error);
-            self.reopen_at = Some(Instant::now() + REOPEN_EVERY);
-            self.unpersisted.clear();
-            self.gone.clear();
-        }
-    }
-
-    /// Handles a failed store call: a busy store keeps this change in
-    /// memory and skips the store's other writes in this scan; any other
-    /// failure stops using the store until it is opened again.
+    /// Maps a failed configured store call to its storage refusal.
     fn store_failed(&mut self, error: &StoreError) -> io::Result<()> {
-        if self.explicit_store {
-            return Err(io::Error::other(match error {
-                StoreError::Configured(error) => *error,
-                StoreError::Busy(_) => crate::storage::StorageError::Busy,
-                StoreError::Data(_) | StoreError::Failed(_) => {
-                    crate::storage::StorageError::Unavailable
-                }
-            }));
-        }
-        match error {
-            StoreError::Configured(error) => return Err(io::Error::other(*error)),
-            StoreError::Busy(_) => {
-                self.busy = true;
-                let what = self
-                    .store
-                    .as_ref()
-                    .map(|store| store.describe())
-                    .unwrap_or_default();
-                warn_busy(&what, error);
+        Err(io::Error::other(match error {
+            StoreError::Configured(error) => *error,
+            StoreError::Busy(_) => crate::storage::StorageError::Busy,
+            StoreError::Data(_) | StoreError::Failed(_) => {
+                crate::storage::StorageError::Unavailable
             }
-            StoreError::Data(_) | StoreError::Failed(_) => self.lose_store(error),
-        }
-        Ok(())
+        }))
     }
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
@@ -2905,14 +2798,6 @@ impl EventCache {
         let key = path.to_string_lossy();
         let stat = Stat::of(path)?;
         if !self.unpersisted.contains(key.as_ref()) {
-            if !self.explicit_store
-                && let Some(file) = self.files.get(key.as_ref())
-                && file.ledger.stat == stat
-                && let Some(index) = &file.index
-                && let Some(metadata) = crate::native_tree::Metadata::from_index(index)
-            {
-                return Ok((file.ledger.source(path, native_id), metadata));
-            }
             match self
                 .store
                 .as_ref()
@@ -2921,11 +2806,10 @@ impl EventCache {
                 Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
                     return Ok((ledger.source(path, native_id), metadata));
                 }
-                Some(Err(error)) if self.explicit_store => {
+                Some(Err(error)) => {
                     return Err(io::Error::other(configured_error(error)));
                 }
-                Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
-                Some(Err(error)) => self.store_failed(&error)?,
+                Some(Ok(_)) | None => {}
             }
         }
         let index = scan_file(path, harness, self, dirty)?;
@@ -3027,14 +2911,13 @@ impl EventCache {
             .as_mut()
             .map(|store| store.save_runs(runs, stamp));
         match saved {
-            Some(Ok(None)) if self.explicit_store => {
+            Some(Ok(None)) => {
                 return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
             }
             Some(Ok(Some(all))) => {
                 self.runs_unsaved = false;
                 self.set_reported_runs(all);
             }
-            Some(Ok(None)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
@@ -3074,11 +2957,10 @@ impl EventCache {
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
-            Some(Ok(Outcome::Stale)) if self.explicit_store => {
+            Some(Ok(Outcome::Stale)) => {
                 return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
             }
             Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
-            Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
@@ -3091,29 +2973,9 @@ impl EventCache {
         let stored = self.store.as_ref().map(|store| store.ledger(path));
         match stored {
             Some(Ok(ledger)) => return Ok(ledger),
-            Some(Err(error)) if self.explicit_store => {
+            Some(Err(error)) => {
                 return Err(io::Error::other(configured_error(error)));
             }
-            Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
-            Some(Err(StoreError::Data(_))) if self.busy => return Ok(None),
-            Some(Err(StoreError::Data(_))) => {
-                // A ledger row that doesn't decode is dropped, and the file
-                // read again from its start.
-                let removed = self
-                    .store
-                    .as_mut()
-                    .map(|store| store.remove_files(&[(path.to_owned(), None)]));
-                match removed {
-                    Some(Ok(Outcome::Stale)) => {
-                        self.lose_store(&"another version of semon rebuilt it");
-                    }
-                    Some(Err(error)) => self.store_failed(&error)?,
-                    Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) | None => {
-                        return Ok(None);
-                    }
-                }
-            }
-            Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
         Ok(self.files.get(path).map(|entry| entry.ledger.clone()))
@@ -3143,15 +3005,10 @@ impl EventCache {
         Ok(match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
             Some(Ok(_)) => Base::Moved,
-            Some(Err(error)) if self.explicit_store => {
+            Some(Err(error)) => {
                 return Err(io::Error::other(configured_error(error)));
             }
-            Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
-            Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
-            Some(Err(error)) => {
-                self.store_failed(&error)?;
-                Base::Unreadable
-            }
+            None => Base::Unreadable,
         })
     }
 
@@ -3218,8 +3075,7 @@ impl EventCache {
     ) -> Result<Vec<crate::storage::native_events::EventReceipt>, crate::storage::StorageError>
     {
         use crate::storage::StorageError;
-        if !self.explicit_store
-            || requests.is_empty()
+        if requests.is_empty()
             || requests.len() > 64
             || !self.cold_writes.is_empty()
             || self.event_operation.is_some()
@@ -3308,33 +3164,20 @@ impl EventCache {
         if let Some(started) = started {
             self.index_write_duration += started.elapsed();
         }
-        if self.explicit_store {
-            return match committed {
-                Some(Ok(Outcome::Written)) => {
-                    self.unpersisted.remove(path);
-                    Ok(false)
-                }
-                Some(Ok(Outcome::Conflict | Outcome::Deferred)) => {
-                    Err(io::Error::other(crate::storage::StorageError::Conflict))
-                }
-                Some(Ok(Outcome::Stale)) => {
-                    Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
-                }
-                Some(Err(error)) => Err(io::Error::other(configured_error(error))),
-                None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
-            };
-        }
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
+                Ok(false)
             }
-            Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return Ok(true),
-            Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
-            Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
-            Some(Err(error)) => self.store_failed(&error)?,
-            None => {}
+            Some(Ok(Outcome::Conflict | Outcome::Deferred)) => {
+                Err(io::Error::other(crate::storage::StorageError::Conflict))
+            }
+            Some(Ok(Outcome::Stale)) => {
+                Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
+            }
+            Some(Err(error)) => Err(io::Error::other(configured_error(error))),
+            None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
         }
-        Ok(false)
     }
 }
 
@@ -3399,7 +3242,6 @@ pub(crate) fn scan_file(
         cache.event_operation = None;
         return result;
     }
-    let configured = cache.explicit_store;
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3418,7 +3260,7 @@ pub(crate) fn scan_file(
     // has no ingestion operation ID and must neither create an intent nor
     // reparse changed Raw behind the staged claim. load_file validates the
     // configured current schema, admission and namespace in its read snapshot.
-    if configured && cache.event_operation.is_none() {
+    if cache.event_operation.is_none() {
         let (ledger, index) = cache
             .store
             .as_ref()
@@ -3459,33 +3301,13 @@ pub(crate) fn scan_file(
         // range and finishes its source/sidecar fences before record/publish.
         return Ok(index);
     }
-    if !configured
-        && let Some(entry) = cache.files.get(&key)
-        && let Some(index) = &entry.index
-        && !cache.unpersisted.contains(&key)
-        && (harness == "copilot" || index.tree_summary.is_some())
-        && index.source_chunks.is_some()
-        && (harness == "copilot" || index.marker_index.is_some())
-        && index.handoff_index.is_some()
-        && (harness != "codex" || index.codex_header.is_some())
-        && (!agent
-            || index
-                .claude_sidecar
-                .as_ref()
-                .is_some_and(|sidecar| sidecar.current(path)))
-        && entry.ledger.stat == Stat::of(path)?
-    {
-        trace("unchanged");
-        return Ok(Arc::clone(index));
-    }
     *dirty = true;
     let mut attempt = 0;
     let mut force_replace = false;
-    let mut conservative_append = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
-        let prepared_ledger = if configured {
+        let prepared_ledger = {
             let expected = cache.recorded(&key)?;
             cache
                 .store
@@ -3501,8 +3323,6 @@ pub(crate) fn scan_file(
                 )
                 .map_err(store_io_error)?;
             expected
-        } else {
-            None
         };
         // Stat'ed before reading: a line that lands during the read makes
         // the next check see a change.
@@ -3511,50 +3331,17 @@ pub(crate) fn scan_file(
         let stat = Stat::from_metadata(&file.metadata()?)?;
         cache.scan_measurements.record("open_stat", started, 1);
         let started = cache.scan_measurements.start();
-        if harness == "codex" && !configured {
-            let recorded_started = cache.scan_measurements.start();
-            let absent = cache.recorded(&key)?.is_none();
-            cache
-                .scan_measurements
-                .record("relocation_recorded", recorded_started, 1);
-            if absent {
-                let prefix_started = cache.scan_measurements.start();
-                let id = crate::codex_native_id_prefix(path, stat.size)?;
-                cache
-                    .scan_measurements
-                    .record("relocation_prefix", prefix_started, 1);
-                if let Some(id) = id
-                    && let Some(store) = cache.store.as_mut()
-                    && let Some(old) = store
-                        .relocate_codex(&key, &stat, &id, &mut file, &mut cache.scan_measurements)
-                        .map_err(|error| io::Error::other(error.to_string()))?
-                {
-                    cache.files.remove(&old);
-                }
-            }
-        }
         cache
             .scan_measurements
             .record("relocation_lookup", started, 1);
         let started = cache.scan_measurements.start();
-        let recorded = if configured {
-            prepared_ledger
-        } else {
-            cache.recorded(&key)?
-        };
+        let recorded = prepared_ledger;
         let mut base = None;
         let mut trusted_append = false;
         if let Some(ledger) = &recorded
             && !force_replace
         {
-            let evidence = !configured
-                && !conservative_append
-                && cache
-                    .store
-                    .as_ref()
-                    .and_then(|store| store.append_evidence(&key).ok().flatten())
-                    .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat));
-            if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
+            if ledger.stat == stat || ledger.resumes(&stat, &mut file) {
                 match cache.base(&key, ledger)? {
                     Base::Found(index) => {
                         cache.require_usage_store(&index)?;
@@ -3613,11 +3400,9 @@ pub(crate) fn scan_file(
                     .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
         {
             trace("unchanged");
-            if configured {
-                let ledger = ledger.clone();
-                let index = Arc::clone(index);
-                cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
-            }
+            let ledger = ledger.clone();
+            let index = Arc::clone(index);
+            cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
             cache.files.insert(
@@ -3781,10 +3566,7 @@ pub(crate) fn scan_file(
                 recorded.as_ref().expect("trusted ledger exists").prefix,
             ) {
                 Ok(captured) => captured,
-                Err(_) if !last => {
-                    conservative_append = true;
-                    continue;
-                }
+                Err(_) if !last => continue,
                 Err(error) => return Err(error),
             }
         } else {
@@ -3930,8 +3712,7 @@ pub(crate) fn scan_file(
             append.then_some(&changes),
             &ledger,
             &index,
-        )? && (!last || configured)
-        {
+        )? {
             trace("conflict");
             continue;
         }
@@ -7215,7 +6996,6 @@ mod tests {
     #[test]
     fn configured_refusal_never_becomes_busy_or_memory_success() {
         let mut cache = EventCache {
-            explicit_store: true,
             ..EventCache::default()
         };
         let refusal = cache
@@ -10617,7 +10397,7 @@ mod tests {
                 7
             );
             drop(index);
-            cache.lose_store(&"injected disconnect");
+            cache.store = None;
             assert!(
                 scan_file(&log, "codex", &mut cache, &mut false)
                     .unwrap_err()
@@ -10733,104 +10513,6 @@ mod tests {
         let cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_none(), "never opened through a symlink");
         assert_eq!(fs::read(&target).unwrap(), b"", "the target is untouched");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_busy_store_opens_unlocked_and_its_busy_writes_wait_for_the_next_scan() {
-        use std::time::{Duration, Instant};
-        let root = scratch("busy");
-        let v1 = root.join("index.json");
-        let path = EventCache::path(&v1);
-        let log = root.join("session.jsonl");
-        let other = root.join("other.jsonl");
-        write_lines(&log, &[said("m1", &["aa"])]);
-        write_lines(&other, &[said("o1", &["oo"])]);
-        touch(&log, 1);
-        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        cache.begin_scan().unwrap();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-
-        // Another process holds the write lock. A current store still opens
-        // at once: the versions are read without it.
-        let holder = rusqlite::Connection::open(&path).unwrap();
-        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let started = Instant::now();
-        assert!(
-            EventCache::open(&v1, &crate::Options::default().source)
-                .unwrap()
-                .store
-                .is_some()
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(800),
-            "{:?}",
-            started.elapsed()
-        );
-
-        // A commit waits for it once; the scan's other writes then skip the
-        // store, and both changes stay in memory.
-        cache.begin_scan().unwrap();
-        append_lines(&log, &[said("m2", &["bb"])]);
-        touch(&log, 2);
-        let started = Instant::now();
-        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        let waited = started.elapsed();
-        assert!(
-            waited < Duration::from_millis(1800),
-            "one wait, not two: {waited:?}"
-        );
-        assert_eq!(index_snapshot(&index), cold(&log));
-        assert!(cache.store.is_some(), "a busy store stays in use");
-        let key = |path: &Path| path.to_string_lossy().into_owned();
-        assert!(cache.unpersisted.contains(&key(&log)));
-        assert!(cache.unpersisted.contains(&key(&other)));
-
-        // Released, and the other process writes the same change of `log`
-        // first. The next scan finds `log` current and stops holding it, and
-        // writes `other` through though it didn't change again.
-        holder.execute_batch("ROLLBACK").unwrap();
-        drop(holder);
-        let mut second = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        scan_file(&log, "claude", &mut second, &mut false).unwrap();
-        cache.end_scan();
-        cache.begin_scan().unwrap();
-        ledger_trace();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(ledger_trace(), ["unchanged"]);
-        assert!(!cache.unpersisted.contains(&key(&log)));
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        assert!(cache.unpersisted.is_empty());
-        // Nothing waits any more: the next scan shares both.
-        cache.end_scan();
-        ledger_trace();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
-        assert_eq!(stored(&v1, &log), cold(&log));
-        assert_eq!(stored(&v1, &other), cold(&other));
-
-        // A store that must first be created can't be while another process
-        // holds its lock: the index runs in memory, and opens it on a later
-        // scan once the retry is due.
-        fs::create_dir(root.join("fresh")).unwrap();
-        let fresh_v1 = root.join("fresh/index.json");
-        let holder = rusqlite::Connection::open(EventCache::path(&fresh_v1)).unwrap();
-        holder
-            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE held (x INTEGER);")
-            .unwrap();
-        let mut fresh = EventCache::open(&fresh_v1, &crate::Options::default().source).unwrap();
-        assert!(fresh.store.is_none());
-        holder.execute_batch("ROLLBACK").unwrap();
-        drop(holder);
-        fresh.begin_scan().unwrap();
-        assert!(fresh.store.is_none(), "not before the retry is due");
-        fresh.reopen_at = Some(Instant::now());
-        fresh.begin_scan().unwrap();
-        assert!(fresh.store.is_some(), "opened on a later scan");
-        scan_file(&log, "claude", &mut fresh, &mut false).unwrap();
-        assert_eq!(stored(&fresh_v1, &log), cold(&log));
         fs::remove_dir_all(root).unwrap();
     }
 

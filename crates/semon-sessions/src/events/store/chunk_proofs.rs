@@ -371,24 +371,7 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 impl Focused {
     #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        Self::open_unbound_with_raw(cache, path, ledger, None)
-    }
-
-    /// Held legacy-fixture tests only; runtime readers carry their binding.
-    #[cfg(test)]
-    pub(crate) fn open_unbound_with_raw(
-        cache: &Path,
-        path: &str,
-        ledger: &Ledger,
-        raw_before: Option<u64>,
-    ) -> io::Result<Self> {
-        Self::open_connected(
-            || super::focused_unbound_connection(cache),
-            cache,
-            path,
-            ledger,
-            raw_before,
-        )
+        Self::open_with_raw(&super::fixture_reader_binding(cache)?, cache, path, ledger, None)
     }
 
     pub(crate) fn open_with_raw(
