@@ -612,6 +612,9 @@ impl NativeOwnership {
         }
         validate_core(db)?;
         validate_statement_layout(db).map_err(failed)?;
+        // Qualify the ordinary Current keyset read when the DDL cookie
+        // changes. Preparing reads no rows and never repairs missing indexes.
+        db.prepare("SELECT session_key,last_ms FROM main.session_catalog INDEXED BY session_catalog_current_order WHERE namespace=?1 AND lifecycle='current' ORDER BY last_ms DESC,session_key ASC LIMIT 0").map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
         validate_copied_usage(db).map_err(failed)?;
