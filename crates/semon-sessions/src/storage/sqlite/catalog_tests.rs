@@ -468,7 +468,13 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
             assert_eq!(
                 revision(),
                 stable_revision,
-                "representation repair invalidated its saved claim"
+                "representation repair invalidated its saved claim; source_claim={:?}",
+                work.events
+                    .as_ref()
+                    .unwrap()
+                    .catalog_claims(&[path.to_string_lossy().into_owned()])
+                    .unwrap()[0]
+                    .1
             );
             if complete {
                 finished = true;
