@@ -446,7 +446,11 @@ pub(super) fn generation(c: &Connection) -> rusqlite::Result<Option<String>> {
     .optional()
 }
 pub(super) fn revision(c: &Connection) -> rusqlite::Result<i64> {
-    c.query_row("SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",[],|r|r.get(0))
+    c.query_row(
+        "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
+        [],
+        |r| r.get(0),
+    )
 }
 fn queue(c: &Connection, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> {
     c.execute(
@@ -580,9 +584,7 @@ impl NativeFrontierPort for OrdinaryNativeFrontier<'_> {
         let scoped = format!(
             "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
         );
-        c.query_row(&scoped, [id], |r| {
-            r.get(0)
-        })
+        c.query_row(&scoped, [id], |r| r.get(0))
     }
     fn queue(&self, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> {
         queue(self.0, kind, value, harness)

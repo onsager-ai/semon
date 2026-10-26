@@ -1557,15 +1557,8 @@ mod sqlite_tests {
         }
         transaction.commit().unwrap();
         for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
-            let first = posting_page(
-                &connection,
-                UNBOUND,
-                scope,
-                "nee",
-                None,
-                MAX_CANDIDATES + 1,
-            )
-            .unwrap();
+            let first =
+                posting_page(&connection, UNBOUND, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
             assert_eq!(first.len(), MAX_CANDIDATES + 1);
             assert_eq!(
                 first.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
@@ -1909,7 +1902,11 @@ mod sqlite_tests {
             };
             let found = read_admitted(&connection, query("needle")).unwrap();
             assert_eq!(
-                found.rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+                found
+                    .rows
+                    .iter()
+                    .map(|row| row.name.as_str())
+                    .collect::<Vec<_>>(),
                 ["needle alpha"]
             );
             assert_eq!(found.report.candidates, 1);

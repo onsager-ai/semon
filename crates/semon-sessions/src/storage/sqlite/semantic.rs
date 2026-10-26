@@ -551,8 +551,7 @@ impl<'tx> FrontierLayout<'tx> {
         let db: &Connection = tx;
         Ok(Self {
             db,
-            header_scoped: "namespace"
-                == "namespace",
+            header_scoped: "namespace" == "namespace",
             support_scoped: crate::events::store::semantic_stage::support_sql(db, "", "namespace")?
                 == "namespace",
         })
