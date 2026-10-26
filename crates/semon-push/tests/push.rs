@@ -835,14 +835,24 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
             fs::write(destination, bytes).unwrap();
             assert!(!String::from_utf8_lossy(bytes).contains(secret));
         }
-        semon_sessions::write_facts(mirrored_options.facts.as_ref().unwrap(), &facts).unwrap();
+        semon_sessions::write_facts(
+            mirrored_options.facts.as_ref().unwrap(),
+            &facts,
+            &mirrored_options.source,
+        )
+        .unwrap();
         // Compare against a deliberate redacted current-source copy, not the
         // unredacted local transcript. The stale receiver paths remain on disk.
         let expected = Home::new();
         let mut expected_options = expected.options.clone();
         expected_options.all = true;
         expected_options.facts = Some(expected.root.join("facts.json"));
-        semon_sessions::write_facts(expected_options.facts.as_ref().unwrap(), &facts).unwrap();
+        semon_sessions::write_facts(
+            expected_options.facts.as_ref().unwrap(),
+            &facts,
+            &expected_options.source,
+        )
+        .unwrap();
         let destination = expected.root.join(current);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::write(
@@ -1372,7 +1382,12 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
                 facts: Some(home.root.join("facts.json")),
                 ..home.options.clone()
             };
-            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+            semon_sessions::write_facts(
+                options.facts.as_ref().unwrap(),
+                &facts,
+                &options.source,
+            )
+            .unwrap();
             options
         };
         let local = configure(&expected);
@@ -1494,7 +1509,12 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
                     facts: Some(home.root.join("facts.json")),
                     ..home.options.clone()
                 };
-                semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+                semon_sessions::write_facts(
+                    options.facts.as_ref().unwrap(),
+                    &facts,
+                    &options.source,
+                )
+                .unwrap();
                 options
             };
             let local = configure(&expected);
@@ -1606,7 +1626,12 @@ fn native_compressed_history_keeps_paginated_query_and_web_parity_after_restart(
                 facts: Some(home.root.join("facts.json")),
                 ..home.options.clone()
             };
-            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+            semon_sessions::write_facts(
+                options.facts.as_ref().unwrap(),
+                &facts,
+                &options.source,
+            )
+            .unwrap();
             options
         };
         let local = configure(&expected);
