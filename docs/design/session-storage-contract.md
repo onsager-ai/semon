@@ -123,15 +123,25 @@ keeps existing byte/deadline/cancellation and covering-block bounds.
 
 ## Snapshot/export and migration requirements (undelivered)
 
-`StoreConfig::transfer_inbox` now provides bounded typed transport staging on
-SQLite and PostgreSQL. `begin`, `stage_page`, `checkpoint` and `staged_page`
-persist/reconcile exact page operations and their cursor atomically. The current
-typed records are metadata, reported Facts and source-observation intents. This
-inbox does not materialize native destination state, freeze a source, qualify a
-snapshot or change ownership. Exhaustive codecs, source export, durable fencing,
-reader drain, final qualification and reverse transfer remain undelivered. The
-current physical inventory tests classify every actual table and fail on an
-unclassified table; classification does not establish a working row codec.
+`StoreConfig::transfer_inbox` provides bounded capture, staging and authoritative
+page application on SQLite and PostgreSQL. `capture(operation)` advances one
+durable page and returns capture progress or a manifest; `begin`, `stage_page`,
+`checkpoint` and `staged_page` retain exact replay state. `apply_page` commits
+authoritative rows, its applied cursor and receipt together. Sequence zero
+completes an actually empty manifest. Current materialization covers reported
+Facts/stamps and native file/event rows, with adapter-local physical row IDs.
+The source freeze and incoming-target markers fence ordinary writes, including
+PG lifecycle writes. Core-row tests exercise pagination, absent-Raw SQLite
+reads and reverse transfer after new PG writes.
+
+These partial manifests are not full-source completeness witnesses and cannot
+authorize an ownership flip. Immutable native pages, usage, proofs, Catalog
+Current/History, pending work and the remaining authoritative families still
+need codecs, materialization and ordinary-reader qualification. Source quiesce,
+unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
+final qualification and qualified reverse transfer remain undelivered. The
+physical inventory tests reject unclassified tables; classification alone does
+not establish a working row codec or safe migration.
 
 A migration snapshot must include typed Event/ledger pages and all supported
 retained and non-rebuildable metadata: Facts/reported usage, custody and generation
