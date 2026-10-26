@@ -87,6 +87,7 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].path, data.rows[0].sources[0].path.to_str().unwrap());
     assert!(refs[0].usage_generation > 0);
+    assert!(!refs[0].usage_ready, "Claude has no native Usage observations");
     assert_eq!(refs[0].pages.0.len(), 64);
     super::snapshot::with_generation(&pool, &namespace, &control, L1, |view| {
         assert_eq!(serde_json::to_vec(&view.catalog(&data.rows[0].key, false)?.unwrap()).unwrap(), data.metadata[0]);
@@ -123,7 +124,7 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     // Missing/current Usage authority and corrupt native header both refuse
     // before effects. Test-only mutations roll back together with the attempt.
     for sql in [
-        "UPDATE semon_pg_native_usage_sources SET usage_ready=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+        "UPDATE semon_pg_native_usage_sources SET receipt=convert_to('corrupt','UTF8') WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
         "UPDATE semon_pg_native_page_generations SET chunks_header=convert_to('corrupt','UTF8') WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
         "DELETE FROM semon_pg_native_page_current WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
     ] {

@@ -1808,8 +1808,10 @@ shared physical producer in that same borrowed PgTxn. It creates no SourceState
 or authority. The ordinary SQLite publisher and PG binding use the same
 `source_matches_ledger` predicate. PG additionally opens the actual immutable
 current native page generation against its full Ledger and header contract,
-then requires its source ID to equal ready current Usage with the same receipt
-and parser. Conflicting duplicate sources, more than 64 distinct sources or
+then requires its source ID to equal current Usage with the same receipt
+and parser. Native Usage availability is retained explicitly; Claude's absent
+native Usage is not incomplete file publication or a fabricated ready Usage.
+Conflicting duplicate sources, more than 64 distinct sources or
 more than 1 MiB of Catalog metadata refuse before Catalog effects.
 
 The returned private references are observations, not durable ownership or an
