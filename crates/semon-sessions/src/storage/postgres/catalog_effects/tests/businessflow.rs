@@ -81,6 +81,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     fs::write(&child, [
         serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":child_id,"cwd":"/synthetic/project","originator":"codex_exec","parent_thread_id":codex_id,"thread_source":"subagent","agent_path":"root/worker","agent_nickname":"worker","timestamp":"2026-10-01T00:00:00Z"}}),
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized related codex input"}]}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized related codex reply"}]}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut sqlite_options = options.clone();
