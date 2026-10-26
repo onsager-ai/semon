@@ -169,6 +169,7 @@ pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()>
 // New globals must be classified deliberately before composite meta is exposed.
 const STORE_METADATA_NAMESPACE: &str = "";
 const SOURCE_METADATA_PREFIXES: &[&str] = &[
+    "native_transfer_v1:",
     "archive_event_index:",
     "native_catalog_relocation:",
     "native_claude_sidecar:",
