@@ -350,11 +350,8 @@ CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(namespace,file_id,COALE
 const MAX_CONTEXT: usize = 1024 * 1024;
 
 pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
-    if stage_layout(c)? {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
     c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+        "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace())",
         [],
         |r| r.get(0),
     )
