@@ -92,6 +92,19 @@ fn bind(
     }
     let mut refs = Vec::with_capacity(sources.len());
     for (path, source) in sources {
+        // Probe aggregate header bytes in SQL before the native adapter fetches
+        // or decodes any of them. Its own per-cell cap is not a cohort budget.
+        let sizes = tx.driver.query(
+            "SELECT octet_length(p.chunks_header)::bigint+coalesce(octet_length(p.launch_header),0)+octet_length(p.ledger)+octet_length(p.source_path)+512 FROM semon_pg_native_page_current c JOIN semon_pg_native_page_generations p USING(namespace_digest,namespace,generation) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND p.source_path=$2 LIMIT 2",
+            &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        if sizes.len() != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+        bytes = bytes.checked_add(usize::try_from(sizes[0].get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?).ok_or(StorageError::Busy)?;
+        if bytes > MAX {
+            return Err(StorageError::Busy);
+        }
         let (_, ledger) = native_reader::ledger(tx, path)?.ok_or(StorageError::ScopeChanged)?;
         if !catalog::source_matches_ledger(source, &ledger) {
             return Err(StorageError::ScopeChanged);
@@ -101,8 +114,8 @@ fn bind(
         let pinned = native_pages::current(tx, path, &ledger)?;
         let receipt = crate::events::store::header_ledger(&ledger);
         // Fixed-size SQL result: no receipt, path or header payload is fetched
-        // before a size check. The actual Usage generation must be both ready
-        // and the owner of the exact native page generation (not any old row).
+        // before a size check. The actual Usage generation must own the exact
+        // native page generation (not any old row); availability stays explicit.
         let rows = tx.driver.query(
             "SELECT s.source_id,s.usage_ready FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) JOIN semon_pg_native_page_generations p USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2) AND s.source_path_digest=c.source_path_digest AND semon_pg_native_key_matches(s.source_path,sha256($2::bytea),$2) AND s.parser_version=$3 AND s.receipt=$4 AND p.generation=$5 AND p.source_path=$2 AND p.ledger=$4 LIMIT 2",
             &[&tx.namespace.as_str().as_bytes(), &path.as_bytes(), &i64::from(crate::events::CACHE_VERSION), &receipt.as_bytes(), &pinned.id.0.as_bytes()],
