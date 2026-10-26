@@ -1028,6 +1028,13 @@ pub(crate) struct Loaded {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    fn prepare_facts_authority(&self, _options: &crate::Options) -> io::Result<()> {
+        Ok(())
+    }
+    fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
+        crate::facts::source_authority::Sources::sqlite(path)
+    }
+
     /// Backend-specific borrowed port; native SQLite retains its owner
     /// connection and committed discovery witness for the full producer call.
     fn source_observations(
@@ -1741,6 +1748,14 @@ impl EventCache {
         Ok(())
     }
 
+    pub(crate) fn prepare_facts_authority(&self, options: &crate::Options) -> io::Result<()> {
+        self.store.as_ref().ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
+            .prepare_facts_authority(options)
+    }
+    pub(crate) fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
+        self.store.as_ref().ok_or_else(|| io::Error::other("Facts authority store unavailable"))?
+            .facts_authority(path)
+    }
     pub(crate) fn query_runtime_binding(
         &self,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {

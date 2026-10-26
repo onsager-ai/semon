@@ -15,38 +15,40 @@ pub(crate) struct Withdrawal {
     pub(crate) facts_path: PathBuf,
     pub(crate) facts_identity: crate::facts::source_authority::Identity,
     pub(crate) runtime: String,
+    #[serde(skip)]
+    pub(crate) authority: Option<std::sync::Arc<std::sync::Mutex<crate::facts::source_authority::Sources>>>,
 }
 
 impl Withdrawal {
-    pub(crate) fn authority_current(&self) -> io::Result<bool> {
-        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
-        let identity =
-            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
-        if identity != self.facts_identity || !authority.selection_known() {
-            return Ok(false);
+    fn with_authority<T>(&self, read: impl FnOnce(&crate::facts::source_authority::Sources) -> io::Result<T>) -> io::Result<T> {
+        if let Some(source) = &self.authority {
+            let source = source.lock().map_err(|_| io::Error::other("Facts authority unavailable"))?;
+            read(&source)
+        } else {
+            read(&crate::facts::source_authority::Sources::sqlite(&self.facts_path)?)
         }
-        authority.validate()?;
-        Ok(true)
     }
-
+    pub(crate) fn authority_current(&self) -> io::Result<bool> {
+        self.with_authority(|authority| {
+            let identity = crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
+            if identity != self.facts_identity || !authority.selection_known() { return Ok(false); }
+            authority.validate()?;
+            Ok(true)
+        })
+    }
     pub(crate) fn current(&self) -> io::Result<bool> {
         if !crate::is_input_path("codex", &self.relative)
-            || !self.relative.ends_with(".jsonl")
-            || !self.authority_current()?
-        {
-            return Ok(false);
-        }
+            || !self.relative.ends_with(".jsonl") || !self.authority_current()? { return Ok(false); }
         let source = crate::open_input(Path::new(&self.path))?;
         let before = crate::events::Stat::from_metadata(&source.metadata()?)?;
-        if before != self.stat {
-            return Ok(false);
-        }
-        let authority = crate::facts::source_authority::RawSources::open(&self.facts_path)?;
-        let withdrawn = authority.codex_current(&self.relative)? == Some(false);
-        authority.validate()?;
+        if before != self.stat { return Ok(false); }
+        let withdrawn = self.with_authority(|authority| {
+            let withdrawn = authority.codex_current(&self.relative)? == Some(false);
+            authority.validate()?;
+            Ok(withdrawn)
+        })?;
         let current_source = crate::open_input(Path::new(&self.path))?;
-        Ok(withdrawn
-            && crate::events::Stat::from_metadata(&source.metadata()?)? == before
+        Ok(withdrawn && crate::events::Stat::from_metadata(&source.metadata()?)? == before
             && crate::events::Stat::from_metadata(&current_source.metadata()?)? == before
             && self.authority_current()?)
     }
@@ -101,6 +103,7 @@ pub(crate) struct Context {
 #[serde(deny_unknown_fields)]
 pub(crate) struct LifecycleAuthority {
     pub(crate) facts: Option<(PathBuf, crate::facts::source_authority::Identity)>,
+    pub(crate) facts_activity: Option<String>,
     pub(crate) source: crate::storage::HostSource,
     pub(crate) claude_home: PathBuf,
     pub(crate) claude_json: PathBuf,
@@ -111,11 +114,14 @@ pub(crate) struct LifecycleAuthority {
 }
 
 impl LifecycleAuthority {
-    pub(crate) fn capture(options: &Options) -> io::Result<Self> {
+    pub(crate) fn capture(options: &Options, cache: &EventCache) -> io::Result<Self> {
         let facts = options
             .facts
             .as_ref()
             .map(|path| {
+                let source = cache.facts_authority(path)?;
+                if !source.facts_known() { return Err(io::Error::other("Facts authority unavailable")); }
+                source.validate()?;
                 Ok::<_, io::Error>((
                     path.clone(),
                     crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?,
@@ -123,6 +129,7 @@ impl LifecycleAuthority {
             })
             .transpose()?;
         let authority = Self {
+            facts_activity: options.facts.as_ref().map(|_| crate::native_evidence::recorded_activity_generation(options)).transpose()?,
             facts,
             source: options.source.clone(),
             claude_home: options.claude_home.clone(),
@@ -140,23 +147,10 @@ impl LifecycleAuthority {
         Ok(authority)
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
-        let facts = if let Some((path, identity)) = &self.facts {
-            if crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
-                != *identity
-            {
-                return Ok(false);
-            }
-            // Facts are canonical Raw input on both backends. A model fence
-            // binds that exact file, not SQLite's derived selected projection.
-            let bytes = crate::read_regular_at_most(path, 64 * 1024 * 1024)?;
-            let facts: crate::Facts = serde_json::from_slice(&bytes)?;
-            if facts.version != crate::facts::FACTS_VERSION {
-                return Ok(false);
-            }
-            Some(facts)
-        } else {
-            None
-        };
+        if let Some((path, identity)) = &self.facts
+            && crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? != *identity {
+            return Ok(false);
+        }
         // Both modes recheck the same captured runtime inputs as the producer.
         // No host configuration, EventCache or storage engine is opened here.
         let options = Options {
@@ -173,13 +167,14 @@ impl LifecycleAuthority {
             session: None,
             scan_window: false,
         };
-        let runtime = match facts {
-            Some(ref facts) => {
-                crate::native_evidence::recorded_runtime_fingerprint(&options, facts)?
-            }
-            None => crate::native_evidence::query_runtime_generation(&options)?,
+        // An unchanged exact canonical descriptor preserves all Facts fields,
+        // not just its version. Only the independent runtime files can change.
+        let runtime_current = if self.facts.is_some() {
+            self.facts_activity.as_ref() == Some(&crate::native_evidence::recorded_activity_generation(&options)?)
+        } else {
+            crate::native_evidence::query_runtime_generation(&options)? == self.runtime
         };
-        let mut current = runtime == self.runtime;
+        let mut current = runtime_current;
         if let Some((path, identity)) = &self.facts {
             current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
                 == *identity;
