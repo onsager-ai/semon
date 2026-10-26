@@ -69,10 +69,10 @@ impl QueryCatalogStore for QueryCatalog {
                         return Err(StorageError::Busy);
                     }
                     for owner in keys {
-                        if owner != key {
-                            if let Some(row) = snapshot.catalog(&owner, false)? {
-                                context.push(row);
-                            }
+                        if owner != key
+                            && let Some(row) = snapshot.catalog(&owner, false)?
+                        {
+                            context.push(row);
                         }
                     }
                 }

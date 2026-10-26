@@ -414,12 +414,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .unwrap();
-    struct BodyHost(
-        std::collections::BTreeMap<
-            (String, String),
-            (crate::SessionSourceRef, std::sync::Arc<[u8]>),
-        >,
-    );
+    type BodySources = std::collections::BTreeMap<
+        (String, String),
+        (crate::SessionSourceRef, std::sync::Arc<[u8]>),
+    >;
+    struct BodyHost(BodySources);
     impl crate::SessionSourceReader for BodyHost {
         fn read_range(
             &self,
