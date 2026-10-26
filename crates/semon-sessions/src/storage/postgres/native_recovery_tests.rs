@@ -106,10 +106,19 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     let mut pg =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
-        // Physical current-generation fixture only; this is not a Catalog
-        // admission/publication test. The rows came from the real parser above.
-        for rows in prepared_rows.chunks(64) {
-            catalog_effects::stage(tx, &generation, &crate::slot_projection::Publication { rows, transcripts: None })?;
+        // Physical recovery fixture, not a publication: 65 Sources exercise
+        // two recovery pages. The admitted publisher is bounded to 64 Sources;
+        // repeating it would conflict with immutable generation search counts.
+        // Preserve the real parser/model rows and seed only recovery's inputs.
+        let ns = namespace.as_str().as_bytes();
+        for row in &prepared_rows {
+            let metadata = serde_json::to_vec(row).map_err(|_| StorageError::Unavailable)?;
+            tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata) VALUES($1,$2,sha256($3::bytea),$3,$4)", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &metadata]).map_err(sqlstate::error)?;
+            for source in &row.sources {
+                let path = source.path.to_str().ok_or(StorageError::InvalidArguments)?.as_bytes();
+                let metadata = serde_json::to_vec(source).map_err(|_| StorageError::Unavailable)?;
+                tx.driver.execute("INSERT INTO semon_pg_native_catalog_sources(namespace,generation,key_digest,session_key,path_digest,source_path,metadata) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5)", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &path, &metadata]).map_err(sqlstate::error)?;
+            }
         }
         tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&namespace.as_str().as_bytes(), &generation]).map_err(sqlstate::error)?;
         native_keys::put_meta(tx, b"catalog_recovery_after", b"")
