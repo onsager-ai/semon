@@ -5063,7 +5063,20 @@ fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
 /// Bounded selected reads qualify the storage contract in their own snapshot.
 /// Archive marker consumers additionally validate the exact selected marker;
 /// unrelated archive history is never traversed by a focused request.
+/// A bound store is read only through its admitted namespace: the reader
+/// connection carries the binding as `semon_namespace()`, which must be the
+/// sole current-format admission; an unregistered connection fails closed.
 pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
+    if crate::storage::sqlite::namespace::is_bound(connection).map_err(io::Error::other)? {
+        let namespace: String = connection
+            .query_row("SELECT semon_namespace()", [], |row| row.get(0))
+            .map_err(io::Error::other)?;
+        let namespace =
+            crate::storage::LogicalSourceNamespace::new(namespace).map_err(io::Error::other)?;
+        crate::storage::sqlite::namespace::require_admitted(connection, &namespace)
+            .map_err(io::Error::other)?;
+        return Ok(());
+    }
     match qualify_contract(connection).map_err(io::Error::other)? {
         Init::Ready => Ok(()),
         Init::Unsupported(reason) => Err(io::Error::other(reason)),
