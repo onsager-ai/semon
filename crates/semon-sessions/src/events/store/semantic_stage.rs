@@ -319,12 +319,12 @@ pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
 /// stage observation even after ACK. Unreachable GC records own no work.
 pub(super) fn owns_header_repair(c: &Connection, path: &str) -> rusqlite::Result<bool> {
     c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)
+        "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)
          OR EXISTS(SELECT 1 FROM catalog_semantic_sources s
-         JOIN catalog_semantic_stage stage ON stage.singleton=1 AND stage.resetting=0
-         LEFT JOIN session_catalog_invalidations i USING(source_path)
-         LEFT JOIN files f ON f.path=s.source_path
-         WHERE s.source_path=?1 AND s.index_done=1 AND i.revision IS s.claim
+         JOIN catalog_semantic_stage stage ON stage.namespace=s.namespace AND stage.singleton=1 AND stage.resetting=0
+         LEFT JOIN session_catalog_invalidations i USING(namespace,source_path)
+         LEFT JOIN files f ON f.namespace=s.namespace AND f.path=s.source_path
+         WHERE s.namespace=semon_namespace() AND s.source_path=?1 AND s.index_done=1 AND i.revision IS s.claim
          AND f.dev IS s.dev AND f.ino IS s.ino AND f.size IS s.size
          AND f.mtime_ns IS s.mtime_ns AND f.ctime_ns IS s.ctime_ns
          AND f.resume_at IS s.resume_at AND f.head_sha256 IS s.head_sha256
@@ -3380,6 +3380,23 @@ mod tests {
             crate::native_timing::cleanup_tests::snapshot(&store.connection),
             before
         );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_header_repair_cannot_borrow_another_namespace_stage() {
+        let (root, store, path) = header_repair_store("namespace");
+        acknowledge_repair_source(&store, &path);
+        assert!(owns_header_repair(&store.connection, &path).unwrap());
+        let foreign = crate::storage::LogicalSourceNamespace::new("foreign-header-repair").unwrap();
+        crate::storage::sqlite::catalog_namespace::register(&store.connection, &foreign).unwrap();
+        assert!(!owns_header_repair(&store.connection, &path).unwrap());
+        crate::storage::sqlite::catalog_namespace::register(
+            &store.connection,
+            &store.owner.config().namespace,
+        ).unwrap();
+        assert!(owns_header_repair(&store.connection, &path).unwrap());
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
