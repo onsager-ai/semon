@@ -22,6 +22,7 @@ mod reported_facts;
 mod schema;
 mod source_journal;
 mod sqlstate;
+mod semantic_stage;
 mod store_metadata;
 pub(crate) mod tree_checkpoint;
 mod tree_writer;

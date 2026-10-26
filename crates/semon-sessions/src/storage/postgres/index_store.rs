@@ -21,6 +21,7 @@ pub(crate) struct NativeIndex {
     journal: PgSourceJournal,
     intents: BTreeMap<String, native_ingest::Intent>,
     selection: Option<BTreeSet<String>>,
+    semantic_epoch: Option<i64>,
 }
 
 pub(crate) fn open(
@@ -52,6 +53,7 @@ pub(crate) fn open(
             journal,
             intents: BTreeMap::new(),
             selection: None,
+            semantic_epoch: None,
         }),
         stamp,
     ))
@@ -94,6 +96,51 @@ impl NativeIndex {
 }
 
 impl IndexStore for NativeIndex {
+    fn begin_semantic_stage(&mut self, paths: &[String], runtime: &str, _: bool) -> Result<Outcome, StoreError> {
+        let (outcome, epoch) = self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::begin(tx, paths, runtime, self.semantic_epoch)).map_err(err)?;
+        self.semantic_epoch = Some(epoch);
+        Ok(outcome)
+    }
+    fn semantic_batch(&mut self, limit: usize) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| super::semantic_stage::next(tx, limit)).map_err(err)
+    }
+    fn record_semantic_batch(&mut self, batch: &crate::model::relation_stage::Batch, prepared: &crate::model::PreparedSources) -> Result<Outcome, StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::record(tx, batch, prepared)).map_err(err)
+    }
+    fn publish_semantic_catalog(&mut self, batch: &crate::model::relation_stage::Batch, prepared: &crate::model::PreparedSources) -> Result<(Outcome, Option<String>), StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::publish(tx, batch, prepared)).map_err(err)
+    }
+    fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        let outcome = self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| super::semantic_stage::finish(tx, epoch)).map_err(err)?;
+        self.semantic_epoch = None;
+        Ok(outcome)
+    }
+    fn semantic_select(&mut self, epoch: i64, selector: &crate::model::relation_stage::Selector) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        use crate::model::relation_stage::{Selector, Selection};
+        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
+            let context = super::semantic_stage::context(tx, epoch)?;
+            let Selector::NativeKey { native, harness } = selector else { return Err(StorageError::NamespaceUpgradePending); };
+            let endpoints = context.endpoints.values().filter(|endpoint| endpoint.row.harness == *harness && endpoint.row.native_ids.contains(native)).collect::<Vec<_>>();
+            Ok(Selection { count: endpoints.len(), endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()), ..Default::default() })
+        }).map_err(err)
+    }
+    fn semantic_replay_page(&mut self, epoch: i64, owners: &[String], after: &str) -> Result<crate::model::relation_stage::Context, StoreError> {
+        use crate::model::relation_stage::Context;
+        if owners.len() > 64 { return Err(err(StorageError::Busy)); }
+        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
+            let context = super::semantic_stage::context(tx, epoch)?;
+            let mut output = Context { epoch: Some(epoch), ..Default::default() };
+            for (key, relation) in context.relations.range((std::ops::Bound::Excluded(after.to_owned()), std::ops::Bound::Unbounded)) {
+                if !owners.contains(&relation.from) && !relation.to.as_ref().is_some_and(|to| owners.contains(to)) { continue; }
+                for key in std::iter::once(&relation.from).chain(relation.to.iter()) {
+                    if let Some(endpoint) = context.endpoints.get(key) { output.endpoints.insert(key.clone(), endpoint.clone()); }
+                }
+                output.relations.insert(key.clone(), relation.clone());
+                if output.relations.len() == 64 { break; }
+            }
+            Ok(output)
+        }).map_err(err)
+    }
     fn source_observations(
         &self,
     ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
