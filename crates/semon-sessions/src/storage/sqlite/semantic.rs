@@ -316,7 +316,7 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
         }
     }
     for (path, claim, recorded) in rows {
-        let actual = super::source_journal::claims(c, Some(ns), std::slice::from_ref(&path))?[0].1;
+        let actual = super::source_journal::claims(c, ns, std::slice::from_ref(&path))?[0].1;
         let ledger = crate::events::store::ledger_row(c, &path)?
             .map(|(_, l)| serde_json::to_string(&l))
             .transpose()
@@ -880,7 +880,7 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
         }
         drop(rows);
         drop(q);
-        let claims = super::source_journal::claims(c, Some(ns), &paths).map_err(error)?;
+        let claims = super::source_journal::claims(c, ns, &paths).map_err(error)?;
         for (path, claim) in claims {
             c.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
         }
@@ -1295,7 +1295,7 @@ impl Stage {
                     &digest,
                 )
                 .map_err(StoreError::Configured)?
-                && super::source_journal::claims(&tx, Some(ns), &batch.paths)
+                && super::source_journal::claims(&tx, ns, &batch.paths)
                     .map_err(error)?
                     .iter()
                     .all(|(_, claim)| claim.is_none())
@@ -1327,7 +1327,7 @@ impl Stage {
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>()
                 != staged
-            || super::source_journal::claims(&tx, Some(ns), &staged).map_err(error)?
+            || super::source_journal::claims(&tx, ns, &staged).map_err(error)?
                 != prepared.claims
         {
             return Ok((Outcome::Conflict, None));
@@ -2133,7 +2133,7 @@ impl Stage {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
             tx.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,generation,runtime,revision) SELECT ?1,1,epoch,'indexing',?2,?3,(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM storage_semantic_profiles WHERE namespace=?1", params![ns,self.source.generation,runtime]).map_err(error)?;
         }
-        let claims = super::source_journal::claims(&tx, Some(ns), paths).map_err(error)?;
+        let claims = super::source_journal::claims(&tx, ns, paths).map_err(error)?;
         for (path, claim) in claims {
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)", params![ns,path,claim]).map_err(error)?;
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'pathowner',?2,'')", params![ns,path]).map_err(error)?;
@@ -2241,7 +2241,7 @@ impl Stage {
             ).map_err(error)?;
             let paths = paths.into_iter().collect::<Vec<_>>();
             for (path, claim) in
-                super::source_journal::claims(&tx, Some(ns), &paths).map_err(error)?
+                super::source_journal::claims(&tx, ns, &paths).map_err(error)?
             {
                 tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
             }
@@ -2432,7 +2432,7 @@ impl Stage {
             eprintln!("semantic_record_conflict: stage_binding");
             return Ok(Outcome::Conflict);
         }
-        let claims = super::source_journal::claims(&tx, Some(ns), &batch.paths).map_err(error)?;
+        let claims = super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)?;
         if claims != prepared.claims {
             #[cfg(test)]
             eprintln!("semantic_record_conflict: source_claims");
