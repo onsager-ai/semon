@@ -1404,8 +1404,6 @@ pub(crate) struct EventCache {
     atomic_cold: bool,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
-    /// Without a store: when opening it is tried again.
-    reopen_at: Option<Instant>,
     /// The store was busy in this refresh (reported runs, then the scan):
     /// its other writes wait for the next, so a refresh waits at most once.
     busy: bool,
@@ -1429,8 +1427,6 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
 }
 
-/// How often an index without its store tries to open it again.
-const REOPEN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2470,10 +2466,6 @@ impl EventCache {
         self.scan_measurements.emit(producer, "scan");
     }
 
-    /// Starts a scan: an index kept in memory tries its store again, at most
-    /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
-    /// process's: a file the store lacks or holds at another ledger is read
-    /// again when next scanned.
     pub(crate) fn revision(&self, path: &Path) -> Option<FileRevision> {
         self.files
             .get(path.to_string_lossy().as_ref())
@@ -2641,45 +2633,6 @@ impl EventCache {
         self.index_write_duration = Duration::ZERO;
         self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
-        if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
-            return Ok(());
-        }
-        let Some(v1_cache) = self.v1_cache.clone() else {
-            return Ok(());
-        };
-        let source = self
-            .host_source
-            .clone()
-            .ok_or_else(|| io::Error::other("host Source admission unavailable"))?;
-        match store::open(&Self::path(&v1_cache), &source) {
-            Ok((store, loaded, journal)) => {
-                let runs: Vec<_> = self.reported_runs().cloned().collect();
-                let stamp = self.claude_json_stamp.take();
-                *self = Self::from_loaded(loaded);
-                self.store = Some(store);
-                self.observation_namespace = journal.namespace().to_owned();
-                self.source_observations = Some(Box::new(journal));
-                self.observation_path = Some(Self::path(&v1_cache));
-                self.v1_cache = Some(v1_cache);
-                self.host_source = Some(source);
-                self.reconcile_pending_source_operation()?;
-                // Runs read from `~/.claude.json` meanwhile are kept.
-                if let Some(stamp) = stamp
-                    && !runs.is_empty()
-                {
-                    for run in &runs {
-                        self.reported_runs
-                            .entry(run.last_session_id.clone())
-                            .or_default()
-                            .insert(run.last_start_time, run.clone());
-                    }
-                    self.claude_json_stamp = Some(stamp.clone());
-                    self.save_runs(&runs, &stamp)?;
-                }
-            }
-            Err(store::Unopened::Unsupported(reason)) => return Err(io::Error::other(reason)),
-            Err(_) => self.reopen_at = Some(Instant::now() + REOPEN_EVERY),
-        }
         Ok(())
     }
 
@@ -10498,104 +10451,6 @@ mod tests {
         let cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_none(), "never opened through a symlink");
         assert_eq!(fs::read(&target).unwrap(), b"", "the target is untouched");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_busy_store_opens_unlocked_and_its_busy_writes_wait_for_the_next_scan() {
-        use std::time::{Duration, Instant};
-        let root = scratch("busy");
-        let v1 = root.join("index.json");
-        let path = EventCache::path(&v1);
-        let log = root.join("session.jsonl");
-        let other = root.join("other.jsonl");
-        write_lines(&log, &[said("m1", &["aa"])]);
-        write_lines(&other, &[said("o1", &["oo"])]);
-        touch(&log, 1);
-        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        cache.begin_scan().unwrap();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-
-        // Another process holds the write lock. A current store still opens
-        // at once: the versions are read without it.
-        let holder = rusqlite::Connection::open(&path).unwrap();
-        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let started = Instant::now();
-        assert!(
-            EventCache::open(&v1, &crate::Options::default().source)
-                .unwrap()
-                .store
-                .is_some()
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(800),
-            "{:?}",
-            started.elapsed()
-        );
-
-        // A commit waits for it once; the scan's other writes then skip the
-        // store, and both changes stay in memory.
-        cache.begin_scan().unwrap();
-        append_lines(&log, &[said("m2", &["bb"])]);
-        touch(&log, 2);
-        let started = Instant::now();
-        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        let waited = started.elapsed();
-        assert!(
-            waited < Duration::from_millis(1800),
-            "one wait, not two: {waited:?}"
-        );
-        assert_eq!(index_snapshot(&index), cold(&log));
-        assert!(cache.store.is_some(), "a busy store stays in use");
-        let key = |path: &Path| path.to_string_lossy().into_owned();
-        assert!(cache.unpersisted.contains(&key(&log)));
-        assert!(cache.unpersisted.contains(&key(&other)));
-
-        // Released, and the other process writes the same change of `log`
-        // first. The next scan finds `log` current and stops holding it, and
-        // writes `other` through though it didn't change again.
-        holder.execute_batch("ROLLBACK").unwrap();
-        drop(holder);
-        let mut second = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        scan_file(&log, "claude", &mut second, &mut false).unwrap();
-        cache.end_scan();
-        cache.begin_scan().unwrap();
-        ledger_trace();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(ledger_trace(), ["unchanged"]);
-        assert!(!cache.unpersisted.contains(&key(&log)));
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        assert!(cache.unpersisted.is_empty());
-        // Nothing waits any more: the next scan shares both.
-        cache.end_scan();
-        ledger_trace();
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
-        assert_eq!(stored(&v1, &log), cold(&log));
-        assert_eq!(stored(&v1, &other), cold(&other));
-
-        // A store that must first be created can't be while another process
-        // holds its lock: the index runs in memory, and opens it on a later
-        // scan once the retry is due.
-        fs::create_dir(root.join("fresh")).unwrap();
-        let fresh_v1 = root.join("fresh/index.json");
-        let holder = rusqlite::Connection::open(EventCache::path(&fresh_v1)).unwrap();
-        holder
-            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE held (x INTEGER);")
-            .unwrap();
-        let mut fresh = EventCache::open(&fresh_v1, &crate::Options::default().source).unwrap();
-        assert!(fresh.store.is_none());
-        holder.execute_batch("ROLLBACK").unwrap();
-        drop(holder);
-        fresh.begin_scan().unwrap();
-        assert!(fresh.store.is_none(), "not before the retry is due");
-        fresh.reopen_at = Some(Instant::now());
-        fresh.begin_scan().unwrap();
-        assert!(fresh.store.is_some(), "opened on a later scan");
-        scan_file(&log, "claude", &mut fresh, &mut false).unwrap();
-        assert_eq!(stored(&fresh_v1, &log), cold(&log));
         fs::remove_dir_all(root).unwrap();
     }
 
