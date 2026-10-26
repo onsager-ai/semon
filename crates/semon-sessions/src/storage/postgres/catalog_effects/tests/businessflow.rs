@@ -361,6 +361,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite withdrawal oracle list")
     };
     let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
+    let sqlite_host = body_host(&options, &expected.rows);
     let parked = [
         (
             claude_agent.clone(),
@@ -441,6 +442,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     );
+    let oracle_retained_reads = oracle_withdrawn.iter().map(|row| {
+        let key = row["key"].as_str().unwrap();
+        let args = serde_json::json!({"id":key,"limit":100});
+        let body = crate::query::transcript::read(
+            &withdraw_options, key, &args, Some(&sqlite_host),
+            crate::SessionSourceReadMode::LocalThenProvider, 1790812802000,
+        ).unwrap().expect("SQLite retained body through preserved Raw custody");
+        let fields = crate::query::transcript::session(
+            &withdraw_options, key, &serde_json::json!({"id":key}), Some(&sqlite_host),
+            crate::SessionSourceReadMode::LocalThenProvider, 1790812802000,
+        ).unwrap().expect("SQLite retained fields through preserved Raw custody");
+        (key.to_owned(), serde_json::json!({"body":body,"fields":fields}))
+    }).collect::<std::collections::BTreeMap<_, _>>();
+    let oracle_retained_search = oracle_withdrawn.iter().map(|row| {
+        let key = row["key"].as_str().unwrap();
+        let query = format!("scope=retained_history&q={}&", crate::viewer::percent_encode(&key.to_lowercase()));
+        let keys = sqlite_scoped(&query, 50).iter().map(|item| item["key"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(keys.contains(&key.to_owned()));
+        (key.to_owned(), keys)
+    }).collect::<std::collections::BTreeMap<_, _>>();
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
@@ -872,7 +893,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             })
         }
     }
-    let body_host = |rows: &[CatalogRow]| {
+    fn body_host(options: &Options, rows: &[CatalogRow]) -> BodyHost {
         BodyHost(
             rows.iter()
                 .flat_map(|row| {
@@ -898,8 +919,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 })
                 .collect(),
         )
-    };
-    let retained_host = body_host(&prepared.rows);
+    }
+    let retained_host = body_host(&options, &prepared.rows);
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
@@ -1294,7 +1315,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: continued_generation.clone(),
         options: options.clone(),
     };
-    let next_host = body_host(&continued.rows);
+    let next_host = body_host(&options, &continued.rows);
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
     assert!(
         next_bodies
@@ -1613,7 +1634,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: moved_generation,
         options: options.clone(),
     };
-    let moved_host = body_host(&moved_rows);
+    let moved_host = body_host(&options, &moved_rows);
     assert_eq!(
         query
             .call_bound_selected_at(
@@ -2525,6 +2546,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{gone} retained search"
     );
     assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
+    for key in &removed {
+        assert_eq!(search(&caught, "scope=retained_history&", key), oracle_retained_search[key]);
+    }
     // Retained-only selected body: on the successor a withdrawn key has no
     // Current row, so its body is read through the proof-owned retained
     // recipe from Raw bytes and equals the SQLite ordinary body exactly.
@@ -2546,6 +2570,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .unwrap();
         assert_eq!(body, expected_bodies[key]["body"], "retained body {key}");
+        assert_eq!(body, oracle_retained_reads[key]["body"], "SQLite withdrawal body parity {key}");
         assert!(body.to_string().contains("sanitized agent answer"));
         let fields = query
             .call_bound_selected_at(
@@ -2556,10 +2581,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &retained_host,
             )
             .unwrap();
-        assert!(
-            fields.is_object() && fields.to_string().contains(key.as_str()),
-            "retained fields {key}: {fields}"
-        );
+        assert_eq!(fields, oracle_retained_reads[key]["fields"], "SQLite withdrawal fields parity {key}");
     }
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
