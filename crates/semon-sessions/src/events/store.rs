@@ -979,8 +979,10 @@ pub(crate) fn complete_relocation(
             crate::storage::StoreBackend::Postgres { .. }
         )
     {
-        return crate::storage::postgres::host::complete_relocation(config, options, input, evidence)
-            .map_err(io::Error::other);
+        return crate::storage::postgres::host::complete_relocation(
+            config, options, input, evidence,
+        )
+        .map_err(io::Error::other);
     }
     let journal = host_journal(options).map_err(io::Error::other)?;
     let db = journal.connection().map_err(io::Error::other)?;
@@ -10048,11 +10050,10 @@ mod tests {
                 .unwrap();
             // Corrupt the physical current schema through the owned journal,
             // rather than trying DML/DDL against the reader's scoped views.
-            store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
-                store.owner.clone(),
-            )
-            .connection()
-            .unwrap();
+            store.connection =
+                crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                    .connection()
+                    .unwrap();
             // Custody is deliberately opaque to version classification.
             store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
@@ -10160,11 +10161,10 @@ mod tests {
         store
             .write_one("retained", None, None, &ledger(1), &full())
             .unwrap();
-        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
-            store.owner.clone(),
-        )
-        .connection()
-        .unwrap();
+        store.connection =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                .connection()
+                .unwrap();
         store
             .connection
             .execute(

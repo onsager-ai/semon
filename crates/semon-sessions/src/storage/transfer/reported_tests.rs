@@ -463,16 +463,26 @@ fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledge
     let (ledger, _) = store.load_file(path.to_str().unwrap()).unwrap().unwrap();
     drop(store);
     let manifest = stage(&source, &target, &[122; 32]);
-    let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    let pages = source
+        .transfer_inbox()
+        .checkpoint(&manifest)
+        .unwrap()
+        .sequence;
     let mut witnessed = false;
     for sequence in 1..=pages {
-        for record in source.transfer_inbox().staged_page(&manifest, sequence).unwrap().records {
+        for record in source
+            .transfer_inbox()
+            .staged_page(&manifest, sequence)
+            .unwrap()
+            .records
+        {
             if let TransferRecord::NativeSource(mut native) = record {
                 assert!(!native.usage_ready);
                 assert_eq!(native.checkpoint, 0);
                 assert!(ledger.offset > 0);
                 native_pages::validate_source_ledger(&native, &ledger).unwrap();
-                let mut header: serde_json::Value = serde_json::from_str(&native.chunks_header).unwrap();
+                let mut header: serde_json::Value =
+                    serde_json::from_str(&native.chunks_header).unwrap();
                 header["consumed_offset"] = (ledger.offset + 1).into();
                 native.chunks_header = serde_json::to_string(&header).unwrap();
                 assert!(native_pages::validate_source_ledger(&native, &ledger).is_err());
