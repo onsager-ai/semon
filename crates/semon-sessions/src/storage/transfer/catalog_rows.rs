@@ -1,6 +1,16 @@
 //! Fixed logical Catalog records carried by the ordinary transfer checkpoint.
 //! These records do not grant a publication ACK, reader lease or ownership.
 use super::*;
+pub(crate) const IMPORTED_GENERATION: &str = "native_transfer_v1:catalog-content-generation";
+
+pub(crate) fn bind_imported_generation(
+    tx: &mut impl InboxTransaction, generation: &str,
+) -> Result<(), StorageError> {
+    if let Some(old) = tx.get(IMPORTED_GENERATION, 64)? {
+        if old != generation.as_bytes() { return Err(StorageError::Conflict); }
+    } else { tx.put(IMPORTED_GENERATION, generation.as_bytes())?; }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogRowKind {
@@ -10,6 +20,7 @@ pub enum CatalogRowKind {
     History,
     HistoryRecipe,
     HistorySlot,
+    HistoryOriginal,
     TraceHeader,
     TraceTurn,
     TraceEdge,
@@ -21,14 +32,14 @@ pub enum CatalogRowKind {
 impl CatalogRowKind {
     pub(crate) const ALL: &'static [Self] = &[
         Self::Current, Self::Recipe, Self::Slot, Self::History,
-        Self::HistoryRecipe, Self::HistorySlot, Self::TraceHeader,
+        Self::HistoryRecipe, Self::HistorySlot, Self::HistoryOriginal, Self::TraceHeader,
         Self::TraceTurn, Self::TraceEdge, Self::TraceBookmark,
         Self::SearchDocument, Self::SearchCount,
     ];
     pub(crate) fn category(self) -> Category {
         match self {
             Self::Current => Category::CatalogCurrent,
-            Self::History => Category::CatalogHistory,
+            Self::History | Self::HistoryOriginal => Category::CatalogHistory,
             Self::Recipe | Self::HistoryRecipe => Category::Recipes,
             Self::Slot | Self::HistorySlot => Category::Slots,
             Self::SearchDocument | Self::SearchCount => Category::Search,
@@ -60,6 +71,10 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             let (key, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
             let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).map_err(bad)?;
             if row.key != key || row.sources.len() > 64 { return Err(StorageError::ScopeChanged); }
+        }
+        HistoryOriginal => {
+            let (_, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
+            let _: Option<crate::storage::catalog::OriginalHeader> = serde_json::from_str(&metadata).map_err(bad)?;
         }
         Recipe => {
             let (_, _, _, version, total): (String, String, Option<String>, u32, u64) = serde_json::from_value(v).map_err(bad)?;

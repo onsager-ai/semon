@@ -13,6 +13,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
         History => (HISTORY, "session_key,metadata"),
         HistoryRecipe => (HISTORY, "session_key,recipe_generation,source_generation,version,total,incomplete"),
         HistorySlot => (HISTORY_SLOTS, "session_key,slot,metadata"),
+        HistoryOriginal => (HISTORY_ORIGINAL, "session_key,original_header"),
         TraceHeader => ("semon_pg_native_catalog_trace_headers", "session_key,trace_generation,source_generation,metadata"),
         TraceTurn => ("semon_pg_native_catalog_trace_turns", "session_key,turn_id,start_id,metadata"),
         TraceEdge => ("semon_pg_native_catalog_trace_edges", "session_key,edge_id,metadata"),
@@ -23,6 +24,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
 }
 const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.metadata,h.recipe_generation,coalesce(h.source_generation,''::bytea) AS source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key) AS history";
 const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,s.session_key,s.slot,s.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_slots s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key) AS history_slots";
+const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.original_header FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE h.original_header IS NOT NULL) AS history_original";
 
 pub(super) fn capture(tx: &mut Inbox<'_, '_>, state: &mut CaptureState) -> Result<transfer::CaptureProgress, StorageError> {
     let index = usize::from(state.native_family - 32);
@@ -30,7 +32,11 @@ pub(super) fn capture(tx: &mut Inbox<'_, '_>, state: &mut CaptureState) -> Resul
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
-    let Some(generation) = super::super::model_cache::generation(tx.0)? else {
+    let generation = match super::super::model_cache::generation(tx.0)? {
+        Some(generation) => Some(generation),
+        None => tx.get(catalog_rows::IMPORTED_GENERATION, 64)?.map(|bytes| String::from_utf8(bytes).map_err(|_|StorageError::ScopeChanged)).transpose()?,
+    };
+    let Some(generation) = generation else {
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
@@ -85,9 +91,16 @@ pub(super) fn capture(tx: &mut Inbox<'_, '_>, state: &mut CaptureState) -> Resul
 pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(), StorageError> {
     catalog_rows::validate(record)?;
     let TransferRecord::CatalogRow { generation, kind, values } = record else { return Err(StorageError::InvalidArguments); };
+    catalog_rows::bind_imported_generation(tx, generation)?;
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
+    if *kind == HistoryOriginal {
+        let changed = tx.0.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET original_header=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+        if changed != 1 { return Err(StorageError::ScopeChanged); }
+        tx.0.driver.execute("UPDATE semon_pg_native_catalog_history_owners SET original=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes()]).map_err(sqlstate::error)?;
+        return Ok(());
+    }
     if matches!(kind, Current | History) {
         let metadata = text(1)?;
         let row: crate::model::summary::CatalogRow = serde_json::from_str(metadata).map_err(|_|StorageError::ScopeChanged)?;
@@ -142,4 +155,44 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     let refs = binds.iter().map(|v| &**v as &(dyn ToSql + Sync)).collect::<Vec<_>>();
     tx.0.driver.execute(&format!("INSERT INTO semon_pg_native_{table}({}) VALUES({})",names.join(","),slots.join(",")), &refs).map_err(sqlstate::error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
+
+    #[test]
+    fn pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw() {
+        let root = root();
+        let source = sqlite(&root,"pg-catalog-source");
+        let reverse = sqlite(&root,"pg-catalog-reverse");
+        let (options, expected) = seed_catalog(&source,&root);
+        let (pool, _) = super::super::super::tests::fixture(|_| {});
+        let control = PgCancellation::default();
+        let config = StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
+            namespace: source.namespace.clone(), expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        config.create_native_store().unwrap();
+        let manifest = stage(&source,&config,&[120;32]);
+        std::fs::remove_dir_all(&options.claude_home).unwrap();
+        apply(&config,&manifest);
+        pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY session_key", &[&ns]).map_err(sqlstate::error)?;
+            let actual = rows.iter().map(|row|serde_json::from_slice::<crate::model::summary::CatalogRow>(&row.get::<_,Vec<u8>>(0)).unwrap()).collect::<Vec<_>>();
+            assert_eq!(serde_json::to_value(actual).unwrap(),serde_json::to_value(&expected).unwrap());
+            let slots:i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+            assert!(slots>64);
+            assert!(super::super::super::model_cache::generation(tx)?.is_none(),"content transfer must not fabricate a publication ACK");
+            Ok(())
+        }).unwrap();
+        let backwards = stage(&config,&reverse,&[121;32]);
+        for category in [transfer::Category::CatalogCurrent,transfer::Category::Recipes,transfer::Category::Slots,transfer::Category::Trace,transfer::Category::Search] {
+            assert_eq!(manifest.categories.iter().find(|c|c.category==category).unwrap(),backwards.categories.iter().find(|c|c.category==category).unwrap());
+        }
+        apply(&reverse,&backwards);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

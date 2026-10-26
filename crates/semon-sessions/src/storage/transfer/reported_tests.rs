@@ -298,6 +298,64 @@ pub(crate) fn seed_native_usage(config: &StoreConfig, path: &Path, count: usize)
     let mut cache=cache(config);cache.ingest(&"4".repeat(64),path,"claude").unwrap();cache.flush_cold_writes().unwrap();
 }
 
+pub(crate) fn seed_catalog(config: &StoreConfig, root: &Path) -> (crate::Options, Vec<crate::model::summary::CatalogRow>) {
+    let options = crate::Options {
+        source: crate::storage::HostSource::new(config.namespace.clone(), config.expected_stream_epoch.clone().unwrap()).unwrap().with_store(config.clone()).unwrap(),
+        claude_home: root.join("claude"), claude_json: root.join("claude.json"),
+        codex_home: root.join("codex"), copilot_home: root.join("copilot"),
+        proc_root: root.join("proc"), cache: root.join("unused.sqlite3"),
+        all: true, ..Default::default()
+    };
+    let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/sanitized/catalog.jsonl".into() };
+    let path = input.full_path(&options);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
+    std::fs::write(options.proc_root.join("sys/kernel/hostname"), "sanitized-transfer-host\n").unwrap();
+    let body = (0..130).map(|i| format!("{}\n",serde_json::json!({"type":"user","sessionId":"catalog","uuid":format!("u{i}"),"parentUuid":if i==0 {None} else {Some(format!("u{}",i-1))},"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":format!("sanitized {i}")}}))).collect::<String>();
+    std::fs::write(&path, body).unwrap();
+    let mut cache = cache(config);
+    cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
+    cache.flush_cold_writes().unwrap();
+    let paths = vec![path.to_str().unwrap().to_owned()];
+    assert_eq!(cache.begin_semantic_stage_with_journal(&paths,"transfer-real-model",true).unwrap(),crate::events::Outcome::Written);
+    for _ in 0..256 {
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        if batch.paths.is_empty() { continue; }
+        let model = cache.prepare_semantic_model_batch(&options,std::slice::from_ref(&input),&batch,1_790_000_000_000).unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            assert!(!model.prepared().rows.is_empty());
+            assert!(model.prepared().transcripts.iter().map(|p|p.slots.len()).sum::<usize>() > 64);
+            assert_eq!(cache.publish_semantic_catalog(&batch,model.prepared()).unwrap().0,crate::events::Outcome::Written);
+            return (options,model.prepared().rows.clone());
+        }
+    }
+    panic!("real source Catalog did not publish");
+}
+
+#[test]
+fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_publication() {
+    let root = root();
+    let source = sqlite(&root,"catalog-source");
+    let target = sqlite(&root,"catalog-target");
+    let reverse = sqlite(&root,"catalog-reverse");
+    let (options, expected) = seed_catalog(&source,&root);
+    let manifest = stage(&source,&target,&[118;32]);
+    assert!(manifest.categories.iter().find(|c|c.category==Category::Slots).unwrap().rows>64);
+    std::fs::remove_dir_all(&options.claude_home).unwrap();
+    apply(&target,&manifest);
+    let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let actual = crate::storage::sqlite::catalog::rows(&db,&crate::catalog::Request::parse("limit=60").unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&actual).unwrap(),serde_json::to_value(&expected).unwrap());
+    assert!(target.catalog_generation().is_err(),"content transfer cannot manufacture publication authority");
+    let backwards = stage(&target,&reverse,&[119;32]);
+    for category in [Category::CatalogCurrent,Category::Recipes,Category::Slots,Category::Trace,Category::Search] {
+        assert_eq!(manifest.categories.iter().find(|c|c.category==category).unwrap(), backwards.categories.iter().find(|c|c.category==category).unwrap());
+    }
+    apply(&reverse,&backwards);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 pub(crate) fn sqlite_core(config: &StoreConfig, path: &Path) -> serde_json::Value {
     let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
     let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
