@@ -1987,6 +1987,16 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
+        // Test-only static step labels; never values, paths or SQL.
+        fn step(step: &'static str) -> impl Fn(crate::storage::StorageError) -> io::Error {
+            move |error| {
+                #[cfg(test)]
+                eprintln!("source recovery step={step} error={error:?}");
+                #[cfg(not(test))]
+                let _ = step;
+                io::Error::other(error.to_string())
+            }
+        }
         // A database path is an optional SQLite timing coordinate, never the
         // identity or admission requirement of a logical Source journal.
         let _probe = self
@@ -1997,7 +2007,10 @@ impl EventCache {
         if self.reconciled_recovery.is_none()
             && (self.pending_source_operation.is_some() || self.deferred_source_operations)
         {
-            self.reconcile_pending_source_operation()?;
+            self.reconcile_pending_source_operation().inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("source recovery step=reconcile");
+            })?;
         }
         if let Some(done) = self.reconciled_recovery.take() {
             return Ok(done);
@@ -2005,31 +2018,34 @@ impl EventCache {
         let store = self
             .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?;
-        if store
-            .recovery_is_current()
-            .map_err(|error| io::Error::other(error.to_string()))?
-        {
+        if store.recovery_is_current().map_err(step("is_current"))? {
             return Ok(true);
         }
-        let cursor = store
-            .recovery_cursor()
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let cursor = store.recovery_cursor().map_err(step("cursor"))?;
         let operation = crate::storage::source_observations::SourceOperation::capture(
             &self.observation_namespace,
             "recover",
             &serde_json::to_vec(&cursor).map_err(io::Error::other)?,
         );
-        let operation = self.persist_source_operation(PendingSourceOperation::Recover {
-            operation,
-            cursor: cursor.clone(),
-        })?;
+        let operation = self
+            .persist_source_operation(PendingSourceOperation::Recover {
+                operation,
+                cursor: cursor.clone(),
+            })
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("source recovery step=intent");
+            })?;
         let (_, done) = self
             .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
             .recover(&operation, cursor.as_deref())
-            .map_err(|error| io::Error::other(error.to_string()))?;
+            .map_err(step("recover"))?;
         // The native port has already committed its matching ACK with Done.
-        self.finish_source_operation(&operation)?;
+        self.finish_source_operation(&operation).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("source recovery step=ack");
+        })?;
         Ok(done)
     }
     pub(crate) fn discover_catalog_sources(
