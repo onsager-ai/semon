@@ -259,7 +259,7 @@ pub(super) fn read(
         return Ok(None);
     }
     let mut statement = connection.prepare(
-        configured::metadata_sql(connection, "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key", "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")?
+        "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key"
     )?;
     let mut rows = statement.query(params![
         &prefix,
@@ -614,7 +614,7 @@ impl Focused {
         {
             let witness: Option<String> = tx
                 .query_row(
-                    configured::metadata_sql(tx, "SELECT json_extract(value,'$.sha256') FROM meta WHERE key=?1", "SELECT json_extract(value,'$.sha256') FROM meta WHERE namespace=semon_namespace() AND key=?1").map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?,
+                    "SELECT json_extract(value,'$.sha256') FROM meta WHERE namespace=semon_namespace() AND key=?1",
                     [format!("{}{page:010}", self.prefix)],
                     |r| r.get(0),
                 )
@@ -777,20 +777,12 @@ pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Resu
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
     transaction.execute(
-        configured::metadata_sql(
-            transaction,
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?,
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
     let namespace = format!("native_proof_tree:{prefix}:");
     transaction.execute(
-        configured::metadata_sql(
-            transaction,
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?,
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&namespace, format!("{namespace}~")],
     )?;
     Ok(())
@@ -832,7 +824,7 @@ pub(super) fn write_measured(
     published::preserve(transaction, path)?;
     measurements.record("chunks_prefix", started, 1);
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::metadata_sql(transaction, "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value", "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?)?;
+    let mut put = transaction.prepare_cached("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("chunks_prepare", started, 1);
     let plan = crate::events::native_pages::chunks::plan(ledger, chunks)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
@@ -850,11 +842,7 @@ pub(super) fn write_measured(
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
         transaction.execute(
-            configured::metadata_sql(
-                transaction,
-                "DELETE FROM meta WHERE key>=?1 AND key<?2",
-                "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-            )?,
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
             params![
                 format!("{namespace}{:010}", nodes.len()),
                 format!("{namespace}~")
@@ -862,11 +850,7 @@ pub(super) fn write_measured(
         )?;
     }
     transaction.execute(
-        configured::metadata_sql(
-            transaction,
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?,
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![
             format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()),
             format!("native_proof_tree:{prefix}:~")
@@ -1432,7 +1416,7 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name)) {
+        match SqliteStore::attempt(&root.join(name), &crate::events::store::fixture_namespace()) {
             Ok((store, _)) => store,
             Err(error) => panic!("real Index schema: {error}"),
         }

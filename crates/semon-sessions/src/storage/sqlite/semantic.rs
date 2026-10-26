@@ -551,7 +551,7 @@ impl<'tx> FrontierLayout<'tx> {
         let db: &Connection = tx;
         Ok(Self {
             db,
-            header_scoped: crate::events::store::configured::metadata_sql(db, "", "namespace")?
+            header_scoped: "namespace"
                 == "namespace",
             support_scoped: crate::events::store::semantic_stage::support_sql(db, "", "namespace")?
                 == "namespace",
@@ -1157,11 +1157,7 @@ fn error(error: rusqlite::Error) -> StoreError {
 }
 fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
     db.query_row(
-        crate::events::store::configured::metadata_sql(
-            db,
-            "SELECT value FROM meta WHERE key='catalog_generation'",
-            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
-        )?,
+        "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
         [],
         |r| r.get(0),
     )

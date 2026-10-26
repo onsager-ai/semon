@@ -897,8 +897,11 @@ pub(super) fn open_scoped(
 
 /// Qualify an exact selected or recovery path without traversing unrelated
 /// archived markers. An existing database is never initialized or reset here.
-pub(crate) fn open_selected(path: &Path) -> Result<(), String> {
-    SqliteStore::attempt_selected(path)
+pub(crate) fn open_selected(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+) -> Result<(), String> {
+    SqliteStore::attempt_selected(path, namespace)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -944,10 +947,10 @@ pub(crate) fn note_catalog_audit(
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
-    let ready: bool = tx.query_row(configured::metadata_sql(&tx, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())").map_err(io::Error::other)?, [expected], |r| r.get(0)).map_err(io::Error::other)?;
+    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", [expected], |r| r.get(0)).map_err(io::Error::other)?;
     if ready {
         tx.execute(
-            configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_observed_at',?1)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)").map_err(io::Error::other)?,
+            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)",
             [now.to_string()],
         )
         .map_err(io::Error::other)?;
@@ -1252,14 +1255,14 @@ pub(crate) fn prioritize_projection_sources(
         let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
     }
     tx.execute(
-        configured::metadata_sql(&tx, "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'", "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'").map_err(io::Error::other)?,
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'",
         [],
     )
     .map_err(io::Error::other)?;
     for source in sources {
         let path = source.path.to_string_lossy();
         tx.execute(
-            configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)").map_err(io::Error::other)?,
+            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
             params![format!("slot_upgrade_selected:{path}"), path],
         )
         .map_err(io::Error::other)?;
@@ -1285,7 +1288,7 @@ pub(crate) fn prioritize_projection_sources(
 pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     let after: Option<String> = tx
         .query_row(
-            configured::metadata_sql(tx, "SELECT value FROM meta WHERE key='catalog_recovery_after'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
+            "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'",
             [],
             |row| row.get(0),
         )
@@ -1327,9 +1330,7 @@ pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     });
     for path in paths {
         let bytes: Option<i64> = tx.query_row(
-            configured::metadata_sql(tx,
-                "SELECT octet_length(value) FROM meta WHERE key=?1",
-                "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1").map_err(io::Error::other)?,
+            "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [archive_index_key(path)], |row| row.get(0),
         ).optional().map_err(io::Error::other)?;
         page_bytes = page_bytes
@@ -1354,12 +1355,12 @@ pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     }
     if let Some(last) = &page.next {
         tx.execute(
-            configured::metadata_sql(tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE main.meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
+            "UPDATE main.meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'",
             [last],
         )
         .map_err(io::Error::other)?;
     } else {
-        tx.execute(configured::metadata_sql(tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM main.meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
+        tx.execute("DELETE FROM main.meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'", [])
             .map_err(io::Error::other)?;
     }
     Ok(page.done)
@@ -1372,9 +1373,9 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
-    tx.execute_batch(configured::metadata_sql(&tx, "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');", "DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?).map_err(io::Error::other)?;
+    tx.execute_batch("DELETE FROM main.catalog_backfill_sources WHERE namespace=semon_namespace(); INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','discovering'),(semon_meta_scope('catalog_recovery_after'),'catalog_recovery_after','');").map_err(io::Error::other)?;
     tx.execute(
-        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_reason'),'catalog_recovery_reason',?1)").map_err(io::Error::other)?,
+        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_recovery_reason'),'catalog_recovery_reason',?1)",
         [reason],
     )
     .map_err(io::Error::other)?;
@@ -1440,8 +1441,14 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let namespace = options
+        .source
+        .config(&options.cache)
+        .map_err(io::Error::other)?
+        .namespace;
+    let (store, _) =
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true, &namespace)
+            .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for input in inputs {
@@ -1463,7 +1470,7 @@ pub(crate) fn enqueue_sources(
         .map_err(io::Error::other)?;
     }
     tx.execute(
-        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_push_driven','1')", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')").map_err(io::Error::other)?,
+        "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')",
         [],
     )
     .map_err(io::Error::other)?;
@@ -1669,7 +1676,7 @@ pub(crate) fn enqueue_facts(
     }
     if push_driven {
         tx.execute(
-            configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_push_driven','1')", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')").map_err(io::Error::other)?,
+            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')",
             [],
         )
         .map_err(io::Error::other)?;
@@ -1865,7 +1872,7 @@ pub(crate) fn begin_source_write(
         .map_err(io::Error::other)?;
     }
     tx.execute(
-        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_push_driven','1')", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')").map_err(io::Error::other)?,
+        "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_push_driven'),'catalog_push_driven','1')",
         [],
     )
     .map_err(io::Error::other)?;
@@ -2104,6 +2111,12 @@ pub(crate) fn focused_unbound_connection(path: &Path) -> io::Result<Connection> 
     }
     read.commit().map_err(io::Error::other)?;
     Ok(db)
+}
+
+/// The single logical source bound by SqliteStore fixtures.
+#[cfg(test)]
+pub(crate) fn fixture_namespace() -> crate::storage::LogicalSourceNamespace {
+    crate::storage::LogicalSourceNamespace::new("fixture-source").unwrap()
 }
 
 #[cfg(test)]
@@ -2642,7 +2655,7 @@ impl IndexStore for SqliteStore {
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(
-                configured::metadata_sql(&self.connection, "SELECT value FROM meta WHERE key='catalog_generation'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'").map_err(failure)?,
+                "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -3047,12 +3060,7 @@ fn queue_tree_repair_tx(tx: &Transaction<'_>, path: &str, ledger: &Ledger) -> io
     }
     let failed: Option<String> = tx
         .query_row(
-            configured::metadata_sql(
-                &tx,
-                "SELECT value FROM meta WHERE key=?1",
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
-            )
-            .map_err(io::Error::other)?,
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_failure:{path}")],
             |r| r.get(0),
         )
@@ -3213,7 +3221,7 @@ fn closed_catalog(
     claims: &[(String, Option<i64>)],
 ) -> rusqlite::Result<bool> {
     let complete: bool = connection.query_row(
-        configured::metadata_sql(connection, "SELECT COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND COALESCE((SELECT value FROM meta WHERE key='catalog_version'),'')=?1", "SELECT COALESCE((SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness'),'complete')='complete' AND COALESCE((SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'),'')=?1")?,
+        "SELECT COALESCE((SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness'),'complete')='complete' AND COALESCE((SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'),'')=?1",
         [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get(0),
     )?;
     if !complete || claims.is_empty() || claims.len() > 64 || publication.rows.len() > 64 {
@@ -3683,7 +3691,7 @@ impl SqliteStore {
             let setup_started = metadata_measurements.start();
             let search_version: Option<String> = transaction
                 .query_row(
-                    configured::metadata_sql(&transaction, "SELECT value FROM meta WHERE key='search_version'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version'").map_err(failure)?,
+                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version'",
                     [],
                     |row| row.get(0),
                 )
@@ -3693,7 +3701,7 @@ impl SqliteStore {
                 search_version.as_deref() != Some(crate::catalog_search::VERSION);
             let search_backfill: Option<String> = transaction
                 .query_row(
-                    configured::metadata_sql(&transaction, "SELECT value FROM meta WHERE key='search_backfill_complete'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_backfill_complete') AND key='search_backfill_complete'").map_err(failure)?,
+                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_backfill_complete') AND key='search_backfill_complete'",
                     [],
                     |row| row.get(0),
                 )
@@ -3703,11 +3711,11 @@ impl SqliteStore {
                 claims.is_none() && (initialize_search || search_backfill.as_deref() != Some("1"));
             if initialize_search && admitted.is_none() {
                 crate::catalog_search::clear(&transaction).map_err(failure)?;
-                transaction.execute(configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','0')", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','0')").map_err(failure)?,[]).map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','0')",[]).map_err(failure)?;
             }
             let previous_version: Option<String> = transaction
                 .query_row(
-                    configured::metadata_sql(&transaction, "SELECT value FROM meta WHERE key = 'catalog_version'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'").map_err(failure)?,
+                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
                     [],
                     |row| row.get(0),
                 )
@@ -4153,7 +4161,7 @@ impl SqliteStore {
                 }
                 if rebuild_search {
                     crate::catalog_search::finish_backfill(&transaction).map_err(failure)?;
-                    transaction.execute(configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1')").map_err(failure)?,[]).map_err(failure)?;
+                    transaction.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1')",[]).map_err(failure)?;
                 }
                 if claims.is_none() {
                     crate::catalog_search::retire_missing(&transaction).map_err(failure)?;
@@ -4169,10 +4177,10 @@ impl SqliteStore {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
                 if claims.is_some() {
-                    transaction.execute(configured::metadata_sql(&transaction, "INSERT INTO meta(key,value) VALUES ('catalog_publication_epoch','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", "INSERT INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_publication_epoch'),'catalog_publication_epoch','1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)").map_err(failure)?,[]).map_err(failure)?;
+                    transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_publication_epoch'),'catalog_publication_epoch','1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[]).map_err(failure)?;
                     let epoch: String = transaction
                         .query_row(
-                            configured::metadata_sql(&transaction, "SELECT value FROM meta WHERE key='catalog_publication_epoch'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_publication_epoch') AND key='catalog_publication_epoch'").map_err(failure)?,
+                            "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_publication_epoch') AND key='catalog_publication_epoch'",
                             [],
                             |row| row.get(0),
                         )
@@ -4215,7 +4223,7 @@ impl SqliteStore {
             if !preserve_complete || claims.is_none() {
                 transaction
                     .execute(
-                        configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_observed_at',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)").map_err(failure)?,
+                        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)",
                         [crate::model::now_ms().to_string()],
                     )
                     .map_err(failure)?;
@@ -4240,11 +4248,11 @@ impl SqliteStore {
                     transaction.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
                     transaction.execute("DELETE FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
                 }
-                transaction.execute(configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES ('slot_projection_catalog_generation',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('slot_projection_catalog_generation'),'slot_projection_catalog_generation',?1)").map_err(failure)?, [&generation]).map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('slot_projection_catalog_generation'),'slot_projection_catalog_generation',?1)", [&generation]).map_err(failure)?;
             } else {
                 transaction
                     .execute(
-                        configured::metadata_sql(&transaction, "DELETE FROM meta WHERE key='slot_projection_catalog_generation'", "DELETE FROM main.meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation'").map_err(failure)?,
+                        "DELETE FROM main.meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation'",
                         [],
                     )
                     .map_err(failure)?;
@@ -4261,20 +4269,20 @@ impl SqliteStore {
                     .map_err(failure)?;
                 transaction
                     .execute(
-                        configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)").map_err(failure)?,
+                        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
                         params![format!("search_generation_{scope}"), generation],
                     )
                     .map_err(failure)?;
                 transaction
                     .execute(
-                        configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)").map_err(failure)?,
+                        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
                         params![format!("search_incomplete_{scope}"), incomplete.to_string()],
                     )
                     .map_err(failure)?;
             }
             transaction
                 .execute(
-                    configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES('search_version',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_version'),'search_version',?1)").map_err(failure)?,
+                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_version'),'search_version',?1)",
                     [crate::catalog_search::VERSION],
                 )
                 .map_err(failure)?;
@@ -4305,7 +4313,7 @@ impl SqliteStore {
             }
             transaction
                 .execute(
-                    configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_completeness',?1)", "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_completeness'),'catalog_completeness',?1)").map_err(failure)?,
+                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES (semon_meta_scope('catalog_completeness'),'catalog_completeness',?1)",
                     [if claims.is_some() && !preserve_complete {
                         "partial"
                     } else {
@@ -4370,11 +4378,18 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn attempt(path: &Path) -> Result<(Self, Loaded), Unopened> {
-        Self::attempt_scoped(path, false)
+    fn attempt(
+        path: &Path,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<(Self, Loaded), Unopened> {
+        Self::attempt_scoped(path, false, namespace)
     }
 
-    fn attempt_scoped(path: &Path, scoped: bool) -> Result<(Self, Loaded), Unopened> {
+    fn attempt_scoped(
+        path: &Path,
+        scoped: bool,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -4415,6 +4430,9 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(classify)?;
+        // Every statement reads and writes through the bound namespace.
+        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
+            .map_err(|error| Unopened::Other(error.to_string()))?;
         match init(&mut connection).map_err(classify)? {
             Init::Ready => {}
             Init::NoWal => {
@@ -4455,10 +4473,13 @@ impl SqliteStore {
     /// Opens an existing current store for bounded selected or recovery work.
     /// Unlike producer opens, this does not initialize storage or inspect
     /// unrelated archived markers.
-    fn attempt_selected(path: &Path) -> Result<Self, Unopened> {
+    fn attempt_selected(
+        path: &Path,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<Self, Unopened> {
         crate::native_timing::discovery_count(|counts| counts.factory_opens += 1);
         if !path.exists() {
-            return Self::attempt_scoped(path, true).map(|(store, _)| store);
+            return Self::attempt_scoped(path, true, namespace).map(|(store, _)| store);
         }
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
@@ -4514,6 +4535,8 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(classify)?;
+        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
+            .map_err(|error| Unopened::Other(error.to_string()))?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
         copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
@@ -4534,7 +4557,7 @@ impl SqliteStore {
         Ok(self
             .connection
             .query_row(
-                configured::metadata_sql(&self.connection, "SELECT value FROM meta WHERE key='claude_json_stamp'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,
+                "SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -4565,7 +4588,7 @@ impl SqliteStore {
         let reported_runs = read_runs(&transaction)?;
         let stamp = transaction
             .query_row(
-                configured::metadata_sql(&transaction, "SELECT value FROM meta WHERE key = 'claude_json_stamp'", "SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,
+                "SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -4735,7 +4758,7 @@ impl SqliteStore {
             }
         }
         transaction.execute(
-            configured::metadata_sql(&transaction, "INSERT OR REPLACE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)", "INSERT OR REPLACE INTO meta (namespace,key,value) VALUES (semon_meta_scope('claude_json_stamp'),'claude_json_stamp', ?1)")?,
+            "INSERT OR REPLACE INTO meta (namespace,key,value) VALUES (semon_meta_scope('claude_json_stamp'),'claude_json_stamp', ?1)",
             [json(stamp)?],
         )?;
         let all = match &self.selected_runs {
@@ -5004,7 +5027,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
     configured::validate_statement_layout(connection)?;
     let parser = match connection
         .query_row(
-            configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE key='cache_version'", "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('cache_version') AND key='cache_version'")?,
+            "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('cache_version') AND key='cache_version'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -5053,7 +5076,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         }
     }
     let publication: bool = connection.query_row(
-        configured::metadata_sql(connection, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?3)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe' AND value<>?3)")?,
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe' AND value<>?3)",
         params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
         |row| row.get(0),
     )?;
@@ -5177,7 +5200,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     }
     copied_usage_sql(connection, "", "")?;
     let unsupported_archive: bool = connection.query_row(
-        configured::metadata_sql(connection, "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)")?,
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
         [CACHE_VERSION],
         |row| row.get(0),
     )?;
@@ -5282,7 +5305,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     transaction.execute_batch(ddl)?;
                 }
                 transaction.execute(
-                    configured::metadata_sql(&transaction, "INSERT INTO meta(key,value) VALUES('cache_version',?1)", "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('cache_version'),'cache_version',?1)")?,
+                    "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('cache_version'),'cache_version',?1)",
                     [CACHE_VERSION.to_string()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -5336,11 +5359,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
     Ok(connection
-        .prepare_cached(configured::metadata_sql(
-            connection,
-            "SELECT value FROM meta WHERE key = 'cache_version'",
-            "SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'",
-        )?)?
+        .prepare_cached("SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'")?
         .query_row([], |row| row.get::<_, String>(0))
         .optional()?
         .and_then(|value| value.parse().ok()))
@@ -5444,16 +5463,12 @@ fn current_file_count(
     )?;
     let mut statement = connection.prepare(
         configured::sql(connection,
-            configured::metadata_sql(connection, "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
+            "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
          CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
-         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.key GLOB ?2", "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
+         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.namespace=semon_namespace() AND m.key GLOB ?2",
+            "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
          CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
-         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.namespace=semon_namespace() AND m.key GLOB ?2")?,
-            configured::metadata_sql(connection, "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
-         CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
-         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE f.namespace=semon_namespace() AND m.key GLOB ?2", "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
-         CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
-         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE f.namespace=semon_namespace() AND m.namespace=semon_namespace() AND m.key GLOB ?2")?,
+         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE f.namespace=semon_namespace() AND m.namespace=semon_namespace() AND m.key GLOB ?2",
         )?,
     )?;
     let mut rows = statement.query(["archive_event_index:", "archive_event_index:*"])?;
@@ -5473,9 +5488,7 @@ fn current_file_count(
 
 fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Option<ArchivedIndex>> {
     let encoded: Option<Option<String>> = connection.query_row(
-        configured::metadata_sql(connection,
-            "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",
-            "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1")?,
+        "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1",
         [archive_index_key(path)], |row| row.get(0),
     ).optional()?;
     encoded
@@ -5722,39 +5735,22 @@ pub(crate) fn metadata_schema() -> &'static str {
     "CREATE TABLE IF NOT EXISTS meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;"
 }
 
-const NATIVE_METADATA_VALUE: &str =
-    "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1";
+const NATIVE_METADATA_VALUE: &str = "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1";
 
-fn native_metadata_value(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(
-        connection,
-        NATIVE_METADATA_VALUE,
-        "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
-    )
+fn native_metadata_value(_: &Connection) -> rusqlite::Result<&'static str> {
+    Ok(NATIVE_METADATA_VALUE)
 }
 
-fn native_metadata_put(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(
-        connection,
-        "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
-    )
+fn native_metadata_put(_: &Connection) -> rusqlite::Result<&'static str> {
+    Ok("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value")
 }
 
-fn metadata_increment(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(
-        connection,
-        "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-    )
+fn metadata_increment(_: &Connection) -> rusqlite::Result<&'static str> {
+    Ok("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)")
 }
 
-fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(
-        connection,
-        "DELETE FROM meta WHERE key=?1",
-        "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
-    )
+fn native_metadata_delete(_: &Connection) -> rusqlite::Result<&'static str> {
+    Ok("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1")
 }
 
 use super::tree_rows::TreeSummaryRecord;
@@ -6406,7 +6402,7 @@ fn validate_prior_reported(
             read_run(prior)?;
         }
     }
-    let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
+    let stamp: Option<String> = connection.query_row("SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'",[],|row|row.get(0)).optional()?;
     if let Some(stamp) = stamp {
         super::reported_rows::decode_stamp(stamp.as_bytes())
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -7354,10 +7350,10 @@ mod tests {
         let path = root.join("index.sqlite3");
         for selected in [false, true] {
             let mut store = if selected {
-                SqliteStore::attempt_selected(&path)
+                SqliteStore::attempt_selected(&path, &fixture_namespace())
                     .unwrap_or_else(|_| panic!("selected factory refused current store"))
             } else {
-                SqliteStore::attempt_scoped(&path, true)
+                SqliteStore::attempt_scoped(&path, true, &fixture_namespace())
                     .unwrap_or_else(|_| panic!("producer factory refused current store"))
                     .0
             };
@@ -7598,7 +7594,7 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path) {
+        match SqliteStore::attempt(path, &fixture_namespace()) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -10127,7 +10123,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, true) {
+                store = match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
                     Ok((store, _)) => store,
                     Err(error) => panic!("reopen transfer store: {error}"),
                 };
@@ -10293,7 +10289,7 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, true) {
+                match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
                     Ok((store, loaded)) => {
                         assert!(loaded.files.is_empty());
                         assert!(loaded.reported_runs.is_empty());
@@ -11929,7 +11925,7 @@ mod tests {
             ),
             (
                 "older-with-future-recipe",
-                "PRAGMA user_version=32; INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
+                "PRAGMA user_version=32; INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
                 "older schema",
             ),
             (
@@ -11979,27 +11975,27 @@ mod tests {
             ),
             (
                 "publication",
-                "INSERT INTO meta VALUES('catalog_version','4294967295')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_version','4294967295')",
                 "publication version",
             ),
             (
                 "search",
-                "INSERT INTO meta VALUES('search_version','4294967295')",
+                "INSERT INTO meta VALUES('fixture-source','search_version','4294967295')",
                 "publication version",
             ),
             (
                 "recipe-other-family",
-                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
                 "publication version",
             ),
             (
                 "recipe-older-current-family",
-                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
                 "publication version",
             ),
             (
                 "archive",
-                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":7}')",
+                "INSERT INTO meta VALUES('fixture-source','archive_event_index:original','{\"version\":7}')",
                 "archived marker version",
             ),
         ] {
@@ -12012,11 +12008,11 @@ mod tests {
                 .write_one("original", None, None, &ledger(1), &full())
                 .unwrap();
             // Custody is deliberately opaque to version classification.
-            store.connection.execute("INSERT INTO session_history_catalog VALUES('original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
+            store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES('archive-custody','original proof')",
+                    "INSERT INTO meta VALUES('fixture-source','archive-custody','original proof')",
                     [],
                 )
                 .unwrap();
@@ -12049,13 +12045,13 @@ mod tests {
                 }
                 _ => panic!("{name} must be explicitly unsupported"),
             };
-            fail(SqliteStore::attempt(&path));
+            fail(SqliteStore::attempt(&path, &fixture_namespace()));
             unchanged();
-            fail(SqliteStore::attempt_scoped(&path, true));
+            fail(SqliteStore::attempt_scoped(&path, true, &fixture_namespace()));
             unchanged();
             if name != "archive" {
                 assert!(
-                    SqliteStore::attempt_selected(&path).is_err(),
+                    SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err(),
                     "selected {name}"
                 );
                 assert!(focused_unbound_connection(&path).is_err(), "focused {name}");
@@ -12118,14 +12114,14 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO session_history_catalog VALUES('retained','{\"custody\":\"retained custody\"}')",
+                "INSERT INTO session_history_catalog VALUES('fixture-source','retained','{\"custody\":\"retained custody\"}')",
                 [],
             )
             .unwrap();
         store
             .connection
             .execute(
-                "INSERT INTO meta VALUES('archive-custody','independent authority')",
+                "INSERT INTO meta VALUES('fixture-source','archive-custody','independent authority')",
                 [],
             )
             .unwrap();
@@ -12146,7 +12142,7 @@ mod tests {
             .collect::<Vec<_>>();
         for scoped in [false, true] {
             assert!(matches!(
-                SqliteStore::attempt_scoped(&path, scoped),
+                SqliteStore::attempt_scoped(&path, scoped, &fixture_namespace()),
                 Err(Unopened::Unsupported(_))
             ));
             for (path, bytes) in paths.iter().zip(&before) {
@@ -12155,7 +12151,7 @@ mod tests {
                 assert_eq!(&actual, bytes);
             }
         }
-        assert!(SqliteStore::attempt_selected(&path).is_err());
+        assert!(SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err());
         assert!(focused_unbound_connection(&path).is_err());
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
@@ -12304,7 +12300,7 @@ mod tests {
                 *live_writer.borrow_mut() = Some(db);
             }));
         });
-        match SqliteStore::attempt(&path) {
+        match SqliteStore::attempt(&path, &fixture_namespace()) {
             Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
             _ => panic!("the concurrently committed WAL version must be refused"),
         }
@@ -12720,6 +12716,10 @@ mod tests {
 
     #[test]
     fn recovery_scalar119_sqlite_current_record_refusal_preserves_bytes() {
+        const SCOPED_VALUE: &str =
+            "SELECT value FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1";
+        const SCOPED_UPDATE: &str =
+            "UPDATE meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1";
         let root = scratch("strict-tree-scalar");
         let path = root.join("one.jsonl");
         fs::write(
@@ -12738,21 +12738,27 @@ mod tests {
         let index = crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         cache.flush_cold_writes().unwrap();
         drop(cache);
-        let (store, _) = opened(&crate::events::EventCache::path(&cache_path));
+        // The real current factory admitted this store; write through its
+        // bound source-journal writer connection.
+        let config = crate::Options::default()
+            .source
+            .config(&cache_path)
+            .unwrap();
+        let connection = crate::storage::sqlite::source_journal::SourceJournal(config)
+            .connection()
+            .unwrap();
         let path = path.to_str().unwrap();
-        let (_, ledger) = ledger_row(&store.connection, path).unwrap().unwrap();
+        let (_, ledger) = ledger_row(&connection, path).unwrap().unwrap();
         let key = tree_summary_key(path);
-        let original: String = store
-            .connection
-            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+        let original: String = connection
+            .query_row(SCOPED_VALUE, [&key], |r| r.get(0))
             .unwrap();
         let base: serde_json::Value = serde_json::from_str(&original).unwrap();
         let read = || {
-            let mut statement = store
-                .connection
-                .prepare(native_metadata_value(&store.connection).unwrap())
+            let mut statement = connection
+                .prepare(native_metadata_value(&connection).unwrap())
                 .unwrap();
-            read_tree_summary(&store.connection, &mut statement, path, &ledger).unwrap()
+            read_tree_summary(&connection, &mut statement, path, &ledger).unwrap()
         };
         let actual = read().unwrap();
         let expected = index.tree_summary.as_ref().unwrap();
@@ -12778,45 +12784,37 @@ mod tests {
         unsupported["version"] = serde_json::json!(2);
         invalid.push(unsupported.to_string());
         for encoded in invalid {
-            store
-                .connection
-                .execute(
-                    "UPDATE meta SET value=?2 WHERE key=?1",
-                    params![key, encoded],
-                )
+            connection
+                .execute(SCOPED_UPDATE, params![key, encoded])
                 .unwrap();
             assert!(read().is_none());
-            let after: String = store
-                .connection
-                .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+            let after: String = connection
+                .query_row(SCOPED_VALUE, [&key], |r| r.get(0))
                 .unwrap();
             assert_eq!(
                 after, encoded,
                 "refusal must leave unsupported bytes untouched"
             );
         }
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value=?2 WHERE key=?1",
-                params![key, original],
-            )
+        connection
+            .execute(SCOPED_UPDATE, params![key, original])
             .unwrap();
         let failure = format!("native_tree_failure:{path}");
-        store
-            .connection
+        connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES(?1,'failed')",
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'failed')",
                 [&failure],
             )
             .unwrap();
         assert!(read().is_none());
-        store
-            .connection
-            .execute("DELETE FROM meta WHERE key=?1", [&failure])
+        connection
+            .execute(
+                "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+                [&failure],
+            )
             .unwrap();
         assert_eq!(read().unwrap().line_count, expected.line_count);
-        drop(store);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -12854,7 +12852,8 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(&path, &fixture_namespace())
+            .unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -12875,7 +12874,8 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (store, _) = SqliteStore::attempt(&path, &fixture_namespace())
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")
@@ -12948,7 +12948,7 @@ pub(crate) fn read_session_slots(
     max: usize,
 ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
     let coherent: bool = connection.query_row(
-                configured::metadata_sql(connection, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE key='slot_projection_catalog_generation' AND value=?1)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation' AND value=?1)").map_err(failure)?,
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation' AND value=?1)",
                 [expected], |record| record.get(0),
             ).map_err(failure)?;
     if !coherent {
@@ -13248,5 +13248,5 @@ pub(crate) fn qualify_catalog_tx(
         }
     }
 
-    tx.query_row(configured::metadata_sql(tx, "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", "SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')").map_err(failure)?, [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
+    tx.query_row("SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')", [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
 }

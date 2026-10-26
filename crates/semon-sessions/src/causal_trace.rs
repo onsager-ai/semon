@@ -653,7 +653,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         crate::events::store::require_current(&tx).map_err(|_| 503u16)?;
         let generation: String = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -685,19 +685,19 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 frontier.push(json!({"catalog_key":sid,"turn":tid}));
                 continue;
             }
-            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",params![sid,tid],|row|row.get(0)).optional().map_err(|_|503u16)?;
+            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1 AND turn_id=?2",params![sid,tid],|row|row.get(0)).optional().map_err(|_|503u16)?;
             let Some(encoded) = encoded else {
                 missing.other = true;
                 continue;
             };
             let turn = decode(encoded)?;
             if !sessions.contains_key(&sid) {
-                let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
-                let metadata = crate::history_projection::catalog(&tx, &sid)
+                let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
+                let metadata = crate::history_projection::admitted_catalog(&tx, &sid)
                     .map_err(|_| 503u16)?
                     .or(tx
                         .query_row(
-                            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                             [&sid],
                             |row| row.get::<_, String>(0),
                         )
@@ -715,7 +715,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 versions.push(json!([sid, version]));
                 let current: Option<String> = tx
                     .query_row(
-                        "SELECT lifecycle FROM session_catalog WHERE session_key=?1",
+                        "SELECT lifecycle FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                         [&sid],
                         |row| row.get(0),
                     )
@@ -729,7 +729,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             if let Some(start) = turn["start"].as_str()
                 && !edges.contains_key(start)
             {
-                let incoming:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",params![sid,start],|row|row.get(0)).optional().map_err(|_|503u16)?;
+                let incoming:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,start],|row|row.get(0)).optional().map_err(|_|503u16)?;
                 if let Some(text) = incoming {
                     edges.insert(start.to_string(), decode(text)?);
                 } else {
@@ -742,12 +742,12 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             }
             for id in ids {
                 let id = id.as_str().ok_or(503u16)?;
-                let encoded:String=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",params![sid,id],|row|row.get(0)).map_err(|_|503u16)?;
+                let encoded:String=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,id],|row|row.get(0)).map_err(|_|503u16)?;
                 let edge = decode(encoded)?;
                 if matches!(edge["kind"].as_str(), Some("spawn" | "relay"))
                     && let Some(target) = edge["to"].as_str()
                 {
-                    let mut starts=tx.prepare("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2").map_err(|_|503u16)?;
+                    let mut starts=tx.prepare("SELECT turn_id FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2").map_err(|_|503u16)?;
                     let found = starts
                         .query_map(params![target, id], |row| row.get::<_, String>(0))
                         .map_err(|_| 503u16)?
@@ -788,7 +788,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         for sid in related.into_iter().take(128) {
             let header: Option<(String, String, Option<String>)> = tx
                 .query_row(
-                    "SELECT generation,source_generation,CASE WHEN ?2 THEN CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END ELSE NULL END FROM session_trace_headers WHERE session_key=?1",
+                    "SELECT generation,source_generation,CASE WHEN ?2 THEN CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END ELSE NULL END FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
                     params![sid, relay_peers.contains(&sid)],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
@@ -808,11 +808,11 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 },
                 None => TraceParticipantActivity::Unavailable,
             };
-            let metadata = crate::history_projection::catalog(&tx, &sid)
+            let metadata = crate::history_projection::admitted_catalog(&tx, &sid)
                 .map_err(|_| 503u16)?
                 .or(tx
                     .query_row(
-                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
+                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                         [&sid],
                         |row| row.get::<_, Option<String>>(0),
                     )
@@ -870,12 +870,12 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         let mut previews = BTreeMap::new();
         let mut previews_incomplete = owners.len() > 128;
         for sid in preview_order.into_iter().take(128) {
-            let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|503u16)?;
+            let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|503u16)?;
             let Some((source, Some(content))) = header else {
                 previews_incomplete = true;
                 continue;
             };
-            let metadata=crate::history_projection::catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
+            let metadata=crate::history_projection::admitted_catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
             let Some(metadata) = metadata else {
                 previews_incomplete = true;
                 continue;
