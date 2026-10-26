@@ -1223,12 +1223,10 @@ pub(crate) fn read_page_snapshot(
         }
         items.push(item);
     }
-    if runtime.as_ref().is_some_and(|before| {
-        transaction.runtime_generation(options)
-            .ok()
-            .as_ref()
-            != Some(before)
-    }) {
+    if runtime
+        .as_ref()
+        .is_some_and(|before| transaction.runtime_generation(options).ok().as_ref() != Some(before))
+    {
         for item in &mut items {
             for section in ["ancestors", "runs"] {
                 if let Some(relatives) = item

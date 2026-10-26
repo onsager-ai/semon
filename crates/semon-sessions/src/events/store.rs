@@ -8422,6 +8422,7 @@ mod tests {
                 mirror_sequence: Some(1),
                 ..crate::Facts::default()
             },
+            &options.source,
         )
         .unwrap();
         let inputs = crate::inputs::inputs(&options)
