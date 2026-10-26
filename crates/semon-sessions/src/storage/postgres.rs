@@ -16,6 +16,7 @@ mod native_recovery;
 mod native_usage;
 mod native_usage_identity;
 mod operations;
+mod model_cache;
 mod pool;
 mod reported_facts;
 mod schema;
