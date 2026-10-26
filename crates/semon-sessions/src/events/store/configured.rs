@@ -2507,6 +2507,8 @@ mod tests {
         assert!(!database.exists());
     }
 
+    include!("configured_recovery_tests.rs");
+
     struct Fixture {
         root: PathBuf,
         config: StoreConfig,
