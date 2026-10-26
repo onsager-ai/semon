@@ -97,19 +97,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
     // Larger indexed history with a fixed small receiver append below.
-    let padding = format!(
-        "{}\n",
-        serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"one","padding":"x".repeat(8192)})
-    );
-    let mut history = fs::OpenOptions::new()
-        .append(true)
-        .open(&claude_parent)
-        .unwrap();
-    for _ in 0..256 {
-        history.write_all(padding.as_bytes()).unwrap();
-    }
-    history.sync_all().unwrap();
-    drop(history);
+    let padding=format!("{}\n",serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"one","padding":"x".repeat(8192)}));
+    let mut history=fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
+    for _ in 0..256 {history.write_all(padding.as_bytes()).unwrap();}history.sync_all().unwrap();drop(history);
     let inputs = crate::inputs::inputs(&options)
         .unwrap()
         .into_iter()
@@ -696,153 +686,43 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{}\n",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
     );
-    let raw_store = || {
-        crate::storage::postgres::index_store::open(
-            pool.clone(),
-            namespace.clone(),
-            control.clone(),
-        )
-        .unwrap()
-        .0
-    };
-    assert!(
-        raw[0].len() > 2 * 1024 * 1024,
-        "trusted append fixture must have a large old prefix"
-    );
-    let io_before = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
-    let hash_before = crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
-    let writer = crate::SessionSourceWrite::begin_with_store(
-        &options,
-        &inputs[0],
-        Some("0123456789abcdef0123456789abcdef"),
-        raw[0].len() as u64,
-        raw_store(),
-        None,
-    )
-    .unwrap();
-    let raw_intent = writer.intent();
-    assert!(
-        raw_intent.continuation.is_some(),
-        "native durable continuation must qualify trusted append"
-    );
-    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-        assert!(
-            crate::storage::postgres::native_keys::read_meta(
-                tx,
-                format!("raw-write-intent:{}", raw_intent.operation).as_bytes(),
-                131072
-            )?
-            .is_some()
-        );
+    let raw_store=|| crate::storage::postgres::index_store::open(pool.clone(),namespace.clone(),control.clone()).unwrap().0;
+    assert!(raw[0].len()>2*1024*1024,"trusted append fixture must have a large old prefix");
+    let io_before=crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
+    let hash_before=crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],Some("0123456789abcdef0123456789abcdef"),raw[0].len() as u64,raw_store(),None).unwrap();
+    let raw_intent=writer.intent();
+    assert!(raw_intent.continuation.is_some(),"native durable continuation must qualify trusted append");
+    pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx| {
+        assert!(crate::storage::postgres::native_keys::read_meta(tx,format!("raw-write-intent:{}",raw_intent.operation).as_bytes(),131072)?.is_some());
         Ok(())
-    })
-    .unwrap();
+    }).unwrap();
     drop(writer); // Fault: durable SQL intent, no Raw bytes yet.
-    assert_eq!(fs::read(&path).unwrap(), raw[0]);
-    let mut mismatch = raw_intent.clone();
-    mismatch.from += 1;
-    assert!(
-        crate::SessionSourceWrite::begin_with_store(
-            &options,
-            &inputs[0],
-            None,
-            0,
-            raw_store(),
-            Some(mismatch)
-        )
-        .is_err()
-    );
-    let writer = crate::SessionSourceWrite::begin_with_store(
-        &options,
-        &inputs[0],
-        None,
-        0,
-        raw_store(),
-        Some(raw_intent.clone()),
-    )
-    .unwrap();
-    let mut raw_file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    raw_file.write_all(append.as_bytes()).unwrap();
-    raw_file.sync_all().unwrap();
-    drop(raw_file);
+    assert_eq!(fs::read(&path).unwrap(),raw[0]);
+    let mut mismatch=raw_intent.clone();mismatch.from+=1;
+    assert!(crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(mismatch)).is_err());
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
+    let mut raw_file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    raw_file.write_all(append.as_bytes()).unwrap();raw_file.sync_all().unwrap();drop(raw_file);
     drop(writer); // Fault: durable bytes, completion transaction not attempted.
-    let written = raw[0].len() as u64 + append.len() as u64;
-    assert_eq!(
-        resumed
-            .ingest(&format!("{:064x}", 158), &path, "claude")
-            .err(),
-        Some(StorageError::Conflict),
-        "unacknowledged Raw bytes cannot enter native SQL"
-    );
-    let writer = crate::SessionSourceWrite::begin_with_store(
-        &options,
-        &inputs[0],
-        None,
-        0,
-        raw_store(),
-        Some(raw_intent.clone()),
-    )
-    .unwrap();
+    let written=raw[0].len() as u64+append.len() as u64;
+    assert_eq!(resumed.ingest(&format!("{:064x}",158),&path,"claude").err(),Some(StorageError::Conflict),"unacknowledged Raw bytes cannot enter native SQL");
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
     writer.complete(written).unwrap();
     // Fault: SQL committed but the receiver lost the ACK. The exact request
     // reconciles before head/ledger CAS and reproduces the same completion.
-    let writer = crate::SessionSourceWrite::begin_with_store(
-        &options,
-        &inputs[0],
-        None,
-        0,
-        raw_store(),
-        Some(raw_intent.clone()),
-    )
-    .unwrap();
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
     writer.complete(written).unwrap();
-    let read_bytes = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get) - io_before;
-    let hash_bytes = crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get) - hash_before;
-    assert!(
-        read_bytes < 512 * 1024,
-        "trusted SourceWrite read {read_bytes} bytes"
-    );
-    assert!(
-        hash_bytes < 512 * 1024,
-        "trusted SourceWrite hashed {hash_bytes} bytes"
-    );
-    let c = raw_intent.continuation.as_ref().unwrap();
-    let mut source = crate::sealed::LogFile::open(&path).unwrap();
-    assert_eq!(
-        crate::source_chunks::continue_prefix(
-            &mut source,
-            &c.state,
-            c.offset,
-            c.prefix,
-            written,
-            || Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "cancel"
-            ))
-        )
-        .unwrap_err()
-        .kind(),
-        std::io::ErrorKind::Interrupted
-    );
-    eprintln!(
-        "sourcewrite160 old_bytes={} delta={} read_bytes={read_bytes} hash_bytes={hash_bytes} history_io_under_sql_lock=0",
-        raw[0].len(),
-        append.len()
-    );
-    let mut stale = raw_intent;
-    stale.operation.push_str("-stale");
-    stale.head = Some("stale-head".into());
-    assert!(
-        crate::SessionSourceWrite::begin_with_store(
-            &options,
-            &inputs[0],
-            None,
-            0,
-            raw_store(),
-            Some(stale)
-        )
-        .is_err()
-    );
+    let read_bytes=crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get)-io_before;
+    let hash_bytes=crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get)-hash_before;
+    assert!(read_bytes<512*1024,"trusted SourceWrite read {read_bytes} bytes");
+    assert!(hash_bytes<512*1024,"trusted SourceWrite hashed {hash_bytes} bytes");
+    let c=raw_intent.continuation.as_ref().unwrap();
+    let mut source=crate::sealed::LogFile::open(&path).unwrap();
+    assert_eq!(crate::source_chunks::continue_prefix(&mut source,&c.state,c.offset,c.prefix,written,||Err(std::io::Error::new(std::io::ErrorKind::Interrupted,"cancel"))).unwrap_err().kind(),std::io::ErrorKind::Interrupted);
+    eprintln!("sourcewrite160 old_bytes={} delta={} read_bytes={read_bytes} hash_bytes={hash_bytes} history_io_under_sql_lock=0",raw[0].len(),append.len());
+    let mut stale=raw_intent;stale.operation.push_str("-stale");stale.head=Some("stale-head".into());
+    assert!(crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(stale)).is_err());
     let receipt = resumed
         .ingest(&format!("{:064x}", 128), &path, "claude")
         .unwrap();
@@ -1262,196 +1142,276 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::storage::postgres::index_store::open(pool.clone(), collision, cancelled),
         Err(StorageError::Busy)
     ));
-    let facts_path = oracle.root.join("positive-facts158.json");
-    let mut recorded = crate::Facts {
-        version: 2,
-        hostname: "source-write-before158".into(),
-        ..Default::default()
-    };
-    crate::save_json_file(&facts_path, &recorded).unwrap();
-    let mut facts_options = options.clone();
-    facts_options.facts = Some(facts_path.clone());
-    let before_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
-    let from = fs::metadata(&path).unwrap().len();
-    let writer = crate::SessionSourceWrite::begin_with_store(
-        &facts_options,
-        &inputs[0],
-        None,
-        from,
-        raw_store(),
-        None,
-    )
-    .unwrap();
-    let facts_intent = writer.intent();
-    let extra = format!(
-        "{}\n",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}})
-    );
-    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(extra.as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    writer.complete(from + extra.len() as u64).unwrap();
-    let replay = crate::SessionSourceWrite::begin_with_store(
-        &facts_options,
-        &inputs[0],
-        None,
-        0,
-        raw_store(),
-        Some(facts_intent),
-    )
-    .unwrap();
-    replay.complete(from + extra.len() as u64).unwrap();
-    let pid_input = crate::Input {
-        root: crate::InputRoot::Claude,
-        path: "sessions/4242.json".into(),
-    };
+    let facts_path=oracle.root.join("positive-facts158.json");
+    let mut recorded=crate::Facts {version:2,hostname:"source-write-before158".into(),..Default::default()};
+    crate::save_json_file(&facts_path,&recorded).unwrap();
+    let mut facts_options=options.clone();facts_options.facts=Some(facts_path.clone());
+    let before_runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    let from=fs::metadata(&path).unwrap().len();
+    let writer=crate::SessionSourceWrite::begin_with_store(&facts_options,&inputs[0],None,from,raw_store(),None).unwrap();
+    let facts_intent=writer.intent();
+    let extra=format!("{}\n",serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}}));
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();file.write_all(extra.as_bytes()).unwrap();file.sync_all().unwrap();drop(file);
+    writer.complete(from+extra.len() as u64).unwrap();
+    let replay=crate::SessionSourceWrite::begin_with_store(&facts_options,&inputs[0],None,0,raw_store(),Some(facts_intent)).unwrap();replay.complete(from+extra.len() as u64).unwrap();
+    let pid_input=crate::Input {root:crate::InputRoot::Claude,path:"sessions/4242.json".into()};
     fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
-    let pid_write = crate::SessionSourceWrite::begin_with_store(
-        &facts_options,
-        &pid_input,
-        None,
-        0,
-        raw_store(),
-        None,
-    )
-    .unwrap();
+    let pid_write=crate::SessionSourceWrite::begin_with_store(&facts_options,&pid_input,None,0,raw_store(),None).unwrap();
     let pid_bytes=serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
-    fs::write(pid_input.full_path(&facts_options), &pid_bytes).unwrap();
-    fs::OpenOptions::new()
-        .write(true)
-        .open(pid_input.full_path(&facts_options))
-        .unwrap()
-        .sync_all()
-        .unwrap();
+    fs::write(pid_input.full_path(&facts_options),&pid_bytes).unwrap();fs::OpenOptions::new().write(true).open(pid_input.full_path(&facts_options)).unwrap().sync_all().unwrap();
     pid_write.complete(pid_bytes.len() as u64).unwrap();
-    recorded.hostname = "source-write-after158".into();
-    recorded.proc_starts.insert(4242, 1234);
-    let facts_writer = crate::SessionFactsWrite::begin_with_store(
-        &facts_options,
-        &recorded,
-        true,
-        raw_store(),
-        None,
-    )
-    .unwrap();
-    let facts_request = facts_writer.intent();
-    drop(facts_writer); // Intent/no Facts bytes.
-    let facts_writer = crate::SessionFactsWrite::begin_with_store(
-        &facts_options,
-        &recorded,
-        true,
-        raw_store(),
-        Some(facts_request.clone()),
-    )
-    .unwrap();
-    crate::save_json_file(&facts_path, &recorded).unwrap();
-    drop(facts_writer); // Bytes/no SQL completion.
-    let facts_writer = crate::SessionFactsWrite::begin_with_store(
-        &facts_options,
-        &recorded,
-        true,
-        raw_store(),
-        Some(facts_request.clone()),
-    )
-    .unwrap();
-    facts_writer.complete().unwrap();
-    let facts_writer = crate::SessionFactsWrite::begin_with_store(
-        &facts_options,
-        &recorded,
-        true,
-        raw_store(),
-        Some(facts_request.clone()),
-    )
-    .unwrap();
-    facts_writer.complete().unwrap(); // Lost ACK.
-    let mut stale_facts = facts_request.clone();
-    stale_facts.operation.push_str("-stale");
-    stale_facts.head = Some("stale".into());
-    assert!(
-        crate::SessionFactsWrite::begin_with_store(
-            &facts_options,
-            &recorded,
-            true,
-            raw_store(),
-            Some(stale_facts)
-        )
-        .is_err()
-    );
-    let mut wrong = facts_request;
-    wrong.before.hostname.push_str("-wrong");
-    assert!(
-        crate::SessionFactsWrite::begin_with_store(
-            &facts_options,
-            &recorded,
-            true,
-            raw_store(),
-            Some(wrong)
-        )
-        .is_err()
-    );
-    assert!(
-        crate::model::pid_files(
-            &facts_options,
-            &crate::facts::MachineFacts::Recorded(Box::new(recorded.clone()))
-        )
-        .iter()
-        .any(|p| p.pid == 4242 && p.session == "one" && p.alive)
-    );
-    let runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
-    assert_ne!(before_runtime, runtime);
-    moved_cache
-        .ingest(&format!("{:064x}", 159), &path, "claude")
-        .unwrap();
-    moved_cache
-        .begin_semantic_stage(
-            &moved_inputs
-                .iter()
-                .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            &runtime,
-        )
-        .unwrap();
-    let facts_generation = loop {
-        let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
-        let model = moved_cache
-            .prepare_semantic_model_batch(&facts_options, &moved_inputs, &batch, 1790812805000)
-            .unwrap();
-        if batch.phase == crate::model::relation_stage::Phase::Publication {
-            assert!(
-                serde_json::to_string(&model.prepared().rows)
-                    .unwrap()
-                    .contains("source-write-after158")
-            );
-            let ack = moved_cache
-                .publish_semantic_catalog(&batch, model.prepared())
-                .unwrap();
-            moved_cache.finish_semantic_stage(batch.epoch).unwrap();
-            break ack.1.unwrap();
+    recorded.hostname="source-write-after158".into();recorded.proc_starts.insert(4242,1234);
+    let facts_writer=crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),None).unwrap();
+    let facts_request=facts_writer.intent();drop(facts_writer); // Intent/no Facts bytes.
+    let facts_writer=crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),Some(facts_request.clone())).unwrap();
+    crate::save_json_file(&facts_path,&recorded).unwrap();drop(facts_writer); // Bytes/no SQL completion.
+    let facts_writer=crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),Some(facts_request.clone())).unwrap();facts_writer.complete().unwrap();
+    let facts_writer=crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),Some(facts_request.clone())).unwrap();facts_writer.complete().unwrap(); // Lost ACK.
+    let mut stale_facts=facts_request.clone();stale_facts.operation.push_str("-stale");stale_facts.head=Some("stale".into());
+    assert!(crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),Some(stale_facts)).is_err());
+    let mut wrong=facts_request;wrong.before.hostname.push_str("-wrong");
+    assert!(crate::SessionFactsWrite::begin_with_store(&facts_options,&recorded,true,raw_store(),Some(wrong)).is_err());
+    assert!(crate::model::pid_files(&facts_options,&crate::facts::MachineFacts::Recorded(Box::new(recorded.clone()))).iter().any(|p|p.pid==4242&&p.session=="one"&&p.alive));
+    let runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();assert_ne!(before_runtime,runtime);
+    moved_cache.ingest(&format!("{:064x}",159),&path,"claude").unwrap();
+    moved_cache.begin_semantic_stage(&moved_inputs.iter().map(|i|i.full_path(&facts_options).to_string_lossy().into_owned()).collect::<Vec<_>>(),&runtime).unwrap();
+    let facts_generation=loop {
+        let batch=moved_cache.semantic_batch(64).unwrap().unwrap();
+        let model=moved_cache.prepare_semantic_model_batch(&facts_options,&moved_inputs,&batch,1790812805000).unwrap();
+        if batch.phase==crate::model::relation_stage::Phase::Publication {
+            assert!(serde_json::to_string(&model.prepared().rows).unwrap().contains("source-write-after158"));
+            let ack=moved_cache.publish_semantic_catalog(&batch,model.prepared()).unwrap();moved_cache.finish_semantic_stage(batch.epoch).unwrap();break ack.1.unwrap();
         }
     };
-    let facts_store = super::super::snapshot::query::QueryCatalog {
+    let facts_store=super::super::snapshot::query::QueryCatalog {pool:pool.clone(),namespace:namespace.clone(),control:control.clone(),generation:facts_generation,options:facts_options.clone()};
+    let mut facts_query=crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(),facts_options.clone())])));
+    let list=facts_query.call_bound_catalog_at("list_sessions",&serde_json::json!({}),1790812805000,&facts_store).unwrap();
+    assert!(list.to_string().contains("source-write-after158"));
+    assert_eq!(fs::read(&path).unwrap(),[raw[0].as_slice(),append.as_bytes(),extra.as_bytes()].concat());
+    assert!(!options.cache.exists());
+    // (a) Ordinary incremental stages grow Current beyond 64 owners. Each
+    // stage names only its changed paths; unmentioned owners carry forward.
+    let stage_publish = |cache: &mut EventCache, inputs: &[crate::Input], at: i64| {
+        let paths = inputs
+            .iter()
+            .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        cache.begin_semantic_stage(&paths, &runtime).unwrap();
+        loop {
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            let model = cache
+                .prepare_semantic_model_batch(&facts_options, inputs, &batch, at)
+                .unwrap();
+            if batch.phase == crate::model::relation_stage::Phase::Publication {
+                let ack = cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap();
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+                break (ack.1.unwrap(), batch, model);
+            }
+        }
+    };
+    let bulk = (0..70)
+        .map(|i| {
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/bulk169-{i:03}.jsonl").into(),
+            };
+            let body = serde_json::json!({"type":"user","sessionId":format!("bulk169-{i:03}"),"uuid":format!("bulk-{i}"),"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"sanitized bulk input"}});
+            fs::write(input.full_path(&facts_options), format!("{body}\n")).unwrap();
+            input
+        })
+        .collect::<Vec<_>>();
+    for (at, input) in bulk.iter().enumerate() {
+        moved_cache
+            .ingest(
+                &format!("{:064x}", 1000 + at),
+                &input.full_path(&facts_options),
+                "claude",
+            )
+            .unwrap();
+    }
+    let mut bulk_generation = String::new();
+    for chunk in bulk.chunks(30) {
+        bulk_generation = stage_publish(&mut moved_cache, chunk, 1790812806000).0;
+    }
+    let store_at = |generation: &str| super::super::snapshot::query::QueryCatalog {
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
-        generation: facts_generation,
+        generation: generation.to_owned(),
         options: facts_options.clone(),
     };
-    let mut facts_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(namespace.as_str().into(), facts_options)]),
-    ));
-    let list = facts_query
+    let total = list["total"].as_u64().unwrap() + 70;
+    assert!(total > 64);
+    let bulk_list = facts_query
         .call_bound_catalog_at(
             "list_sessions",
             &serde_json::json!({}),
-            1790812805000,
-            &facts_store,
+            1790812806000,
+            &store_at(&bulk_generation),
         )
         .unwrap();
-    assert!(list.to_string().contains("source-write-after158"));
+    assert_eq!(bulk_list["total"].as_u64(), Some(total));
+    assert!(bulk_list.to_string().contains("source-write-after158"));
+    let bulk_page = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &bulk_generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &facts_options,
+                "",
+                &crate::catalog::Request::parse("limit=20").unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    assert_eq!(bulk_page.status, 200);
+    // (b) A small partial update republishes one owner; every unrelated
+    // Current row, Source and proof stays byte-identical, as do Facts bytes.
+    let facts_bytes = fs::read(&facts_path).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(bulk[5].full_path(&facts_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-005","uuid":"bulk-5b","parentUuid":"bulk-5","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized bulk continuation"}})).unwrap();
+    moved_cache
+        .ingest(
+            &format!("{:064x}", 1100),
+            &bulk[5].full_path(&facts_options),
+            "claude",
+        )
+        .unwrap();
+    let (partial_generation, partial_batch, partial_model) =
+        stage_publish(&mut moved_cache, &bulk[5..6], 1790812807000);
+    assert_ne!(partial_generation, bulk_generation);
+    // Unrelated means every owner and proof not reading `path`.
+    let unrelated = |a: &str, b: &str, path: &str| {
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            let mut differences = Vec::new();
+            let owner = "session_key NOT IN (SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation IN ($2,$3) AND source_path=$4)";
+            for (table, columns, owner) in [
+                ("catalog_rows", "session_key,metadata", owner),
+                (
+                    "catalog_sources",
+                    "session_key,source_path,metadata,native_digest",
+                    owner,
+                ),
+                (
+                    "catalog_proofs",
+                    "source_path,page_generation,usage_generation,usage_ready",
+                    "source_path<>$4",
+                ),
+            ] {
+                let count: i64 = tx.driver.query_one(&format!("SELECT count(*) FROM (((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {owner}) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND {owner})) UNION ALL ((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND {owner}) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {owner}))) d"), &[&ns, &a.as_bytes(), &b.as_bytes(), &path.as_bytes()]).map_err(|_| StorageError::Unavailable)?.get(0);
+                differences.push(count);
+            }
+            Ok(differences)
+        })
+        .unwrap()
+    };
+    let changed = bulk[5].full_path(&facts_options);
     assert_eq!(
-        fs::read(&path).unwrap(),
-        [raw[0].as_slice(), append.as_bytes(), extra.as_bytes()].concat()
+        unrelated(
+            &bulk_generation,
+            &partial_generation,
+            changed.to_str().unwrap()
+        ),
+        vec![0, 0, 0]
     );
-    assert!(!options.cache.exists());
+    assert_eq!(fs::read(&facts_path).unwrap(), facts_bytes);
+    let partial_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812807000,
+            &store_at(&partial_generation),
+        )
+        .unwrap();
+    assert_eq!(partial_list["total"].as_u64(), Some(total));
+    assert!(partial_list.to_string().contains("source-write-after158"));
+    // (c) An isolated Source withdraws by bounded pages. A Source of a mixed
+    // or connected owner refuses and leaves Current untouched: removal and
+    // the owner's semantic republication are separate commits today.
+    let (mut store, _) = crate::storage::postgres::index_store::open(
+        pool.clone(),
+        namespace.clone(),
+        control.clone(),
+    )
+    .unwrap();
+    let agent = claude_agent.to_str().unwrap().to_owned();
+    let agent_ledger = store.ledger(&agent).unwrap().unwrap();
+    assert!(store.remove_files(&[(agent, Some(agent_ledger))]).is_err());
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(partial_generation.as_str())
+    );
+    let gone = bulk[1].full_path(&facts_options);
+    let gone_path = gone.to_str().unwrap().to_owned();
+    let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
+    fs::rename(&gone, oracle.root.join("retained-bulk169.jsonl")).unwrap();
+    assert_eq!(
+        store.remove_files(&gone_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let withdrawn = store.session_catalog_generation().unwrap().unwrap();
+    assert_ne!(withdrawn, partial_generation);
+    assert_eq!(
+        unrelated(&partial_generation, &withdrawn, &gone_path),
+        vec![0, 0, 0],
+        "withdrawal of an isolated owner keeps unrelated Current"
+    );
+    // A successor publication, then exact old requests replay their own
+    // recorded generations without republishing or moving the head.
+    writeln!(fs::OpenOptions::new().append(true).open(bulk[2].full_path(&facts_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-002","uuid":"bulk-2b","parentUuid":"bulk-2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized successor"}})).unwrap();
+    moved_cache
+        .ingest(
+            &format!("{:064x}", 1101),
+            &bulk[2].full_path(&facts_options),
+            "claude",
+        )
+        .unwrap();
+    let successor = stage_publish(&mut moved_cache, &bulk[2..3], 1790812808000).0;
+    assert_ne!(successor, withdrawn);
+    assert_eq!(
+        moved_cache
+            .publish_semantic_catalog(&partial_batch, partial_model.prepared())
+            .unwrap()
+            .1
+            .as_deref(),
+        Some(partial_generation.as_str())
+    );
+    assert_eq!(
+        store.remove_files(&gone_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(successor.as_str())
+    );
+    let successor_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812808000,
+            &store_at(&successor),
+        )
+        .unwrap();
+    assert_eq!(successor_list["total"].as_u64(), Some(total - 1));
+    // (d) Restart: reopened stores read the newest Current and the old
+    // selected bodies exactly as before.
+    drop(store);
+    drop(moved_cache);
+    let reopened =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        reopened.session_catalog_generation().as_deref(),
+        Some(successor.as_str())
+    );
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies,
+        "old selected bodies after incremental publication and restart"
+    );
 }

@@ -37,7 +37,17 @@ fn lock(tx: &mut PgTxn<'_>) -> Result<i64, StorageError> {
 }
 
 fn load(tx: &mut PgTxn<'_>, active: bool) -> Result<Option<Stage>, StorageError> {
-    let rows = tx.driver.query("SELECT stage_epoch,CASE WHEN octet_length(payload)<=1048576 THEN payload END,payload_hash,active FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND seq=0 AND (NOT $2 OR active) ORDER BY stage_epoch DESC LIMIT 2", &[&tx.namespace.as_str().as_bytes(), &active]).map_err(sqlstate::error)?;
+    load_epoch(tx, active, None)
+}
+
+// Finished stages are retained per epoch, so an exact old request still finds
+// its own recorded acknowledgement after successor publications.
+fn load_epoch(
+    tx: &mut PgTxn<'_>,
+    active: bool,
+    epoch: Option<i64>,
+) -> Result<Option<Stage>, StorageError> {
+    let rows = tx.driver.query("SELECT stage_epoch,CASE WHEN octet_length(payload)<=1048576 THEN payload END,payload_hash,active FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND seq=0 AND (NOT $2 OR active) AND ($3::bigint IS NULL OR stage_epoch=$3) ORDER BY stage_epoch DESC LIMIT 2", &[&tx.namespace.as_str().as_bytes(), &active, &epoch]).map_err(sqlstate::error)?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
@@ -101,11 +111,10 @@ pub(super) fn begin(
     {
         return Err(StorageError::InvalidArguments);
     }
+    // A stage names changed paths and their component, not every ingested
+    // file: publication carries unmentioned Current owners by bounded pages
+    // and refuses an unmentioned owner connected to a claimed Source.
     let revision = lock(tx)?;
-    let files = super::native_reader::file_ledgers(tx)?;
-    if files.len() > 64 || files.iter().any(|(path, _)| !paths.contains(path)) {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
     let generation = model_cache::generation(tx)?;
     if let Some(stage) = load(tx, true)? {
         if held.is_some_and(|epoch| epoch != stage.epoch)
@@ -310,7 +319,7 @@ pub(super) fn publish(
     let witness = prepared
         .staged_model_witness()
         .map_err(|_| StorageError::ScopeChanged)?;
-    if let Some(stage) = load(tx, false)?
+    if let Some(stage) = load_epoch(tx, false, Some(batch.epoch))?
         && !stage.active
         && stage.epoch == batch.epoch
     {
