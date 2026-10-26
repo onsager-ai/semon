@@ -84,7 +84,10 @@ pub(crate) fn complete_relocation(
         archive(tx, &evidence.from_path)?;
         let ns = config.namespace.as_str().as_bytes();
         tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-        tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns, &path.as_bytes(), &encoded]).map_err(sqlstate::error)?;
+        let written = tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace AND semon_pg_native_source_mutations.evidence=excluded.evidence", &[&ns, &path.as_bytes(), &encoded]).map_err(sqlstate::error)?;
+        if written != 1 {
+            return Err(StorageError::Conflict);
+        }
         tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&ns,&evidence.from_path.as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
         super::source_journal::invalidate(tx, &path)?;
         super::source_journal::invalidate(tx, &evidence.from_path)
