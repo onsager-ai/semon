@@ -99,6 +99,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-answer","parentUuid":"related-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
     ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
+    // A second connected subagent of the same parent; the catch-up below
+    // withdraws both, so their new custodies exceed one bounded advance.
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related191-agent-call","parentUuid":"related-agent-result","timestamp":"2026-10-01T00:00:01Z","message":{"id":"related191-agent-call","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"claude-related191-spawn","name":"Agent","input":{"description":"sanitized agent task","prompt":"sanitized agent prompt"}}]}})).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"related191-agent-result","parentUuid":"related191-agent-call","timestamp":"2026-10-01T00:00:03Z","toolUseResult":{"status":"async_launched","agentId":"related191"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude-related191-spawn","content":"launched","is_error":false}]}})).unwrap();
+    let claude_agent191 = options
+        .claude_home
+        .join("projects/project/one/subagents/agent-related191.jsonl");
+    fs::create_dir_all(claude_agent191.parent().unwrap()).unwrap();
+    fs::write(&claude_agent191,[
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"related191-user","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized agent prompt"}}),
+        serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related191-answer","parentUuid":"related191-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related191-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
+    ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
+    fs::write(claude_agent191.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related191-spawn"}).to_string()).unwrap();
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
         serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
@@ -1685,11 +1700,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .prepare_semantic_model_batch(&facts_options, inputs, &batch, at)
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
-                let ack = cache
-                    .publish_semantic_catalog(&batch, model.prepared())
-                    .unwrap();
+                // Each bounded custody advance commits as a Deferred checkpoint;
+                // the qualified head is unchanged until the final CAS publishes.
+                let head = cache.session_catalog_generation().unwrap();
+                let mut deferred = 0;
+                let ack = loop {
+                    let ack = cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap();
+                    if ack.0 != crate::events::Outcome::Deferred {
+                        break ack;
+                    }
+                    assert_eq!(ack.1, None);
+                    assert_eq!(cache.session_catalog_generation().unwrap(), head);
+                    deferred += 1;
+                    assert!(deferred < 64, "custody makes bounded progress");
+                };
+                assert_eq!(ack.0, crate::events::Outcome::Written);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
-                break (ack.1.unwrap(), batch, model);
+                break (ack.1.unwrap(), batch, model, deferred);
             }
         }
     };
@@ -1764,7 +1793,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "claude",
         )
         .unwrap();
-    let (partial_generation, partial_batch, partial_model) =
+    let (partial_generation, partial_batch, partial_model, _) =
         stage_publish(&mut moved_cache, &bulk[5..6], 1790812807000);
     assert_ne!(partial_generation, bulk_generation);
     // Unrelated means every owner and proof not reading `path`.
@@ -2031,8 +2060,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap(), qualified);
-    // The ordinary semantic catch-up claims the `removed` invalidation and
-    // republishes the connected parent without the withdrawn Source.
+    // The second connected subagent is withdrawn the same way; both removed
+    // sessions need new retained custody in one catch-up publication.
+    let agent191 = claude_agent191.to_str().unwrap().to_owned();
+    let agent191_removal = vec![(agent191.clone(), store.ledger(&agent191).unwrap())];
+    fs::rename(
+        &claude_agent191,
+        oracle.root.join("retained-agent191.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        store.remove_files(&agent191_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    // The ordinary semantic catch-up claims the `removed` invalidations and
+    // republishes the connected parent without the withdrawn Sources.
     let mut catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let connected = [
@@ -2044,8 +2087,68 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             root: crate::InputRoot::Claude,
             path: "projects/project/one/subagents/agent-related154.jsonl".into(),
         },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/one/subagents/agent-related191.jsonl".into(),
+        },
     ];
-    let caught = stage_publish(&mut catchup, &connected, 1790812809000).0;
+    let paths = connected
+        .iter()
+        .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    catchup.begin_semantic_stage(&paths, &runtime).unwrap();
+    let (batch, model) = loop {
+        let batch = catchup.semantic_batch(64).unwrap().unwrap();
+        let model = catchup
+            .prepare_semantic_model_batch(&facts_options, &connected, &batch, 1790812809000)
+            .unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            break (batch, model);
+        }
+    };
+    // Two new custodies need more than one bounded advance. The first
+    // checkpoint's ACK is lost with the process; a restarted producer resumes
+    // the same operation from the durable checkpoint, not from scratch.
+    assert_eq!(
+        catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
+        (crate::events::Outcome::Deferred, None)
+    );
+    assert_eq!(
+        catchup.session_catalog_generation().unwrap(),
+        qualified.as_deref().unwrap()
+    );
+    drop(catchup);
+    let mut catchup =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let mut deferred = 1;
+    let ack = loop {
+        let ack = catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        if ack.0 != crate::events::Outcome::Deferred {
+            break ack;
+        }
+        assert_eq!(ack.1, None);
+        assert_eq!(
+            catchup.session_catalog_generation().unwrap(),
+            qualified.as_deref().unwrap()
+        );
+        deferred += 1;
+        assert!(deferred < 64, "custody makes bounded progress");
+    };
+    assert_eq!(ack.0, crate::events::Outcome::Written);
+    // A lost Written ACK replays the exact operation and its generation.
+    assert_eq!(
+        catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
+        ack
+    );
+    catchup.finish_semantic_stage(batch.epoch).unwrap();
+    let caught = ack.1.unwrap();
+    assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
