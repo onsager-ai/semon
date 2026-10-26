@@ -301,7 +301,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
         self.catalog(key, true)
             .map_err(failed)?
-            .map(|row| serde_json::to_string(&row).map_err(io::Error::other))
+            .map(|mut row| {
+                row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                serde_json::to_string(&row).map_err(io::Error::other)
+            })
             .transpose()
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {

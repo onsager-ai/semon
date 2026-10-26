@@ -471,6 +471,15 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
 
 const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, decode(current_setting('semon.namespace'::text, true), 'hex'::text))";
 
+// SELECT-only scope for one host-authorized workspace metadata request. The
+// ordinary policy remains the sole authority for every mutation and Raw table.
+const WORKSPACE_POLICY: &str = "(encode(namespace, 'hex'::text) = ANY (string_to_array(current_setting('semon.read_scope'::text, true), ','::text)))";
+const WORKSPACE_TABLES: &[&str] = &[
+    "semon_pg_native_catalog_rows", "semon_pg_native_catalog_history_owners",
+    "semon_pg_native_catalog_history_headers", "semon_pg_native_semantic_runtime",
+    "semon_pg_native_meta", "semon_pg_native_catalog_operations", "semon_pg_source_state",
+];
+
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
     hash.update(b"semon-private-native-v8");
@@ -485,6 +494,8 @@ fn contract_hash() -> Vec<u8> {
         hash.update(format!("{index:?}"));
     }
     hash.update(POLICY);
+    hash.update(WORKSPACE_POLICY);
+    for table in WORKSPACE_TABLES { hash.update(table); }
     hash.update(native_keys::MATCH_BODY);
     hash.update(native_keys::DIGEST_BODY);
     for body in super::super::native_usage_identity::contract() {
@@ -527,6 +538,9 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             ));
         }
         ddl.push_str(&format!("PRIMARY KEY(namespace_digest,{})); ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; ALTER TABLE {name} FORCE ROW LEVEL SECURITY; CREATE POLICY native_namespace ON {name} USING ({POLICY}) WITH CHECK ({POLICY});", table.key));
+    }
+    for table in WORKSPACE_TABLES {
+        ddl.push_str(&format!("CREATE POLICY workspace_catalog ON {table} FOR SELECT USING ({WORKSPACE_POLICY});"));
     }
     for (name, table, columns, unique) in INDEXES {
         let unique = if *unique { "UNIQUE" } else { "" };
@@ -572,7 +586,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx.driver.query("SELECT c.relname, c.relrowsecurity AND c.relforcerowsecurity AND c.relkind='r' AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'UPDATE') AND has_table_privilege(c.oid,'DELETE'),
         ARRAY(SELECT a.attname::text || ' ' || format_type(a.atttypid,a.atttypmod) || CASE WHEN a.attnotnull THEN '' ELSE '?' END FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum),
         ARRAY(SELECT a.attname::text FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.num WHERE k.conrelid=c.oid AND k.contype='p' ORDER BY x.ord),
-        ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || pg_get_expr(p.polwithcheck,p.polrelid) FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
+        ARRAY(SELECT p.polname::text || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text || ':' || pg_get_expr(p.polqual,p.polrelid) || ':' || coalesce(pg_get_expr(p.polwithcheck,p.polrelid),'') FROM pg_policy p WHERE p.polrelid=c.oid ORDER BY p.polname),
         (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attname='namespace_digest' AND a.attgenerated='s'),
         ARRAY(SELECT i.relname::text || ':' || x.indisunique::text || ':' || x.indisvalid::text || ':' || x.indisready::text || ':' || array_to_string(ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY z(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=z.num ORDER BY z.ord),',') || ':' || coalesce(pg_get_expr(x.indpred,x.indrelid),'') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid WHERE x.indrelid=c.oid ORDER BY i.relname),
         ARRAY(SELECT a.attname::text || ':' || pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attgenerated='s' ORDER BY a.attname)
@@ -633,6 +647,10 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             POLICY
         };
         let policy = format!("{policy_name}:*:true:{{0}}:{POLICY}:{check}");
+        let mut policies = vec![policy];
+        if WORKSPACE_TABLES.contains(&name.as_str()) {
+            policies.push(format!("workspace_catalog:r:true:{{0}}:{WORKSPACE_POLICY}:"));
+        }
         let mut indexes = vec![format!("{name}_pkey:true:true:true:{keys}:")];
         for (index, target, keys, unique) in INDEXES {
             if native && *target == table.name {
@@ -657,7 +675,7 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         if !row.get::<_, bool>(1)
             || row.get::<_, Vec<String>>(2) != columns
             || row.get::<_, Vec<String>>(3) != key
-            || row.get::<_, Vec<String>>(4) != vec![policy]
+            || row.get::<_, Vec<String>>(4) != policies
             || row.get::<_, Option<String>>(5).as_deref() != Some("sha256(namespace)")
             || row.get::<_, Vec<String>>(6) != indexes
             || row.get::<_, Vec<String>>(7) != generated
