@@ -986,14 +986,24 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    pub(crate) fn session_description(&self, key: &str, version: u32, inputs: &str) -> Result<Option<String>, StorageError> {
+    pub(crate) fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StorageError> {
         let db = self.snapshot()?;
         super::read_session_description(&db, key, version, inputs).map_err(failed)
     }
 
-    pub(crate) fn save_session_descriptions(&self, descriptions: &[(String,u32,String,String)]) -> Result<Outcome, StorageError> {
+    pub(crate) fn save_session_descriptions(
+        &self,
+        descriptions: &[(String, u32, String, String)],
+    ) -> Result<Outcome, StorageError> {
         let mut db = connection(&self.config)?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         self.validate(&tx)?;
         super::write_session_descriptions(&tx, descriptions).map_err(failed)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -3124,7 +3134,8 @@ mod tests {
     fn default_current_source_admission_preserves_restart_replay_and_isolation() {
         use crate::storage::native_events::NativeEventStore;
         let f = Fixture::current("source-a");
-        let source = crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
+        let source =
+            crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
         let cache_path = f.root.join("index.json");
         let mut cache = EventCache::open_scoped(&cache_path, &source).unwrap();
         let receipt = cache.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
@@ -3134,10 +3145,30 @@ mod tests {
         let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
-        let other = crate::storage::HostSource::new(LogicalSourceNamespace::new("source-b").unwrap(), "a".repeat(64)).unwrap();
+        let other = crate::storage::HostSource::new(
+            LogicalSourceNamespace::new("source-b").unwrap(),
+            "a".repeat(64),
+        )
+        .unwrap();
         let isolated = EventCache::open_scoped(&cache_path, &other).unwrap();
-        assert!(isolated.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap().is_none());
-        assert!(restarted.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap().is_some());
+        assert!(
+            isolated
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(f.raw.to_str().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(f.raw.to_str().unwrap())
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {

@@ -512,6 +512,7 @@ mod tests {
             crate::storage::local_query_catalog(&local_options, bound.config.namespace.clone());
         assert_eq!(
             local
+                .unwrap()
                 .read_cohort(&bound.config.namespace, 1, &mut 1024)
                 .err()
                 .unwrap()

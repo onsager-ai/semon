@@ -116,13 +116,17 @@ impl IndexStore for ConfiguredIndex {
         version: u32,
         inputs: &str,
     ) -> Result<Option<String>, StoreError> {
-        self.native.session_description(key, version, inputs).map_err(StoreError::Configured)
+        self.native
+            .session_description(key, version, inputs)
+            .map_err(StoreError::Configured)
     }
     fn save_session_descriptions(
         &mut self,
         descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError> {
-        self.native.save_session_descriptions(descriptions).map_err(StoreError::Configured)
+        self.native
+            .save_session_descriptions(descriptions)
+            .map_err(StoreError::Configured)
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         if let Some(stage) = &self.semantic {

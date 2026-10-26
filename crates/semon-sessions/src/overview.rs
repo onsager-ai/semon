@@ -3,11 +3,14 @@
 //! reads; message text never enters the projection or a workspace ViewerCore.
 use crate::{
     Options, analytics,
-    events::EventCache,
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+#[cfg(test)]
+use crate::events::EventCache;
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io, sync::Arc};
@@ -248,13 +251,16 @@ fn read(
     since: i64,
     analytics: bool,
 ) -> io::Result<(Vec<Saved>, bool, String)> {
-    let binding = crate::storage::local_navigation_binding(&source.options, &source.key).map_err(failed)?;
+    let binding =
+        crate::storage::local_navigation_binding(&source.options, &source.key).map_err(failed)?;
     let mut connection = binding.connection().map_err(failed)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(1))
         .map_err(failed)?;
     let db = connection.transaction().map_err(failed)?;
-    binding.validate(&db, &binding.config().namespace).map_err(failed)?;
+    binding
+        .validate(&db, &binding.config().namespace)
+        .map_err(failed)?;
     let complete = db.query_row("SELECT value FROM meta WHERE key='catalog_completeness'",[],|row|row.get::<_,String>(0)).optional().map_err(failed)?.as_deref()==Some("complete")
         && !db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c LEFT JOIN session_overview o USING(session_key) WHERE c.last_ms>=?1 AND (o.session_key IS NULL OR EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:'||c.session_key)) LIMIT 1)",[since],|row|row.get::<_,bool>(0)).map_err(failed)?;
     let mut generation = db
@@ -463,12 +469,15 @@ pub(crate) fn session_home_details_inner(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable")
             })?;
-        let binding = crate::storage::local_navigation_binding(options, source_key).map_err(failed)?;
+        let binding =
+            crate::storage::local_navigation_binding(options, source_key).map_err(failed)?;
         let mut db = binding.connection().map_err(failed)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(failed)?;
         let tx = db.transaction().map_err(failed)?;
-        binding.validate(&tx, &binding.config().namespace).map_err(failed)?;
+        binding
+            .validate(&tx, &binding.config().namespace)
+            .map_err(failed)?;
         let generation: String = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='catalog_generation'",
