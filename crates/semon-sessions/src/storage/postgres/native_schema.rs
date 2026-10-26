@@ -14,6 +14,31 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "catalog_leases",
+        columns: "lease_id bytea,generation bytea,expires_at bigint",
+        key: "lease_id",
+    },
+    Table {
+        name: "catalog_operations",
+        columns: "operation_id bytea,payload bytea,generation bytea,stage_epoch bigint",
+        key: "operation_id",
+    },
+    Table {
+        name: "catalog_proofs",
+        columns: "generation bytea,path_digest bytea,source_path bytea,page_generation bytea,usage_generation bigint,usage_ready boolean",
+        key: "generation,path_digest",
+    },
+    Table {
+        name: "catalog_changes",
+        columns: "generation bytea,previous bytea?,stage_epoch bigint",
+        key: "generation",
+    },
+    Table {
+        name: "catalog_stage",
+        columns: "singleton boolean,stage_epoch bigint,runtime bytea,generation bytea?",
+        key: "singleton",
+    },
+    Table {
         name: "semantic_runtime",
         columns: "singleton boolean,admission bigint,stream_epoch bytea",
         key: "singleton",

@@ -363,34 +363,46 @@ impl IndexStore for NativeIndex {
     }
     fn session_slots(
         &self,
-        _: &crate::model::summary::CatalogRow,
-        _: Option<&str>,
-        _: usize,
+        row: &crate::model::summary::CatalogRow,
+        expected: Option<&str>,
+        max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
-        pending()
+        let Some(generation) = expected else { return Ok(None); };
+        if max == 0 || max > 64 { return Err(err(StorageError::Busy)); }
+        super::catalog_effects::snapshot::with_generation(&self.pool, &self.namespace, &self.control, generation, |snapshot| {
+            let Some((stored, header, slots)) = snapshot.selected(&row.key, false, 0, max as i64)? else { return Ok(None); };
+            if serde_json::to_vec(&stored.sources).ok() != serde_json::to_vec(&row.sources).ok() || header.3 > max as i64 { return Ok(None); }
+            slots.iter().map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>().map(Some)
+        }).map_err(err)
     }
     fn publish_session_catalog_fenced(
         &mut self,
-        _: &crate::slot_projection::Publication<'_>,
-        _: Option<&str>,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        pending()
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+            super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
+        }).map_err(err)
     }
     fn publish_partial_catalog(
         &mut self,
-        _: &crate::slot_projection::Publication<'_>,
-        _: Option<&str>,
-        _: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        pending()
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+            super::catalog_effects::publication::publish(tx, publication, expected, claims, false)
+        }).map_err(err)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
-        _: &crate::slot_projection::Publication<'_>,
-        _: Option<&str>,
-        _: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        pending()
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+            super::catalog_effects::publication::publish(tx, publication, expected, claims, true).map(Some)
+        }).map_err(err)
     }
     fn resolve_catalog_input(
         &mut self,
@@ -425,7 +437,11 @@ impl IndexStore for NativeIndex {
             .map_err(err)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        pending()
+        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
+            let Some(generation) = super::model_cache::generation(tx)? else { return Ok(false); };
+            let row = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&self.namespace.as_str().as_bytes(), &generation.as_bytes()]).map_err(sqlstate::error)?;
+            Ok(row.get(0))
+        }).map_err(err)
     }
     fn catalog_component_paths(
         &self,
