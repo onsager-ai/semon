@@ -136,7 +136,9 @@ impl Projection {
             let prefix = prefix(kind, &identity);
             tx.execute("DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?1||'~'", [prefix])?;
         }
-        let mut put = tx.prepare_cached("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)")?;
+        let mut put = tx.prepare_cached(
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",
+        )?;
         if complete {
             put.execute(params![prefix("session", &identity), session])?;
             for (order, text) in turns.iter().enumerate() {

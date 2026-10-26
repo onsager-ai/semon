@@ -27,8 +27,12 @@ impl Relationships for Writer<'_, '_, '_> {
             .map(|_| self.transaction.total_changes());
         self.layout.ensure_current()?;
         let sql = match group {
-            RelationshipGroup::Lineage => "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
-            RelationshipGroup::Semantic => "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
+            RelationshipGroup::Lineage => {
+                "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')"
+            }
+            RelationshipGroup::Semantic => {
+                "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')"
+            }
         };
         self.transaction.execute(sql, [path])?;
         Ok(())

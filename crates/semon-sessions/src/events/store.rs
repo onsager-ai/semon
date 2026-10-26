@@ -518,54 +518,6 @@ const PUT_EVENT: &str = "INSERT OR REPLACE INTO events (file_id, extra, seq, k, 
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)";
 
-const COPIED_USAGE_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS usage_identity (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    record_uuid TEXT NOT NULL,
-    PRIMARY KEY(file_id, message_id, record_uuid)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
-CREATE TABLE IF NOT EXISTS usage (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    model TEXT,
-    input INTEGER NOT NULL,
-    cached_input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    reasoning_output INTEGER NOT NULL,
-    total INTEGER NOT NULL,
-    model_input INTEGER NOT NULL,
-    model_output INTEGER NOT NULL,
-    model_cache_write INTEGER NOT NULL,
-    model_cache_read INTEGER NOT NULL,
-    billing_input INTEGER NOT NULL,
-    billing_output INTEGER NOT NULL,
-    billing_cache_read INTEGER NOT NULL,
-    billing_cache_write_5m INTEGER NOT NULL,
-    billing_cache_write_1h INTEGER NOT NULL,
-    billing_web_search_requests INTEGER NOT NULL,
-    billing_speed TEXT,
-    billing_service_tier TEXT,
-    billing_prompt_size INTEGER NOT NULL,
-    billing_timestamp INTEGER,
-    billing_split_unknown INTEGER NOT NULL,
-    record_ids TEXT NOT NULL,
-    PRIMARY KEY (file_id, message_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS codex_usage (
-    file_id INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    cache_write INTEGER NOT NULL,
-    cache_read INTEGER NOT NULL,
-    t INTEGER,
-    PRIMARY KEY (file_id, seq)
-) STRICT, WITHOUT ROWID;
-";
-
 const COMPOSITE_COPIED_USAGE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS usage_identity (
     namespace TEXT NOT NULL,
@@ -620,17 +572,13 @@ CREATE TABLE IF NOT EXISTS codex_usage (
 ) STRICT, WITHOUT ROWID;
 ";
 
-fn copied_usage_schema(composite: bool) -> &'static str {
-    if composite {
-        COMPOSITE_COPIED_USAGE_SCHEMA
-    } else {
-        COPIED_USAGE_SCHEMA
-    }
+fn copied_usage_schema() -> &'static str {
+    COMPOSITE_COPIED_USAGE_SCHEMA
 }
 
 fn copied_usage_sql<'a>(
     c: &Connection,
-    legacy: &'a str,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
     let version: i64 = c.pragma_query_value(None, "schema_version", |r| r.get(0))?;
@@ -639,33 +587,28 @@ fn copied_usage_sql<'a>(
         let layout: Option<bool> = c
             .prepare_cached("SELECT semon_copied_usage_layout(?1)")?
             .query_row([version], |r| r.get(0))?;
-        if let Some(composite) = layout {
-            return Ok(if composite { scoped } else { legacy });
+        if layout == Some(true) {
+            return Ok(scoped);
         }
     }
     // These tables are one atomic physical family, independent of files and
     // native usage. Reject missing tables and partial namespace keys before DML.
-    let mut shape = None;
     for (table, keys) in [
         ("usage_identity", "file_id,message_id,record_uuid"),
         ("usage", "file_id,message_id"),
         ("codex_usage", "file_id,seq"),
     ] {
         let actual: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
-        let composite = if actual == keys {
-            false
-        } else if actual == format!("namespace,{keys}") {
-            true
-        } else {
+        if actual != format!("namespace,{keys}") {
             return Err(rusqlite::Error::InvalidQuery);
-        };
-        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1) WHERE name='namespace'")?.query_row(params![table, i64::from(composite)], |r| r.get(0))?;
+        }
+        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=1 AND min(pk=1 AND [notnull]=1 AND type='TEXT') FROM pragma_table_info(?1) WHERE name='namespace'")?.query_row([table], |row| row.get(0))?;
         let physical: bool = c
             .prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
             )?
             .query_row([table], |r| r.get(0))?;
-        if !namespace_valid || !physical || shape.is_some_and(|prior| prior != composite) {
+        if !namespace_valid || !physical {
             return Err(rusqlite::Error::InvalidQuery);
         }
         // Composite payload rows must reference the same physical core key.
@@ -683,36 +626,26 @@ fn copied_usage_sql<'a>(
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let expected: Vec<(String, String, String)> = if composite {
-            vec![
-                ("files".into(), "namespace".into(), "namespace".into()),
-                ("files".into(), "file_id".into(), "file_id".into()),
-            ]
-        } else {
-            Vec::new()
-        };
+        let expected = vec![
+            ("files".to_owned(), "namespace".to_owned(), "namespace".to_owned()),
+            ("files".to_owned(), "file_id".to_owned(), "file_id".to_owned()),
+        ];
         if foreign_keys != expected {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        shape = Some(composite);
     }
-    let composite = shape.ok_or(rusqlite::Error::InvalidQuery)?;
     let peer_index: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_index_info('usage_identity_peers') ORDER BY seqno)")?
         .query_row([], |r| r.get(0))?;
     let peer_table: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name='usage_identity_peers' AND tbl_name='usage_identity') AND EXISTS(SELECT 1 FROM pragma_index_list('usage_identity') WHERE name='usage_identity_peers' AND [unique]=0 AND partial=0 AND origin='c')")?
         .query_row([], |r| r.get(0))?;
-    let expected_index = if composite {
-        "namespace,message_id,record_uuid,file_id"
-    } else {
-        "message_id,record_uuid,file_id"
-    };
+    let expected_index = "namespace,message_id,record_uuid,file_id";
     if !peer_table || peer_index != expected_index {
         return Err(rusqlite::Error::InvalidQuery);
     }
     // Do not cache an uncommitted schema cookie: rollback can reuse it for
     // a different DDL transaction. Existing committed decisions remain usable.
     if !c.is_autocommit() {
-        return Ok(if composite { scoped } else { legacy });
+        return Ok(scoped);
     }
     c.create_scalar_function(
         "semon_copied_usage_layout",
@@ -721,10 +654,10 @@ fn copied_usage_sql<'a>(
             | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
         move |context| {
             let observed: i64 = context.get(0)?;
-            Ok((observed == version).then_some(composite))
+            Ok((observed == version).then_some(true))
         },
     )?;
-    Ok(if composite { scoped } else { legacy })
+    Ok(scoped)
 }
 
 // The current schema is qualified before constructing the transaction writer.
@@ -736,8 +669,7 @@ struct WriterLayout<'tx, 'connection> {
 
 impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
     fn new(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
-        configured::sql(transaction, "", "")?;
-        configured::metadata_sql(transaction, "", "")?;
+        configured::validate_statement_layout(transaction)?;
         copied_usage_sql(transaction, "", "")?;
         semantic_stage::support_sql(transaction, "", "")?;
         let schema_version =
@@ -4821,6 +4753,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
             "unsupported session index: missing metadata",
         ));
     }
+    configured::validate_statement_layout(connection)?;
     let parser = match connection
         .query_row(
             configured::metadata_sql(connection, "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE key='cache_version'", "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('cache_version') AND key='cache_version'")?,
@@ -4994,7 +4927,7 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         semantic_stage::support_schema(),
         metadata_schema(),
         configured::CORE_SCHEMA,
-        copied_usage_schema(true),
+        copied_usage_schema(),
         usage,
         repair,
         tree_state::schema(true),
@@ -11207,7 +11140,7 @@ mod tests {
             "CREATE TABLE files(file_id INTEGER PRIMARY KEY); INSERT INTO files VALUES(1),(2);"
         })
         .unwrap();
-        db.execute_batch(copied_usage_schema(composite)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
         let seed = ["a", "b", "c", "z"]
             .into_iter()
             .map(|id| {

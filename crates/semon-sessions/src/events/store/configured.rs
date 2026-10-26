@@ -86,7 +86,7 @@ thread_local! {
 }
 
 // Observation only. In particular, this guard caches no shape result: every
-// existing selector still executes its complete qualification query.
+// entry qualification executes its complete physical checks.
 pub(super) struct WriterShapeProbe(Option<WriterShapeMeasurements>);
 
 impl WriterShapeProbe {
@@ -141,20 +141,13 @@ impl Drop for WriterShapeProbe {
     }
 }
 
-/// Require the current namespace-leading core before returning its statement.
-/// Unsupported earlier contracts never select another runtime statement.
+/// Statement selection has one current contract. Physical checks belong to
+/// the admitted open and transaction-writer boundaries, never each statement.
 pub(super) fn sql<'a>(
-    db: &Connection,
+    _db: &Connection,
     _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let started = WriterShapeProbe::start("core_shape_calls");
-    let composite = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get::<_, bool>(0));
-    WriterShapeProbe::finish("core_shape_query", started);
-    let composite = composite?;
-    if !composite {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
     Ok(scoped)
 }
 
@@ -162,13 +155,23 @@ pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
     sql(db, "", "namespace=semon_namespace() AND ")
 }
 
-/// Require the current metadata key contract. The unused first argument is
-/// being removed with the remaining consumer SQL ports in this workstream.
 pub(crate) fn metadata_sql<'a>(
-    db: &Connection,
+    _db: &Connection,
     _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
+    Ok(scoped)
+}
+
+/// Entry qualification retained by current open/admission and WriterLayout.
+/// Its schema-cookie guard detects controlled DDL after writer construction.
+pub(super) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
+    let started = WriterShapeProbe::start("core_shape_calls");
+    let core: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)")?.query_row([], |row| row.get(0))?;
+    WriterShapeProbe::finish("core_shape_query", started);
+    if !core {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let started = WriterShapeProbe::start("meta_shape_calls");
     crate::native_timing::discovery_count(|counts| {
         counts.schema_probes += 1;
@@ -176,13 +179,12 @@ pub(crate) fn metadata_sql<'a>(
     });
     let shape = db.prepare_cached(
         "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
-    )?.query_row([], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)));
+    )?.query_row([], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?,row.get::<_, i64>(3)?)))?;
     WriterShapeProbe::finish("meta_shape_query", started);
-    let (columns, namespace, key, values) = shape?;
-    if (columns, namespace, key, values) != (3, 1, 2, 1) {
+    if shape != (3, 1, 2, 1) {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    Ok(scoped)
+    Ok(())
 }
 
 // Empty is reserved for store metadata: LogicalSourceNamespace refuses it.
@@ -436,7 +438,9 @@ fn failed(error: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
         if (message.starts_with("no such ") || message.starts_with("private native"))
             && message.len() < 160
-            && message.bytes().all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
+            && message
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
         {
             eprintln!("configured SQL contract failure: {message}");
         }
@@ -525,6 +529,7 @@ impl NativeOwnership {
 
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
+        validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
         if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
@@ -883,7 +888,7 @@ fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
     if !composite_meta {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    metadata_sql(db, "", "").map_err(failed)?;
+    validate_statement_layout(db).map_err(failed)?;
     Ok(())
 }
 
@@ -2103,7 +2108,7 @@ mod tests {
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
-        db.execute_batch(copied_usage_schema(false)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
         db.execute_batch(tree_state::SCHEMA).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
@@ -7268,8 +7273,18 @@ mod tests {
             // not native transcript content. Derive that bit independently from
             // the qualified baseline; all native slots remain reference values.
             for projection in &mut expected.transcripts {
-                let row = expected.rows.iter().find(|row| row.key == projection.key).unwrap();
-                projection.repair = cache.session_slots(row, prepared.base_generation.as_deref(), projection.slots.len()).is_none();
+                let row = expected
+                    .rows
+                    .iter()
+                    .find(|row| row.key == projection.key)
+                    .unwrap();
+                projection.repair = cache
+                    .session_slots(
+                        row,
+                        prepared.base_generation.as_deref(),
+                        projection.slots.len(),
+                    )
+                    .is_none();
             }
             assert_eq!(
                 serde_json::to_value(
