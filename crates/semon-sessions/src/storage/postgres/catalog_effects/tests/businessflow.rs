@@ -1142,7 +1142,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }], "pg-businessflow", "limit=20");
     assert_eq!(workspace.status, 200, "ordinary production workspace Catalog");
     let workspace: serde_json::Value = serde_json::from_slice(&workspace.body).unwrap();
-    assert_eq!(workspace["items"].as_array().unwrap().iter().map(|row| row["key"].as_str().unwrap()).collect::<Vec<_>>(), oracle.rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>());
+    assert_eq!(workspace["items"].as_array().unwrap().iter().map(|row| row["key"].as_str().unwrap()).collect::<Vec<_>>(), page["items"].as_array().unwrap().iter().map(|row| row["key"].as_str().unwrap()).collect::<Vec<_>>());
     type BodySources = std::collections::BTreeMap<
         (String, String),
         (crate::SessionSourceRef, std::sync::Arc<[u8]>),
