@@ -301,7 +301,9 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &'a self,
         path: &std::path::Path,
     ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
-        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(path)?))
+        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(
+            path,
+        )?))
     }
     fn require_current(&self) -> io::Result<()> {
         Ok(())

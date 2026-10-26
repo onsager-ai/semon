@@ -371,7 +371,7 @@ mod tests {
                 None,
             ),
         ] {
-            write_facts(&path, &facts).unwrap();
+            write_facts(&path, &facts, &crate::Options::default().source).unwrap();
             let source = CurrentSources::open(&path).unwrap();
             assert_eq!(
                 source.codex_current("sessions/selected.jsonl").unwrap(),
@@ -391,13 +391,13 @@ mod tests {
         facts.codex_provisional_rollouts = Some(std::collections::BTreeSet::from([
             "sessions/new.jsonl".into(),
         ]));
-        write_facts(&path, &facts).unwrap();
+        write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         let unknown = CurrentSources::open(&path).unwrap();
         assert!(!unknown.selection_known());
         assert_eq!(unknown.codex_current("sessions/new.jsonl").unwrap(), None);
         drop(unknown);
         facts.codex_rollouts = Some(Default::default());
-        write_facts(&path, &facts).unwrap();
+        write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         let explicit_empty = CurrentSources::open(&path).unwrap();
         assert!(explicit_empty.selection_known());
         assert_eq!(
@@ -427,7 +427,7 @@ mod tests {
         let a = fixture(Some(&["a.jsonl"]));
         let file_a = crate::save_json_file(&path, &a).unwrap();
         let identity_a = Identity::of(&file_a.metadata().unwrap()).unwrap();
-        write_facts(&path, &fixture(Some(&["b.jsonl"]))).unwrap();
+        write_facts(&path, &fixture(Some(&["b.jsonl"])), &crate::Options::default().source).unwrap();
         assert!(publish(&path, &a, &identity_a).is_err());
         let b = CurrentSources::open(&path).unwrap();
         assert_eq!(b.codex_current("a.jsonl").unwrap(), Some(false));
@@ -439,9 +439,9 @@ mod tests {
     fn replacement_in_place_change_and_disappearance_invalidate_open_reader() {
         let root = root();
         let path = root.join("facts.json");
-        write_facts(&path, &fixture(Some(&["a.jsonl"]))).unwrap();
+        write_facts(&path, &fixture(Some(&["a.jsonl"])), &crate::Options::default().source).unwrap();
         let old = CurrentSources::open(&path).unwrap();
-        write_facts(&path, &fixture(Some(&["b.jsonl"]))).unwrap();
+        write_facts(&path, &fixture(Some(&["b.jsonl"])), &crate::Options::default().source).unwrap();
         assert!(old.codex_current("a.jsonl").is_err());
         let old = CurrentSources::open(&path).unwrap();
         fs::write(&path, b"{}").unwrap();
@@ -458,7 +458,7 @@ mod tests {
         let path = root.join("facts.json");
         fs::create_dir(database(&path)).unwrap();
         let facts = fixture(Some(&["selected.jsonl"]));
-        write_facts(&path, &facts).unwrap();
+        write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         assert_eq!(read_facts(&path).unwrap(), facts);
         assert!(CurrentSources::open(&path).is_err());
         fs::remove_dir(database(&path)).unwrap();
@@ -482,7 +482,7 @@ mod tests {
     fn symlink_substitution_never_supplies_current_authority() {
         let root = root();
         let path = root.join("facts.json");
-        write_facts(&path, &fixture(Some(&["a.jsonl"]))).unwrap();
+        write_facts(&path, &fixture(Some(&["a.jsonl"])), &crate::Options::default().source).unwrap();
         fs::rename(&path, root.join("original.json")).unwrap();
         std::os::unix::fs::symlink(root.join("original.json"), &path).unwrap();
         assert!(CurrentSources::open(&path).is_err());
@@ -503,7 +503,7 @@ mod tests {
                 ),
                 ..fixture(None)
             };
-            write_facts(&path, &facts).unwrap();
+            write_facts(&path, &facts, &crate::Options::default().source).unwrap();
             let source = CurrentSources::open(&path).unwrap();
             let mut query = source
                 .connection

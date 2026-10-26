@@ -1229,7 +1229,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         store,
                         host,
                     )
-                    .unwrap();
+                    .unwrap_or_else(|error| panic!("PG selected body {}: {error:?}", row.key));
                 let fields = query
                     .call_bound_selected_at(
                         "get_session",
@@ -2062,7 +2062,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         hostname: "source-write-before158".into(),
         ..Default::default()
     };
-    crate::save_json_file(&facts_path, &recorded).unwrap();
+    crate::write_facts(&facts_path, &recorded, &options.source).unwrap();
     let mut facts_options = options.clone();
     facts_options.facts = Some(facts_path.clone());
     let before_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
@@ -2160,7 +2160,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Some(facts_request.clone()),
     )
     .unwrap();
-    crate::save_json_file(&facts_path, &recorded).unwrap();
+    crate::write_facts(&facts_path, &recorded, &facts_options.source).unwrap();
     drop(facts_writer); // Bytes/no SQL completion.
     let facts_writer = crate::SessionFactsWrite::begin_with_store(
         &facts_options,

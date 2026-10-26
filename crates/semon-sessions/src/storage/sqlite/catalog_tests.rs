@@ -502,10 +502,18 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
             .iter()
             .find(|row| row["key"] == "usage-history")
             .unwrap();
-        let saved: String = db.query_row("SELECT metadata FROM session_catalog WHERE session_key='usage-history'", [], |r|r.get(0)).unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='usage-history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let saved: crate::model::summary::CatalogRow = serde_json::from_str(&saved).unwrap();
         let query_state = saved.query.as_ref().map(|q| &q["state"]);
-        let generation_matches = saved.query.as_ref().is_some_and(|q| q["source_generation"] == crate::retention::source_generation(&saved.sources).unwrap());
+        let generation_matches = saved.query.as_ref().is_some_and(|q| {
+            q["source_generation"] == crate::retention::source_generation(&saved.sources).unwrap()
+        });
         assert_eq!(
             owner["status"]["state"], "off",
             "native usage records cannot prove turn completion during staged repair: lifecycle={:?}, saved_state={query_state:?}, generation_matches={generation_matches}, transport_state={:?}, observation={:?}",

@@ -685,9 +685,23 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
     Ok(facts)
 }
 
-/// Writes facts as JSON, atomically.
-pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
+/// Writes canonical Facts atomically and publishes the selected backend's
+/// derived authority. PG preparation is journaled by SessionFactsWrite and
+/// consumed by its ordinary producer, without a SQLite projection side effect.
+pub fn write_facts(
+    path: &Path,
+    facts: &Facts,
+    source: &crate::storage::HostSource,
+) -> io::Result<()> {
     let file = crate::save_json_file(path, facts)?;
+    #[cfg(feature = "postgres")]
+    if source.selected_store().is_some_and(|config| {
+        matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })
+    }) {
+        return Ok(());
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = source;
     if let Ok(metadata) = file.metadata()
         && let Ok(identity) = source_authority::Identity::of(&metadata)
     {
