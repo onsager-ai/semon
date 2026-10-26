@@ -1067,7 +1067,7 @@ mod sqlite_tests {
         );
         connection
             .execute_batch(
-                "CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;",
+                "CREATE TEMP TABLE IF NOT EXISTS catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;",
             )
             .unwrap();
         connection

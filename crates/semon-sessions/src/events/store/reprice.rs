@@ -1714,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn native_usage_metadata_proof_reference_owners_refuse_unported_history_before_gc() {
+    fn native_usage_metadata_proof_reference_owners_refuse_invalid_history_before_gc() {
         let mut db = Connection::open_in_memory().unwrap();
         assembled_metadata_fixture(&db);
         let mut old = ledger();
@@ -1772,7 +1772,7 @@ mod tests {
         let retained_before: i64 = db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'native_published_chunks:*'", [], |r| r.get(0)).unwrap();
         assert!(retained_before > 0);
         db.execute(
-            "INSERT INTO session_history_catalog VALUES('owner','{}')",
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata) VALUES('a','owner','{}')",
             [],
         )
         .unwrap();
@@ -1781,7 +1781,7 @@ mod tests {
             let tx = db.unchecked_transaction().unwrap();
             assert!(
                 chunk_proofs::clear(&tx, "same.jsonl").is_err(),
-                "singleton history has no proven Source owner in a composite Catalog"
+                "malformed current history cannot authorize proof collection"
             );
             tx.rollback().unwrap();
         }
