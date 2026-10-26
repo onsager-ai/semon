@@ -278,6 +278,13 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     if database.as_os_str().is_empty() || database == Path::new(":memory:") {
         return Err(StorageError::InvalidArguments);
     }
+    if let Some(parent) = database.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder.create(parent).map_err(|_| StorageError::Unavailable)?;
+    }
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -295,6 +302,7 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     tree_state::register(&db).map_err(failed)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failed)?;
+    db.pragma_update(None, "locking_mode", "EXCLUSIVE").map_err(failed)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -314,6 +322,10 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(failed)?;
     tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+    #[cfg(test)]
+    if let Some(hook) = super::BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
     let mode: String = db
         .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
         .map_err(failed)?;
