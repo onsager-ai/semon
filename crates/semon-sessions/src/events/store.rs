@@ -1249,7 +1249,7 @@ pub(crate) fn prioritize_projection_sources(
         let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
     }
     tx.execute(
-        configured::metadata_sql(&tx, "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'").map_err(io::Error::other)?,
+        configured::metadata_sql(&tx, "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'", "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'").map_err(io::Error::other)?,
         [],
     )
     .map_err(io::Error::other)?;
@@ -1349,12 +1349,12 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     }
     if let Some(last) = &page.next {
         tx.execute(
-            configured::metadata_sql(tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
+            configured::metadata_sql(tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE main.meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
             [last],
         )
         .map_err(io::Error::other)?;
     } else {
-        tx.execute(configured::metadata_sql(tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
+        tx.execute(configured::metadata_sql(tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM main.meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
             .map_err(io::Error::other)?;
     }
     Ok(page.done)
@@ -5184,7 +5184,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     transaction.execute_batch(ddl)?;
                 }
                 transaction.execute(
-                    configured::metadata_sql(&transaction, "INSERT INTO meta(key,value) VALUES('cache_version',?1)", "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope('cache_version'),'cache_version',?1)")?,
+                    configured::metadata_sql(&transaction, "INSERT INTO meta(key,value) VALUES('cache_version',?1)", "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('cache_version'),'cache_version',?1)")?,
                     [CACHE_VERSION.to_string()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -5639,7 +5639,7 @@ fn native_metadata_put(connection: &Connection) -> rusqlite::Result<&'static str
     configured::metadata_sql(
         connection,
         "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
     )
 }
 
@@ -5647,7 +5647,7 @@ fn metadata_increment(connection: &Connection) -> rusqlite::Result<&'static str>
     configured::metadata_sql(
         connection,
         "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-        "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
     )
 }
 
@@ -5655,7 +5655,7 @@ fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static 
     configured::metadata_sql(
         connection,
         "DELETE FROM meta WHERE key=?1",
-        "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+        "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
     )
 }
 
