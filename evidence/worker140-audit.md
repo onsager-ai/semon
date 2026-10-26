@@ -1,5 +1,74 @@
 # Worker140 / PG57 — unfinished major business-flow WIP
 
+## Worker144 / global144 / PG61 — same major B, NOT COMPLETE
+
+Custody: started with clean local/remote e00cce06113de58b3f09c4caf43dbe41463ec309,
+which is Root's normal merge of 522af2f and Worker140 final 17d66662. No reset,
+other worktree mutation, nested harness, public PG factory or MAIN merge occurred.
+
+Implemented WIP on task/477-pg-vertical-20261026:
+- Step 0: ordinary UUID/versioned Copilot and rollout Codex fixtures. CI
+  40265716159/e22143bc passed the formerly failing SQLite oracle, PG model parity,
+  and restart; failed an append source assertion that incorrectly used row 0.
+  This now finds the exact source path. No native validation was weakened.
+- Step 1 PARTIAL: publication uses semantic_owner::begin and a durable monotonic
+  catalog_stage epoch under the SourceState lock. This is NOT the full semantic
+  staging producer; begin_semantic_stage/batch/record/publish/finish/select/replay
+  trait defaults remain unavailable and are STILL BLOCKING the ordinary queued
+  semantic flow (events.rs:1160-1217). Do not accept the stage row as that owner.
+- Step 2 WIP: ordinary IndexStore publication ports now call one transaction with
+  native135 binding, immutable Current/recipe/trace/search effects, history
+  preservation, expected-head CAS, exact claim ACK, full-value operation replay,
+  durable native proof references and change hints. The ordinary port derives
+  operation IDs from the complete request (including trace witnesses/overview,
+  recipes, base, claims and closed mode). Removal of an unmentioned Current row
+  explicitly refuses; general partial/cohort closure is NOT complete. Explicit
+  mismatched caller-supplied OpID qualification remains missing.
+- Step 3 PARTIAL: session_slots reads bounded exact-source recipes. Explicit
+  pending remains remove_files, resolve_catalog_input, relocate_codex and
+  catalog_component_paths. No claim is made that those are off the full ordinary
+  call path: semantic execution has NOT reached them. qualified_catalog observes
+  a committed op; it is not complete backend/public selection qualification.
+- Step 4 PARTIAL: acknowledged immutable generation + expiring lease can feed the
+  ordinary Catalog list renderer. Completeness is explicitly partial. Bounded
+  request-owned selected_reader adds native-page hash proof verification to an
+  independently authorized host reader and ordinary native_field::preview.
+  No local Raw file is opened by the PG reader. Proofs are retained indefinitely;
+  there is no GC capability. CatalogSnapshot search, selected_details and
+  transcript_observation still explicitly refuse; QueryCatalogStore is unported.
+  This is not complete selected Query/body/field integration.
+- Step 5 PARTIAL: existing scenario now attempts publish, exact ACK replay,
+  competing stale CAS refusal, ordinary list, scalar field parity, restart,
+  append/republish and old selected proof read. Existing process-wide SQLite
+  rejection and Raw checks remain. Full list parity, restart selected route,
+  explicit mismatched OpID, concurrent CAS, restricted-role collision on the new
+  reader and complete cancellation/oversize publication matrix are still missing.
+
+Observed CI: 40265909533/8a8ef8e2 failed private publish visibility (fixed).
+40266184604/51f0bfa1 compiled and ran through publication, identical ACK replay and
+stale competitor refusal, then failed list rendering at businessflow.rs:134.
+The adapter supplied an invalid completeness value; fixed to current `partial`.
+40266455652/eccaf779, 40266562039/132348ec, 40266653453/6ee60ee5 were still running
+at observation. Final code 16eeca2382823d6a07459e08502d93a70eaf077c was normally
+pushed and full remote SHA verified. No final-green evidence exists. Formatting
+has not been applied from CI artifacts and fmt/strict Clippy/default/full gates
+remain pending. Root must collect exact-head results, not infer green from a
+prefix assertion. These WIP paths need further implementation and review.
+
+Interfaces for Root: only private PG modules/current native TABLES additions;
+no PgPool API or public backend enum change. New tables catalog_operations,
+catalog_proofs, catalog_changes, catalog_stage and catalog_leases are current
+manifest entries and inherit namespace forced RLS. Preserve immutable bytea Tree
+address fix. Reconcile A/C via Root only. Full477/current transfer/catch-up/fenced
+cutover/qualified rollback/Hub313 stay open; #380 before #477 MAIN unchanged.
+
+Thermal log remains unavailable. No local cargo/build/check/test/clippy/fmt,
+lockgen/update, Node/typecheck, browser/image/corpus/SQL benchmark ran. CI only;
+stop CPU work at >=85 C or unavailable readings. Bounded named-file reads and
+sanitized small diagnostic artifacts only. This bounded attempt is FAIL, not an
+external authorization blocker, and grants no automatic retry/escalation.
+
+
 Worker140 is NOT complete and is not accepted. No full #477 claim is made.
 This bounded start did not connect admitted Catalog/list/selected reads. Continue
 the same major business flow; do not independently accept the helpers below.
