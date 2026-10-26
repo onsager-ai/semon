@@ -101,6 +101,7 @@ mod tests {
             .bind_source(&namespace, Some(&"a".repeat(64)), &control)
             .unwrap();
         let journal = config.source_observations().unwrap();
+        let mut writer = config.native_events().unwrap();
         assert!(journal.recovery_cursor().is_ok());
         pinned
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
@@ -116,6 +117,13 @@ mod tests {
         }
         assert_eq!(
             journal.recovery_cursor().unwrap_err(),
+            StorageError::NamespaceUnadmitted
+        );
+        // The production writer must reject its old capability before touching
+        // Raw, even when the requested file does not exist.
+        let absent = std::path::Path::new("/namespace233-absent.jsonl");
+        assert_eq!(
+            writer.ingest(&"c".repeat(64), absent, "claude").unwrap_err(),
             StorageError::NamespaceUnadmitted
         );
         assert!(config.native_events().is_err());
@@ -135,6 +143,10 @@ mod tests {
         assert!(
             config.native_events().is_err(),
             "future old hosts cannot adopt the successor epoch"
+        );
+        assert_eq!(
+            writer.ingest(&"c".repeat(64), absent, "claude").unwrap_err(),
+            StorageError::ScopeChanged
         );
         for kind in [TxnKind::ReadSnapshot, TxnKind::Write] {
             assert_eq!(
