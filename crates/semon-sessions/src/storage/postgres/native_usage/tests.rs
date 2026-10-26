@@ -594,17 +594,33 @@ fn pg_native_usage_concurrent_generation_and_fact_replay_are_namespace_serialize
 
 #[test]
 fn pg_native_usage_warm_revocation_and_manifest_drift_refuse_before_family_effects() {
-    for ddl in [
-        "ALTER TABLE semon_pg_native_usage_facts DISABLE ROW LEVEL SECURITY",
-        "ALTER TABLE semon_pg_native_usage_dimensions ALTER COLUMN value DROP NOT NULL",
-        "REVOKE ALL ON semon_pg_native_usage_facts FROM PUBLIC; REVOKE ALL ON semon_pg_native_usage_facts FROM CURRENT_USER",
+    for (change, controlled) in [
+        (
+            "ALTER TABLE semon_pg_native_usage_facts DISABLE ROW LEVEL SECURITY",
+            true,
+        ),
+        (
+            "ALTER TABLE semon_pg_native_usage_dimensions ALTER COLUMN value DROP NOT NULL",
+            true,
+        ),
+        (
+            "REVOKE ALL ON semon_pg_native_usage_facts FROM PUBLIC; REVOKE ALL ON semon_pg_native_usage_facts FROM CURRENT_USER",
+            false,
+        ),
     ] {
         let (pool, factory) = fixture(|limits| limits.max_connections = 1);
         let namespace = ns("warm\0🦀");
         let control = PgCancellation::default();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
-        factory.client().batch_execute(ddl).unwrap();
+        if controlled {
+            pool.controlled_schema_change(&control, |tx| {
+                tx.driver.batch_execute(change).map_err(sqlstate::error)
+            })
+            .unwrap();
+        } else {
+            factory.client().batch_execute(change).unwrap();
+        }
         assert_eq!(
             pool.apply_operation(&namespace, &identity(), &control, |_| panic!(
                 "drift before receipt and family effects"

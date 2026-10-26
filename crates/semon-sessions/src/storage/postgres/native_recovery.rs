@@ -18,7 +18,7 @@ pub(super) fn cursor(tx: &mut PgTxn<'_>) -> Result<Option<String>, StorageError>
         .map_err(|_| StorageError::ScopeChanged)
 }
 
-fn head(tx: &mut PgTxn<'_>) -> Result<String, StorageError> {
+pub(super) fn head(tx: &mut PgTxn<'_>) -> Result<String, StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     // The locked Source head selects the immutable current generation. An
