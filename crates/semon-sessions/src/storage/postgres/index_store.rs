@@ -589,6 +589,11 @@ impl IndexStore for NativeIndex {
             })
             .map_err(err)
     }
+    fn resume_runtime_input(&mut self,options:&crate::Options,path:&str)->Result<(),StoreError> {
+        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx| {
+            super::source_lifecycle::resume_runtime(tx,options,path)
+        }).map_err(err)
+    }
     fn resolve_catalog_input(
         &mut self,
         path: &str,

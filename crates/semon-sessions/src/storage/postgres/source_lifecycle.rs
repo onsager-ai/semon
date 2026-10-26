@@ -189,7 +189,31 @@ pub(super) fn resolve(
         return Ok(Outcome::Conflict);
     }
     let mut affected = BTreeSet::new();
-    if let Some((harness, id)) = native {
+    if let Some((harness,id))=native { affected.extend(dependent_paths(tx,harness,id)?); }
+    if let Some(log) = log {
+        affected.insert(log.to_owned());
+    }
+    if affected.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    for target in affected {
+        super::source_journal::invalidate(tx, &target)?;
+    }
+    if tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns,&path.as_bytes(),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::Conflict); }
+    tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    tx.driver
+        .execute(
+            "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)",
+            &[&ns, &key.as_bytes(), &request],
+        )
+        .map_err(sqlstate::error)?;
+    tx.check()?;
+    Ok(Outcome::Written)
+}
+
+fn dependent_paths(tx:&mut PgTxn<'_>,harness:&str,id:&str)->Result<BTreeSet<String>,StorageError> {
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    let mut affected=BTreeSet::new();
         let runtime = format!("runtime:native:{harness}");
         let dependencies=tx.driver.query("SELECT source_path FROM semon_pg_native_native_dependencies WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND harness IN ($2,$3) AND native_id=$4 LIMIT 65", &[&ns,&harness.as_bytes(),&runtime.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
         if dependencies.len() > 64 {
@@ -224,24 +248,27 @@ pub(super) fn resolve(
                 }
             }
         }
-    }
-    if let Some(log) = log {
-        affected.insert(log.to_owned());
-    }
-    if affected.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-    for target in affected {
-        super::source_journal::invalidate(tx, &target)?;
-    }
-    if tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns,&path.as_bytes(),&revision]).map_err(sqlstate::error)?!=1 { return Err(StorageError::Conflict); }
-    tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
-    tx.driver
-        .execute(
-            "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)",
-            &[&ns, &key.as_bytes(), &request],
-        )
-        .map_err(sqlstate::error)?;
-    tx.check()?;
-    Ok(Outcome::Written)
+
+    if affected.len()>64 { return Err(StorageError::Busy); }
+    Ok(affected)
+}
+
+pub(super) fn resume_runtime(tx:&mut PgTxn<'_>,options:&crate::Options,path:&str)->Result<(),StorageError> {
+    use sha2::{Digest,Sha256};
+    if options.facts.is_none() { return Ok(()); }
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let values=tx.driver.query("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence END FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    let Some(value)=values.first() else { return Ok(()); };
+    let bytes:Vec<u8>=value.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
+    let evidence:crate::source_change::RuntimeInputEvidence=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+    if evidence.unaffected.len()!=64 || !evidence.unaffected.bytes().all(|b|b.is_ascii_hexdigit()) { return Err(StorageError::ScopeChanged); }
+    let Some(id)=crate::events::store::resumed_runtime_native(options,path,&evidence).map_err(|_|StorageError::ScopeChanged)? else { return Ok(()); };
+    let request=serde_json::to_vec(&("runtime-input-resume-v1",path,&bytes,&id)).map_err(|_|StorageError::Unavailable)?;
+    let key=format!("runtime-input-resume-v1:{:x}",Sha256::digest(&request));
+    let receipt=tx.driver.query("SELECT value=$3 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND key=$2", &[&ns,&key.as_bytes(),&request]).map_err(sqlstate::error)?;
+    if let Some(value)=receipt.first() { return if value.get::<_,bool>(0) {Ok(())} else {Err(StorageError::Conflict)}; }
+    for affected in dependent_paths(tx,"claude",&id)? { super::source_journal::invalidate(tx,&affected)?; }
+    tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&key.as_bytes(),&request]).map_err(sqlstate::error)?;
+    tx.check()
 }
