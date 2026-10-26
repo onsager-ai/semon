@@ -96,6 +96,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-answer","parentUuid":"related-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
     ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
+    // Positive ClaudeName: the native custom-title record names the session.
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
     // Larger indexed history with a fixed small receiver append below.
     let padding=format!("{}\n",serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"one","padding":"x".repeat(8192)}));
     let mut history=fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
@@ -184,6 +187,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
     assert_eq!(prepared.rows.len(), oracle.rows.len());
     assert_eq!(producer_rows(&prepared.rows), producer_rows(&oracle.rows));
+    assert!(serde_json::to_string(&prepared.rows).unwrap().contains("sanitized name175"));
     assert_eq!(prepared.transcripts.len(), oracle.projections.len());
     for (actual, expected) in prepared.transcripts.iter().zip(&oracle.projections) {
         assert_eq!(
