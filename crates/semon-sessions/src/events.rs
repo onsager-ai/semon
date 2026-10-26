@@ -1800,7 +1800,12 @@ impl EventCache {
         #[cfg(feature = "postgres")]
         if let crate::storage::StoreBackend::Postgres { pool, control } = &config.backend {
             crate::storage::postgres::require_configured(config, pool, control)?;
-            return Self::open_pg_native(pool.clone(), config.namespace.clone(), control.clone());
+            let pool = pool.bind_source(
+                &config.namespace,
+                config.expected_stream_epoch.as_deref(),
+                control,
+            )?;
+            return Self::open_pg_native(pool, config.namespace.clone(), control.clone());
         }
         let store = crate::storage::sqlite::open_configured_index(config)?;
         let database = config.backend.sqlite_database()?;

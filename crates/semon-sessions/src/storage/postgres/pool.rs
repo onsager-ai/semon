@@ -295,6 +295,7 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct PgPool {
     pub(super) inner: Arc<Inner>,
+    pub(super) source_binding: Option<crate::storage::QueryRuntimeBinding>,
 }
 impl PgPool {
     pub(super) fn new(
@@ -308,6 +309,7 @@ impl PgPool {
             .build()
             .map_err(|_| StorageError::Unavailable)?;
         Ok(Self {
+            source_binding: None,
             inner: Arc::new(Inner {
                 factory,
                 state: Mutex::new(State {

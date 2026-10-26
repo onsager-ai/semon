@@ -55,6 +55,13 @@ impl PgPool {
         if namespace.as_str().is_empty() || namespace.as_str().len() > 4096 {
             return Err(StorageError::InvalidArguments);
         }
+        if self
+            .source_binding
+            .as_ref()
+            .is_some_and(|binding| &binding.namespace != namespace)
+        {
+            return Err(StorageError::NamespaceMismatch);
+        }
         let mut lease = self.acquire(control)?;
         let limits = self.inner.limits;
         let deadline = control.deadline(Instant::now() + limits.txn_deadline);
@@ -133,6 +140,14 @@ impl PgPool {
                     if blocked {
                         return Err(StorageError::ScopeChanged);
                     }
+                }
+            }
+            if let Some(expected) = &self.source_binding {
+                let actual = super::model_cache::binding(&mut tx)?;
+                if actual.admission != expected.admission
+                    || actual.stream_epoch != expected.stream_epoch
+                {
+                    return Err(StorageError::ScopeChanged);
                 }
             }
             let value = operation(&mut tx)?;

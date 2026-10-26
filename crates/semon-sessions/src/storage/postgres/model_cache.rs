@@ -14,6 +14,15 @@ pub(super) fn initialize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
 }
 
 pub(super) fn binding(tx: &mut PgTxn<'_>) -> Result<QueryRuntimeBinding, StorageError> {
+    if super::native_keys::read_meta(tx, b"source-unenrolled", 1)?
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Err(StorageError::NamespaceUnadmitted);
+    }
+    raw_binding(tx)
+}
+
+pub(super) fn raw_binding(tx: &mut PgTxn<'_>) -> Result<QueryRuntimeBinding, StorageError> {
     tx.check()?;
     let rows = tx.driver.query(
         "SELECT admission,CASE WHEN octet_length(stream_epoch)=64 THEN stream_epoch END FROM semon_pg_native_semantic_runtime WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton",
