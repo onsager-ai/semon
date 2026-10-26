@@ -1173,10 +1173,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|row| row["key"].as_str().unwrap())
             .collect::<Vec<_>>()
     );
-    type BodySources = std::collections::BTreeMap<
-        (String, String),
-        (crate::SessionSourceRef, std::sync::Arc<[u8]>),
-    >;
+    type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
     #[derive(Clone)]
     struct BodyHost(BodySources);
     impl crate::SessionSourceReader for BodyHost {
@@ -1189,7 +1186,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         ) -> std::io::Result<crate::SessionSourceRange> {
             let (saved, bytes) = self
                 .0
-                .get(&(reference.root.clone(), reference.path.clone()))
+                .iter()
+                .find(|(saved, _)| saved == reference)
                 .ok_or_else(|| std::io::Error::other("host denied"))?;
             if saved != reference
                 || expected.is_some_and(|pin| pin != "body-fixture")
@@ -1228,11 +1226,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             tail_sha256: source.tail_sha256,
                         };
                         (
-                            (row.harness.clone(), path),
-                            (
-                                reference,
-                                std::sync::Arc::from(fs::read(&source.path).unwrap()),
-                            ),
+                            reference,
+                            std::sync::Arc::from(fs::read(&source.path).unwrap()),
                         )
                     })
                 })
@@ -1367,13 +1362,46 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         prefix_sha256: source.prefix_sha256,
                         tail_sha256: source.tail_sha256,
                     };
-                    let proof = captured_config
-                        .captured_source_proof_at(&options, &generation, &row.key, &reference)
-                        .unwrap();
+                    let proof = captured_config.captured_source_proof_at(
+                        &options,
+                        &generation,
+                        &row.key,
+                        &reference,
+                    );
+                    if row.harness == "copilot" && !source.path.exists() {
+                        // This fixture's host independently retained the bytes
+                        // outside the input roots. It can authorize the body,
+                        // but Source cannot certify a vanished local carrier.
+                        assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
+                        continue;
+                    }
+                    let proof = proof.unwrap();
                     assert_eq!(proof.source, reference);
+                    let physical_path = if source.path.exists() {
+                        source.path.clone()
+                    } else {
+                        assert_eq!(row.harness, "codex");
+                        options
+                            .codex_home
+                            .join("archived_sessions")
+                            .join(source.path.file_name().unwrap())
+                    };
+                    let physical = crate::events::Stat::of(&physical_path).unwrap();
                     assert_eq!(
-                        (proof.dev, proof.ino, proof.size),
-                        (source.dev, source.ino, source.size)
+                        (
+                            proof.dev,
+                            proof.ino,
+                            proof.size,
+                            proof.modified_ns,
+                            proof.changed_ns
+                        ),
+                        (
+                            physical.dev,
+                            physical.ino,
+                            physical.size,
+                            physical.modified_ns,
+                            physical.changed_ns
+                        )
                     );
                     let mut changed = reference;
                     changed.prefix_sha256[0] ^= 1;
@@ -1803,7 +1831,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: continued_generation.clone(),
         options: options.clone(),
     };
-    let next_host = body_host(&options, &continued.rows);
+    let mut next_host = body_host(&options, &continued.rows);
+    // A retained composite can select both exact original and successor
+    // references for one physical path. Authorize those captured references
+    // explicitly; a current-path entry alone cannot authorize an old prefix.
+    next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
     assert!(
         next_bodies
@@ -1814,6 +1846,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies,
         "old authorized body must survive successor publication"
+    );
+    assert_eq!(
+        captured_bodies(&pool),
+        expected_bodies,
+        "the exact captured prefix has a current physical covering witness after append"
     );
     assert_ne!(continued_generation, generation);
     assert_eq!(
@@ -2053,7 +2090,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         fs::read(&retained_copy).unwrap(),
         retained_host
             .0
-            .values()
+            .iter()
             .find(|(r, _)| r.root == "copilot")
             .unwrap()
             .1

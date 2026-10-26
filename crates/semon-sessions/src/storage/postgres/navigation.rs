@@ -52,16 +52,71 @@ pub(crate) fn captured_source_proof(
                     && source.tail_sha256 == reference.tail_sha256
             })
             .ok_or(StorageError::ScopeChanged)?;
-        // The admitted immutable recipe binds the historical consumed prefix.
-        // Preparation grants no bytes: the body reader still opens the exact
-        // persisted Native header and verifies each requested physical block.
+        // Qualify the exact persisted prefix under this publication's lease.
+        // A historical recipe's old descriptor clocks are not a witness for
+        // today's covering file. The host separately verifies Native block
+        // hashes while copying bytes using the returned current descriptor.
+        let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
+        super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)?;
+        tx.check()?;
+        let ledger = crate::source_carrier::ledger(source);
+        let relocation = super::native_keys::read_meta(
+            &mut tx,
+            format!("native_catalog_relocation:{absolute}").as_bytes(),
+            1024 * 1024,
+        )?;
+        let relocated = relocation
+            .as_deref()
+            .map(|bytes| {
+                serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes)
+                    .map_err(|_| StorageError::ScopeChanged)
+            })
+            .transpose()?;
+        let (physical_path, physical_owner) = if let Some(proof) = &relocated {
+            if proof.version != 1
+                || proof.native_id != reference.native_id
+                || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger))
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            let path = std::path::Path::new(&proof.new_path);
+            let mut covering = source.clone();
+            covering.path = path.to_owned();
+            if crate::catalog::source_relative(options, &row.harness, &covering).is_none() {
+                return Err(StorageError::ScopeChanged);
+            }
+            (path, proof.after.stat)
+        } else {
+            (source.path.as_path(), ledger.stat)
+        };
+        let file = crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+        let stat = crate::events::Stat::from_metadata(
+            &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
+        if stat.dev != physical_owner.dev
+            || stat.ino != physical_owner.ino
+            || stat.size < source.offset
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let named =
+            std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+        if !named.is_file()
+            || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)?
+                != stat
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        tx.check()?;
         Ok(crate::SessionSourceProof {
             source: reference.clone(),
-            dev: source.dev,
-            ino: source.ino,
-            size: source.size,
-            modified_ns: source.modified_ns,
-            changed_ns: source.changed_ns,
+            dev: stat.dev,
+            ino: stat.ino,
+            size: stat.size,
+            modified_ns: stat.modified_ns,
+            changed_ns: stat.changed_ns,
             freshness: crate::CatalogFreshness {
                 state: "retained".into(),
             },

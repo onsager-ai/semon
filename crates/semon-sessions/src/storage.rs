@@ -412,6 +412,19 @@ impl StoreConfig {
         }
     }
 
+    /// Observe the PostgreSQL admission receipt for this exact host epoch.
+    /// None means unknown, never permission to discard a pending host intent.
+    /// This does not admit, revoke, or advance the namespace generation.
+    #[cfg(feature = "postgres")]
+    pub fn observe_namespace_admission(
+        &self,
+    ) -> Result<Option<NamespaceAdmissionObservation>, StorageError> {
+        let StoreBackend::Postgres { pool, control } = &self.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
+        postgres::namespace::observe(self, pool, control)
+    }
+
     /// Read a native Catalog through durable namespace and epoch admission.
     /// Options supplies Raw/runtime authority only, never database coordinates.
     pub fn catalog_page(
@@ -638,6 +651,14 @@ pub struct NamespaceAdmission {
     pub namespace: LogicalSourceNamespace,
     pub generation: u64,
     pub admitted_at: i64,
+}
+
+/// Exact durable receipt, including a retired admission after re-enrollment.
+#[cfg(feature = "postgres")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceAdmissionObservation {
+    pub admission: NamespaceAdmission,
+    pub retired: bool,
 }
 impl std::error::Error for StorageError {}
 

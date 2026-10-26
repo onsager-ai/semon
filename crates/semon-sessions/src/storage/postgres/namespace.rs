@@ -12,6 +12,63 @@ fn epoch(config: &StoreConfig) -> Result<&str, StorageError> {
         .ok_or(StorageError::InvalidArguments)
 }
 
+fn receipt_key(epoch: &str) -> Vec<u8> {
+    format!("source-admission:{epoch}").into_bytes()
+}
+
+fn receipt(
+    tx: &mut super::txn::PgTxn<'_>,
+    epoch: &str,
+    admission: &NamespaceAdmission,
+    retired: bool,
+) -> Result<(), StorageError> {
+    let bytes = serde_json::to_vec(&(admission.generation, admission.admitted_at, retired))
+        .map_err(|_| StorageError::Unavailable)?;
+    native_keys::put_meta(tx, &receipt_key(epoch), &bytes)
+}
+
+pub(crate) fn observe(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<Option<crate::storage::NamespaceAdmissionObservation>, StorageError> {
+    let expected = epoch(config)?;
+    pool.transaction(&config.namespace, TxnKind::ReadSnapshot, control, |tx| {
+        store_metadata::authorize(tx)?;
+        let Some(bytes) = native_keys::read_meta(tx, &receipt_key(expected), 128)? else {
+            return Ok(None);
+        };
+        let (generation, admitted_at, retired): (u64, i64, bool) =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        let binding = model_cache::raw_binding(tx)?;
+        if generation == 0
+            || generation > binding.admission
+            || (!retired && (binding.admission != generation || binding.stream_epoch != expected))
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        if generation == binding.admission {
+            let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?
+                .is_some_and(|value| !value.is_empty());
+            let at = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
+            if binding.stream_epoch != expected
+                || retired != revoked
+                || at.as_deref() != Some(admitted_at.to_string().as_bytes())
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        Ok(Some(crate::storage::NamespaceAdmissionObservation {
+            admission: NamespaceAdmission {
+                namespace: config.namespace.clone(),
+                generation,
+                admitted_at,
+            },
+            retired,
+        }))
+    })
+}
+
 pub(crate) fn admit(
     config: &StoreConfig,
     pool: &PgPool,
@@ -23,6 +80,9 @@ pub(crate) fn admit(
         let binding = model_cache::raw_binding(tx)?;
         let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?.is_some_and(|value| !value.is_empty());
         if (!revoked && binding.stream_epoch != expected) || (revoked && binding.stream_epoch == expected) {
+            return Err(StorageError::ScopeChanged);
+        }
+        if revoked && native_keys::read_meta(tx, &receipt_key(expected), 128)?.is_some() {
             return Err(StorageError::ScopeChanged);
         }
         let prior = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
@@ -39,7 +99,9 @@ pub(crate) fn admit(
         } else { binding.admission };
         native_keys::put_meta(tx, b"source-admitted-at", admitted_at.to_string().as_bytes())?;
         native_keys::put_meta(tx, b"source-unenrolled", b"")?;
-        Ok(NamespaceAdmission { namespace: config.namespace.clone(), generation, admitted_at })
+        let admission = NamespaceAdmission { namespace: config.namespace.clone(), generation, admitted_at };
+        receipt(tx, expected, &admission, false)?;
+        Ok(admission)
     })
 }
 
@@ -57,7 +119,7 @@ pub(crate) fn unenroll(
     // before revocation. Future source transactions validate their pinned epoch.
     pool.transaction(&config.namespace, TxnKind::StoreWrite, control, |tx| {
         store_metadata::authorize(tx)?;
-        let binding = model_cache::binding(tx)?;
+        let binding = model_cache::raw_binding(tx)?;
         let admitted_at = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
         if binding.admission != expected.generation
             || binding.stream_epoch != expected_epoch
@@ -74,7 +136,8 @@ pub(crate) fn unenroll(
                 return Err(StorageError::Conflict);
             }
         }
-        native_keys::put_meta(tx, b"source-unenrolled", b"1")
+        native_keys::put_meta(tx, b"source-unenrolled", b"1")?;
+        receipt(tx, expected_epoch, expected, true)
     })
 }
 
@@ -95,7 +158,15 @@ mod tests {
             expected_stream_epoch: Some("a".repeat(64)),
         };
         config.create_native_store().unwrap();
-        let admission = config.admit_namespace().unwrap();
+        assert_eq!(config.observe_namespace_admission().unwrap(), None);
+        super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
+        assert_eq!(
+            config.admit_namespace().unwrap_err(),
+            StorageError::CommitUncertain
+        );
+        let observed = config.observe_namespace_admission().unwrap().unwrap();
+        assert!(!observed.retired);
+        let admission = observed.admission;
         assert_eq!(config.admit_namespace().unwrap(), admission);
         let pinned = pool
             .bind_source(&namespace, Some(&"a".repeat(64)), &control)
@@ -111,6 +182,14 @@ mod tests {
         pinned
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
+        super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
+        assert_eq!(
+            config.unenroll_namespace(&admission).unwrap_err(),
+            StorageError::CommitUncertain
+        );
+        let observed = config.observe_namespace_admission().unwrap().unwrap();
+        assert!(observed.retired);
+        assert_eq!(observed.admission, admission);
         config.unenroll_namespace(&admission).unwrap();
         for kind in [TxnKind::ReadSnapshot, TxnKind::Write] {
             assert_eq!(
@@ -141,8 +220,27 @@ mod tests {
         );
         let mut successor = config.clone();
         successor.expected_stream_epoch = Some("b".repeat(64));
+        assert_eq!(successor.observe_namespace_admission().unwrap(), None);
         let next = successor.admit_namespace().unwrap();
         assert_eq!(next.generation, admission.generation + 1);
+        assert_eq!(
+            config
+                .observe_namespace_admission()
+                .unwrap()
+                .unwrap()
+                .admission,
+            admission
+        );
+        assert!(
+            config
+                .observe_namespace_admission()
+                .unwrap()
+                .unwrap()
+                .retired
+        );
+        let observed = successor.observe_namespace_admission().unwrap().unwrap();
+        assert!(!observed.retired);
+        assert_eq!(observed.admission, next);
         assert_eq!(
             config.unenroll_namespace(&admission).unwrap_err(),
             StorageError::ScopeChanged
