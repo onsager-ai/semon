@@ -466,6 +466,11 @@ impl SourceObservationStore for SourceJournal {
         if cursor.is_some_and(|value| value.len() > 4096) {
             return Err(StorageError::InvalidArguments);
         }
+        // Recovery moves only this Source's cursor; another namespace's exact
+        // OpID is refused rather than recorded as a local Conflict.
+        if operation.namespace != self.namespace() {
+            return Err(StorageError::NamespaceMismatch);
+        }
         let namespace = Some(self.namespace());
         let payload = serde_json::to_vec(&cursor).map_err(|_| StorageError::InvalidArguments)?;
         if let Some(receipt) = operation_replay(operation, namespace, "recover", &payload)? {

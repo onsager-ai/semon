@@ -854,12 +854,14 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
             ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
         ] {
             let metadata = if table == "meta" {
+                // The fenced SourceJournal backfill completion owns its two
+                // completion keys; other Catalog keys stay publisher-only.
                 let rows: &[&str] = match operation {
                     "UPDATE" => &["OLD", "NEW"],
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
