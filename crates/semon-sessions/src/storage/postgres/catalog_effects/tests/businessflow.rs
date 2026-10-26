@@ -682,12 +682,31 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{}\n",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
     );
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(append.as_bytes())
-        .unwrap();
+    let raw_store=|| crate::storage::postgres::index_store::open(pool.clone(),namespace.clone(),control.clone()).unwrap().0;
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,raw[0].len() as u64,raw_store(),None).unwrap();
+    let raw_intent=writer.intent();
+    pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx| {
+        assert!(crate::storage::postgres::native_keys::read_meta(tx,format!("raw-write-intent:{}",raw_intent.operation).as_bytes(),32768)?.is_some());
+        Ok(())
+    }).unwrap();
+    drop(writer); // Fault: durable SQL intent, no Raw bytes yet.
+    assert_eq!(fs::read(&path).unwrap(),raw[0]);
+    let mut mismatch=raw_intent.clone();mismatch.from+=1;
+    assert!(crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(mismatch)).is_err());
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
+    let mut raw_file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    raw_file.write_all(append.as_bytes()).unwrap();raw_file.sync_all().unwrap();drop(raw_file);
+    drop(writer); // Fault: durable bytes, completion transaction not attempted.
+    let written=raw[0].len() as u64+append.len() as u64;
+    assert!(resumed.ingest(&format!("{:064x}",158),&path,"claude").is_err(),"unacknowledged Raw bytes cannot enter native SQL");
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
+    writer.complete(written).unwrap();
+    // Fault: SQL committed but the receiver lost the ACK. The exact request
+    // reconciles before head/ledger CAS and reproduces the same completion.
+    let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(raw_intent.clone())).unwrap();
+    writer.complete(written).unwrap();
+    let mut stale=raw_intent;stale.operation.push_str("-stale");stale.head=Some("stale-head".into());
+    assert!(crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,0,raw_store(),Some(stale)).is_err());
     let receipt = resumed
         .ingest(&format!("{:064x}", 128), &path, "claude")
         .unwrap();
@@ -1107,4 +1126,35 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::storage::postgres::index_store::open(pool, collision, cancelled),
         Err(StorageError::Busy)
     ));
+    let facts_path=oracle.root.join("positive-facts158.json");
+    let mut recorded=crate::Facts {version:2,hostname:"source-write-before158".into(),..Default::default()};
+    crate::write_facts(&facts_path,&recorded).unwrap();
+    let mut facts_options=options.clone();facts_options.facts=Some(facts_path.clone());
+    let before_runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    let from=fs::metadata(&path).unwrap().len();
+    let writer=crate::SessionSourceWrite::begin_with_store(&facts_options,&inputs[0],None,from,raw_store(),None).unwrap();
+    let facts_intent=writer.intent();
+    let extra=format!("{}\n",serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}}));
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();file.write_all(extra.as_bytes()).unwrap();file.sync_all().unwrap();drop(file);
+    recorded.hostname="source-write-after158".into();crate::write_facts(&facts_path,&recorded).unwrap();
+    writer.complete(from+extra.len() as u64).unwrap();
+    let replay=crate::SessionSourceWrite::begin_with_store(&facts_options,&inputs[0],None,0,raw_store(),Some(facts_intent)).unwrap();replay.complete(from+extra.len() as u64).unwrap();
+    let runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();assert_ne!(before_runtime,runtime);
+    moved_cache.ingest(&format!("{:064x}",159),&path,"claude").unwrap();
+    moved_cache.begin_semantic_stage(&moved_inputs.iter().map(|i|i.full_path(&facts_options).to_string_lossy().into_owned()).collect::<Vec<_>>(),&runtime).unwrap();
+    let facts_generation=loop {
+        let batch=moved_cache.semantic_batch(64).unwrap().unwrap();
+        let model=moved_cache.prepare_semantic_model_batch(&facts_options,&moved_inputs,&batch,1790812805000).unwrap();
+        if batch.phase==crate::model::relation_stage::Phase::Publication {
+            assert!(model.prepared().rows.iter().all(|r|r.query.as_ref().is_some_and(|q|q["runtime"]==runtime)));
+            let ack=moved_cache.publish_semantic_catalog(&batch,model.prepared()).unwrap();moved_cache.finish_semantic_stage(batch.epoch).unwrap();break ack.1.unwrap();
+        }
+    };
+    let facts_store=super::super::snapshot::query::QueryCatalog {pool:pool.clone(),namespace:namespace.clone(),control:control.clone(),generation:facts_generation,options:facts_options.clone()};
+    let mut facts_query=crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(vec![(namespace.as_str().into(),facts_options)])));
+    let list=facts_query.call_bound_catalog_at("list_sessions",&serde_json::json!({}),1790812805000,&facts_store).unwrap();
+    assert!(list.to_string().contains("source-write-after158"));
+    assert_eq!(fs::read(&path).unwrap(),[raw[0].as_slice(),append.as_bytes(),extra.as_bytes()].concat());
+    assert!(!options.cache.exists());
+
 }

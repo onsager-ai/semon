@@ -585,6 +585,7 @@ impl IndexStore for NativeIndex {
             })
             .map_err(err)
     }
+    fn source_write_proofs(&self) -> bool { true }
     fn source_write_begin(&mut self, options:&crate::Options,input:&crate::Input,intent:&crate::source_change::WriteIntent)->Result<(i64,Option<crate::source_change::AppendEvidence>),StoreError> {
         self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::write_begin(tx,options,input,intent)).map_err(err)
     }

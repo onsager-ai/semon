@@ -132,6 +132,7 @@ impl SessionSourceWrite {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn intent(&self) -> WriteIntent { self.intent.clone() }
 
     pub fn complete(mut self, to: u64) -> io::Result<()> {
@@ -160,8 +161,8 @@ impl SessionSourceWrite {
         };
         let completion=WriteCompletion {
             to,after,hash:bytes_hash(&self.input.full_path(&self.options),to)?,evidence,
-            runtime:crate::native_evidence::query_runtime_generation(&self.options)?,
-            facts:self.options.facts.as_ref().map(|path| {
+            runtime:if self.store.source_write_proofs() {crate::native_evidence::query_runtime_generation(&self.options)?} else {String::new()},
+            facts:self.options.facts.as_ref().filter(|_|self.store.source_write_proofs()).map(|path| {
                 use sha2::{Digest,Sha256};
                 let facts=crate::read_facts(path)?;
                 Ok::<_,io::Error>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(io::Error::other)?)))
