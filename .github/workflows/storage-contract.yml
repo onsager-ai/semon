@@ -6,6 +6,7 @@ on:
     branches:
       - task/479-pg-facts-20261026
       - task/479-pg-catalog-20261026
+      - task/477-current-transfer-20261027
 permissions:
   contents: read
 concurrency:
@@ -62,6 +63,9 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Current SQLite transfer inbox restart and atomic checkpoint
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture
       - name: Current owner recovery custody search and navigation
         id: current_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
