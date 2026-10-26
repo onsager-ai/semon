@@ -8,6 +8,29 @@ projection algorithms are unchanged. The full native commit unit remains pending
 PostgreSQL (#479) has private pool, schema and native-row prerequisites. Its
 complete session backend and Hub adoption/migration (#313) remain undelivered.
 
+## Connected native writer (Worker122, unaccepted WIP)
+
+SQLite and the private PostgreSQL bundle now consume the same ordered callbacks:
+core rows, normalized usage, Tree, Codex header, Claude sidecar, chunk pages,
+parent marker, launch pages, invalidation/mutation retirement, dependencies and
+archive metadata retirement. All effects stay in the caller's transaction.
+The PostgreSQL current page pointer follows the launch stage; old generations
+are retained. A core ledger alone still does not prove a complete ingest.
+
+Current PostgreSQL schema 6 adds a destination index for relocation evidence
+advancement. It is fresh creation only: unsupported schema state is refused
+without an upgrade, reset or deletion. SQLite and PostgreSQL share the existing
+relocation-evidence advancement rule; Raw-prefix verification and Catalog
+relocation reuse are still unported. The private result remains `PartialFile`.
+
+The retained-page parity test materializes and closes its SQLite oracles first,
+then runs its PostgreSQL phase in an isolated test process with SQLite's actual
+connection initializer rejecting and counting all connection attempts. This is
+scoped native-family evidence, not complete-backend no-SQLite qualification.
+Resource/noise measurements, long metadata keys, Tree retirement, Catalog
+references/reader leases/GC, selected consumers and a Raw-qualified durable
+ingest receipt remain open. No factory or public backend is enabled.
+
 MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.

@@ -209,7 +209,12 @@ const FOUNDATION: &[Table] = &[
 
 // Indexes are part of the same authoritative manifest, including key order.
 const INDEXES: &[(&str, &str, &str, bool)] = &[
-    ("relocation_new", "relocation_candidates", "new_path,old_path", false),
+    (
+        "relocation_new",
+        "relocation_candidates",
+        "new_path,old_path",
+        false,
+    ),
     ("files_path", "files", "path", true),
     ("files_cwd", "files", "cwd,path", false),
     (
