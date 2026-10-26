@@ -128,17 +128,13 @@ fn ordinal(value: usize) -> Result<i64, StorageError> {
     i64::try_from(value).map_err(|_| StorageError::InvalidArguments)
 }
 
-/// Core-only family, deliberately not connected to a successful IndexStore.
-/// All callers must use the existing host write transaction and propagate errors.
-#[allow(dead_code)]
-pub(super) fn write(
+/// Exact core CAS admission shared with the connected partial bundle.
+/// The namespace lock remains held until the caller's transaction ends.
+pub(super) fn qualify(
     tx: &mut PgTxn<'_>,
     path: &str,
     expected: Option<&Ledger>,
-    ledger: &Ledger,
-    index: &FileIndex,
-    changes: Option<&DirtyRows>,
-) -> Result<i64, StorageError> {
+) -> Result<(i64, bool), StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.execute("INSERT INTO semon_pg_source_state(namespace) VALUES($1) ON CONFLICT(namespace_digest) DO NOTHING", &[&ns]).map_err(sqlstate::error)?;
@@ -171,8 +167,24 @@ pub(super) fn write(
         }
         _ => return Err(StorageError::Conflict),
     };
+    Ok((id, !current.is_empty()))
+}
+
+/// Core-only family, deliberately not connected to a successful IndexStore.
+/// All callers must use the existing host write transaction and propagate errors.
+#[allow(dead_code)]
+pub(super) fn write(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    expected: Option<&Ledger>,
+    ledger: &Ledger,
+    index: &FileIndex,
+    changes: Option<&DirtyRows>,
+) -> Result<i64, StorageError> {
+    let (id, exists) = qualify(tx, path, expected)?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
     after(tx)?;
-    if changes.is_none() && !current.is_empty() {
+    if changes.is_none() && exists {
         // Identity deletion first is required by the copied-identity triggers.
         for table in [
             "usage_identity",

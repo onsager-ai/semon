@@ -50,6 +50,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use super::Yield;
+use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
 use super::native_rows::EventState;
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
@@ -6274,24 +6275,6 @@ fn write_tree_summary(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexHeaderRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    header: crate::native_header::CodexHeader,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParentMarkerRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    index: crate::native_marker::Index,
-}
-
 fn parent_marker_key(path: &str) -> String {
     format!("native_parent_marker:{path}")
 }
@@ -6336,13 +6319,9 @@ fn write_parent_marker(
     ledger: &Ledger,
     index: Option<&crate::native_marker::Index>,
 ) -> rusqlite::Result<()> {
-    if let Some(index) = index.filter(|index| index.valid(ledger)) {
-        let encoded = json(&ParentMarkerRecord {
-            version: 1,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            index: index.clone(),
-        })?;
+    if let Some(encoded) = super::native_aux::parent_marker(ledger, index)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+    {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![parent_marker_key(path), encoded])?;
@@ -6417,16 +6396,8 @@ fn write_codex_header(
     ledger: &Ledger,
     header: Option<&crate::native_header::CodexHeader>,
 ) -> rusqlite::Result<()> {
-    let encoded = header
-        .map(|header| {
-            json(&CodexHeaderRecord {
-                version: 1,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                header: header.clone(),
-            })
-        })
-        .transpose()?;
+    let encoded = super::native_aux::codex_header(ledger, header)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
@@ -6439,15 +6410,6 @@ fn write_codex_header(
             .execute([codex_header_key(path)])?;
     }
     Ok(())
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClaudeSidecarRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    sidecar: crate::native_sidecar::ClaudeSidecar,
 }
 
 fn claude_sidecar_key(path: &str) -> String {
@@ -6497,16 +6459,8 @@ fn write_claude_sidecar(
     if sidecar.is_none() && !crate::native_sidecar::agent_path(Path::new(path)) {
         return Ok(());
     }
-    let encoded = sidecar
-        .map(|sidecar| {
-            json(&ClaudeSidecarRecord {
-                version: 1,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                sidecar: sidecar.clone(),
-            })
-        })
-        .transpose()?;
+    let encoded = super::native_aux::claude_sidecar(ledger, sidecar)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?

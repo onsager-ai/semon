@@ -534,6 +534,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
+| `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
@@ -1615,3 +1617,56 @@ STORE fault hooks cover before state write, after state write and after receipt.
 This component is pending exact-head CI and independent review. Writer/backend
 qualification remains zero, and complete native bundle, read/repricing integration,
 no-SQLite proof and migration/cutover/rollback are still required.
+
+## Worker114 connected private native file increment
+
+The PG partial bundle consumes the same native_commit Input/Effects sequence
+as SQLite in one borrowed transaction: exact Core CAS, Usage enrollment and
+facts, complete Tree scalar/checkpoint publication, dependencies/invalidation,
+shared Codex header/Claude sidecar/parent marker plans, archive metadata
+retirement and source-mutation retirement. Current PG physical schema includes
+source_mutations and relocation_candidates; pending relocation candidates
+refuse before family effects because relocation proof advancement is unported.
+
+This is WIP, not a successful native ingest. The returned PartialFile explicitly
+names missing immutable chunk-proof generations/reader lifetimes, launch calls
+and EOF markers, relocation qualification, and complete durable ingest receipt/Raw
+qualification. It has no conversion to EventReceipt. Public qualification stays
+zero; no public backend factory or IndexStore implementation is activated.
+Meaningful real-parser, independent SQLite metadata, connected rollback and
+stale-CAS tests are registered in the existing PG filter; exact CI is required.
+
+
+## Worker117: private native file page persistence (WIP)
+
+The native SQLite chunk and launch writers and private PG file bundle consume
+`events/native_pages` encoding plans. The current PG layout is version 5, created
+fresh only. It stores lossless namespace bytes, content-addressed page blobs,
+exact Usage-source/ledger/header-bound native generations, immutable page
+references and a transactionally updated path-digest pointer with full-path
+collision checks. Old generations are retained; this adapter has no GC.
+
+The private reader checks namespace, exact ledger, generation binding, byte
+limits, cancellation/deadline, payload digests and chunk Merkle witnesses before
+returning a hash. Launch reconstruction shares the production SQLite validator,
+including EOF and its complete-index fingerprint. SQL snapshots grant no Raw
+access. A native generation is not a Catalog publication generation.
+
+This increment is unqualified WIP. Catalog Current/history references, actual
+reader/pool lease ownership, GC ownership and selected publication integration
+remain unported. No complete native ingest receipt, public PG backend, full
+no-SQLite path, migration, cutover or rollback is claimed. History-noise resource
+measurements and complete page/lease adversarial qualification remain required.
+Exact CI and independent review determine acceptance; public qualification is 0.
+
+## Current schema contract (2026-10-26 amendment)
+
+Semon supports one current schema contract per engine. The #477 transfer,
+catch-up, cutover and rollback paths exchange that current contract only.
+Old Semon schema readers, writers, importers, upgrade chains, dual writes and
+compatibility-only tests are outside scope and must not be retained to support
+older installations. Unsupported old state is refused explicitly without
+resetting, deleting or silently replacing retained data. Raw and non-rebuildable
+current facts/history retain their existing preservation requirements.
+This supersedes any earlier proposal to import older singleton/composite
+profiles. Current producer/consumer correctness and integrity checks still apply.
