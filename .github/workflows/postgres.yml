@@ -106,7 +106,15 @@ jobs:
           if-no-files-found: error
       - name: Native keys125 long file and metadata producer oracle
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys125.log"
+      - name: Retain native key measurements
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-keys125-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-keys125.log
+          if-no-files-found: error
       - name: Strict published Tree scalar and deferred interpretation qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
@@ -146,7 +154,15 @@ jobs:
         run: cargo fmt --all --check
       - name: PostgreSQL strict Clippy
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings
+        shell: bash
+        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/pg-keys125-clippy.log"
+      - name: Retain strict Clippy diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-keys125-clippy-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-keys125-clippy.log
+          if-no-files-found: error
       - name: Real PostgreSQL and existing session regressions
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls

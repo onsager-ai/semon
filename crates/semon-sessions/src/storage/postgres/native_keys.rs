@@ -73,19 +73,33 @@ mod tests {
             let control = PgCancellation::default();
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                 put_meta(tx, b"preserved-key", b"preserved-value")
-            }).unwrap();
+            })
+            .unwrap();
             let mut client = factory.client();
             client.batch_execute(alteration).unwrap();
             let mut entered = false;
-            assert!(pool.transaction(&namespace, TxnKind::Write, &control, |_| {
-                entered = true;
-                Ok(())
-            }).is_err());
-            assert!(!entered, "warm admission rejected the changed physical contract");
-            client.query_one("SELECT set_config('semon.namespace',$1,false)", &[&super::super::namespace_context(&namespace)]).unwrap();
-            let row = client.query_one("SELECT key,value FROM semon_pg_native_meta", &[]).unwrap();
-            assert_eq!(row.get::<_,Vec<u8>>(0), b"preserved-key");
-            assert_eq!(row.get::<_,Vec<u8>>(1), b"preserved-value");
+            assert!(
+                pool.transaction(&namespace, TxnKind::Write, &control, |_| {
+                    entered = true;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(
+                !entered,
+                "warm admission rejected the changed physical contract"
+            );
+            client
+                .query_one(
+                    "SELECT set_config('semon.namespace',$1,false)",
+                    &[&super::super::namespace_context(&namespace)],
+                )
+                .unwrap();
+            let row = client
+                .query_one("SELECT key,value FROM semon_pg_native_meta", &[])
+                .unwrap();
+            assert_eq!(row.get::<_, Vec<u8>>(0), b"preserved-key");
+            assert_eq!(row.get::<_, Vec<u8>>(1), b"preserved-value");
         }
     }
 }
