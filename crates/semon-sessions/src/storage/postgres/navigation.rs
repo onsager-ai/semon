@@ -66,12 +66,29 @@ pub(crate) fn captured_source_proof(
         let id = String::from_utf8(rows[0].get(1)).map_err(|_| StorageError::ScopeChanged)?;
         super::native_pages::open(&mut tx, absolute, &crate::source_carrier::ledger(source), crate::storage::proof_lifetime::ProofGenerationId(id))?;
         tx.check()?;
-        let file = crate::open_input(&source.path).map_err(|_| StorageError::ScopeChanged)?;
+        let ledger = crate::source_carrier::ledger(source);
+        let relocation = super::native_keys::read_meta(&mut tx, format!("native_catalog_relocation:{absolute}").as_bytes(), 1024 * 1024)?;
+        let relocated = relocation.as_deref().map(|bytes| serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes).map_err(|_| StorageError::ScopeChanged)).transpose()?;
+        let (physical_path, physical_owner) = if let Some(proof) = &relocated {
+            if proof.version != 1 || proof.native_id != reference.native_id || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger)) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let path = std::path::Path::new(&proof.new_path);
+            let mut covering = source.clone();
+            covering.path = path.to_owned();
+            if crate::catalog::source_relative(options, &row.harness, &covering).is_none() {
+                return Err(StorageError::ScopeChanged);
+            }
+            (path, proof.after.stat)
+        } else {
+            (source.path.as_path(), ledger.stat)
+        };
+        let file = crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)?;
         let stat = crate::events::Stat::from_metadata(&file.metadata().map_err(|_| StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)?;
-        if stat.dev != source.dev || stat.ino != source.ino || stat.size < source.offset {
+        if stat.dev != physical_owner.dev || stat.ino != physical_owner.ino || stat.size < source.offset {
             return Err(StorageError::ScopeChanged);
         }
-        let named = std::fs::symlink_metadata(&source.path).map_err(|_| StorageError::ScopeChanged)?;
+        let named = std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
         if !named.is_file() || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)? != stat {
             return Err(StorageError::ScopeChanged);
         }

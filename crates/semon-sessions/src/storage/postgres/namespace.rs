@@ -33,6 +33,13 @@ pub(crate) fn observe(config: &StoreConfig, pool: &PgPool, control: &PgCancellat
         if generation == 0 || generation > binding.admission || (!retired && (binding.admission != generation || binding.stream_epoch != expected)) {
             return Err(StorageError::ScopeChanged);
         }
+        if generation == binding.admission {
+            let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?.is_some_and(|value| !value.is_empty());
+            let at = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
+            if binding.stream_epoch != expected || retired != revoked || at.as_deref() != Some(admitted_at.to_string().as_bytes()) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
         Ok(Some(crate::storage::NamespaceAdmissionObservation {
             admission: NamespaceAdmission { namespace: config.namespace.clone(), generation, admitted_at }, retired,
         }))
@@ -50,6 +57,9 @@ pub(crate) fn admit(
         let binding = model_cache::raw_binding(tx)?;
         let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?.is_some_and(|value| !value.is_empty());
         if (!revoked && binding.stream_epoch != expected) || (revoked && binding.stream_epoch == expected) {
+            return Err(StorageError::ScopeChanged);
+        }
+        if revoked && native_keys::read_meta(tx, &receipt_key(expected), 128)?.is_some() {
             return Err(StorageError::ScopeChanged);
         }
         let prior = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
