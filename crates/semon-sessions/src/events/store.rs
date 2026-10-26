@@ -3900,7 +3900,7 @@ fn authored_storage_ddl() -> [&'static str; 21] {
         crate::storage::sqlite::trace::SCHEMA,
         crate::storage::sqlite::history::SCHEMA,
         crate::storage::sqlite::search::SCHEMA,
-        crate::storage::sqlite::changes::schema(true, true),
+        crate::storage::sqlite::changes::SCHEMA,
         SOURCE_OBSERVATION_RECEIPTS_SCHEMA,
         reprice::queue_schema(),
         reprice::catalog_schema(),

@@ -247,7 +247,9 @@ impl SourceJournal {
         }
         let db = Connection::open_with_flags(
             database,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
         db.busy_timeout(Duration::from_millis(100))
