@@ -10238,9 +10238,24 @@ mod tests {
                 proc_root: root.join("proc"),
                 ..crate::Options::default()
             };
+            let retained_raw = root.join("retained-original.jsonl");
+            let original_native = fs::read(&native).unwrap();
+            if name == "archive" {
+                // Current Facts need not read unused historical custody. Move
+                // Raw outside discovery (preserving its bytes) so the ordinary
+                // disappearance writer must consume this exact archive marker.
+                fs::rename(&native, &retained_raw).unwrap();
+            }
             let error = crate::local_facts(&options).unwrap_err();
             if name == "archive" {
-                assert!(error.to_string().contains(reason), "{name}: {error}");
+                assert_eq!(
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<StorageError>()),
+                    Some(&StorageError::Unavailable),
+                    "{name} {reason}: {error}"
+                );
+                assert_eq!(fs::read(&retained_raw).unwrap(), original_native);
             } else {
                 let expected = match open_admitted(&path, &source) {
                     Err(error) => error,
