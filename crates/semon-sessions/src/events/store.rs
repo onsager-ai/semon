@@ -5407,26 +5407,56 @@ fn storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
+    let scoped = connection.prepare_cached("SELECT s.name FROM main.sqlite_schema s JOIN pragma_table_info(s.name,'main') p ON p.name='namespace' WHERE s.type='table' AND s.name IN ('files','meta','session_catalog','session_trace_headers','usage_identity','native_usage_sources','native_tree_headers','pricing_recompute_pending','reported_runs','catalog_semantic_stage')")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
     let mut flags = [false; 10];
     for (flag, table) in flags.iter_mut().zip([
-        "files", "meta", "session_catalog", "session_trace_headers",
-        "usage_identity", "native_usage_sources", "native_tree_headers",
-        "pricing_recompute_pending", "reported_runs", "catalog_semantic_stage",
+        "files",
+        "meta",
+        "session_catalog",
+        "session_trace_headers",
+        "usage_identity",
+        "native_usage_sources",
+        "native_tree_headers",
+        "pricing_recompute_pending",
+        "reported_runs",
+        "catalog_semantic_stage",
     ]) {
-        *flag = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace')")?
-            .query_row([table], |row| row.get(0))?;
+        *flag = scoped.contains(table);
     }
-    let [core, metadata, catalog, trace, copied_usage, native_usage, tree,
-        pricing_queue, semantic_support, semantic_stage] = flags;
+    let [
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
+    ] = flags;
     let profile = PhysicalLayout {
-        core, metadata, catalog, trace, copied_usage, native_usage, tree,
-        pricing_queue, semantic_support, semantic_stage,
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
     };
     let Ok(ddl) = authored_storage_ddl(profile) else {
         return Ok(false);
     };
-    static INVENTORIES: OnceLock<Mutex<BTreeMap<PhysicalLayout, String>>> = OnceLock::new();
-    let mut inventories = INVENTORIES.get_or_init(Mutex::default).lock()
+    static INVENTORIES: OnceLock<Mutex<BTreeMap<PhysicalLayout, std::sync::Arc<String>>>> =
+        OnceLock::new();
+    let mut inventories = INVENTORIES
+        .get_or_init(Mutex::default)
+        .lock()
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(profile) {
         let reference = Connection::open_in_memory()?;
@@ -5437,15 +5467,19 @@ fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
             .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        entry.insert(format!(
+        entry.insert(std::sync::Arc::new(format!(
             "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
             objects.len(),
             objects.join(",")
-        ));
+        )));
     }
-    let sql = inventories.get(&profile).ok_or(rusqlite::Error::InvalidQuery)?;
+    let sql = inventories
+        .get(&profile)
+        .cloned()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    drop(inventories);
     connection
-        .prepare_cached(sql)?
+        .prepare_cached(sql.as_str())?
         .query_row([], |row| row.get(0))
 }
 
