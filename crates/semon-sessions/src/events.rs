@@ -1772,10 +1772,19 @@ impl EventCache {
         control: crate::storage::postgres::PgCancellation,
     ) -> Result<Self, crate::storage::StorageError> {
         let observation_namespace = namespace.as_str().to_owned();
-        let (store, claude_json_stamp) = crate::storage::postgres::index_store::open(pool, namespace, control)?;
-        let mut cache = Self { store: Some(store), claude_json_stamp, observation_namespace,
-            scoped: true, explicit_store: true, ..Self::default() };
-        cache.reconcile_pending_source_operation().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        let (store, claude_json_stamp) =
+            crate::storage::postgres::index_store::open(pool, namespace, control)?;
+        let mut cache = Self {
+            store: Some(store),
+            claude_json_stamp,
+            observation_namespace,
+            scoped: true,
+            explicit_store: true,
+            ..Self::default()
+        };
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
         Ok(cache)
     }
     /// A read-only request-local cache of selected source generations. The

@@ -8,6 +8,35 @@ projection algorithms are unchanged. The full native commit unit remains pending
 PostgreSQL (#479) has private pool, schema and native-row prerequisites. Its
 complete session backend and Hub adoption/migration (#313) remain undelivered.
 
+## Native EventCache integration (Worker126, unaccepted WIP)
+
+`storage/postgres/index_store.rs` injects an authorized pool and logical source
+namespace into the ordinary EventCache scanner. It never derives SQLite paths.
+`native_ingest.rs` persists exact request intents in the existing native metadata
+family before Raw opens and records completion through `PgPool::apply_operation`.
+The request binds namespace, path, harness and current parser contract. Replay
+checks the durable operation before Raw I/O. Catalog operations remain fenced.
+
+`events/native_decode.rs` is the shared current row restoration used by the
+production SQLite reader and private PG native reader. PG reads select one path
+and its child families, qualify Usage/pages/auxiliary metadata and restore Tree
+through the existing typed checkpoint. Oversized state refuses before payload
+decoding; the current private reader is capped at 65,536 rows and 1 MiB per
+family and is not yet the required keyset implementation.
+
+The `pg_native126` isolated-process test runs configured SQLite first, then
+PG-only EventCache ingestion with SQLite's connection initializer rejecting all
+opens, including other threads. It covers initial ingest, restart/noop, exact
+replay after Raw changes/disappearance and request rebinding refusal. This WIP
+still needs the complete append/replacement/truncation/concurrency/fault/lost-ACK,
+resource/noise and security matrix. Removal/recovery enumeration and atomic
+multi-path batching remain fenced. No independent acceptance or full-backend
+qualification is claimed; applicable exact-head CI is required.
+
+Inventory additions: `storage/postgres/{index_store,native_ingest,native_reader}.rs`
+contain PG-only production adapter code; `native_ingest_tests.rs` contains the
+test-only SQLite oracle and actual process-wide no-SQLite instrumentation.
+
 ## Connected native writer (Worker122, unaccepted WIP)
 
 SQLite and the private PostgreSQL bundle now consume the same ordered callbacks:

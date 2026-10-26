@@ -14,8 +14,14 @@ pub(super) fn values(row: &Row<'_>, bools: &[usize]) -> rusqlite::Result<Values>
                 _ => return Err(rusqlite::Error::InvalidQuery),
             },
             ValueRef::Integer(v) => v.into(),
-            ValueRef::Text(v) => Value::String(std::str::from_utf8(v).map_err(|_| rusqlite::Error::InvalidQuery)?.to_owned()),
-            ValueRef::Blob(v) => serde_json::to_value(v).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            ValueRef::Text(v) => Value::String(
+                std::str::from_utf8(v)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?
+                    .to_owned(),
+            ),
+            ValueRef::Blob(v) => {
+                serde_json::to_value(v).map_err(|_| rusqlite::Error::InvalidQuery)?
+            }
             ValueRef::Real(_) => return Err(rusqlite::Error::InvalidQuery),
         });
     }
