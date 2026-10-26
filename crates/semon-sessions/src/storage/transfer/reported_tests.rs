@@ -134,6 +134,11 @@ fn current_transfer225_reported_more_than_one_page_restart_reverse_and_fences() 
     apply(&target,&manifest); assert_eq!(read(&target),expected);
     observe(&target,&input,300,1300); let postwrite=read(&target); assert_eq!(postwrite.len(),201);
     let reverse_manifest=stage(&target,&reverse,&[2;32]); apply(&reverse,&reverse_manifest); assert_eq!(read(&reverse),postwrite);
+    let db=rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
+    let sql=format!("SELECT {} FROM reported_runs WHERE namespace=?1 ORDER BY session_id,start",crate::events::store::RUN_COLUMNS);
+    let original=db.prepare(&sql).unwrap().query_map([source.namespace.as_str()],crate::events::store::read_run).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(original,expected,"reverse and rejected old writers must preserve every original source row");
+    drop(db);
     assert!(input.exists()); std::fs::remove_dir_all(root).unwrap();
 }
 
