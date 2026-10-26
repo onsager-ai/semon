@@ -590,7 +590,7 @@ fn virtual_read(
 /// None identifies evidence not yet owned by this projection (an omitted-source
 /// window, composite history or an observation awaiting its native producer). Once admitted,
 /// corrupted or changed evidence is an explicit error, never a body fallback.
-pub(super) fn read(
+pub(crate) fn read(
     options: &Options,
     key: &str,
     args: &Value,
@@ -1252,6 +1252,8 @@ fn read_inner(
 /// The ordinary pager consumes immutable recipes and independently authorized
 /// records. Physical backends own publication/proof qualification and lifetime.
 pub(crate) trait PageSource {
+    fn query_error(&self, error: &io::Error) -> QueryError { QueryError::io(error) }
+
     fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError>;
     fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)>;
     fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value, u64)>;
@@ -1324,7 +1326,7 @@ pub(crate) fn render_page(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {
                 count = (count * 2).min(MAX_SLOTS)
             }
-            Err(error) => return Err(QueryError::io(&error)),
+            Err(error) => return Err(source.query_error(&error)),
         }
     };
     Ok(answer)
@@ -1341,6 +1343,8 @@ struct SqlitePage<'a, 'b> {
     slot_generation: &'a str,
 }
 impl PageSource for SqlitePage<'_, '_> {
+    fn query_error(&self, error: &io::Error) -> QueryError { self.records.query_error(error) }
+
     fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError> {
         let snapshot = self.db.unchecked_transaction().map_err(unavailable)?;
         unchanged(&snapshot, self.key, self.history, self.text, self.headers, self.slot_generation)?;
