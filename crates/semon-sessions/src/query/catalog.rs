@@ -237,11 +237,14 @@ impl Query {
         store: &dyn crate::storage::query::QueryCatalogStore,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        if self.sources.machines.len() != 1 || tool != "list_sessions" {
+        if self.sources.machines.len() != 1 || !matches!(tool, "list_sessions" | "read_transcript") {
             return Err(QueryError::new(
                 "namespace_upgrade_pending",
                 "Admitted Query selector is not qualified",
             ));
+        }
+        if tool == "read_transcript" {
+            return Err(unavailable("Selected Query requires an authorized Raw reader"));
         }
         self.execute_catalog_store_at(
             tool,
@@ -251,6 +254,20 @@ impl Query {
             now,
             Some(store),
         )
+    }
+
+    /// Host authorization is explicit and separate from Catalog admission.
+    #[allow(dead_code)]
+    pub(crate) fn call_bound_selected_at(
+        &mut self, tool: &str, args: &Value, now: i64,
+        store: &dyn crate::storage::query::QueryCatalogStore,
+        host: &dyn crate::SessionSourceReader,
+    ) -> Result<Value, QueryError> {
+        validate_query_call(tool, args)?;
+        if self.sources.is_retired() || self.sources.machines.len() != 1 || tool != "read_transcript" {
+            return Err(unavailable("Admitted selected Query tool unavailable"));
+        }
+        store.selected_body(args["id"].as_str().expect("validated selected id"), args, now, host)
     }
 
     fn execute_catalog_store_at(

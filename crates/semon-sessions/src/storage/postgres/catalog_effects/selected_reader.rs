@@ -104,3 +104,77 @@ impl SessionSourceReader for Reader<'_> {
 fn text(value: Vec<u8>) -> Result<String, StorageError> {
     String::from_utf8(value).map_err(|_| StorageError::ScopeChanged)
 }
+
+/// Multi-source request adapter. Neither a recipe nor a path grants host access.
+pub(in crate::storage::postgres) struct SelectedRecords<'a> {
+    pub pool: &'a PgPool,
+    pub namespace: &'a LogicalSourceNamespace,
+    pub control: &'a PgCancellation,
+    pub generation: &'a str,
+    pub host: &'a dyn SessionSourceReader,
+    pub sources: Vec<(&'a CatalogSource, SessionSourceRef)>,
+    pub pins: RefCell<std::collections::BTreeMap<String, String>>,
+    pub bytes_left: std::cell::Cell<usize>,
+}
+impl SelectedRecords<'_> {
+    fn reference(&self, path: &std::path::Path) -> io::Result<&SessionSourceRef> {
+        self.sources.iter().find(|(source, _)| source.path == path).map(|(_, reference)| reference).ok_or_else(|| io::Error::other(StorageError::ScopeChanged))
+    }
+    pub fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<serde_json::Value>,u64)> {
+        let reference = self.reference(path)?;
+        let part = self.read_range(reference, None, offset, 1)?;
+        crate::source_reader::read_native_record(self, reference, &part.generation, offset)
+    }
+    pub fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(serde_json::Value,u64)> {
+        let reference = self.reference(&file.path).ok()?;
+        file.prompts.record_from(&mut SelectedFile { reader: self, reference, position: offset }, offset)
+    }
+    pub fn finish(&self) -> io::Result<()> {
+        for (_, reference) in &self.sources {
+            if self.pins.borrow().contains_key(&format!("{}:{}",reference.root,reference.path)) && reference.offset > 0 {
+                self.read_range(reference, None, reference.offset - 1, 1)?;
+            }
+        }
+        Ok(())
+    }
+}
+impl SessionSourceReader for SelectedRecords<'_> {
+    fn read_range(&self, reference: &SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> io::Result<SessionSourceRange> {
+        let (source, saved) = self.sources.iter().find(|(_, saved)| saved == reference).ok_or_else(||io::Error::other(StorageError::ScopeChanged))?;
+        let key = format!("{}:{}", reference.root, reference.path);
+        let pins = self.pins.borrow();
+        let pin = pins.get(&key).map(String::as_str);
+        if expected.zip(pin).is_some_and(|(a,b)|a!=b) { return Err(io::Error::other(StorageError::ScopeChanged)); }
+        let reader = Reader { pool:self.pool, namespace:self.namespace, control:self.control, generation:self.generation, source, reference:saved, host:self.host };
+        let part = reader.read_range(reference, pin.or(expected), offset, max)?;
+        drop(pins);
+        let left = self.bytes_left.get().checked_sub(part.bytes.len()).ok_or_else(||io::Error::other(StorageError::Busy))?;
+        self.bytes_left.set(left);
+        self.pins.borrow_mut().entry(key).or_insert_with(||part.generation.clone());
+        Ok(part)
+    }
+}
+struct SelectedFile<'a, 'b> {
+    reader: &'a SelectedRecords<'b>, reference: &'a SessionSourceRef, position: u64,
+}
+impl std::io::Read for SelectedFile<'_, '_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let max = buffer.len().min(crate::source_reader::SESSION_SOURCE_CHUNK_MAX).min(self.reference.offset.saturating_sub(self.position) as usize);
+        if max == 0 { return Ok(0); }
+        let part = self.reader.read_range(self.reference, None, self.position, max)?;
+        buffer[..part.bytes.len()].copy_from_slice(&part.bytes);
+        self.position += part.bytes.len() as u64;
+        Ok(part.bytes.len())
+    }
+}
+impl std::io::Seek for SelectedFile<'_, '_> {
+    fn seek(&mut self, from: std::io::SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            std::io::SeekFrom::Start(at) => Some(at),
+            std::io::SeekFrom::Current(at) => self.position.checked_add_signed(at),
+            std::io::SeekFrom::End(at) => self.reference.offset.checked_add_signed(at),
+        }.filter(|at| *at <= self.reference.offset).ok_or_else(||io::Error::other(StorageError::InvalidArguments))?;
+        self.position = position;
+        Ok(position)
+    }
+}
