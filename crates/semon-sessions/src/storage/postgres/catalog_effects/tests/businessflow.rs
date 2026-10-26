@@ -687,6 +687,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
     );
     let raw_store=|| crate::storage::postgres::index_store::open(pool.clone(),namespace.clone(),control.clone()).unwrap().0;
+    assert!(raw[0].len()>2*1024*1024,"trusted append fixture must have a large old prefix");
     let io_before=crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
     let hash_before=crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
     let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],Some("0123456789abcdef0123456789abcdef"),raw[0].len() as u64,raw_store(),None).unwrap();
