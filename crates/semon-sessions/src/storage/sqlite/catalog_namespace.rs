@@ -36,7 +36,13 @@ pub(crate) fn register(
     source: &LogicalSourceNamespace,
 ) -> Result<(), StorageError> {
     crate::events::store::configured::bind_metadata_scope(db, source.as_str()).map_err(failed)?;
-    db.create_scalar_function("semon_transfer_writer", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(0_i64)).map_err(failed)?;
+    db.create_scalar_function(
+        "semon_transfer_writer",
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(0_i64),
+    )
+    .map_err(failed)?;
     let source = source.as_str().to_owned();
     db.create_scalar_function(
         "semon_namespace",
