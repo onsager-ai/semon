@@ -2658,61 +2658,7 @@ impl IndexStore for SqliteStore {
             if !current(&tx).map_err(failure)? {
                 return Ok(None);
             }
-            let coherent: bool = tx.query_row(
-                configured::metadata_sql(&tx, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE key='slot_projection_catalog_generation' AND value=?1)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation' AND value=?1)").map_err(failure)?,
-                [expected], |record| record.get(0),
-            ).map_err(failure)?;
-            if !coherent {
-                return Ok(None);
-            }
-            let header: Option<(String, u32, i64, Option<String>)> = tx.query_row(
-                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE session_key=?1",
-                [&row.key], |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
-            ).optional().map_err(failure)?;
-            let Some((generation, version, total, sources)) = header else {
-                return Ok(None);
-            };
-            let Ok(total) = usize::try_from(total) else {
-                return Ok(None);
-            };
-            let source_generation = crate::retention::source_generation(&row.sources)
-                .map_err(|error| StoreError::Data(error.to_string()))?;
-            if version != crate::slot_projection::VERSION
-                || total > max
-                || sources.as_deref() != Some(&source_generation)
-            {
-                return Ok(None);
-            }
-            let mut statement = tx.prepare(
-                "SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_slots WHERE session_key=?1 ORDER BY slot",
-            ).map_err(failure)?;
-            let rows = statement
-                .query_map([&row.key], |record| {
-                    Ok((record.get::<_, i64>(0)?, record.get::<_, String>(1)?))
-                })
-                .map_err(failure)?;
-            let mut metadata = Vec::with_capacity(total);
-            for record in rows {
-                let (slot, text) = record.map_err(failure)?;
-                if usize::try_from(slot).ok() != Some(metadata.len()) || metadata.len() >= total {
-                    return Ok(None);
-                }
-                metadata.push(text);
-            }
-            if metadata.len() != total
-                || crate::slot_projection::generation(&metadata, &row.sources)
-                    .map_err(|error| StoreError::Data(error.to_string()))?
-                    != generation
-            {
-                return Ok(None);
-            }
-            metadata
-                .into_iter()
-                .map(|text| {
-                    serde_json::from_str(&text).map_err(|error| StoreError::Data(error.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map(Some)
+            read_session_slots(&tx, row, expected, max)
         })();
         self.connection
             .busy_timeout(BUSY_TIMEOUT)
@@ -3201,19 +3147,7 @@ impl IndexStore for SqliteStore {
 
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
         let transaction = self.connection.unchecked_transaction().map_err(failure)?;
-        let mut statement=transaction.prepare("SELECT file_id,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns,path FROM files ORDER BY file_id").map_err(failure)?;
-        let mut rows = statement.query([]).map_err(failure)?;
-        let mut ledgers = Vec::new();
-        while let Some(row) = rows.next().map_err(failure)? {
-            let path = row.get(9).map_err(failure)?;
-            let ledger = match read_ledger(row) {
-                Ok((_, ledger)) => Some(ledger),
-                Err(error) if is_data_error(&error) => None,
-                Err(error) => return Err(failure(error)),
-            };
-            ledgers.push((path, ledger));
-        }
-        Ok(ledgers)
+        read_file_ledgers(&transaction)
     }
 
     fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
@@ -4668,88 +4602,7 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         require_current_sql(&transaction)?;
-        copied_usage_sql(&transaction, "", "")?;
-        for (path, expected) in files {
-            match (ledger_row(&transaction, path), expected) {
-                (Ok(Some((_, found))), Some(expected)) if found == *expected => {
-                    if archived_index(&transaction, path)?
-                        .is_some_and(|record| record.matches(&found))
-                    {
-                        // Explicit archive retention does not make this source
-                        // current. Complete catalog observation still retires
-                        // its membership; only the existing event rows survive.
-                        // Re-observing this exact retained generation after its
-                        // withdrawal must not advance the stage's own claim.
-                        // A fresh announced revision or changed reason remains
-                        // visible; neither the claim nor its proof is replaced.
-                        let already_removed:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1 AND reason='removed')",[path],|row|row.get(0))?;
-                        if !already_removed {
-                            invalidate_catalog_source(&transaction, path, "removed")?;
-                        }
-                        continue;
-                    }
-                }
-                // Moved on by another process, rewritten, or already gone.
-                (Ok(_), _) => continue,
-                (Err(error), _) if is_data_error(&error) => {}
-                (Err(error), _) => return Err(error),
-            }
-            // By path, never decoding the row: an undecodable one goes too.
-            for table in [
-                "events",
-                "signals",
-                "usage_identity",
-                "usage",
-                "codex_usage",
-                "native_tree_copied_identities",
-            ] {
-                transaction.execute(
-                    &format!(
-                        "DELETE FROM {table} WHERE {}file_id IN \
-                         (SELECT file_id FROM files WHERE {}path = ?1)",
-                        child_predicate(&transaction, table)?,
-                        configured::predicate(&transaction)?
-                    ),
-                    [path],
-                )?;
-            }
-            transaction.execute(
-                tree_state::sql(&transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
-                [path],
-            )?;
-            transaction.execute(
-                configured::sql(
-                    &transaction,
-                    "DELETE FROM files WHERE path = ?1",
-                    "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
-                )?,
-                [path],
-            )?;
-            transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
-            transaction.execute(
-                native_metadata_delete(&transaction)?,
-                [archive_index_key(path)],
-            )?;
-            transaction.execute(
-                native_metadata_delete(&transaction)?,
-                [codex_header_key(path)],
-            )?;
-            transaction.execute(
-                native_metadata_delete(&transaction)?,
-                [claude_sidecar_key(path)],
-            )?;
-            chunk_proofs::clear(&transaction, path)?;
-            launch_calls::clear(&transaction, path)?;
-            transaction.execute(
-                native_metadata_delete(&transaction)?,
-                [parent_marker_key(path)],
-            )?;
-            transaction.execute(
-                native_metadata_delete(&transaction)?,
-                [tree_summary_key(path)],
-            )?;
-            invalidate_catalog_source(&transaction, path, "removed")?;
-        }
+        remove_files_tx(&transaction, files, None)?;
         transaction.commit()?;
         Ok(Outcome::Written)
     }
@@ -12954,4 +12807,164 @@ fn original_slot_publication_reference(
         }
     }
     Ok(())
+}
+
+pub(crate) fn read_session_slots(connection: &Connection, row: &crate::model::summary::CatalogRow, expected: &str, max: usize) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+            let coherent: bool = connection.query_row(
+                configured::metadata_sql(connection, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE key='slot_projection_catalog_generation' AND value=?1)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation' AND value=?1)").map_err(failure)?,
+                [expected], |record| record.get(0),
+            ).map_err(failure)?;
+            if !coherent {
+                return Ok(None);
+            }
+            let header: Option<(String, u32, i64, Option<String>)> = connection.query_row(
+                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1",
+                [&row.key], |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
+            ).optional().map_err(failure)?;
+            let Some((generation, version, total, sources)) = header else {
+                return Ok(None);
+            };
+            let Ok(total) = usize::try_from(total) else {
+                return Ok(None);
+            };
+            let source_generation = crate::retention::source_generation(&row.sources)
+                .map_err(|error| StoreError::Data(error.to_string()))?;
+            if version != crate::slot_projection::VERSION
+                || total > max
+                || sources.as_deref() != Some(&source_generation)
+            {
+                return Ok(None);
+            }
+            let mut statement = connection.prepare(
+                "SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_slots WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY slot",
+            ).map_err(failure)?;
+            let rows = statement
+                .query_map([&row.key], |record| {
+                    Ok((record.get::<_, i64>(0)?, record.get::<_, String>(1)?))
+                })
+                .map_err(failure)?;
+            let mut metadata = Vec::with_capacity(total);
+            for record in rows {
+                let (slot, text) = record.map_err(failure)?;
+                if usize::try_from(slot).ok() != Some(metadata.len()) || metadata.len() >= total {
+                    return Ok(None);
+                }
+                metadata.push(text);
+            }
+            if metadata.len() != total
+                || crate::slot_projection::generation(&metadata, &row.sources)
+                    .map_err(|error| StoreError::Data(error.to_string()))?
+                    != generation
+            {
+                return Ok(None);
+            }
+            metadata
+                .into_iter()
+                .map(|text| {
+                    serde_json::from_str(&text).map_err(|error| StoreError::Data(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some)
+}
+
+pub(crate) fn read_file_ledgers(connection: &Connection) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
+        let mut statement=connection.prepare("SELECT file_id,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns,path FROM files WHERE namespace=semon_namespace() ORDER BY file_id").map_err(failure)?;
+        let mut rows = statement.query([]).map_err(failure)?;
+        let mut ledgers = Vec::new();
+        while let Some(row) = rows.next().map_err(failure)? {
+            let path = row.get(9).map_err(failure)?;
+            let ledger = match read_ledger(row) {
+                Ok((_, ledger)) => Some(ledger),
+                Err(error) if is_data_error(&error) => None,
+                Err(error) => return Err(failure(error)),
+            };
+            ledgers.push((path, ledger));
+        }
+        Ok(ledgers)
+}
+
+pub(crate) fn remove_files_tx(transaction: &Transaction<'_>, files: &[(String, Option<Ledger>)], namespace: Option<&str>) -> rusqlite::Result<()> {
+        copied_usage_sql(transaction, "", "")?;
+        for (path, expected) in files {
+            match (ledger_row(transaction, path), expected) {
+                (Ok(Some((_, found))), Some(expected)) if found == *expected => {
+                    if archived_index(transaction, path)?
+                        .is_some_and(|record| record.matches(&found))
+                    {
+                        // Explicit archive retention does not make this source
+                        // current. Complete catalog observation still retires
+                        // its membership; only the existing event rows survive.
+                        // Re-observing this exact retained generation after its
+                        // withdrawal must not advance the stage's own claim.
+                        // A fresh announced revision or changed reason remains
+                        // visible; neither the claim nor its proof is replaced.
+                        let already_removed:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND reason='removed')",[path],|row|row.get(0))?;
+                        if !already_removed {
+                            crate::storage::sqlite::source_journal::invalidate(transaction, namespace, path, "removed")?;
+                        }
+                        continue;
+                    }
+                }
+                // Moved on by another process, rewritten, or already gone.
+                (Ok(_), _) => continue,
+                (Err(error), _) if is_data_error(&error) => {}
+                (Err(error), _) => return Err(error),
+            }
+            // By path, never decoding the row: an undecodable one goes too.
+            for table in [
+                "events",
+                "signals",
+                "usage_identity",
+                "usage",
+                "codex_usage",
+                "native_tree_copied_identities",
+            ] {
+                transaction.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE {}file_id IN \
+                         (SELECT file_id FROM files WHERE {}path = ?1)",
+                        child_predicate(transaction, table)?,
+                        configured::predicate(transaction)?
+                    ),
+                    [path],
+                )?;
+            }
+            transaction.execute(
+                tree_state::sql(transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
+                [path],
+            )?;
+            transaction.execute(
+                configured::sql(
+                    transaction,
+                    "DELETE FROM files WHERE path = ?1",
+                    "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
+                )?,
+                [path],
+            )?;
+            transaction.execute("DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
+            transaction.execute(
+                native_metadata_delete(transaction)?,
+                [archive_index_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(transaction)?,
+                [codex_header_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(transaction)?,
+                [claude_sidecar_key(path)],
+            )?;
+            chunk_proofs::clear(transaction, path)?;
+            launch_calls::clear(transaction, path)?;
+            transaction.execute(
+                native_metadata_delete(transaction)?,
+                [parent_marker_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(transaction)?,
+                [tree_summary_key(path)],
+            )?;
+            crate::storage::sqlite::source_journal::invalidate(transaction, namespace, path, "removed")?;
+        }
+        Ok(())
 }
