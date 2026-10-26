@@ -2274,10 +2274,7 @@ mod tests {
         fn with_setup(setup: impl FnOnce(&Connection, &Path)) -> Self {
             Self::with_named_setup("configured-events", setup)
         }
-        fn with_named_setup(
-            namespace: &str,
-            setup: impl FnOnce(&Connection, &Path),
-        ) -> Self {
+        fn with_named_setup(namespace: &str, setup: impl FnOnce(&Connection, &Path)) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "semon-configured-event-{}-{}",
@@ -2357,20 +2354,22 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
-        let f = Fixture::with_setup(
-            |db, raw| {
-                let path = raw.to_string_lossy();
-                db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
-                db.execute(
-                    "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
-                    [path.as_ref()],
-                )
-                .unwrap();
-                db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
-                db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
-                db.execute("INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')", []).unwrap();
-            },
-        );
+        let f = Fixture::with_setup(|db, raw| {
+            let path = raw.to_string_lossy();
+            db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
+            db.execute(
+                "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
+                [path.as_ref()],
+            )
+            .unwrap();
+            db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
+            db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
+            db.execute(
+                "INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')",
+                [],
+            )
+            .unwrap();
+        });
         let foreign = |db: &Connection| -> Vec<(String, String)> {
             db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
@@ -2438,9 +2437,7 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_mixed_family_refuses_before_ingest() {
-        let f = Fixture::with_setup(
-            |_, _| {},
-        );
+        let f = Fixture::with_setup(|_, _| {});
         // Establish valid current admission before injecting physical drift.
         // The production factory must still refuse it before ingestion.
         f.db().execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
@@ -2464,8 +2461,7 @@ mod tests {
         })
         .unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        for ddl in authored_storage_ddl()
-        {
+        for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
         for table in [

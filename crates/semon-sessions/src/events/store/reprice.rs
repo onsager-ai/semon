@@ -1437,60 +1437,10 @@ mod tests {
 
     #[test]
     fn native_usage_authored_assembly_preserves_factories_and_complete_dependencies() {
-        // Freeze both existing factory selections at the chunk boundary. These
-        // are authored schemas, not a parallel test implementation of a writer.
-        let [usage, repair] = native_usage::schema(false);
-        let original = [
-            SLOT_SCHEMA,
-            crate::events::store::catalog_schema(false),
-            CATALOG_SUPPORT_SCHEMA,
-            metadata_schema(false),
-            LEGACY_EVENT_SCHEMA,
-            copied_usage_schema(false),
-            usage,
-            repair,
-            tree_state::schema(false),
-            semantic_stage::SCHEMA,
-            semantic_stage::SEMANTIC_CORE_INDEXES,
-            semantic_stage::metadata_indexes(false),
-            crate::overview::SCHEMA,
-            crate::causal_trace::header_schema(false),
-            crate::causal_trace::SCHEMA,
-            crate::history_projection::SCHEMA,
-            crate::catalog_search::SCHEMA,
-            crate::storage::sqlite::changes::SCHEMA,
-            "
-CREATE TABLE IF NOT EXISTS source_observation_receipts (
-    namespace TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    payload_digest TEXT NOT NULL,
-    outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),
-    recovery_done INTEGER CHECK(recovery_done IN (0,1)),
-    PRIMARY KEY(namespace,operation_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS source_observation_intents (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    payload_digest TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    UNIQUE(namespace,operation_id)
-) STRICT;
-CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observation_intents(namespace,sequence);
-",
-            queue_schema(false),
-            catalog_schema(false, false, false),
-            file_schema(false, false),
-        ];
+        // Both production factories now author the same current contract.
+        let original = authored_storage_ddl();
+        let configured_original = original;
         assert_eq!(storage_ddl(), original);
-        let mut configured_original = original;
-        configured_original[4] = configured::CORE_SCHEMA;
-        configured_original[10] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
-        configured_original[21] = configured::pricing_file_schema(false);
-        assert_eq!(
-            authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
-            configured_original
-        );
         let full_objects = |db: &Connection| {
             db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").unwrap()
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap()
@@ -1532,25 +1482,14 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
         // Every table, index and trigger from all 22 dependencies is required,
         // including history, overview, support, slots, search and semantic stage.
         let required_objects = objects(&reference);
-        for copied in [false, true] {
-            for metadata in [false, true] {
-                for catalog in [false, true] {
-                    for trace in [false, true] {
+        for copied in [true] {
+            for metadata in [true] {
+                for catalog in [true] {
+                    for _trace in [true] {
                         let db = Connection::open_in_memory().unwrap();
                         bind_fixture(&db, "a");
                         db.pragma_update(None, "foreign_keys", true).unwrap();
-                        for ddl in authored_storage_ddl(PhysicalLayout {
-                            core: true,
-                            native_usage: true,
-                            pricing_queue: true,
-                            copied_usage: copied,
-                            tree: copied,
-                            metadata,
-                            catalog,
-                            trace,
-                            ..PhysicalLayout::default()
-                        })
-                        .unwrap()
+                        for ddl in authored_storage_ddl()
                         {
                             db.execute_batch(ddl).unwrap();
                         }
@@ -1626,34 +1565,6 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
                 }
             }
         }
-        // Invalid cross-family combinations are rejected before any execution.
-        for bad in [
-            PhysicalLayout {
-                copied_usage: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            PhysicalLayout {
-                tree: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            PhysicalLayout {
-                metadata: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            PhysicalLayout {
-                pricing_queue: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            PhysicalLayout {
-                native_usage: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-        ] {
-            assert_eq!(
-                authored_storage_ddl(bad),
-                Err(DdlProfileError::UnsupportedFamilyCombination)
-            );
-        }
     }
 
     fn assembled_metadata_fixture(db: &Connection) {
@@ -1661,18 +1572,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
         // This fixture models an existing current store, including its journal
         // contract. Admission must not switch a caller's journal mode for it.
         db.pragma_update(None, "journal_mode", "WAL").unwrap();
-        for ddl in authored_storage_ddl(PhysicalLayout {
-            core: true,
-            metadata: true,
-            catalog: true,
-            trace: true,
-            copied_usage: true,
-            native_usage: true,
-            tree: true,
-            pricing_queue: true,
-            ..PhysicalLayout::default()
-        })
-        .unwrap()
+        for ddl in authored_storage_ddl()
         {
             db.execute_batch(ddl).unwrap();
         }
@@ -2088,7 +1988,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
             tree_state::register(&db).unwrap();
             db.execute_batch(configured::CORE_SCHEMA).unwrap();
             db.execute_batch(crate::events::store::SCHEMA).unwrap();
-            db.execute_batch(metadata_schema(false)).unwrap();
+            db.execute_batch(metadata_schema()).unwrap();
             for ddl in native_usage::schema(true) {
                 db.execute_batch(ddl).unwrap();
             }
@@ -2165,15 +2065,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
         ] {
             let mut db = Connection::open_in_memory().unwrap();
             bind_fixture(&db, "a");
-            for ddl in authored_storage_ddl(PhysicalLayout {
-                core: true,
-                native_usage: true,
-                pricing_queue: true,
-                copied_usage: true,
-                tree: true,
-                ..PhysicalLayout::default()
-            })
-            .unwrap()
+            for ddl in authored_storage_ddl()
             {
                 db.execute_batch(ddl).unwrap();
             }
@@ -2209,18 +2101,10 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
 
     #[test]
     fn native_usage_copied_layout_is_independent_of_core_and_native_layout() {
-        for copied_composite in [false, true] {
+        for copied_composite in [true] {
             let mut db = Connection::open_in_memory().unwrap();
             bind_fixture(&db, "a");
-            for ddl in authored_storage_ddl(PhysicalLayout {
-                core: true,
-                native_usage: true,
-                copied_usage: copied_composite,
-                tree: copied_composite,
-                pricing_queue: true,
-                ..PhysicalLayout::default()
-            })
-            .unwrap()
+            for ddl in authored_storage_ddl()
             {
                 db.execute_batch(ddl).unwrap();
             }
@@ -2306,9 +2190,9 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
     fn native_usage_copied_tree_pricing_collision_restart_and_rollback() {
         // Assemble the complete authored usage/Tree/repair families, with
         // Catalog and metadata layouts selected independently of the core.
-        for meta_composite in [false, true] {
-            for catalog_composite in [false, true] {
-                for trace_composite in [false, true] {
+        for meta_composite in [true] {
+            for catalog_composite in [true] {
+                for trace_composite in [true] {
                     let collide = catalog_composite && trace_composite;
                     let root = root();
                     let database = root.join("families.sqlite3");
@@ -2316,18 +2200,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
                     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
                         .unwrap();
                     bind_fixture(&db, "a");
-                    for ddl in authored_storage_ddl(PhysicalLayout {
-                        core: true,
-                        metadata: meta_composite,
-                        catalog: catalog_composite,
-                        trace: trace_composite,
-                        copied_usage: true,
-                        native_usage: true,
-                        tree: true,
-                        pricing_queue: true,
-                        ..PhysicalLayout::default()
-                    })
-                    .unwrap()
+                    for ddl in authored_storage_ddl()
                     {
                         db.execute_batch(ddl).unwrap();
                     }
