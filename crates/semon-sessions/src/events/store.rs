@@ -11940,7 +11940,8 @@ pub(crate) fn current_search_test_connection(
     path: &Path,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> Connection {
-    let (mut store, _) = SqliteStore::attempt(path, namespace).unwrap();
+    let (mut store, _) = SqliteStore::attempt(path, namespace)
+        .unwrap_or_else(|_| panic!("current search fixture store admission failed"));
     store.publish_catalog_with_generation(
         &crate::slot_projection::Publication { rows: &[], transcripts: None },
         None, None, false, None,
