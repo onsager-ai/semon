@@ -7,6 +7,7 @@ pub(super) fn capture_native(
     tx: &mut Inbox<'_>,
     state: &mut CaptureState,
 ) -> Result<CaptureProgress, StorageError> {
+    if state.native_family >= 32 { return super::catalog::capture(tx, state); }
     let id = state
         .cursor
         .as_ref()
@@ -30,7 +31,9 @@ pub(super) fn capture_native(
             )
             .map_err(failed)?;
         let Some(next) = next else {
-            transfer::reported::finish_capture(tx, state)?;
+            state.native_family = 32;
+            state.native_key = None;
+            transfer::reported::save_capture(tx, state)?;
             return Ok(state.progress());
         };
         let sizes = FILE_COLUMNS
