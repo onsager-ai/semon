@@ -124,5 +124,23 @@ fn history(
             return Ok(());
         };
         after = Some(last.get(0));
+        let digests = page.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
+        retained_search(tx, generation, previous, &digests)?;
     }
+}
+
+/// Retained-history search inputs follow their history owner into the
+/// successor; memberships carry no scope and posting reads filter by the
+/// scope document. Current owners' rows were already carried exactly.
+pub(super) fn retained_search(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    previous: &str,
+    digests: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let scope = crate::catalog_search::scope_key(crate::CatalogReadScope::RetainedHistory);
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_search_documents(namespace,generation,scope,key_digest,session_key,fields,complete) SELECT namespace,$2,scope,key_digest,session_key,fields,complete FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND scope=$4 AND key_digest=ANY($5::bytea[]) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &previous.as_bytes(), &scope.as_bytes(), &digests]).map_err(sqlstate::error)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_search_memberships(namespace,generation,key_digest,session_key,gram,last_ms) SELECT namespace,$2,key_digest,session_key,gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND key_digest=ANY($4::bytea[]) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &previous.as_bytes(), &digests]).map_err(sqlstate::error)?;
+    tx.check()
 }

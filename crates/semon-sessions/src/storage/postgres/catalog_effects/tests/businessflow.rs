@@ -2247,6 +2247,51 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert!(codex.iter().all(|(other, _)| other != key));
     }
     assert!(claude.len() + codex.len() <= retained.len());
+    // P3 search: metadata search over the published PG projection. A key
+    // query finds its Current session; a removed key is absent from the
+    // successor's Current search but found in the qualified generation.
+    let search = |generation: &str, scope: &str, key: &str| {
+        let query = format!(
+            "{scope}limit=50&q={}",
+            crate::viewer::percent_encode(&key.to_lowercase())
+        );
+        let reply = super::super::snapshot::with_admitted_generation(
+            &pool,
+            &namespace,
+            &control,
+            generation,
+            |snapshot| {
+                crate::catalog::read_page_snapshot(
+                    &options,
+                    recent_machine,
+                    &crate::catalog::Request::parse(&query).unwrap(),
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.status, 200, "{query}");
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let kept = &current[0].0;
+    assert!(search(&caught, "", kept).contains(kept), "Current search {kept}");
+    let gone = removed.iter().next().unwrap();
+    assert!(!search(&caught, "", gone).contains(gone), "{gone} withdrawn");
+    let old = qualified.as_deref().unwrap();
+    assert!(search(old, "", gone).contains(gone), "{gone} before withdrawal");
+    // Retained scope finds the withdrawn key through its carried document.
+    assert!(
+        search(&caught, "scope=retained_history&", gone).contains(gone),
+        "{gone} retained search"
+    );
+    assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),

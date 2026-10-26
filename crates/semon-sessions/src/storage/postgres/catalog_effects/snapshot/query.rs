@@ -38,8 +38,11 @@ impl QueryCatalogStore for QueryCatalog {
             &self.control,
             &self.generation,
             |snapshot| {
+                // A withdrawn key reads its proof-owned retained recipe; the
+                // body itself still comes only from Raw Source bytes.
+                let history = snapshot.catalog(key, false)?.is_none();
                 let (row, header, _) = snapshot
-                    .selected(key, false, 0, 1)?
+                    .selected(key, history, 0, 1)?
                     .ok_or(StorageError::ScopeChanged)?;
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
                 let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
@@ -122,7 +125,7 @@ impl QueryCatalogStore for QueryCatalog {
                         now,
                         &|turn| {
                             snapshot
-                                .query_first_slot(key, turn)
+                                .query_first_slot(key, turn, history)
                                 .map(|(_, slot)| slot)
                                 .map_err(unavailable)
                         },
@@ -145,12 +148,13 @@ impl QueryCatalogStore for QueryCatalog {
                     crate::tx::Anchor::Before(at) => (false, at.min(total)),
                     crate::tx::Anchor::After(at) => (true, at.min(total)),
                     crate::tx::Anchor::Turn(turn) => {
-                        (true, snapshot.query_first_slot(key, &turn)?.0)
+                        (true, snapshot.query_first_slot(key, &turn, history)?.0)
                     }
                 };
                 let page = PgPage {
                     snapshot,
                     key,
+                    history,
                     records: &records,
                 };
                 let answer = crate::query::transcript::render_page(
@@ -435,6 +439,7 @@ impl QueryCatalogStore for QueryCatalog {
 struct PgPage<'a, 'b, 'tx, 'r> {
     snapshot: &'a Snapshot<'b, 'tx>,
     key: &'a str,
+    history: bool,
     records: &'a super::super::selected_reader::SelectedRecords<'r, 'b, 'tx>,
 }
 impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
@@ -448,7 +453,7 @@ impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
         for start in (low..high).step_by(64) {
             let (_, slots) = self
                 .snapshot
-                .recipe(self.key, false, start as i64, (high - start).min(64) as i64)
+                .recipe(self.key, self.history, start as i64, (high - start).min(64) as i64)
                 .map_err(unavailable)?
                 .ok_or_else(|| unavailable(StorageError::ScopeChanged))?;
             for slot in slots {
@@ -482,10 +487,19 @@ impl Snapshot<'_, '_> {
         &self,
         key: &str,
         turn: &str,
+        history: bool,
     ) -> Result<(usize, crate::slot_projection::SavedSlot), StorageError> {
+        let (owner, slots) = if history {
+            (
+                self.owner(key)?.ok_or(StorageError::ScopeChanged)?,
+                "semon_pg_native_catalog_history_slots",
+            )
+        } else {
+            (self.generation.clone(), "semon_pg_native_catalog_recipe_rows")
+        };
         let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
-        let rows=tx.driver.query("SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1", &[&tx.namespace.as_str().as_bytes(),&self.generation.as_bytes(),&key.as_bytes(),&turn]).map_err(sqlstate::error)?;
+        let rows=tx.driver.query(&format!("SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {slots} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1"), &[&tx.namespace.as_str().as_bytes(),&owner.as_bytes(),&key.as_bytes(),&turn]).map_err(sqlstate::error)?;
         tx.check()?;
         let row = rows.first().ok_or(StorageError::ScopeChanged)?;
         let slot =
