@@ -305,9 +305,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         identity: &str,
     ) -> Result<Option<String>, StorageError> {
         let tx = self.tx;
-        let result = (|| {
-            tx.query_row("SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3",params![id,scope,identity],|r|r.get(0)).optional()
-        })();
+        let result = tx.query_row("SELECT f.payload FROM native_usage_identities i JOIN native_usage_facts f ON f.namespace=i.namespace AND f.source_id=i.source_id AND f.native_offset=i.native_offset WHERE i.namespace=semon_namespace() AND i.source_id=?1 AND i.scope=?2 AND i.identity=?3",params![id,scope,identity],|r|r.get(0)).optional();
         self.result(result)
     }
     fn identity(

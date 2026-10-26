@@ -709,12 +709,19 @@ impl NativeOwnership {
                 [], |r| r.get(0),
             ).map_err(failed)?;
             if registry {
-                let admission = tx.query_row(
-                    "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
-                    [config.namespace.as_str()], |r| r.get(0),
-                ).optional().map_err(failed)?;
+                let admission = tx
+                    .query_row(
+                        "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                        [config.namespace.as_str()],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(failed)?;
                 if let Some(admission) = admission {
-                    let owner = Self { config: config.clone(), admission };
+                    let owner = Self {
+                        config: config.clone(),
+                        admission,
+                    };
                     owner.validate_ready(&tx)?;
                     return Ok(owner);
                 }
@@ -1155,9 +1162,6 @@ impl Writer {
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        let owner = self.owner.as_ref().ok_or(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))?;
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         connection
             .create_scalar_function(
@@ -1188,14 +1192,13 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        let result = store.publish_catalog_owned(
+        let result = store.publish_catalog_with_writer(
             publication,
             expected,
             claims,
             closed,
             None,
             super::CatalogWriter::Auto,
-            owner,
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {
