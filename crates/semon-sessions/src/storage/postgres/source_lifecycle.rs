@@ -596,24 +596,38 @@ pub(super) fn facts_complete(tx:&mut PgTxn<'_>,options:&crate::Options,intent:&c
         let selected=|facts:&crate::Facts|facts.codex_rollouts.iter().flatten().chain(facts.codex_provisional_rollouts.iter().flatten()).cloned().collect::<BTreeSet<_>>();
         let old=selected(&intent.before);let new=selected(&intent.wanted);
         let every=intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none();
-        // A global or whole-selection change affects every (Codex) Current Source
-        // (selection change: Codex owners only) and is bounded by this operation's
-        // 64 Source budget. Otherwise only the
-        // changed rollout paths are looked up by the Source path index.
+        // A global or whole-selection change affects every (Codex) Current
+        // Source. It invalidates them by keyset pages of 64, each checking the
+        // deadline, so catch-up grows with the Catalog instead of refusing.
+        // Otherwise only the changed rollout paths use the Source path index.
         let targets=if changes.global||every {None} else {Some(old.symmetric_difference(&new).map(|relative|options.codex_home.join(relative).to_string_lossy().into_owned().into_bytes()).collect::<Vec<_>>())};
-        let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) AND (NOT $4 OR key_digest IN (SELECT key_digest FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND harness=$5)) ORDER BY source_path LIMIT 65", &[&ns,&generation.as_bytes(),&targets,&(every&&!changes.global),&b"codex".as_slice()]).map_err(sqlstate::error)?;
-        if rows.len()>64 {return Err(StorageError::Busy);}
-        for row in rows {
-            let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
-            let codex=std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
-            if changes.global||(every&&codex.is_some())||targets.is_some() {affected.insert(path.clone());}
+        let mut after:Option<Vec<u8>>=None;
+        loop {
+            tx.check()?;
+            let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) AND (NOT $4 OR key_digest IN (SELECT key_digest FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND harness=$5)) AND ($6::bytea IS NULL OR source_path>$6) ORDER BY source_path LIMIT 64", &[&ns,&generation.as_bytes(),&targets,&(every&&!changes.global),&b"codex".as_slice(),&after]).map_err(sqlstate::error)?;
+            let Some(last)=rows.last() else {break};
+            after=Some(last.get(0));
+            for row in &rows {
+                let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+                let codex=std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
+                if (changes.global||(every&&codex.is_some())||targets.is_some())&&!affected.contains(&path) {super::source_journal::invalidate(tx,&path)?;}
+            }
         }
         for relative in old.symmetric_difference(&new) {if crate::is_input_path("codex",relative) {affected.insert(options.codex_home.join(relative).to_string_lossy().into_owned());}}
     }
+    // A repository change invalidates that cwd's Sources by the same pages.
     for cwd in &changes.repos {
-        let rows=tx.driver.query("SELECT path FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND cwd=$2 LIMIT 65", &[&ns,&cwd.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len()>64 {return Err(StorageError::Busy);}
-        for row in rows {affected.insert(String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?);}
+        let mut after:Option<Vec<u8>>=None;
+        loop {
+            tx.check()?;
+            let rows=tx.driver.query("SELECT path FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND cwd=$2 AND ($3::bytea IS NULL OR path>$3) ORDER BY path LIMIT 64", &[&ns,&cwd.as_bytes(),&after]).map_err(sqlstate::error)?;
+            let Some(last)=rows.last() else {break};
+            after=Some(last.get(0));
+            for row in &rows {
+                let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+                if !affected.contains(&path) {super::source_journal::invalidate(tx,&path)?;}
+            }
+        }
     }
     if affected.len()>64 {return Err(StorageError::Busy);}
     for path in affected {super::source_journal::invalidate(tx,&path)?;}

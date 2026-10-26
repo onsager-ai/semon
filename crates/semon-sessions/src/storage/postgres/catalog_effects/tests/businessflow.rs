@@ -1501,4 +1501,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .complete()
     .unwrap();
     assert_eq!(crate::read_facts(&facts_path).unwrap(), archived_facts);
+    // A global Facts change invalidates every Current Source (> 64 here) by
+    // bounded pages instead of refusing, and replays its lost ACK.
+    let mut renamed = archived_facts.clone();
+    renamed.hostname = "source-write-after174".into();
+    let global = crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &renamed,
+        true,
+        raw_store(),
+        None,
+    )
+    .unwrap();
+    let global_request = global.intent();
+    crate::save_json_file(&facts_path, &renamed).unwrap();
+    global.complete().unwrap();
+    crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &renamed,
+        true,
+        raw_store(),
+        Some(global_request),
+    )
+    .unwrap()
+    .complete()
+    .unwrap();
+    assert_eq!(crate::read_facts(&facts_path).unwrap(), renamed);
 }
