@@ -2350,7 +2350,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Restart continues from the successor; the readers' retained proofs
     // still serve the old selected bodies exactly.
     drop(catchup);
-    let reopened =
+    let mut reopened =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     assert_eq!(
         reopened.session_catalog_generation().as_deref(),
@@ -2360,5 +2360,51 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies,
         "old selected bodies after a connected withdrawal and restart"
+    );
+    // Zero-row publication: Facts no longer list the archived rollout, so
+    // its catch-up batch prepares no row. The recorded batch runtime is the
+    // lifecycle authority that retires the owner into retained history.
+    let mut emptied = renamed.clone();
+    emptied.codex_rollouts = Some(std::collections::BTreeSet::new());
+    let emptied_write = crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &emptied,
+        true,
+        raw_store(),
+        None,
+    )
+    .unwrap();
+    crate::save_json_file(&facts_path, &emptied).unwrap();
+    emptied_write.complete().unwrap();
+    let rollout = [crate::Input {
+        root: crate::InputRoot::Codex,
+        path: format!("archived_sessions/rollout-{codex_id}.jsonl"),
+    }];
+    let (retired, retired_batch, retired_model, _) =
+        stage_publish(&mut reopened, &rollout, 1790812810000);
+    assert!(retired_model.prepared().rows.is_empty(), "zero-row batch");
+    assert_eq!(retired_batch.runtime, runtime);
+    assert_ne!(retired, caught);
+    let codex_keys = prepared
+        .rows
+        .iter()
+        .filter(|row| row.harness == "codex")
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    assert!(!codex_keys.is_empty());
+    let after = scoped(&retired, "");
+    let kept_after = scoped(&retired, "scope=retained_history&");
+    for key in &codex_keys {
+        assert!(after.iter().all(|(other, _)| other != key), "{key} retired");
+        assert!(
+            kept_after.contains(&(key.clone(), true)),
+            "{key} retained after zero-row publication"
+        );
+    }
+    // Every other Current session is unchanged by the zero-row publication.
+    assert_eq!(
+        after.len() + codex_keys.len(),
+        current.len(),
+        "zero-row publication retires only the rollout owner"
     );
 }
