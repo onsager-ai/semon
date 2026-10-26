@@ -75,7 +75,7 @@ impl Chunks {
 fn unavailable() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "native source block generation unavailable",
+        crate::storage::StorageError::Conflict,
     )
 }
 
@@ -302,6 +302,60 @@ pub(crate) fn continue_prefix(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn append_capture_distinguishes_generation_changes_from_reader_failures() {
+        struct FailedReader(io::ErrorKind);
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(self.0, "synthetic reader failure"))
+            }
+        }
+        impl Seek for FailedReader {
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+                Err(io::Error::new(self.0, "synthetic reader failure"))
+            }
+        }
+        let original = b"old\n";
+        let captured = capture(&mut Cursor::new(original), 4, 0).unwrap();
+        for kind in [
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Other,
+            io::ErrorKind::InvalidData,
+        ] {
+            let error = capture_append(
+                &mut FailedReader(kind),
+                4,
+                4,
+                &captured.chunks,
+                captured.prefix,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), kind);
+            assert!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<crate::storage::StorageError>()
+                    .is_none()
+            );
+        }
+        let mut stale = captured.chunks;
+        stale.resume = None;
+        let error = capture_append(&mut Cursor::new(original), 4, 4, &stale, captured.prefix)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<crate::storage::StorageError>(),
+            Some(&crate::storage::StorageError::Conflict)
+        );
+    }
 
     #[test]
     fn source_proofs_match_the_complete_prefix_and_both_parser_partitions() {
