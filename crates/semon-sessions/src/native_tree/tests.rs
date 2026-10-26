@@ -403,9 +403,9 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         [],
     )
     .unwrap();
-    let revision: String = db
+    let revision: i64 = db
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_source_revision'",
+            "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
             [],
             |r| r.get(0),
         )
@@ -418,15 +418,19 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         let pending = home.cache().advance_tree_repair(&home.options).unwrap();
         steps += 1;
         let cursor: i64 = db
-            .query_row("SELECT cursor FROM native_tree_repairs", [], |r| r.get(0))
+            .query_row(
+                "SELECT cursor FROM native_tree_repairs WHERE namespace=semon_namespace()",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(cursor - previous <= 1024 * 1024 + 32 * 1024 * 1024);
         previous = cursor;
         assert_eq!(
             db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
                 [],
-                |r| r.get::<_, String>(0)
+                |r| r.get::<_, i64>(0)
             )
             .unwrap(),
             revision
@@ -442,7 +446,7 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     assert!(nodes[0].open_tools.is_empty());
     let root: i64 = db
         .query_row(
-            "SELECT octet_length(value) FROM meta WHERE key=?1",
+            "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{}", path.display())],
             |r| r.get(0),
         )

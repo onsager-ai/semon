@@ -74,8 +74,15 @@ jobs:
       - name: Standalone session bootstrap HTTP regressions
         run: cargo test --locked -p semon-sessions http_session_bootstrap_is_consumed_before_routing -- --nocapture
 
+      # Run on the original checkout, before formatting review can change it.
+      # --no-deps keeps the vendored tiny_http lint policy unchanged.
+      - name: cargo clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets --locked -- --no-deps -D warnings
+
       - name: cargo fmt --check
         id: rustfmt
+        if: ${{ !cancelled() }}
         run: cargo fmt --all --check
 
       - name: Prepare Rust formatting changes for thermal-restricted review
@@ -119,13 +126,6 @@ jobs:
 
       - name: Verify harness icon hashes
         run: cd assets/harnesses && sha256sum -c SHA256SUMS
-
-      # --no-deps: lint the workspace's own crates only. Clippy would
-      # otherwise lint vendor/tiny_http too, since a path dependency's lints
-      # aren't capped the way a registry crate's are, and that code is kept
-      # as published (vendor/tiny_http/SEMON-PATCH.md).
-      - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- --no-deps -D warnings
 
       - name: Sealed selected transcript regression
         run: |

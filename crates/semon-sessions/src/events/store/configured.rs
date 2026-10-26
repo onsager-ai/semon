@@ -1043,8 +1043,8 @@ fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Constant-size preparation of a fresh composite core. Existing singleton
-/// stores refuse before writes; supported-current bounded migration is pending.
+/// Prepare the admitted current namespace core. Unsupported Semon schemas
+/// refuse before writes; current-format backend transfer is a separate port.
 pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
     SourceJournal(config.clone()).validate(&db)?;
