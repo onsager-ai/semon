@@ -2078,8 +2078,53 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             path: "projects/project/one/subagents/agent-related191.jsonl".into(),
         },
     ];
-    let (caught, _, _, deferred) = stage_publish(&mut catchup, &connected, 1790812809000);
-    assert!(deferred >= 1, "two new custodies need more than one attempt");
+    let paths = connected
+        .iter()
+        .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    catchup.begin_semantic_stage(&paths, &runtime).unwrap();
+    let (batch, model) = loop {
+        let batch = catchup.semantic_batch(64).unwrap().unwrap();
+        let model = catchup
+            .prepare_semantic_model_batch(&facts_options, &connected, &batch, 1790812809000)
+            .unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            break (batch, model);
+        }
+    };
+    // Two new custodies need more than one bounded advance. The first
+    // checkpoint's ACK is lost with the process; a restarted producer resumes
+    // the same operation from the durable checkpoint, not from scratch.
+    assert_eq!(
+        catchup.publish_semantic_catalog(&batch, model.prepared()).unwrap(),
+        (crate::events::Outcome::Deferred, None)
+    );
+    assert_eq!(catchup.session_catalog_generation().unwrap(), qualified);
+    drop(catchup);
+    let mut catchup =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let mut deferred = 1;
+    let ack = loop {
+        let ack = catchup
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        if ack.0 != crate::events::Outcome::Deferred {
+            break ack;
+        }
+        assert_eq!(ack.1, None);
+        assert_eq!(catchup.session_catalog_generation().unwrap(), qualified);
+        deferred += 1;
+        assert!(deferred < 64, "custody makes bounded progress");
+    };
+    assert_eq!(ack.0, crate::events::Outcome::Written);
+    // A lost Written ACK replays the exact operation and its generation.
+    assert_eq!(
+        catchup.publish_semantic_catalog(&batch, model.prepared()).unwrap(),
+        ack
+    );
+    catchup.finish_semantic_stage(batch.epoch).unwrap();
+    let caught = ack.1.unwrap();
+    assert_eq!(catchup.session_catalog_generation().unwrap(), Some(caught.clone()));
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
