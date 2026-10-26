@@ -848,13 +848,21 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             "dependency" => {
                 "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
-            "claudeid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND substr(path,length(rtrim(path,replace(path,'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
-            "copilotid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
+            "claudeid" => {
+                "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND substr(path,length(rtrim(path,replace(path,'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4"
+            }
+            "copilotid" => {
+                "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4"
+            }
             "nativeall" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
-            "headerid" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4",
-            "headerparent" => "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4",
+            "headerid" => {
+                "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_native WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.id')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+            }
+            "headerparent" => {
+                "SELECT substr(m.key,length('native_codex_header:')+1) FROM main.meta m INDEXED BY semantic_codex_header_parent WHERE m.namespace=?1 AND m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.metadata.parent_thread')=?2 AND substr(m.key,length('native_codex_header:')+1)>?3 ORDER BY m.key LIMIT ?4"
+            }
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
         };
         let mut q = c.prepare(sql).map_err(error)?;

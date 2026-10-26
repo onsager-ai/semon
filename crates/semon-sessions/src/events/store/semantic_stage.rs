@@ -559,9 +559,6 @@ impl NativeFrontierPort for OrdinaryNativeFrontier<'_> {
             return c.query_row("SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))",[id],|r|r.get(0));
         }
         let dependency = if !parent { "native" } else { "parent" };
-        let legacy = format!(
-            "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
-        );
         let scoped = format!(
             "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
         );

@@ -4475,7 +4475,8 @@ fn local_only_provisional_codex_refuses_corruption_truncation_races_and_missing_
                     .unwrap()
                     .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
                     .unwrap();
-                fixture.db()
+                fixture
+                    .db()
                     .execute(
                         "DELETE FROM meta WHERE key LIKE 'native_source_chunks:%'",
                         [],
@@ -4620,8 +4621,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                 "legacy" => {
                     // A supported persisted recipe predating the physical
                     // change-time witness has no local generation proof.
-                    let mut db =
-                        fixture.db();
+                    let mut db = fixture.db();
                     let text: String = db
                         .query_row(
                             "SELECT metadata FROM session_catalog WHERE session_key='pinned'",

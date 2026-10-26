@@ -1427,7 +1427,6 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportedFileStamp {
@@ -3275,7 +3274,6 @@ pub(crate) fn scan_file(
         let started = cache.scan_measurements.start();
         let recorded = prepared_ledger;
         let mut base = None;
-        let mut trusted_append = false;
         if let Some(ledger) = &recorded
             && !force_replace
         {
@@ -3283,18 +3281,7 @@ pub(crate) fn scan_file(
                 match cache.base(&key, ledger)? {
                     Base::Found(index) => {
                         cache.require_usage_store(&index)?;
-                        trusted_append = evidence
-                            && index
-                                .source_chunks
-                                .as_ref()
-                                .is_some_and(|chunks| chunks.resume.is_some());
-                        if ledger.stat == stat
-                            || trusted_append
-                            || !evidence
-                            || ledger.resumes(&stat, &mut file)
-                        {
-                            base = Some(index);
-                        }
+                        base = Some(index);
                     }
                     Base::Moved if !last => continue,
                     Base::Moved | Base::Unreadable => {}
@@ -3338,9 +3325,11 @@ pub(crate) fn scan_file(
                     .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
         {
             trace("unchanged");
-            let ledger = ledger.clone();
-            let index = Arc::clone(index);
-            cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
+            {
+                let ledger = ledger.clone();
+                let index = Arc::clone(index);
+                cache.commit(&key, Some(&ledger), None, &ledger, &index)?;
+            }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
             cache.files.insert(
@@ -3491,25 +3480,7 @@ pub(crate) fn scan_file(
             .take()
             .expect("parser tracks dirty rows");
         let started = cache.scan_measurements.start();
-        let captured = if trusted_append {
-            let previous = writable
-                .source_chunks
-                .as_ref()
-                .expect("trusted chunks exist");
-            match crate::source_chunks::capture_append(
-                &mut file,
-                offset,
-                from,
-                previous,
-                recorded.as_ref().expect("trusted ledger exists").prefix,
-            ) {
-                Ok(captured) => captured,
-                Err(_) if !last => continue,
-                Err(error) => return Err(error),
-            }
-        } else {
-            crate::source_chunks::capture(&mut file, offset, from)?
-        };
+        let captured = crate::source_chunks::capture(&mut file, offset, from)?;
         cache.scan_measurements.record("chunk_capture", started, 1);
         if captured.parsed != parsed
             || (append

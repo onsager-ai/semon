@@ -313,7 +313,9 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached("INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)")?
+            tx.prepare_cached(
+                "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
+            )?
             .execute(params![id, scope, identity, offset])?;
             Ok(())
         })();
@@ -323,7 +325,9 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
         let tx = self.tx;
         let result = (|| {
             let offset = i64::try_from(fact.offset).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            tx.prepare_cached("INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)")?
+            tx.prepare_cached(
+                "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
+            )?
             .execute(params![
                 fact.source,
                 offset,

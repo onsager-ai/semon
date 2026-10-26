@@ -360,7 +360,9 @@ pub(super) fn write_values(
         tx.prepare_cached("INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?.execute(params![id,label,value])?;
     }
     for model in rows.models {
-        tx.prepare_cached("INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING")?
+        tx.prepare_cached(
+            "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
+        )?
         .execute(params![id, model])
         .map_err(|error| diagnose("model_insert", error))?;
     }

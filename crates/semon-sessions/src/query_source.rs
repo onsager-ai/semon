@@ -229,11 +229,10 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db =
-            crate::storage::local_navigation_binding(options, "")
-                .map_err(io::Error::other)
-                .and_then(|binding| crate::events::store::focused_connection(&binding))
-                .map_err(|error| {
+        let db = crate::storage::local_navigation_binding(options, "")
+            .map_err(io::Error::other)
+            .and_then(|binding| crate::events::store::focused_connection(&binding))
+            .map_err(|error| {
                 for source in sources.iter().take(16) {
                     note_focused_source_interest(&cache_path, source);
                 }
