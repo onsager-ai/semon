@@ -888,15 +888,7 @@ fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
 }
 
 fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite::Result<()> {
-    let witness:Option<(String,String)>=tx.query_row(match (
-        "1" == "1",
-        "1" == "1",
-    ) {
-        (false, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE session_key=?1",
-        (true, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE c.namespace=semon_namespace() AND session_key=?1",
-        (false, true) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE t.namespace=semon_namespace() AND session_key=?1",
-        (true, true) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(namespace,session_key) WHERE c.namespace=semon_namespace() AND session_key=?1",
-    },[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let witness:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(namespace,session_key) WHERE c.namespace=semon_namespace() AND session_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((encoded, generation)) = witness else {
         return Ok(());
     };
