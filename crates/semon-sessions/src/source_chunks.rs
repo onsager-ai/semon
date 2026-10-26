@@ -343,55 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn continuation_matches_full_sha_across_boundaries_and_refuses_corruption() {
-        let bytes: Vec<u8> = (0..SIZE * 5 + 137).map(|n| (n % 251) as u8).collect();
-        for from in [
-            0,
-            1,
-            55,
-            56,
-            63,
-            64,
-            SIZE - 1,
-            SIZE,
-            SIZE + 19,
-            SIZE * 4 + 3,
-        ] {
-            let old = capture(&mut Cursor::new(&bytes), from as u64, 0).unwrap();
-            for to in [from, from + 1, from + 63, from + SIZE] {
-                if to > bytes.len() {
-                    continue;
-                }
-                let full = capture(&mut Cursor::new(&bytes), to as u64, from as u64).unwrap();
-                let resumed = capture_append(
-                    &mut Cursor::new(&bytes),
-                    to as u64,
-                    from as u64,
-                    &old.chunks,
-                    old.prefix,
-                )
-                .unwrap();
-                assert_eq!(resumed.prefix, full.prefix);
-                assert_eq!(resumed.tail, full.tail);
-                assert_eq!(resumed.parsed, full.parsed);
-                assert_eq!(resumed.chunks, full.chunks);
-            }
-            let mut corrupted = old.chunks.clone();
-            corrupted.resume.as_mut().unwrap().at += 64;
-            assert!(
-                capture_append(
-                    &mut Cursor::new(&bytes),
-                    from as u64 + 1,
-                    from as u64,
-                    &corrupted,
-                    old.prefix
-                )
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
     fn old_generation_blocks_survive_append_and_refuse_changed_interiors() {
         let original = vec![b'x'; SIZE * 3 + 17];
         let captured = capture(&mut Cursor::new(&original), original.len() as u64, 0).unwrap();

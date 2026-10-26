@@ -2,7 +2,6 @@
 //! No complete event index, semantic cohort or unrelated source is prepared.
 use super::*;
 use crate::{
-    events::EventCache,
     model::summary::CatalogRow,
     slot_projection::{QueryObservation, SavedSlot, VERSION},
 };

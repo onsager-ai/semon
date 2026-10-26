@@ -290,7 +290,6 @@ pub(crate) fn publish_current_rows_with_store<
     )
 }
 
-
 /// One metadata-search producer; adapters own only physical effects. The phase
 /// callback keeps SQLite's existing performance probes outside the algorithm.
 pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
@@ -426,7 +425,6 @@ fn publish_current_rows_effects<
     }
     Ok(())
 }
-
 
 /// Remove only this cohort's old documents and postings. Aggregate shared gram
 /// decrements once, using source-key lookups rather than scanning all members of
