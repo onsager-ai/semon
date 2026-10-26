@@ -512,8 +512,14 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
         operation: operation.clone(),
         cursor: Some(String::new()),
     };
-    assert_eq!(store.recovery_is_current(), Err(StorageError::NamespaceUpgradePending));
-    assert_eq!(store.recovery_cursor(), Err(StorageError::NamespaceUpgradePending));
+    assert_eq!(
+        store.recovery_is_current(),
+        Err(StorageError::NamespaceUpgradePending)
+    );
+    assert_eq!(
+        store.recovery_cursor(),
+        Err(StorageError::NamespaceUpgradePending)
+    );
     assert_eq!(
         store.persist_intent(&intent),
         Err(StorageError::NamespaceUpgradePending)
@@ -522,8 +528,14 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
         store.recover(&operation, Some("")),
         Err(StorageError::NamespaceUpgradePending)
     );
-    assert_eq!(intent.apply(&mut store), Err(StorageError::NamespaceUpgradePending));
-    assert_eq!(store.apply(&intent), Err(StorageError::NamespaceUpgradePending));
+    assert_eq!(
+        intent.apply(&mut store),
+        Err(StorageError::NamespaceUpgradePending)
+    );
+    assert_eq!(
+        store.apply(&intent),
+        Err(StorageError::NamespaceUpgradePending)
+    );
     let counts = factory.client().query_one(
         "SELECT (SELECT count(*) FROM semon_pg_source_state), (SELECT count(*) FROM semon_pg_source_intents), (SELECT count(*) FROM semon_pg_source_receipts)", &[],
     ).unwrap();
