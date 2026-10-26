@@ -63,12 +63,38 @@ pub(super) fn capture(
             _ => NativePageKind::Tree,
         };
         let cursor = state.native_key.as_ref().map(|s| s.as_bytes());
-        let suffix="FROM semon_pg_native_page_current c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key";
-        let sizes=tx.0.driver.query(&format!("SELECT octet_length(b.payload) {suffix} LIMIT 64"),&[&ns,&path.as_bytes(),&kind(page_kind),&cursor]).map_err(sqlstate::error)?;
-        let mut count=0;let mut bytes=0usize;
-        for row in &sizes {let size=usize::try_from(row.get::<_,i32>(0)).map_err(|_|StorageError::ScopeChanged)?;if bytes.checked_add(size).is_none_or(|n|n>transfer::MAX_PAGE_BYTES){break;}bytes+=size;count+=1;}
-        if count==0 && !sizes.is_empty(){return Err(StorageError::Busy);}
-        let rows=tx.0.driver.query(&format!("SELECT r.page_key,b.payload {suffix} LIMIT {count}"),&[&ns,&path.as_bytes(),&kind(page_kind),&cursor]).map_err(sqlstate::error)?;
+        let suffix = "FROM semon_pg_native_page_current c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key";
+        let sizes =
+            tx.0.driver
+                .query(
+                    &format!("SELECT octet_length(b.payload) {suffix} LIMIT 64"),
+                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor],
+                )
+                .map_err(sqlstate::error)?;
+        let mut count = 0;
+        let mut bytes = 0usize;
+        for row in &sizes {
+            let size =
+                usize::try_from(row.get::<_, i32>(0)).map_err(|_| StorageError::ScopeChanged)?;
+            if bytes
+                .checked_add(size)
+                .is_none_or(|n| n > transfer::MAX_PAGE_BYTES)
+            {
+                break;
+            }
+            bytes += size;
+            count += 1;
+        }
+        if count == 0 && !sizes.is_empty() {
+            return Err(StorageError::Busy);
+        }
+        let rows =
+            tx.0.driver
+                .query(
+                    &format!("SELECT r.page_key,b.payload {suffix} LIMIT {count}"),
+                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor],
+                )
+                .map_err(sqlstate::error)?;
         if rows.is_empty() {
             state.native_family += 1;
             state.native_key = None;
@@ -80,10 +106,8 @@ pub(super) fn capture(
                         path: path.clone(),
                         kind: page_kind,
                         key: String::from_utf8(r.get(0)).map_err(|_| StorageError::ScopeChanged)?,
-                        payload: String::from_utf8(
-                            r.get::<_, Vec<u8>>(1),
-                        )
-                        .map_err(|_| StorageError::ScopeChanged)?,
+                        payload: String::from_utf8(r.get::<_, Vec<u8>>(1))
+                            .map_err(|_| StorageError::ScopeChanged)?,
                     })
                 })
                 .collect::<Result<Vec<_>, StorageError>>()?;
@@ -124,6 +148,8 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     match record {
         TransferRecord::NativeSource(source) => {
+            let (_,ledger) = super::super::native_reader::ledger(tx.0,&source.path)?.ok_or(StorageError::ScopeChanged)?;
+            native_pages::validate_source_ledger(source,&ledger)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
             let id = source.id(tx.0.namespace.as_str())?;

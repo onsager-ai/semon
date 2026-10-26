@@ -1,4 +1,5 @@
 //! Namespace-owned durable transfer transport, separate from native publication.
+mod catalog;
 mod native;
 mod pages;
 mod rows;
@@ -272,7 +273,8 @@ pub(crate) fn apply(
         }
         if page.first {
             let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp') OR EXISTS(SELECT 1 FROM files WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_history_catalog WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
-            if occupied {
+            let published: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_generation','native_transfer_v1:catalog-content-generation') AND value<>'') OR EXISTS(SELECT 1 FROM main.storage_semantic_publications WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
+            if occupied || published {
                 return Err(StorageError::Conflict);
             }
             install_fence(tx.0)?;
@@ -293,6 +295,7 @@ pub(crate) fn apply(
                     tx.put(key, value.as_bytes())?
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,
