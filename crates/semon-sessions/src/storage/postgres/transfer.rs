@@ -141,7 +141,14 @@ pub(crate) fn capture(
             return Err(StorageError::ScopeChanged);
         }
         if state.native && !state.done {
-            return capture_native(tx, &mut state);
+            #[cfg(test)]
+            let family = state.native_family;
+            let result = capture_native(tx, &mut state);
+            #[cfg(test)]
+            if let Err(error) = &result {
+                eprintln!("transfer PG capture failed: family={family} error={error:?}");
+            }
+            return result;
         }
         if state.done {
             return Ok(state.progress());
