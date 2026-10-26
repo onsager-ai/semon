@@ -316,6 +316,16 @@ pub(crate) fn preserve_replacement_rows<P: OriginalHistoryStore>(
     store: &P,
     rows: &[CatalogRow],
 ) -> Result<bool, P::Error> {
+    preserve_rows(store, rows, &[])
+}
+
+/// Sessions a publication withdraws from Current keep original custody the
+/// same way replaced rows do, under the same one-advance bound.
+pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
+    store: &P,
+    rows: &[CatalogRow],
+    withdrawn: &[CatalogRow],
+) -> Result<bool, P::Error> {
     let mut advanced = false;
     for row in rows {
         if store.retained(&row.key)? {
@@ -327,6 +337,15 @@ pub(crate) fn preserve_replacement_rows<P: OriginalHistoryStore>(
             }
             advanced = true;
         }
+    }
+    for old in withdrawn {
+        if store.retained(&old.key)? {
+            continue;
+        }
+        if advanced || !preserve_original(store, old)? {
+            return Ok(false);
+        }
+        advanced = true;
     }
     Ok(true)
 }

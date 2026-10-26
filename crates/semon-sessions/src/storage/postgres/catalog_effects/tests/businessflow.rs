@@ -219,6 +219,49 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|list| &list["total"])
             .collect::<Vec<_>>()
     );
+    // Retained-history scope through the ordinary SQLite viewer page over the
+    // fully published Query cache; exact ordered keys are saved before the PG
+    // no-SQLite phase. Nothing is withdrawn yet, so it equals the current page.
+    let mut history_options = closed_options.clone();
+    history_options.all = false;
+    history_options.since = recent_windows[2];
+    let page_keys = |reply: crate::ViewerReply| -> Vec<String> {
+        assert_eq!(reply.status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let oracle_history = page_keys(crate::catalog::session_catalog_page(
+        &history_options,
+        recent_machine,
+        "scope=retained_history&limit=50",
+    ));
+    let mut ordered = expected.rows.clone();
+    ordered.sort_by(|a, b| {
+        b.last
+            .unwrap_or(0)
+            .cmp(&a.last.unwrap_or(0))
+            .then(a.key.cmp(&b.key))
+    });
+    assert_eq!(
+        oracle_history,
+        ordered
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        oracle_history,
+        page_keys(crate::catalog::session_catalog_page(
+            &history_options,
+            recent_machine,
+            "limit=50",
+        ))
+    );
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -435,6 +478,78 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
+    // P3: retained history over the admitted PG generation equals the SQLite
+    // oracle page: exact ordered keys and full producer rows, then a keyset
+    // second page continues without overlap.
+    let (history_rows, history_page, history_next) =
+        super::super::snapshot::with_admitted_generation(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            |snapshot| {
+                use crate::storage::catalog::CatalogSnapshot;
+                let request =
+                    crate::catalog::Request::parse("scope=retained_history&limit=50").unwrap();
+                let rows = snapshot
+                    .rows(&request)
+                    .map_err(|_| StorageError::ScopeChanged)?;
+                let page = crate::catalog::read_page_snapshot(
+                    &options,
+                    recent_machine,
+                    &request,
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)?;
+                let first = crate::catalog::read_page_snapshot(
+                    &options,
+                    recent_machine,
+                    &crate::catalog::Request::parse("scope=retained_history&limit=1").unwrap(),
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)?;
+                Ok((rows, page, first))
+            },
+        )
+        .unwrap();
+    assert_eq!(page_keys(history_page), oracle_history);
+    assert_eq!(producer_rows(&history_rows), producer_rows(&ordered));
+    assert!(
+        history_rows
+            .iter()
+            .all(|row| row.lifecycle == crate::model::summary::CatalogLifecycle::Current)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&history_next.body).unwrap();
+    assert_eq!(
+        first["items"][0]["key"].as_str(),
+        oracle_history.first().map(String::as_str)
+    );
+    if oracle_history.len() > 1 {
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("retained history keyset cursor");
+        let second = super::super::snapshot::with_admitted_generation(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            |snapshot| {
+                crate::catalog::read_page_snapshot(
+                    &options,
+                    recent_machine,
+                    &crate::catalog::Request::parse(&format!(
+                        "scope=retained_history&limit=50&cursor={}",
+                        crate::viewer::percent_encode(cursor)
+                    ))
+                    .unwrap(),
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            },
+        )
+        .unwrap();
+        assert_eq!(page_keys(second), oracle_history[1..].to_vec());
+    }
     let query_store = super::super::snapshot::query::QueryCatalog {
         pool: pool.clone(),
         namespace: namespace.clone(),
@@ -1692,9 +1807,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(partial_list["total"].as_u64(), Some(total));
     assert!(partial_list.to_string().contains("source-write-after158"));
-    // (c) An isolated Source withdraws by bounded pages. A Source of a mixed
-    // or connected owner refuses and leaves Current untouched: removal and
-    // the owner's semantic republication are separate commits today.
+    // (c) An isolated Source withdraws by bounded pages. A mixed or connected
+    // owner's Source is withdrawn last, below, through the semantic catch-up.
     let (mut store, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
         namespace.clone(),
@@ -1702,12 +1816,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let agent = claude_agent.to_str().unwrap().to_owned();
-    let agent_ledger = store.ledger(&agent).unwrap().unwrap();
-    assert!(store.remove_files(&[(agent, Some(agent_ledger))]).is_err());
-    assert_eq!(
-        store.session_catalog_generation().unwrap().as_deref(),
-        Some(partial_generation.as_str())
-    );
+    let agent_removal = vec![(agent.clone(), store.ledger(&agent).unwrap())];
     let gone = bulk[1].full_path(&facts_options);
     let gone_path = gone.to_str().unwrap().to_owned();
     let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
@@ -1890,4 +1999,151 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .complete()
     .unwrap();
     assert_eq!(crate::read_facts(&facts_path).unwrap(), renamed);
+    // (e) A connected Source withdrawal commits only its Index intent and the
+    // `removed` invalidation. The qualified Current generation stays until the
+    // ordinary semantic catch-up publishes; an exact lost-ACK replay is applied.
+    let (mut store, _) = crate::storage::postgres::index_store::open(
+        pool.clone(),
+        namespace.clone(),
+        control.clone(),
+    )
+    .unwrap();
+    let qualified = store.session_catalog_generation().unwrap();
+    fs::rename(&claude_agent, oracle.root.join("retained-agent180.jsonl")).unwrap();
+    assert_eq!(
+        store.remove_files(&agent_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    let reason: Vec<u8> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let row = tx.driver.query_one("SELECT reason FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&namespace.as_str().as_bytes(), &agent.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(row.get::<_, String>(0).into_bytes())
+    }).unwrap();
+    assert_eq!(reason, b"removed");
+    assert_eq!(
+        store.remove_files(&agent_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    // The ordinary semantic catch-up claims the `removed` invalidation and
+    // republishes the connected parent without the withdrawn Source.
+    let mut catchup =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let connected = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/one.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/one/subagents/agent-related154.jsonl".into(),
+        },
+    ];
+    let caught = stage_publish(&mut catchup, &connected, 1790812809000).0;
+    assert_ne!(Some(caught.clone()), qualified);
+    let parent = claude_parent.to_str().unwrap().to_owned();
+    let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        let mut counts = Vec::new();
+        for (generation, path) in [(caught.as_str(), &agent), (caught.as_str(), &parent), (qualified.as_deref().unwrap(), &agent)] {
+            counts.push(tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND source_path=$3", &[&ns, &generation.as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get::<_, i64>(0));
+        }
+        Ok(counts)
+    }).unwrap();
+    assert_eq!(counts[0], 0, "withdrawn Source left the successor Current");
+    assert!(
+        counts[1] > 0 && counts[2] > 0,
+        "parent republished; qualified generation retained"
+    );
+    // P3: the successor's retained history is its Current rows plus every
+    // session the withdrawal removed, served from the owner headers as
+    // Retained. Whole scopes follow the viewer keyset cursor (bulk169 made
+    // the generation larger than one page).
+    let scoped = |generation: &str, scope: &str| {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let query = match &cursor {
+                Some(cursor) => format!(
+                    "{scope}limit=50&cursor={}",
+                    crate::viewer::percent_encode(cursor)
+                ),
+                None => format!("{scope}limit=50"),
+            };
+            let reply = super::super::snapshot::with_admitted_generation(
+                &pool,
+                &namespace,
+                &control,
+                generation,
+                |snapshot| {
+                    crate::catalog::read_page_snapshot(
+                        &options,
+                        recent_machine,
+                        &crate::catalog::Request::parse(&query).unwrap(),
+                        snapshot,
+                    )
+                    .map_err(|_| StorageError::ScopeChanged)
+                },
+            )
+            .unwrap();
+            assert_eq!(reply.status, 200);
+            let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            for item in page["items"].as_array().unwrap() {
+                items.push((
+                    item["key"].as_str().unwrap().to_owned(),
+                    item["lifecycle"] == "retained",
+                ));
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break items,
+            }
+        }
+    };
+    let before = scoped(qualified.as_deref().unwrap(), "");
+    let current = scoped(&caught, "");
+    let mut retained = scoped(&caught, "scope=retained_history&");
+    let current_keys = current
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let removed = before
+        .iter()
+        .filter(|(key, _)| !current_keys.contains(key))
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!removed.is_empty(), "connected withdrawal removed no Current session");
+    assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
+    // Membership and lifecycle are exact; removed rows come from custody.
+    let mut expected_retained = current
+        .iter()
+        .map(|(key, _)| (key.clone(), false))
+        .chain(removed.iter().map(|key| (key.clone(), true)))
+        .collect::<Vec<_>>();
+    expected_retained.sort();
+    retained.sort();
+    assert_eq!(retained, expected_retained);
+    // Exact old OpID after its successor replays without moving the head.
+    assert_eq!(
+        store.remove_files(&agent_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(caught.as_str())
+    );
+    // Restart continues from the successor; the readers' retained proofs
+    // still serve the old selected bodies exactly.
+    drop(catchup);
+    let reopened =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        reopened.session_catalog_generation().as_deref(),
+        Some(caught.as_str())
+    );
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies,
+        "old selected bodies after a connected withdrawal and restart"
+    );
 }

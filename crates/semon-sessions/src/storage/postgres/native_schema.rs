@@ -60,7 +60,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_headers",
-        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea",
         key: "generation,key_digest",
     },
     Table {
@@ -343,6 +343,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
         "catalog_order",
         "catalog_rows",
+        "generation,last_ms,key_digest",
+        false,
+    ),
+    (
+        "catalog_history_order",
+        "catalog_history_headers",
         "generation,last_ms,key_digest",
         false,
     ),

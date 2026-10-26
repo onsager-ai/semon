@@ -124,12 +124,6 @@ fn publish_operation(
         .iter()
         .filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    if runtime.len() != 1 {
-        return Err(StorageError::ScopeChanged);
-    }
-    let runtime = *runtime.first().ok_or(StorageError::ScopeChanged)?;
-    let binding = super::super::model_cache::binding(tx)?;
-    let bound = semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?;
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old_epoch = prior.first().map(|row| row.get::<_, i64>(0));
     let old_runtime = prior
@@ -143,6 +137,18 @@ fn publish_operation(
         .map(String::from_utf8)
         .transpose()
         .map_err(|_| StorageError::ScopeChanged)?;
+    // A withdrawal-only request has no rows; it keeps the bound runtime of
+    // the head it replaces rather than inventing one.
+    let bound = match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
+        (Some(runtime), 1, _) => {
+            let binding = super::super::model_cache::binding(tx)?;
+            semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?
+        }
+        (None, 0, true) if expected.is_some() => {
+            old_runtime.clone().ok_or(StorageError::ScopeChanged)?
+        }
+        _ => return Err(StorageError::ScopeChanged),
+    };
     semantic_owner::begin(
         semantic_owner::Observed {
             epoch: old_epoch,
@@ -163,12 +169,38 @@ fn publish_operation(
     let generation = format!("{:x}", Sha256::digest(operation));
     // A partial request keeps every unmentioned Current owner. Owners connected
     // to a republished or claimed Source must be republished by the producer.
+    let mut leaving = Vec::new();
     if let Some(previous) = expected {
-        let mentioned = publication
+        let mut mentioned = publication
             .rows
             .iter()
             .map(|row| digest(row.key.as_bytes()))
             .collect::<Vec<_>>();
+        // A claimed Source that no row reads and that is retired is withdrawn:
+        // owners reading only withdrawn Sources leave Current, exactly as the
+        // isolated withdrawal does; mixed owners must be republished above.
+        let mut retired = Vec::new();
+        for (path, _) in claims {
+            if !paths.contains(path)
+                && super::super::native_keys::read_meta(
+                    tx,
+                    format!("source-retired:{path}").as_bytes(),
+                    16384,
+                )?
+                .is_some()
+            {
+                retired.push(path.as_bytes().to_vec());
+            }
+        }
+        if !retired.is_empty() {
+            let withdrawn = tx.driver.query("SELECT r.key_digest FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND NOT r.key_digest=ANY($3::bytea[]) AND EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[])) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND NOT s.source_path=ANY($4::bytea[])) ORDER BY r.key_digest LIMIT 65", &[&ns, &previous.as_bytes(), &mentioned, &retired]).map_err(sqlstate::error)?.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
+            if withdrawn.len() > 64 {
+                return Err(StorageError::Busy);
+            }
+            tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original) SELECT namespace,$3,key_digest,session_key,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns, &previous.as_bytes(), &generation.as_bytes(), &withdrawn]).map_err(sqlstate::error)?;
+            leaving.clone_from(&withdrawn);
+            mentioned.extend(withdrawn);
+        }
         let claimed = paths
             .iter()
             .map(String::as_str)
@@ -179,7 +211,7 @@ fn publish_operation(
     }
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     if let Some(previous) = expected
-        && !history::preserve(tx, &generation, previous, publication)?
+        && !history::preserve(tx, &generation, previous, publication, &leaving)?
     {
         return Err(StorageError::Busy);
     }
