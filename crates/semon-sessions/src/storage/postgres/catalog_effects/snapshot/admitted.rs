@@ -112,8 +112,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 .get::<_, Option<Vec<u8>>>(1)
                 .ok_or_else(|| failed(StorageError::Busy))?;
             crate::selected_read::charge(64, bytes.len())?;
-            let mut value: CatalogRow =
-                serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            let mut value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
             if value.key.as_bytes() != key
                 || value.sources.len() > 64
                 || value.last.unwrap_or(0) != row.get::<_, i64>(2)
