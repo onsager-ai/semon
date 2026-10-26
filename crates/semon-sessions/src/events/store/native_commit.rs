@@ -85,8 +85,14 @@ impl Effects for Writer<'_, '_, '_> {
         } = *input;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
-        relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
-        native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
+        relocation::advance(transaction, path, expected, ledger, changes.is_some()).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=relocation");
+        })?;
+        native_usage::begin_source(transaction, path, expected, ledger, changes.is_some()).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=usage_begin");
+        })?;
         measurements.record("relocation", started, 1);
         record_writer_rows(
             transaction,
@@ -119,7 +125,10 @@ impl Effects for Writer<'_, '_, '_> {
             measurements,
             self.layout,
             usage_deletes,
-        )?;
+        ).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=file_rows");
+        })?;
         Ok(())
     }
     fn usage(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
@@ -130,7 +139,10 @@ impl Effects for Writer<'_, '_, '_> {
             ..
         } = *input;
         let transaction = self.transaction;
-        native_usage::write(transaction, path, ledger, index)?;
+        native_usage::write(transaction, path, ledger, index).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=usage_rows");
+        })?;
         #[cfg(test)]
         configured::effect("native_usage")?;
         Ok(())
@@ -142,7 +154,10 @@ impl Effects for Writer<'_, '_, '_> {
             input.ledger,
             input.index,
             self.measurements,
-        )
+        ).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=tree");
+        })
     }
     fn auxiliary(&mut self, input: &Input<'_>, stage: shared::Auxiliary) -> rusqlite::Result<()> {
         write_native_aux(
@@ -152,17 +167,23 @@ impl Effects for Writer<'_, '_, '_> {
             input.index,
             self.measurements,
             stage,
-        )
+        ).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=auxiliary");
+        })
     }
     fn relationships(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
-        shared::relationships(self, input.path, input.index)
+        shared::relationships(self, input.path, input.index).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native SQL stage=relationships");
+        })
     }
     fn archive(&mut self, path: &str) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
         let started = measurements.start();
         transaction.execute(
-            "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
             [archive_index_key(path)],
         )?;
         measurements.record("archive_metadata", started, 1);
@@ -181,7 +202,10 @@ impl Effects for Writer<'_, '_, '_> {
                 namespace,
                 path,
                 "changed",
-            )?;
+            ).inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native SQL stage=invalidation");
+            })?;
             measurements.record("invalidation", started, 1);
             #[cfg(test)]
             configured::effect("invalidation")?;

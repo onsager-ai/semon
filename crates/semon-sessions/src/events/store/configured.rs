@@ -3247,7 +3247,7 @@ mod tests {
 
     fn same_db_sources() -> (Fixture, StoreConfig, PathBuf) {
         use crate::storage::native_events::NativeEventStore;
-        let mut a = Fixture::new();
+        let mut a = Fixture::current("source-a");
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
         a.config.backend = StoreBackend::Sqlite {
             database: a.root.join("composite.sqlite3"),
