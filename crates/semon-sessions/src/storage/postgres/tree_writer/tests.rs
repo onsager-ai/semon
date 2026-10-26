@@ -726,6 +726,9 @@ fn scalar(tx: &mut PgTxn<'_>, data: &Fixture) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 fn interpretation_inputs(pool: &PgPool, data: &Fixture) {
+    apply_interpretation_inputs(pool, interpretation_values(data));
+}
+fn interpretation_values(data: &Fixture) -> (Option<String>, Option<String>) {
     use rusqlite::OptionalExtension;
     let db = rusqlite::Connection::open(crate::events::EventCache::path(
         &data.root.join("index.json"),
@@ -738,14 +741,15 @@ fn interpretation_inputs(pool: &PgPool, data: &Fixture) {
         .optional()
         .unwrap()
     };
-    let pricing = value("pricing_recompute_target");
+    (value("pricing_recompute_target"), value("catalog_semantic_recipe"))
+}
+fn apply_interpretation_inputs(pool: &PgPool, (pricing, recipe): (Option<String>, Option<String>)) {
     if pricing.is_some() {
         super::super::PgStoreMetadata::open(pool.clone(), &PgCancellation::default())
             .unwrap()
             .set_pricing_target(&[1; 32], 0, pricing.as_deref(), &PgCancellation::default())
             .unwrap();
     }
-    let recipe = value("catalog_semantic_recipe");
     if let Some(recipe) = recipe {
         pool.transaction(
             &ns("tree\0🦀"),
@@ -766,6 +770,112 @@ fn interpretation_inputs(pool: &PgPool, data: &Fixture) {
             },
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn pg_native_keys132_tree_real_sqlite_long_path_publication_and_restart() {
+    // Finish the real SQLite parser/store oracle before creating a PG pool.
+    // Models/tools remain short: their bounded traversal is still open work.
+    let data = super::super::tree_checkpoint::tests::parser_fixture_path("claude", true);
+    let expected = oracle_record(&data);
+    assert!(data.path.len() > 2704);
+    let interpretation = interpretation_values(&data);
+    let expected_witness = oracle_witness(&data);
+    let expected_tools = data.oracle.tools.keys().map(|id| (id.clone(), data.oracle.tool_name(id).unwrap())).collect::<Vec<_>>();
+    let (pool, factory) = fixture(|_| {});
+    apply_interpretation_inputs(&pool, interpretation);
+    pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+        install_without_tree(tx, &data)?;
+        assert!(publish_fixture(tx, &data, None)?);
+        assert!(scalar(tx, &data) == expected);
+        let projection: i64 = tx.driver.query_one(
+            "SELECT projection_id FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2)",
+            &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()],
+        ).map_err(sqlstate::error)?.get(0);
+        assert_dimensions(tx, &data, projection);
+        let before = state(tx);
+        assert!(publish_fixture(tx, &data, Some(&data.ledger))?);
+        assert!(state(tx) == before, "long-path replay has no row changes");
+        Ok(())
+    }).unwrap();
+    pool.transaction(&ns("foreign\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| {
+        install_without_tree(tx, &data)?;
+        let (projection, actual) = stage_fixture(tx, &data)?;
+        assert_eq!(actual, expected_witness);
+        assert_dimensions(tx, &data, projection);
+        Ok(())
+    }).unwrap();
+    drop(pool);
+    let reopened = PgPool::open(factory, limits()).unwrap();
+    let mut summary = Snapshot::restore(reopened, ns("tree\0🦀"), &data.path, &data.ledger, PgCancellation::default()).unwrap();
+    summary.load_shared_usage().unwrap();
+    assert_eq!(summary.models, data.oracle.models);
+    assert_eq!(serde_json::to_value(&summary.usage_by_id).unwrap(), serde_json::to_value(&data.oracle.usage_by_id).unwrap());
+    for (tool, name) in expected_tools {
+        assert_eq!(summary.tool_name(&tool).unwrap(), name);
+    }
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_keys132_tree_header_actual_sql_noise_rows_and_heap_bytes() {
+    let data = super::super::tree_checkpoint::tests::parser_fixture_path("claude", true);
+    let interpretation = interpretation_values(&data);
+    let (pool, _) = fixture(|_| {});
+    apply_interpretation_inputs(&pool, interpretation);
+    let namespace = ns("tree\0🦀");
+    let control = PgCancellation::default();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        install_without_tree(tx, &data)?;
+        assert!(publish_fixture(tx, &data, None)?);
+        Ok(())
+    }).unwrap();
+    let mut previous = 0_i64;
+    for noise in [0_i64, 256, 2048] {
+        let measurement = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            if noise > previous {
+                tx.driver.execute("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,convert_to('keys132-unrelated-'||n::text,'UTF8'),1,1,$2 FROM generate_series($3::bigint,$4::bigint) n", &[&namespace.as_str().as_bytes(), &b"unrelated".as_slice(), &previous, &(noise-1)]).map_err(sqlstate::error)?;
+            }
+            assert!(tx.driver.query_one(HEADER_EXISTS_SQL, &[&namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?.get::<_,bool>(0));
+            let row = tx.driver.query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {HEADER_EXISTS_SQL}"), &[&namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?;
+            let plan: serde_json::Value = row.get(0);
+            fn visited(plan: &serde_json::Value) -> u64 {
+                let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                    + plan.get("Rows Removed by Index Recheck").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                match plan.get("Plans").and_then(serde_json::Value::as_array) {
+                    Some(children) => removed + children.iter().map(visited).sum::<u64>(),
+                    None => (removed + plan["Actual Rows"].as_u64().unwrap()) * plan["Actual Loops"].as_u64().unwrap(),
+                }
+            }
+            let bytes: i64 = tx.driver.query_one("SELECT octet_length(source_path)::bigint FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2)", &[&namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            Ok((visited(&plan[0]["Plan"]), bytes))
+        }).unwrap();
+        assert!(measurement.0 <= 4, "noise={noise} selected physical rows={}", measurement.0);
+        assert_eq!(measurement.1 as usize, data.path.len());
+        eprintln!("keys132_tree_header noise={noise} sql_rows={} heap_path_bytes={}", measurement.0, measurement.1);
+        previous = noise;
+    }
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_keys132_tree_warm_generated_and_index_drift_refuse_before_callback() {
+    for alteration in [
+        "ALTER TABLE semon_pg_native_tree_headers DROP COLUMN source_path_digest CASCADE; ALTER TABLE semon_pg_native_tree_headers ADD COLUMN source_path_digest bytea GENERATED ALWAYS AS (sha256(source_path)) STORED NOT NULL",
+        "DROP INDEX semon_pg_native_tree_repair_queue; CREATE INDEX semon_pg_native_tree_repair_queue ON semon_pg_native_tree_repairs(namespace_digest,last_attempt,state,source_path_digest)",
+        "ALTER TABLE semon_pg_native_tree_usage_models NO FORCE ROW LEVEL SECURITY",
+    ] {
+        let (pool, factory) = fixture(|_| {});
+        let namespace = ns("keys132-drift");
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |_| Ok(())).unwrap();
+        factory.client().batch_execute(alteration).unwrap();
+        let mut entered = false;
+        assert!(pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |_| {
+            entered = true;
+            Ok(())
+        }).is_err());
+        assert!(!entered, "warm Tree contract drift precedes every callback");
     }
 }
 

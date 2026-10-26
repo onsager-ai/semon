@@ -119,7 +119,7 @@ impl Effects for Usage<'_, '_> {
     fn unblock(&mut self, path: &str, receipt: &str) -> Result<(), StorageError> {
         self.tx.check()?;
         // Bytea has no LIKE; decode the fixed ASCII prefix only, never user IDs.
-        self.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$4 WHERE namespace=$1 AND source_path=$2 AND substring(state from 1 for 8)=$5 AND (receipt<>$3 OR state=$6)", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes(),&receipt.as_bytes(),&b"ready".as_slice(),&b"blocked_".as_slice(),&b"blocked_evidence".as_slice()]).map_err(sqlstate::error)?;
+        self.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2) AND substring(state from 1 for 8)=$5 AND (receipt<>$3 OR state=$6)", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes(),&receipt.as_bytes(),&b"ready".as_slice(),&b"blocked_".as_slice(),&b"blocked_evidence".as_slice()]).map_err(sqlstate::error)?;
         self.after_effect()
     }
     fn fact(&mut self, id: i64, offset: u64) -> Result<Option<(String, String)>, StorageError> {

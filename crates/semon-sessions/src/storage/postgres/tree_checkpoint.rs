@@ -162,7 +162,7 @@ impl Snapshot {
         let receipt = header_ledger(ledger).into_bytes();
         // Compare variable metadata server-side: only three fixed bigint values
         // are allocated by the driver. No uncharged Ledger/JSON allocation.
-        let result = tx.driver.query("SELECT h.file_id,h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_files f ON f.namespace=h.namespace AND f.file_id=h.file_id AND f.path=h.source_path JOIN semon_pg_native_tree_generations g ON g.namespace=h.namespace AND g.projection_id=h.projection_id JOIN semon_pg_native_usage_current c ON c.namespace_digest=h.namespace_digest AND c.namespace=h.namespace AND c.source_path_digest=semon_pg_native_digest(h.namespace,h.source_path,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256(h.source_path),h.source_path) AND c.source_id=g.source_id JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending AND s.receipt=$3 AND s.parser_version=$4 AND ((s.usage_ready AND s.checkpoint=$5::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.dev=$6::text::numeric AND f.ino=$7::text::numeric AND f.size=$8::text::numeric AND f.resume_at=$5::text::numeric AND f.mtime_ns=$9 AND f.ctime_ns IS NOT DISTINCT FROM $10 AND f.head_sha256=$11 AND f.tail_sha256=$12 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.path.as_bytes(), &receipt, &i64::from(CACHE_VERSION), &ledger.offset.to_string(), &ledger.stat.dev.to_string(), &ledger.stat.ino.to_string(), &ledger.stat.size.to_string(), &ledger.stat.modified_ns.to_be_bytes().as_slice(), &ledger.stat.changed_ns.map(|v| v.to_be_bytes().to_vec()), &ledger.prefix.as_slice(), &ledger.tail.as_slice()]).map_err(sqlstate::error)?;
+        let result = tx.driver.query("SELECT h.file_id,h.projection_id,g.source_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_files f ON f.namespace_digest=h.namespace_digest AND f.namespace=h.namespace AND f.file_id=h.file_id AND f.path=h.source_path JOIN semon_pg_native_tree_generations g ON g.namespace_digest=h.namespace_digest AND g.namespace=h.namespace AND g.projection_id=h.projection_id JOIN semon_pg_native_usage_current c ON c.namespace_digest=h.namespace_digest AND c.namespace=h.namespace AND c.source_path_digest=semon_pg_native_digest(h.namespace,h.source_path,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256(h.source_path),h.source_path) AND c.source_id=g.source_id JOIN semon_pg_native_usage_sources s ON s.namespace_digest=c.namespace_digest AND s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(h.source_path,sha256($2::bytea),$2) AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending AND s.receipt=$3 AND s.parser_version=$4 AND ((s.usage_ready AND s.checkpoint=$5::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace_digest=s.namespace_digest AND z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.dev=$6::text::numeric AND f.ino=$7::text::numeric AND f.size=$8::text::numeric AND f.resume_at=$5::text::numeric AND f.mtime_ns=$9 AND f.ctime_ns IS NOT DISTINCT FROM $10 AND f.head_sha256=$11 AND f.tail_sha256=$12 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.path.as_bytes(), &receipt, &i64::from(CACHE_VERSION), &ledger.offset.to_string(), &ledger.stat.dev.to_string(), &ledger.stat.ino.to_string(), &ledger.stat.size.to_string(), &ledger.stat.modified_ns.to_be_bytes().as_slice(), &ledger.stat.changed_ns.map(|v| v.to_be_bytes().to_vec()), &ledger.prefix.as_slice(), &ledger.tail.as_slice()]).map_err(sqlstate::error)?;
         selected_read::charge(64, 0).map_err(budget)?;
         let row = result.first().ok_or(StorageError::Busy)?;
         let actual = (row.get(0), row.get(1), row.get(2));
@@ -196,7 +196,7 @@ impl Snapshot {
         .ok_or(StorageError::Busy)?;
         let (_, pricing) = super::store_metadata::read(tx)?;
         let recipe = super::tree_writer::metadata(tx, b"catalog_semantic_recipe")?;
-        let lengths = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?;
+        let lengths = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?;
         let length = lengths
             .first()
             .ok_or(StorageError::Busy)?
@@ -206,7 +206,7 @@ impl Snapshot {
         }
         selected_read::charge(64, length.unwrap_or(0) as usize).map_err(budget)?;
         tx.check()?;
-        let fingerprint: Option<Vec<u8>> = tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?.get(0);
+        let fingerprint: Option<Vec<u8>> = tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &file]).map_err(sqlstate::error)?.get(0);
         let fingerprint = fingerprint.map(text).transpose()?;
         let interpretation =
             crate::events::tree_rows::interpretation(&[pricing, recipe, fingerprint])
@@ -260,10 +260,10 @@ impl Snapshot {
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
         self.with(|tx| {
             tx.check()?;
-            let lengths = tx.driver.query("SELECT coalesce(octet_length(name),0)::bigint FROM semon_pg_native_tree_tools WHERE namespace=$1 AND projection_id=$2 AND tool_id=$3 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
+            let lengths = tx.driver.query("SELECT coalesce(octet_length(name),0)::bigint FROM semon_pg_native_tree_tools WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND tool_id=$3 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
             let Some(length) = lengths.first() else { return Ok(None); };
             selected_read::charge(64, usize::try_from(length.get::<_, i64>(0)).map_err(|_| StorageError::Unavailable)?).map_err(budget)?;
-            let row = tx.driver.query_one("SELECT name FROM semon_pg_native_tree_tools WHERE namespace=$1 AND projection_id=$2 AND tool_id=$3", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.driver.query_one("SELECT name FROM semon_pg_native_tree_tools WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND tool_id=$3", &[&tx.namespace.as_str().as_bytes(), &self.projection, &id.as_bytes()]).map_err(sqlstate::error)?;
             row.get::<_, Option<Vec<u8>>>(0).map(text).transpose()
         })
     }
@@ -281,13 +281,13 @@ impl Snapshot {
                 // after server-side range/integrality validation. Charge before decode.
                 selected_read::charge(128, 100).map_err(budget)?;
                 let columns = ["input", "cached_input", "output", "reasoning_output", "total"].map(|c| format!("CASE WHEN {c} BETWEEN 0 AND 18446744073709551615 AND trunc({c})={c} THEN ({c}::numeric(20,0))::text ELSE NULL END")).join(",");
-                let row = tx.driver.query_one(&format!("SELECT {columns} FROM semon_pg_native_usage WHERE namespace=$1 AND file_id=$2 AND message_id=$3"), &[&tx.namespace.as_str().as_bytes(), &self.file, &message.as_bytes()]).map_err(sqlstate::error)?;
+                let row = tx.driver.query_one(&format!("SELECT {columns} FROM semon_pg_native_usage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND message_id=$3"), &[&tx.namespace.as_str().as_bytes(), &self.file, &message.as_bytes()]).map_err(sqlstate::error)?;
                 let uint = |i| row.get::<_, Option<String>>(i).ok_or(StorageError::Unavailable)?.parse::<u64>().map_err(|_| StorageError::Unavailable);
                 tokens.insert(message.clone(), Tokens { input: uint(0)?, cached_input: uint(1)?, output: uint(2)?, reasoning_output: uint(3)?, total: uint(4)? });
-                let lengths = tx.driver.query("SELECT octet_length(model)::bigint FROM semon_pg_native_tree_usage_models WHERE namespace=$1 AND projection_id=$2 AND message_id=$3 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.projection, &message.as_bytes()]).map_err(sqlstate::error)?;
+                let lengths = tx.driver.query("SELECT octet_length(model)::bigint FROM semon_pg_native_tree_usage_models WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND message_id_digest=semon_pg_native_digest($1::bytea,$3::bytea,'tree.message') AND semon_pg_native_key_matches(message_id,sha256($3::bytea),$3) LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &self.projection, &message.as_bytes()]).map_err(sqlstate::error)?;
                 if let Some(length) = lengths.first() {
                     selected_read::charge(64, usize::try_from(length.get::<_, i64>(0)).map_err(|_| StorageError::Unavailable)?).map_err(budget)?;
-                    let row = tx.driver.query_one("SELECT model FROM semon_pg_native_tree_usage_models WHERE namespace=$1 AND projection_id=$2 AND message_id=$3", &[&tx.namespace.as_str().as_bytes(), &self.projection, &message.as_bytes()]).map_err(sqlstate::error)?;
+                    let row = tx.driver.query_one("SELECT model FROM semon_pg_native_tree_usage_models WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND projection_id=$2 AND message_id_digest=semon_pg_native_digest($1::bytea,$3::bytea,'tree.message') AND semon_pg_native_key_matches(message_id,sha256($3::bytea),$3)", &[&tx.namespace.as_str().as_bytes(), &self.projection, &message.as_bytes()]).map_err(sqlstate::error)?;
                     models.insert(message.clone(), text(row.get(0))?);
                 }
             }
@@ -315,9 +315,21 @@ fn rows(
     keys: usize,
     mut consume: impl FnMut(Vec<Option<String>>) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let key = format!("ARRAY[{}]", columns[..keys].join(","));
+    // Copied identities are returned into an ordered logical map. Their
+    // internal traversal uses the bounded physical tuple, never full bytea.
+    let physical = if family == "tree_copied_identities" {
+        vec!["message_id_digest", "record_uuid_digest"]
+    } else {
+        columns[..keys].to_vec()
+    };
+    let key = format!("ROW({})", physical.join(","));
+    let after = (1..=keys)
+        .map(|i| format!("($3::bytea[])[{i}]"))
+        .collect::<Vec<_>>()
+        .join(",");
     let predicate = format!(
-        "FROM semon_pg_native_{family} WHERE namespace=$1 AND {owner}=$2 AND ($3::bytea[] IS NULL OR {key}>$3) ORDER BY {key} LIMIT 1"
+        "FROM semon_pg_native_{family} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND {owner}=$2 AND ($3::bytea[] IS NULL OR {key}>ROW({after})) ORDER BY {} LIMIT 1",
+        physical.join(",")
     );
     let sizes = columns
         .iter()
@@ -343,18 +355,18 @@ fn rows(
                 .map(|n| sum.saturating_add(n))
                 .map_err(|_| StorageError::Unavailable)
         })?;
-        selected_read::charge(128, dynamic).map_err(budget)?;
+        selected_read::charge(128 + keys * 32, dynamic).map_err(budget)?;
         tx.check()?;
         let row = tx
             .driver
             .query_one(
-                &format!("SELECT {} {predicate}", columns.join(",")),
+                &format!("SELECT {},{} {predicate}", columns.join(","), physical.join(",")),
                 &[&tx.namespace.as_str().as_bytes(), &id, &cursor],
             )
             .map_err(sqlstate::error)?;
         #[cfg(test)]
         DECODED.with(|value| value.set(value.get() + 1));
-        cursor = Some((0..keys).map(|i| row.get(i)).collect());
+        cursor = Some((0..keys).map(|i| row.get(columns.len() + i)).collect());
         let values = (0..columns.len())
             .map(|i| row.get::<_, Option<Vec<u8>>>(i).map(text).transpose())
             .collect::<Result<_, _>>()?;
