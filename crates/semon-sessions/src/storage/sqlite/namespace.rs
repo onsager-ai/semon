@@ -298,12 +298,10 @@ mod tests {
             let cache = root.join("index.json");
             drop(EventCache::open_scoped(&cache, &crate::Options::default().source).unwrap());
             let database = EventCache::path(&cache);
-            let db = Connection::open(&database).unwrap();
-            db.execute("INSERT INTO meta(key,value) VALUES('catalog_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [crate::model::summary::CATALOG_VERSION.to_string()]).unwrap();
-            db.execute("INSERT INTO meta(key,value) VALUES('catalog_generation',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ["a".repeat(64)]).unwrap();
-            let epoch = db
+            let epoch = Connection::open(&database)
+                .unwrap()
                 .query_row(
-                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
                     [],
                     |r| r.get(0),
                 )
@@ -313,6 +311,19 @@ mod tests {
                 namespace: LogicalSourceNamespace::new("source-A").unwrap(),
                 expected_stream_epoch: Some(epoch),
             };
+            // Source metadata is written through the current qualified writer.
+            let db = super::super::source_journal::SourceJournal(config.clone())
+                .connection()
+                .unwrap();
+            for (key, value) in [
+                (
+                    "catalog_version",
+                    crate::model::summary::CATALOG_VERSION.to_string(),
+                ),
+                ("catalog_generation", "a".repeat(64)),
+            ] {
+                db.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (key, value)).unwrap();
+            }
             Self { root, config }
         }
         fn db(&self) -> Connection {
