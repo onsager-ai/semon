@@ -83,12 +83,8 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             expected_stream_epoch: Some("a".repeat(64)),
         };
         crate::events::store::configured::create_semantic_store(&config).unwrap();
-        config.admit_namespace().unwrap();
-        for _ in 0..128 {
-            if config.assign_catalog_namespace(64).unwrap().complete {
-                break;
-            }
-        }
+        // The private current producer owns its own composite admission. The
+        // generic public factory remains fenced until full qualification.
         let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
         let mut sqlite = EventCache::open_semantic(cap).unwrap();
         let receipt = sqlite.ingest(&"1".repeat(64), &path, harness).unwrap();
