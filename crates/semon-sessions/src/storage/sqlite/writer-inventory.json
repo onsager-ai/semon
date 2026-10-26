@@ -102,6 +102,7 @@
     "storage/postgres/native_bundle/tests.rs",
     "storage/postgres/native_core/tests.rs",
     "storage/postgres/native_ingest_tests.rs",
+    "storage/postgres/native_recovery_tests.rs",
     "storage/postgres/native_usage/tests.rs",
     "storage/postgres/native_usage_identity/tests.rs",
     "storage/postgres/reported_facts.rs",

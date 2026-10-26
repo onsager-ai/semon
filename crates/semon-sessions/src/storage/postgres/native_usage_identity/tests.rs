@@ -318,7 +318,6 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
             for sql in [
                 "SELECT label,value FROM semon_pg_native_tree_labels WHERE projection_id=$1 ORDER BY label",
                 "SELECT model,model FROM semon_pg_native_tree_models WHERE projection_id=$1 ORDER BY model",
-                "SELECT tool_id,name FROM semon_pg_native_tree_tools WHERE projection_id=$1 AND NOT closed AND name IS NOT NULL ORDER BY tool_id",
             ] {
                 let mut rows = Vec::new();
                 for row in tx.driver.query(sql, &[&projection]).map_err(sqlstate::error)? {
@@ -327,10 +326,19 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
                 }
                 families.push(rows);
             }
+            let mut tools = Vec::new();
+            for row in tx.driver.query("SELECT tool_id,name,closed FROM semon_pg_native_tree_tools WHERE projection_id=$1 ORDER BY tool_id_digest", &[&projection]).map_err(sqlstate::error)? {
+                tx.check()?;
+                tools.push((
+                    text(row.get(0))?,
+                    row.get::<_, Option<Vec<u8>>>(1).map(text).transpose()?,
+                    row.get::<_, bool>(2),
+                ));
+            }
             Ok(witness::digest(
                 families[0].iter().map(|(k, v)| (k.as_str(), v.as_str())),
                 families[1].iter().map(|(m, _)| m.as_str()),
-                families[2].iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                tools.iter().map(|(id, name, closed)| (id.as_str(), name.as_deref(), *closed)),
             ))
         })
     };

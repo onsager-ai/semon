@@ -12900,7 +12900,11 @@ mod tests {
                 rows.tools
                     .iter()
                     .map(|(id, name)| {
-                        (id.as_str(), Some(name.as_str()), rows.closed_tools.contains(id))
+                        (
+                            id.as_str(),
+                            Some(name.as_str()),
+                            rows.closed_tools.contains(id),
+                        )
                     })
                     .chain(
                         rows.closed_tools
