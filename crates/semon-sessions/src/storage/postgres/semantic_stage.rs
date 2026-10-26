@@ -27,6 +27,7 @@ pub(super) struct Stage {
     active: bool,
     model: Option<String>,
     acknowledgement: Option<String>,
+    identities: Vec<(String, String, String)>,
 }
 
 fn lock(tx: &mut PgTxn<'_>) -> Result<i64, StorageError> {
@@ -93,6 +94,8 @@ pub(super) fn begin(
         return Err(StorageError::InvalidArguments);
     }
     let revision = lock(tx)?;
+    let files = super::native_reader::file_ledgers(tx)?;
+    if files.len() > 64 || files.iter().any(|(path, _)| !paths.contains(path)) { return Err(StorageError::NamespaceUpgradePending); }
     let generation = model_cache::generation(tx)?;
     if let Some(stage) = load(tx, true)? {
         if held.is_some_and(|epoch| epoch != stage.epoch)
@@ -123,6 +126,7 @@ pub(super) fn begin(
             active: true,
             model: None,
             acknowledgement: None,
+            identities: Vec::new(),
         },
         true,
     )?;
@@ -209,9 +213,30 @@ pub(super) fn record(
         return Err(StorageError::Conflict);
     }
     if batch.phase == Phase::Publication {
-        stage.model = Some(prepared.staged_model_witness().map_err(|_| StorageError::ScopeChanged)?);
+        stage.model = Some(
+            prepared
+                .staged_model_witness()
+                .map_err(|_| StorageError::ScopeChanged)?,
+        );
         save(tx, &stage, false)?;
         return Ok(Outcome::Written);
+    }
+    if batch.phase == Phase::Indexing {
+        let observed = prepared.indexed_sources.iter().map(|(harness, source)| (harness.clone(), source.native_id.clone())).collect::<std::collections::BTreeSet<_>>();
+        if prepared.indexed_sources.len() != batch.paths.len() { return Err(StorageError::Conflict); }
+        let mut keys = std::collections::BTreeSet::new();
+        for (harness, native) in &observed {
+            let collision = observed.iter().any(|(other, id)| id == native && other != harness);
+            let mut key = if collision { format!("{harness}:{native}") } else { native.clone() };
+            let mut probes = 0;
+            while collision && (observed.iter().any(|(_, id)| id == &key) || keys.contains(&key)) {
+                probes += 1;
+                if probes > 64 || key.len() > 65536 { return Err(StorageError::Busy); }
+                key.insert(0, ':');
+            }
+            keys.insert(key.clone());
+            stage.identities.push((harness.clone(), native.clone(), key));
+        }
     }
     stage.context = prepared.relationships.clone();
     stage.context.epoch = Some(stage.epoch);
@@ -232,15 +257,21 @@ pub(super) fn publish(
     prepared: &PreparedSources,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let revision = lock(tx)?;
-    let witness = prepared.staged_model_witness().map_err(|_| StorageError::ScopeChanged)?;
+    let witness = prepared
+        .staged_model_witness()
+        .map_err(|_| StorageError::ScopeChanged)?;
     if let Some(stage) = load(tx, false)? {
         if !stage.active && stage.epoch == batch.epoch {
-            if stage.model.as_deref() != Some(&witness) { return Err(StorageError::Conflict); }
+            if stage.model.as_deref() != Some(&witness) {
+                return Err(StorageError::Conflict);
+            }
             return Ok((Outcome::Written, stage.acknowledgement));
         }
     }
     let mut stage = checked(tx, batch)?;
-    if stage.model.as_deref() != Some(&witness) { return Err(StorageError::Conflict); }
+    if stage.model.as_deref() != Some(&witness) {
+        return Err(StorageError::Conflict);
+    }
     if batch.phase != Phase::Publication || stage.revision != revision {
         return Err(StorageError::Conflict);
     }
@@ -285,4 +316,10 @@ pub(super) fn context(tx: &mut PgTxn<'_>, epoch: i64) -> Result<Context, Storage
         return Err(StorageError::Conflict);
     }
     Ok(stage.context)
+}
+
+pub(super) fn native_key(tx: &mut PgTxn<'_>, epoch: i64, harness: &str, native: &str) -> Result<String, StorageError> {
+    let stage = load(tx, true)?.ok_or(StorageError::Conflict)?;
+    if stage.epoch != epoch || stage.generation != model_cache::generation(tx)? { return Err(StorageError::Conflict); }
+    stage.identities.iter().find(|(h, n, _)| h == harness && n == native).map(|(_, _, key)| key.clone()).ok_or(StorageError::ScopeChanged)
 }

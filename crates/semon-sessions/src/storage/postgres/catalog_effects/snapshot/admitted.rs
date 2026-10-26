@@ -100,15 +100,33 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
         self.has_history(&row.key)
     }
-    fn selected_details(&self, key: &str, sources: &[CatalogSource], status: &mut dyn FnMut(&CatalogRow) -> serde_json::Value) -> io::Result<Option<serde_json::Value>> {
+    fn selected_details(
+        &self,
+        key: &str,
+        sources: &[CatalogSource],
+        status: &mut dyn FnMut(&CatalogRow) -> serde_json::Value,
+    ) -> io::Result<Option<serde_json::Value>> {
         self.require_current()?;
         crate::storage::selected::selected_details(self, key, sources, &mut |row| status(row))
     }
-    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<serde_json::Value>> {
+    fn transcript_observation(
+        &self,
+        key: &str,
+        generation: &str,
+        history: bool,
+    ) -> io::Result<Option<serde_json::Value>> {
         self.require_current()?;
-        if generation != self.generation { return Ok(None); }
-        let Some((_, header, _)) = self.selected(key, history, 0, 1).map_err(failed)? else { return Ok(None); };
-        if !(0..=9_007_199_254_740_991).contains(&header.3) { return Err(failed(StorageError::ScopeChanged)); }
-        Ok(Some(serde_json::json!({"generation":crate::transcript_range::entry_generation(&header.0),"total":header.3})))
+        if generation != self.generation {
+            return Ok(None);
+        }
+        let Some((_, header, _)) = self.selected(key, history, 0, 1).map_err(failed)? else {
+            return Ok(None);
+        };
+        if !(0..=9_007_199_254_740_991).contains(&header.3) {
+            return Err(failed(StorageError::ScopeChanged));
+        }
+        Ok(Some(
+            serde_json::json!({"generation":crate::transcript_range::entry_generation(&header.0),"total":header.3}),
+        ))
     }
 }
