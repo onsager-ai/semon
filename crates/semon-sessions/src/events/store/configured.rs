@@ -1412,9 +1412,9 @@ mod tests {
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch("CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL); INSERT INTO storage_source_journal VALUES('a',11),('b',22);
             CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,codex_native_usage TEXT,codex_pricing_fingerprint TEXT,PRIMARY KEY(namespace,file_id));
-            CREATE TABLE native_usage_sources(source_path TEXT,usage_ready INTEGER);
-            CREATE TABLE pricing_recompute_pending(owner_kind TEXT,owner_key TEXT,PRIMARY KEY(owner_kind,owner_key));").unwrap();
-        db.execute_batch(PRICING_FILE_SCHEMA_META).unwrap();
+            CREATE TABLE native_usage_sources(namespace TEXT NOT NULL,source_path TEXT,usage_ready INTEGER);
+            CREATE TABLE pricing_recompute_pending(namespace TEXT NOT NULL,owner_kind TEXT,owner_key TEXT,PRIMARY KEY(namespace,owner_kind,owner_key));").unwrap();
+        db.execute_batch(reprice::file_schema()).unwrap();
         let bind = |db: &Connection, namespace: &str| {
             bind_metadata_scope(db, namespace).unwrap();
             let namespace = namespace.to_owned();
