@@ -864,6 +864,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: generation.clone(),
         options: options.clone(),
     };
+    let long_recipe = prepared.transcripts.iter().find(|row| row.key == "related191").unwrap();
+    assert_eq!(long_recipe.slots.len(), 152);
+    assert!(crate::storage::query::QueryCatalogStore::has_search_slots(
+        &query_store, &namespace, &long_recipe.key, None,
+    ).unwrap());
+    assert!(!crate::storage::query::QueryCatalogStore::has_search_slots(
+        &query_store, &namespace, &long_recipe.key, Some(i64::MAX),
+    ).unwrap());
     let mut query = crate::Query::from_sources(std::sync::Arc::new(
         crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
     ));
