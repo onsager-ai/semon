@@ -2,7 +2,7 @@
 use super::*;
 use crate::events::native_decode::Values;
 
-pub(super) fn values(row: &Row<'_>, bools: &[usize]) -> rusqlite::Result<Values> {
+pub(crate) fn values(row: &Row<'_>, bools: &[usize]) -> rusqlite::Result<Values> {
     use rusqlite::types::{Type, ValueRef};
     let mut values = Vec::with_capacity(row.as_ref().column_count());
     for column in 0..row.as_ref().column_count() {

@@ -1,4 +1,6 @@
 //! Namespace-owned durable transfer transport, separate from native publication.
+mod native;
+use native::{capture_native, apply_native};
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,
@@ -177,6 +179,7 @@ pub(crate) fn capture(
         {
             return Err(StorageError::ScopeChanged);
         }
+        if state.native && !state.done { return capture_native(tx, &mut state); }
         if state.done {
             return Ok(state.progress());
         }
@@ -209,7 +212,9 @@ pub(crate) fn capture(
             if more {
                 return Err(StorageError::Busy);
             }
-            transfer::reported::finish_capture(tx, &mut state)?;
+            state.native = true;
+            state.cursor = None;
+            transfer::reported::save_capture(tx, &state)?;
             return Ok(state.progress());
         }
         let sql = format!(
@@ -283,6 +288,7 @@ pub(crate) fn apply(
                 transfer::TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                     tx.put(key, value.as_bytes())?
                 }
+                transfer::TransferRecord::NativeFile { .. } | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
             }
         }

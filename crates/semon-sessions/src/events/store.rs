@@ -23,7 +23,7 @@ pub(crate) mod chunk_proofs;
 pub(crate) mod configured;
 mod launch_calls;
 pub(crate) mod native_commit;
-mod native_decode;
+pub(crate) mod native_decode;
 pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
@@ -341,12 +341,12 @@ CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sou
 CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(namespace,lifecycle, source_path, session_key);
 ";
 
-const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
+pub(crate) const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
      rate_limits, codex_native_usage, copilot, ctime_ns";
 
-const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
+pub(crate) const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
      script, y, poll, reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m, item, peer, \
      peer_sock, peer_pid, peer_start, u";
 
