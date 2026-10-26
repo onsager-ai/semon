@@ -191,6 +191,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
+    let query_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
+        generation: generation.clone(), options: options.clone(),
+    };
+    let mut query = crate::Query::with_machines(vec![(namespace.as_str().into(), options.clone())]);
+    let query_list = query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &query_store).unwrap();
+    assert_eq!(query_list["total"].as_u64(), Some(prepared.rows.len() as u64));
+    super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {
+        for row in &prepared.rows {
+            let observation = snapshot.transcript_observation(&row.key, &generation, false).map_err(|_| StorageError::Unavailable)?.unwrap();
+            assert!(observation["total"].as_u64().is_some());
+            let details = snapshot.selected_details(&row.key, &row.sources, &mut |_| serde_json::json!({"observation":"unavailable"})).map_err(|_| StorageError::Unavailable)?;
+            assert!(details.is_some());
+        }
+        Ok(())
+    }).unwrap();
     // Only the request-owned host can grant fixture bytes. The PG reader adds
     // persisted native proof verification to the ordinary scalar-field parser.
     struct Host {
