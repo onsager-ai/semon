@@ -489,10 +489,17 @@ pub(super) fn file_ledgers(
                 return Err(StorageError::ScopeChanged);
             }
             after = id;
-            let path=row.get::<String>(9).map_err(bad)?;
-            if let Some(bytes)=super::native_keys::read_meta(tx,format!("source-retired:{path}").as_bytes(),16384)? {
-                let retired:Option<Ledger>=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
-                if retired.as_ref()==Some(&ledger) {continue;}
+            let path = row.get::<String>(9).map_err(bad)?;
+            if let Some(bytes) = super::native_keys::read_meta(
+                tx,
+                format!("source-retired:{path}").as_bytes(),
+                16384,
+            )? {
+                let retired: Option<Ledger> =
+                    serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+                if retired.as_ref() == Some(&ledger) {
+                    continue;
+                }
                 return Err(StorageError::ScopeChanged);
             }
             result.push((path, Some(ledger)));

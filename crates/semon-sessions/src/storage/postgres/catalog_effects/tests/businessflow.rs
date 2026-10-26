@@ -994,35 +994,98 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "old authorized body survives native relocation"
     );
     drop(cache);
-    let moved_inputs=crate::inputs::inputs(&options).unwrap().into_iter().filter(|i|crate::native_evidence::catalog_input(&i.full_path(&options),&options).is_some()).collect::<Vec<_>>();
-    let moved_paths=moved_inputs.iter().map(|i|i.full_path(&options).to_string_lossy().into_owned()).collect::<Vec<_>>();
-    let mut moved_cache=EventCache::open_pg_native(pool.clone(),namespace.clone(),control.clone()).unwrap();
-    let moved_runtime=crate::native_evidence::query_runtime_generation(&options).unwrap();
-    moved_cache.begin_semantic_stage(&moved_paths,&moved_runtime).unwrap();
-    let (moved_generation,moved_rows)=loop {
-        let batch=moved_cache.semantic_batch(64).unwrap().unwrap();
-        let model=moved_cache.prepare_semantic_model_batch(&options,&moved_inputs,&batch,1790812803000).unwrap();
-        if batch.phase==crate::model::relation_stage::Phase::Publication {
-            let rows=model.prepared().rows.clone();
-            let ack=moved_cache.publish_semantic_catalog(&batch,model.prepared()).unwrap();
+    let moved_inputs = crate::inputs::inputs(&options)
+        .unwrap()
+        .into_iter()
+        .filter(|i| {
+            crate::native_evidence::catalog_input(&i.full_path(&options), &options).is_some()
+        })
+        .collect::<Vec<_>>();
+    let moved_paths = moved_inputs
+        .iter()
+        .map(|i| i.full_path(&options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut moved_cache =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let moved_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    moved_cache
+        .begin_semantic_stage(&moved_paths, &moved_runtime)
+        .unwrap();
+    let (moved_generation, moved_rows) = loop {
+        let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
+        let model = moved_cache
+            .prepare_semantic_model_batch(&options, &moved_inputs, &batch, 1790812803000)
+            .unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let rows = model.prepared().rows.clone();
+            let ack = moved_cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
             moved_cache.finish_semantic_stage(batch.epoch).unwrap();
-            break (ack.1.unwrap(),rows);
+            break (ack.1.unwrap(), rows);
         }
     };
-    assert_eq!(moved_rows.iter().filter(|r|r.harness=="codex" && r.native_ids.iter().any(|id|id==codex_id)).count(),1);
-    let moved_owner=moved_rows.iter().find(|r|r.harness=="codex" && r.native_ids.iter().any(|id|id==codex_id)).unwrap();
-    assert_eq!(moved_owner.key,continued.rows.iter().find(|r|r.harness=="codex" && r.native_ids.iter().any(|id|id==codex_id)).unwrap().key);
-    let moved_store=super::super::snapshot::query::QueryCatalog{pool:pool.clone(),namespace:namespace.clone(),control:control.clone(),generation:moved_generation,options:options.clone()};
-    let moved_host=body_host(&moved_rows);
-    assert_eq!(query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":moved_owner.key,"limit":100}),1790812802000,&moved_store,&moved_host).unwrap(),expected_bodies[&moved_owner.key]["body"]);
+    assert_eq!(
+        moved_rows
+            .iter()
+            .filter(|r| r.harness == "codex" && r.native_ids.iter().any(|id| id == codex_id))
+            .count(),
+        1
+    );
+    let moved_owner = moved_rows
+        .iter()
+        .find(|r| r.harness == "codex" && r.native_ids.iter().any(|id| id == codex_id))
+        .unwrap();
+    assert_eq!(
+        moved_owner.key,
+        continued
+            .rows
+            .iter()
+            .find(|r| r.harness == "codex" && r.native_ids.iter().any(|id| id == codex_id))
+            .unwrap()
+            .key
+    );
+    let moved_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: moved_generation,
+        options: options.clone(),
+    };
+    let moved_host = body_host(&moved_rows);
+    assert_eq!(
+        query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":moved_owner.key,"limit":100}),
+                1790812802000,
+                &moved_store,
+                &moved_host
+            )
+            .unwrap(),
+        expected_bodies[&moved_owner.key]["body"]
+    );
     drop(moved_cache);
-    let mut moved_cache=EventCache::open_pg_native(pool.clone(),namespace.clone(),control.clone()).unwrap();
+    let mut moved_cache =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     writeln!(fs::OpenOptions::new().append(true).open(&archived).unwrap(),"{}",serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized relocation continuation"}]}})).unwrap();
-    moved_cache.ingest(&format!("{:064x}",156),&archived,"codex").unwrap();
-    let appended=crate::model::prepare_sources(&options,&mut moved_cache,&moved_inputs,1790812804000).unwrap();
-    assert!(appended.rows.iter().any(|r|r.key==moved_owner.key));
-    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies);
-    let (mut cache,_)=crate::storage::postgres::index_store::open(pool.clone(),namespace.clone(),control.clone()).unwrap();
+    moved_cache
+        .ingest(&format!("{:064x}", 156), &archived, "codex")
+        .unwrap();
+    let appended =
+        crate::model::prepare_sources(&options, &mut moved_cache, &moved_inputs, 1790812804000)
+            .unwrap();
+    assert!(appended.rows.iter().any(|r| r.key == moved_owner.key));
+    assert_eq!(
+        read_bodies(&mut query, &query_store, &retained_host),
+        expected_bodies
+    );
+    let (mut cache, _) = crate::storage::postgres::index_store::open(
+        pool.clone(),
+        namespace.clone(),
+        control.clone(),
+    )
+    .unwrap();
     let collision = ns("vertical140\0🦀other");
     let (other, _) = crate::storage::postgres::index_store::open(
         pool.clone(),

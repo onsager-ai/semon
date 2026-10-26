@@ -355,7 +355,7 @@ pub(super) fn relocation_candidate(
         }
     }
     if candidates.is_empty() {
-        let rows=tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND new_path=$2 AND native_id=$3 LIMIT 2", &[&ns,&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
+        let rows=tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND new_path=$2 LIMIT 2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
         for row in rows {
             candidates
                 .insert(String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?);
@@ -365,7 +365,7 @@ pub(super) fn relocation_candidate(
         return Ok(None);
     }
     let old = candidates.into_iter().next().unwrap();
-    let announced:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND old_path=$2 AND new_path=$3 AND native_id=$4)", &[&ns,&old.as_bytes(),&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let announced:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND old_path=$2 AND new_path=$3)", &[&ns,&old.as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if !announced
         && !std::fs::symlink_metadata(&old).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
     {
@@ -449,7 +449,7 @@ pub(super) fn relocate(
         format!("native_catalog_relocation:{old}").as_bytes(),
         &serde_json::to_vec(&proof).map_err(|_| StorageError::Unavailable)?,
     )?;
-    tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path,native_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", &[&ns,&old.as_bytes(),&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&ns,&old.as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
     super::source_journal::invalidate(tx, old)?;
     tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
     if after.stat != *stat {
