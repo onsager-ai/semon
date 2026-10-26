@@ -192,13 +192,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     history.sync_all().unwrap();
     drop(history);
-    let inputs = crate::inputs::inputs(&options)
+    let mut inputs = crate::inputs::inputs(&options)
         .unwrap()
         .into_iter()
         .filter(|input| {
             crate::native_evidence::catalog_input(&input.full_path(&options), &options).is_some()
         })
         .collect::<Vec<_>>();
+    // The trusted append below targets this exact padded parent, independently
+    // of the discovery order of copies, subagents and other harnesses.
+    let append_input = inputs
+        .iter()
+        .position(|input| input.full_path(&options) == claude_parent)
+        .expect("padded Claude parent is a discovered native input");
+    inputs.swap(0, append_input);
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");
     let mut sqlite =
