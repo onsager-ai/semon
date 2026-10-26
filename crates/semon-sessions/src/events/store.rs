@@ -2275,7 +2275,8 @@ impl IndexStore for SqliteStore {
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        let writer = configured::Writer::owned(self.owner.clone());
+        let writer =
+            configured::Writer::owned(self.owner.clone()).map_err(StoreError::Configured)?;
         relocation::reuse(self, path, stat, id, file, measurements, &writer)
     }
 
@@ -8616,7 +8617,7 @@ mod tests {
                 let mut pages = Vec::new();
                 let mut after: Option<crate::catalog_search::Position> = None;
                 for _ in 0..4096 {
-                    let selection = crate::catalog_search::read(
+                    let selection = crate::catalog_search::read_admitted(
                         connection,
                         crate::catalog_search::Query {
                             scope,

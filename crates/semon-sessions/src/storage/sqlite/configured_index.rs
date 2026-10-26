@@ -24,7 +24,7 @@ pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageE
     journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {
         reported_selection: None,
-        native: crate::events::store::configured::Writer::new(config),
+        native: crate::events::store::configured::Writer::new(config)?,
         semantic: None,
         journal,
     }))
@@ -44,7 +44,7 @@ pub(crate) fn open_semantic(
 ) -> Result<Box<dyn IndexStore>, StorageError> {
     let journal = capability.journal();
     journal.prepare()?;
-    let native = capability.writer();
+    let native = capability.writer()?;
     Ok(Box::new(ConfiguredIndex {
         reported_selection: None,
         native,
