@@ -317,31 +317,24 @@ pub(super) fn relocation_candidate(
         return Ok(None);
     };
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+    // Codex Current Sources of the same native ID, by the native index.
+    let rows=tx.driver.query("SELECT CASE WHEN sum(octet_length(s.metadata)) OVER ()<=1048576 THEN s.metadata END FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.generation=s.generation AND r.key_digest=s.key_digest WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 ORDER BY s.source_path LIMIT 65", &[&ns,&generation.as_bytes(),&id.as_bytes(),&b"codex".as_slice()]).map_err(sqlstate::error)?;
     if rows.len() > 64 {
         return Err(StorageError::Busy);
     }
     let mut candidates = BTreeSet::new();
-    let mut used = 0usize;
     for row in rows {
         let bytes = row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        used = used.saturating_add(bytes.len());
-        if used > 1048576 {
-            return Err(StorageError::Busy);
-        }
-        let row: CatalogRow =
+        let source: crate::model::summary::CatalogSource =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        for source in row.sources {
-            let Some(old) = source.path.to_str() else {
-                return Err(StorageError::ScopeChanged);
-            };
-            if row.harness == "codex"
-                && source.native_id == id
-                && old != path
-                && relocation_namespace(old).is_some_and(|(r, a)| r == root && a != archived)
-            {
-                candidates.insert(old.to_owned());
-            }
+        let Some(old) = source.path.to_str() else {
+            return Err(StorageError::ScopeChanged);
+        };
+        if source.native_id == id
+            && old != path
+            && relocation_namespace(old).is_some_and(|(r, a)| r == root && a != archived)
+        {
+            candidates.insert(old.to_owned());
         }
     }
     if candidates.is_empty() {
@@ -600,19 +593,19 @@ pub(super) fn facts_complete(tx:&mut PgTxn<'_>,options:&crate::Options,intent:&c
     for pid in &changes.pids {affected.extend(dependent_paths(tx,"runtime:pid",&pid.to_string())?);}
     for (pid,id) in pids {if changes.pids.contains(pid) {affected.extend(dependent_paths(tx,"claude",id)?);}}
     if let Some(generation)=model_cache::generation(tx)? {
-        let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len()>64 {return Err(StorageError::Busy);}
         let selected=|facts:&crate::Facts|facts.codex_rollouts.iter().flatten().chain(facts.codex_provisional_rollouts.iter().flatten()).cloned().collect::<BTreeSet<_>>();
         let old=selected(&intent.before);let new=selected(&intent.wanted);
+        let every=intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none();
+        // A global or whole-selection change affects every (Codex) Current Source
+        // and is bounded by this operation's 64 Source budget. Otherwise only the
+        // changed rollout paths are looked up by the Source path index.
+        let targets=if changes.global||every {None} else {Some(old.symmetric_difference(&new).map(|relative|options.codex_home.join(relative).to_string_lossy().into_owned().into_bytes()).collect::<Vec<_>>())};
+        let rows=tx.driver.query("SELECT DISTINCT source_path FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea[] IS NULL OR source_path=ANY($3::bytea[])) ORDER BY source_path LIMIT 65", &[&ns,&generation.as_bytes(),&targets]).map_err(sqlstate::error)?;
+        if rows.len()>64 {return Err(StorageError::Busy);}
         for row in rows {
-            let bytes=row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-            let row:CatalogRow=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
-            for source in row.sources {
-                let Some(path)=source.path.to_str() else {return Err(StorageError::ScopeChanged);};
-                let codex=source.path.strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
-                let changed_selection=codex.is_some_and(|p|old.contains(p)!=new.contains(p)||intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none());
-                if changes.global||changed_selection {affected.insert(path.to_owned());}
-            }
+            let path=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+            let codex=std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
+            if changes.global||(every&&codex.is_some())||targets.is_some() {affected.insert(path.clone());}
         }
         for relative in old.symmetric_difference(&new) {if crate::is_input_path("codex",relative) {affected.insert(options.codex_home.join(relative).to_string_lossy().into_owned());}}
     }
