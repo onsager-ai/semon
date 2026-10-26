@@ -5709,14 +5709,17 @@ mod tests {
 
     #[test]
     fn native_usage_repair_readiness_rejects_stale_interpretation() {
-        let f = Fixture::new();
+        use crate::storage::native_events::NativeEventStore;
+        let f = Fixture::current("configured-events");
         let authored: String = f
             .db()
             .query_row("SELECT sql FROM sqlite_schema WHERE name='meta'", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        ).unwrap();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let path = f.raw.to_str().unwrap();
         let mut db = connection(&f.config).unwrap();
@@ -5745,7 +5748,9 @@ mod tests {
         assert!(tree_state::ready(&db, path, &ledger).unwrap());
         drop(db);
         drop(writer);
-        let mut restarted = f.config.native_events().unwrap();
+        let mut restarted = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        ).unwrap();
         assert!(
             restarted
                 .ingest(&"a".repeat(64), &f.raw, "codex")

@@ -4,6 +4,8 @@ use super::*;
 use crate::{events::CodexNativeUsage, native_record::Record, pricing::CostBuild};
 pub(crate) mod algorithm;
 
+pub(crate) const SEEN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='tree' AND identity=?2),EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='model' AND identity=?2)";
+
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) fn parser_fixture(path: &std::path::Path, harness: &str) -> FileIndex {
     let mut index = FileIndex::default();
@@ -192,7 +194,7 @@ pub(super) fn seen(
     if receipt != header_ledger(ledger) {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    c.query_row("SELECT EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='tree' AND identity=?2),EXISTS(SELECT 1 FROM native_usage_identities WHERE namespace=semon_namespace() AND source_id=?1 AND scope='model' AND identity=?2)",params![id,identity],|r|Ok(Seen { tree:r.get(0)?,model:r.get(1)? }))
+    c.query_row(SEEN_SQL,params![id,identity],|r|Ok(Seen { tree:r.get(0)?,model:r.get(1)? }))
 }
 
 pub(super) fn restore(

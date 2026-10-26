@@ -9,6 +9,8 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
+const CURRENT_NATIVE_SQL: &str = "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2";
+
 pub(crate) struct SqliteNavigation(pub(crate) NativeReaderBinding);
 impl NativeNavigationStore for SqliteNavigation {
     fn catalog_generation(&self) -> Result<String, StorageError> {
@@ -80,7 +82,7 @@ fn read_observation(
     if observation.qualified_head().is_none() {
         return Ok(observation);
     }
-    let sql = "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2";
+    let sql = CURRENT_NATIVE_SQL;
     let lookup = |sql: &str| {
         db.prepare(sql)
             .map_err(failed)?
@@ -288,7 +290,7 @@ mod tests {
         r.read_scope = CatalogReadScope::RetainedHistory;
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Provisional);
-        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='native' ORDER BY session_key LIMIT 2",[],|row|row.get(3)).unwrap();
+        let plan: String = db.query_row(&format!("EXPLAIN QUERY PLAN {CURRENT_NATIVE_SQL}"), ("codex", "native"), |row| row.get(3)).unwrap();
         assert!(plan.contains("COVERING INDEX"), "{plan}");
     }
 }
