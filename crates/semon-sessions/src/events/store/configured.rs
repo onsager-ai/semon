@@ -3237,8 +3237,16 @@ mod tests {
         for cache in [&mut restarted, &mut isolated] {
             let index = crate::events::scan_file(&f.raw, "codex", cache, &mut false).unwrap();
             assert!(index.codex_header.is_some());
-            assert_eq!(cache.store.as_ref().unwrap().file_ledgers().unwrap().len(), 1);
-            let receipt = cache.store.as_ref().unwrap().event_receipt(f.raw.to_str().unwrap()).unwrap();
+            assert_eq!(
+                cache.store.as_ref().unwrap().file_ledgers().unwrap().len(),
+                1
+            );
+            let receipt = cache
+                .store
+                .as_ref()
+                .unwrap()
+                .event_receipt(f.raw.to_str().unwrap())
+                .unwrap();
             assert_eq!(receipt.operation_id.len(), 64);
             assert!(receipt.consumed_bytes > 0);
         }
@@ -3249,12 +3257,45 @@ mod tests {
         }
         let key = f.raw.to_string_lossy().into_owned();
         let expected = restarted.store.as_ref().unwrap().ledger(&key).unwrap();
-        assert_eq!(restarted.store.as_mut().unwrap().remove_files(&[(key.clone(), expected)]).unwrap(), Outcome::Written);
-        assert!(restarted.store.as_ref().unwrap().file_ledgers().unwrap().is_empty());
-        assert_eq!(isolated.store.as_ref().unwrap().file_ledgers().unwrap().len(), 1);
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .remove_files(&[(key.clone(), expected)])
+                .unwrap(),
+            Outcome::Written
+        );
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .file_ledgers()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            isolated
+                .store
+                .as_ref()
+                .unwrap()
+                .file_ledgers()
+                .unwrap()
+                .len(),
+            1
+        );
         drop(isolated);
         let other_restart = EventCache::open_scoped(&cache_path, &other).unwrap();
-        assert!(other_restart.store.as_ref().unwrap().load_file(&key).unwrap().is_some());
+        assert!(
+            other_restart
+                .store
+                .as_ref()
+                .unwrap()
+                .load_file(&key)
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {
