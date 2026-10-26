@@ -1152,9 +1152,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "ordinary production workspace Catalog"
     );
     let workspace: serde_json::Value = serde_json::from_slice(&workspace.body).unwrap();
-    assert!(workspace["items"].as_array().unwrap().iter().all(|row|
-        row["machine"]["key"] == "machine-independent-of-source-uuid"
-    ));
+    assert!(
+        workspace["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["machine"]["key"] == "machine-independent-of-source-uuid")
+    );
     assert_eq!(
         workspace["items"]
             .as_array()
@@ -3134,6 +3138,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
+    let prior_parent = super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,qualified.as_deref().unwrap(),|prior| prior.catalog("one",false)).unwrap();
+    super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,&caught,|snapshot| {
+        use crate::storage::catalog::CatalogSnapshot;
+        let current = snapshot.catalog("one",false)?;
+        eprintln!("withdrawal_parent prior_sources={} current_sources={} history={} parent_projection={}",prior_parent.as_ref().map_or(0,|row|row.sources.len()),current.as_ref().map_or(0,|row|row.sources.len()),snapshot.has_history("one").unwrap(),model.prepared().transcripts.iter().any(|projection|projection.key=="one"));
+        Ok(())
+    }).unwrap();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
         let mut counts = Vec::new();

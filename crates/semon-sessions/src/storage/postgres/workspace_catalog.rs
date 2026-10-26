@@ -123,6 +123,21 @@ mod tests {
         let no_repo = read(&authorized,&Request::parse("no_repo=1&limit=10").unwrap(),None).unwrap().unwrap();
         assert_eq!(no_repo.rows.len(),2);
         assert!(no_repo.rows.iter().all(|(_,row)| row.key == "older" && row.repo.is_none()));
+        let first = crate::session_catalog_union(&sources[..2], "workspace-machines", "limit=1&harness=claude&repo=repo&model=m");
+        assert_eq!(first.status,200);
+        let first: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(first["items"][0]["machine"]["key"],"machine-a");
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let second = crate::session_catalog_union(&sources[..2], "workspace-machines", &format!("limit=1&harness=claude&repo=repo&model=m&cursor={}",crate::viewer::percent_encode(cursor)));
+        assert_eq!(second.status,200);
+        let second: serde_json::Value = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second["items"][0]["machine"]["key"],"machine-z");
+        assert!(second["next_cursor"].is_null());
+        let no_repo = crate::session_catalog_union(&sources[..2], "workspace-machines", "no_repo=1&limit=10");
+        assert_eq!(no_repo.status,200);
+        let no_repo: serde_json::Value = serde_json::from_slice(&no_repo.body).unwrap();
+        assert_eq!(no_repo["items"].as_array().unwrap().len(),2);
+        assert!(no_repo["items"].as_array().unwrap().iter().all(|row| row["key"] == "older" && row["repo"].is_null()));
         let scope = authorized.iter().map(|source| super::super::namespace_context(&source.options.source.namespace().unwrap())).collect::<Vec<_>>().join(",");
         pool.transaction(&configs[0].namespace,txn::TxnKind::Write,&control,|tx| {
             tx.driver.query_one("SELECT set_config('semon.read_scope',$1,true)", &[&scope]).map_err(sqlstate::error)?;
