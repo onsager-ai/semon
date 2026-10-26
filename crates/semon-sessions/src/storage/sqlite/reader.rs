@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::{ops::Deref, time::Duration};
 
 impl NativeReaderBinding {
-    pub(super) fn connection(&self) -> Result<Connection, StorageError> {
+    pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         let config = self.config();
         let StoreBackend::Sqlite { database } = &config.backend;
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
@@ -28,7 +28,7 @@ impl NativeReaderBinding {
         Ok(db)
     }
 
-    pub(super) fn validate(
+    pub(crate) fn validate(
         &self,
         db: &Connection,
         requested: &LogicalSourceNamespace,

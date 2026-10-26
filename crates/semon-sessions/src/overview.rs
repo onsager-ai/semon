@@ -14,10 +14,11 @@ use std::{collections::BTreeMap, io, sync::Arc};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_overview (
- session_key TEXT PRIMARY KEY, last_ms INTEGER NOT NULL, state TEXT NOT NULL, summary TEXT NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS session_overview_order ON session_overview(last_ms DESC,session_key);
-CREATE INDEX IF NOT EXISTS session_overview_state ON session_overview(state,last_ms DESC,session_key);
+ namespace TEXT NOT NULL, session_key TEXT NOT NULL, last_ms INTEGER NOT NULL, state TEXT NOT NULL, summary TEXT NOT NULL,
+ PRIMARY KEY(namespace,session_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_overview_order ON session_overview(namespace,last_ms DESC,session_key);
+CREATE INDEX IF NOT EXISTS session_overview_state ON session_overview(namespace,state,last_ms DESC,session_key);
 ";
 
 pub(crate) mod comparison {
@@ -111,11 +112,11 @@ fn publish_measured(
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     measurements.record("summary_serialization", started, 1);
     let started = measurements.start();
-    let changed = tx.prepare_cached("INSERT INTO session_overview VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
+    let changed = tx.prepare_cached("INSERT INTO main.session_overview VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
     measurements.record("summary_upsert", started, 1);
     if changed > 0 {
         let started = measurements.start();
-        tx.prepare_cached("INSERT INTO meta(key,value) VALUES('overview_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)")?.execute([])?;
+        tx.prepare_cached("INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_generation','1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)")?.execute([])?;
         measurements.record("generation", started, 1);
     }
     Ok(())
@@ -247,16 +248,13 @@ fn read(
     since: i64,
     analytics: bool,
 ) -> io::Result<(Vec<Saved>, bool, String)> {
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&source.options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(failed)?;
+    let binding = crate::storage::local_navigation_binding(&source.options, &source.key).map_err(failed)?;
+    let mut connection = binding.connection().map_err(failed)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(1))
         .map_err(failed)?;
     let db = connection.transaction().map_err(failed)?;
-    crate::events::store::require_current(&db)?;
+    binding.validate(&db, &binding.config().namespace).map_err(failed)?;
     let complete = db.query_row("SELECT value FROM meta WHERE key='catalog_completeness'",[],|row|row.get::<_,String>(0)).optional().map_err(failed)?.as_deref()==Some("complete")
         && !db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c LEFT JOIN session_overview o USING(session_key) WHERE c.last_ms>=?1 AND (o.session_key IS NULL OR EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:'||c.session_key)) LIMIT 1)",[since],|row|row.get::<_,bool>(0)).map_err(failed)?;
     let mut generation = db
@@ -465,15 +463,12 @@ pub(crate) fn session_home_details_inner(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable")
             })?;
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(failed)?;
+        let binding = crate::storage::local_navigation_binding(options, source_key).map_err(failed)?;
+        let mut db = binding.connection().map_err(failed)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(failed)?;
         let tx = db.transaction().map_err(failed)?;
-        crate::events::store::require_current(&tx)?;
+        binding.validate(&tx, &binding.config().namespace).map_err(failed)?;
         let generation: String = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='catalog_generation'",

@@ -23,6 +23,7 @@ pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "session_trace_edges",
     "session_trace_bookmarks",
     "session_overview",
+    "session_descriptions",
     "session_search_coverage",
     "session_search_documents",
     "session_search_memberships",
@@ -84,13 +85,9 @@ pub(super) fn ready(db: &Connection) -> Result<bool, StorageError> {
 /// explicit namespace predicate. Indexed Catalog ranges use main plus the same
 /// predicate, retaining namespace-leading covering indexes.
 pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
-    if !started(db).map_err(failed)? {
-        return Ok(false);
-    }
-    if !ready(db)? {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
     for table in QUALIFIED_CATALOG_TABLES {
+        let current: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |row| row.get(0)).map_err(failed)?;
+        if !current { return Err(StorageError::NamespaceUpgradePending); }
         // Preserve the native positional row layout. Namespace is an adapter
         // qualifier, not a new native payload column.
         let mut statement = db
@@ -112,6 +109,7 @@ pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
         }
         db.execute_batch(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT {columns} FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table))).map_err(failed)?;
     }
+    db.execute_batch("CREATE TEMP VIEW IF NOT EXISTS meta AS SELECT namespace,key,value FROM main.meta WHERE namespace=semon_meta_scope(key);").map_err(failed)?;
     Ok(true)
 }
 

@@ -112,21 +112,17 @@ impl IndexStore for ConfiguredIndex {
     }
     fn session_description(
         &self,
-        _key: &str,
-        _version: u32,
-        _inputs: &str,
+        key: &str,
+        version: u32,
+        inputs: &str,
     ) -> Result<Option<String>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.session_description(key, version, inputs).map_err(StoreError::Configured)
     }
     fn save_session_descriptions(
         &mut self,
-        _descriptions: &[(String, u32, String, String)],
+        descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.save_session_descriptions(descriptions).map_err(StoreError::Configured)
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         if let Some(stage) = &self.semantic {

@@ -59,6 +59,8 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Default admitted current Source restart and isolation
+        run: cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
       - name: Canonical namespace factory structure and drift refusal
         run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
       - name: Native Claude name and owned member replay qualification

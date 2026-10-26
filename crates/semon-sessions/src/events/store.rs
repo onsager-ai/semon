@@ -2547,6 +2547,16 @@ impl SourceObservationStore for SqliteStore {
     }
 }
 
+pub(crate) fn read_session_description(db: &Connection, key: &str, version: u32, inputs: &str) -> rusqlite::Result<Option<String>> {
+    db.query_row("SELECT description FROM main.session_descriptions WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND inputs=?3", params![key,version,inputs], |row| row.get(0)).optional()
+}
+
+pub(crate) fn write_session_descriptions(tx: &Transaction<'_>, descriptions: &[(String,u32,String,String)]) -> rusqlite::Result<()> {
+    let mut put = tx.prepare("INSERT OR REPLACE INTO main.session_descriptions(namespace,session_key,version,inputs,description) VALUES(semon_namespace(),?1,?2,?3,?4)")?;
+    for (key,version,inputs,description) in descriptions { put.execute(params![key,version,inputs,description])?; }
+    Ok(())
+}
+
 impl IndexStore for SqliteStore {
     fn source_observations(&self) -> Option<&dyn SourceObservationStore> {
         Some(self)
@@ -2569,10 +2579,7 @@ impl IndexStore for SqliteStore {
         if !current(&self.connection).map_err(failure)? {
             return Ok(None);
         }
-        self.connection.query_row(
-            "SELECT description FROM session_descriptions WHERE session_key = ?1 AND version = ?2 AND inputs = ?3",
-            params![key, version, inputs], |row| row.get(0),
-        ).optional().map_err(failure)
+        read_session_description(&self.connection, key, version, inputs).map_err(failure)
     }
 
     fn save_session_descriptions(
@@ -2593,11 +2600,7 @@ impl IndexStore for SqliteStore {
                 return Ok(Outcome::Stale);
             }
             {
-                let mut put = transaction.prepare("INSERT OR REPLACE INTO session_descriptions (session_key, version, inputs, description) VALUES (?1, ?2, ?3, ?4)").map_err(failure)?;
-                for (key, version, inputs, description) in descriptions {
-                    put.execute(params![key, version, inputs, description])
-                        .map_err(failure)?;
-                }
+                write_session_descriptions(&transaction, descriptions).map_err(failure)?;
             }
             transaction.commit().map_err(failure)?;
             Ok(Outcome::Written)

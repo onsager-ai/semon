@@ -699,6 +699,8 @@ fn machine_options(
         .map(|dir| {
             let facts = dir.join("facts.json");
             let options = semon_sessions::Options {
+                source: semon_sessions::storage::HostSource::load_or_create(&dir.join(".semon/source.json"))
+                    .expect("machine Source configuration is unavailable or invalid"),
                 claude_home: dir.join("claude"),
                 codex_home: dir.join("codex"),
                 copilot_home: dir.join("copilot"),
