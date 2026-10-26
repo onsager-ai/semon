@@ -289,6 +289,23 @@ pub(crate) fn publish_measured(
     Ok(())
 }
 
+pub(crate) fn publish_owned(
+    tx: &Transaction<'_>,
+    owner: &crate::events::store::configured::NativeOwnership,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<()> {
+    let store = crate::storage::sqlite::trace::TraceWriter::owned(tx, owner)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let mut measurements = crate::native_timing::Measurements::default();
+    let record = publication_record(row, projection, &mut measurements)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
+        query.publish(tx, row, summary, &record.0)?;
+    }
+    publish_record(&store, row, projection, record, &mut measurements)
+}
+
 fn publication_record(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
