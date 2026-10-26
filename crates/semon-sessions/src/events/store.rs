@@ -3980,13 +3980,14 @@ pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
 
 pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool> {
     crate::native_timing::discovery_count(|counts| {
-        counts.statements += 2;
+        counts.statements += 3;
         counts.schema_probes += 1;
     });
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
-    Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
+    let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    Ok(application == 0 && schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
 }
 
 /// A versioned retention marker in the existing metadata region. Event rows
@@ -6890,7 +6891,7 @@ mod tests {
         state
             .get_mut("meta")
             .unwrap()
-            .retain(|row| row[0] != rusqlite::types::Value::Text("catalog_observed_at".into()));
+            .retain(|row| row[1] != rusqlite::types::Value::Text("catalog_observed_at".into()));
         state
     }
 
@@ -6953,9 +6954,12 @@ mod tests {
         // Deferred tick does not publish rows or stamp an observation clock.
         let publish = |store: &mut SqliteStore, writer| {
             for tick in 0..128 {
+                let timing = matches!(writer, CatalogWriter::RowWise);
+                let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                 let before = crate::model::now_ms();
                 let outcome = catalog_write(store, rows, projections, scoped, writer).unwrap();
                 if outcome.0 == Outcome::Written {
+                    crate::native_timing::catalog_commit_tests::assert_written(timing);
                     return (
                         outcome,
                         catalog_commit_success_state(
@@ -6966,18 +6970,14 @@ mod tests {
                     );
                 }
                 assert_eq!(outcome.0, Outcome::Deferred);
+                crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                drop(recording);
                 assert!(tick < 127, "original custody continuation did not complete");
             }
             unreachable!()
         };
-        let recording = crate::native_timing::catalog_commit_tests::recording(false);
         let (left, left_state) = publish(batch, CatalogWriter::Auto);
-        crate::native_timing::catalog_commit_tests::assert_written(false);
-        drop(recording);
-        let recording = crate::native_timing::catalog_commit_tests::recording(true);
         let (right, right_state) = publish(row_wise, CatalogWriter::RowWise);
-        crate::native_timing::catalog_commit_tests::assert_written(true);
-        drop(recording);
         assert_eq!(left, right, "exact committed collection generation");
         assert_eq!(left.0, Outcome::Written);
         assert_eq!(
@@ -10002,7 +10002,7 @@ mod tests {
             ),
             (
                 "older-with-future-recipe",
-                "PRAGMA user_version=32; INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
+                "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-complete-receipts-v99' WHERE namespace=semon_namespace()",
                 "older schema",
             ),
             (
@@ -10062,12 +10062,12 @@ mod tests {
             ),
             (
                 "recipe-other-family",
-                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+                "UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-complete-receipts-v2' WHERE namespace=semon_namespace()",
                 "publication version",
             ),
             (
                 "recipe-older-current-family",
-                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
+                "UPDATE main.storage_semantic_profiles SET recipe='recorded-origin-turn-native-name-hints-v3' WHERE namespace=semon_namespace()",
                 "publication version",
             ),
             (
