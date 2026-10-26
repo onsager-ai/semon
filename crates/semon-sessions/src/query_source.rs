@@ -229,12 +229,13 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db = crate::events::store::focused_unbound_connection(&cache_path).map_err(|error| {
-            for source in sources.iter().take(16) {
-                note_focused_source_interest(&cache_path, source);
-            }
-            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
-        })?;
+        let db =
+            crate::events::store::focused_unbound_connection(&cache_path).map_err(|error| {
+                for source in sources.iter().take(16) {
+                    note_focused_source_interest(&cache_path, source);
+                }
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
+            })?;
         db.busy_timeout(std::time::Duration::from_millis(100))
             .map_err(|error| {
                 crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))

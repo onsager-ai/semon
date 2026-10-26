@@ -2112,7 +2112,9 @@ pub(crate) fn focused_connection(
         .validate(&read, &binding.config().namespace)
         .map_err(io::Error::other)?
     {
-        return Err(io::Error::other(crate::storage::StorageError::NamespaceUpgradePending));
+        return Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ));
     }
     require_current(&read)?;
     read.commit().map_err(io::Error::other)?;
@@ -5101,7 +5103,9 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
     // tests still qualify an unbound connection until they are retired.
     #[cfg(not(test))]
     {
-        Err(io::Error::other(crate::storage::StorageError::NamespaceUpgradePending))
+        Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ))
     }
     #[cfg(test)]
     {
