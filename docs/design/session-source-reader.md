@@ -178,10 +178,10 @@ it does not establish complete backend, migration or rollback readiness.
 An explicitly captured PG publication uses `StoreConfig::call_captured_query_at`.
 Before entering that body lease, a host can call `captured_source_proof_at` with
 the same publication, canonical owner key and exact `SessionSourceRef`. It
-qualifies the admitted recipe, source metadata and immutable Native proof header
-without reading Raw or opening SQLite. Its `retained` freshness describes the
+qualifies the admitted immutable recipe and its exact source metadata without
+reading Raw or opening SQLite. Its `retained` freshness describes the
 captured observation, not current runtime or host custody. The body read qualifies
-the Native proof again and still requires independent host authorization and
+the persisted Native proof and still requires independent host authorization and
 byte-generation checks. An expired live reader remains expired.
 
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
