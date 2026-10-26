@@ -50,7 +50,9 @@ pub(super) fn capture(
             launch_header: launch.map(text).transpose()?,
         };
         if source.backing.is_some() {
-            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&source.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
+            let header: crate::events::native_pages::chunks::Header =
+                serde_json::from_str(&source.chunks_header)
+                    .map_err(|_| StorageError::ScopeChanged)?;
             source.checkpoint = header.consumed_offset.ok_or(StorageError::ScopeChanged)?;
             source.parser_version = header.parser_version;
             source.usage_ready = false;
@@ -75,7 +77,13 @@ pub(super) fn capture(
             tx.0.driver
                 .query(
                     &format!("SELECT octet_length(b.payload) {suffix} LIMIT 64"),
-                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor, &state.native_backing],
+                    &[
+                        &ns,
+                        &path.as_bytes(),
+                        &kind(page_kind),
+                        &cursor,
+                        &state.native_backing,
+                    ],
                 )
                 .map_err(sqlstate::error)?;
         let mut count = 0;
@@ -99,7 +107,13 @@ pub(super) fn capture(
             tx.0.driver
                 .query(
                     &format!("SELECT r.page_key,b.payload {suffix} LIMIT {count}"),
-                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor, &state.native_backing],
+                    &[
+                        &ns,
+                        &path.as_bytes(),
+                        &kind(page_kind),
+                        &cursor,
+                        &state.native_backing,
+                    ],
                 )
                 .map_err(sqlstate::error)?;
         if rows.is_empty() {
@@ -122,7 +136,7 @@ pub(super) fn capture(
             native_pages::append(tx, state, Category::PageBlobs, records)?;
         }
     } else {
-        let next = tx.0.driver.query_opt("SELECT encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex') AS digest FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.source_path=g.source_path AND p.generation=g.generation) AND ($3::text IS NULL OR encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')>$3) ORDER BY digest LIMIT 1", &[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?.map(|r|r.get::<_,String>(0));
+        let next = tx.0.driver.query("SELECT encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex') AS digest FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.source_path=g.source_path AND p.generation=g.generation) AND ($3::text IS NULL OR encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')>$3) ORDER BY digest LIMIT 1", &[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?.into_iter().next().map(|r|r.get::<_,String>(0));
         if let Some(next) = next {
             state.native_backing = Some(next);
             state.native_family = 3;
@@ -166,10 +180,10 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     match record {
         TransferRecord::NativeSource(source) => {
             if source.backing.is_none() {
-            let (_, ledger) = super::super::native_reader::ledger(tx.0, &source.path)?
-                .ok_or(StorageError::ScopeChanged)?;
-            native_pages::validate_source_ledger(source, &ledger)?;
-            tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
+                let (_, ledger) = super::super::native_reader::ledger(tx.0, &source.path)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                native_pages::validate_source_ledger(source, &ledger)?;
+                tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
                 tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
             }
             let id = source.id(tx.0.namespace.as_str())?;
