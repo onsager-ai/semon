@@ -58,13 +58,7 @@ pub(crate) fn captured_source_proof(
         // hashes while copying bytes using the returned current descriptor.
         let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
         let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
-        let metadata = serde_json::to_vec(source).map_err(|_| StorageError::ScopeChanged)?;
-        let rows = tx.driver.query("SELECT p.source_path=$3 AND s.source_path=$3 AND s.metadata=$4,p.page_generation FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_catalog_sources s USING(namespace_digest,namespace,generation,path_digest) WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) LIMIT 65", &[&config.namespace.as_str().as_bytes(), &generation.as_bytes(), &absolute.as_bytes(), &metadata]).map_err(super::sqlstate::error)?;
-        if rows.is_empty() || rows.len() > 64 || rows.iter().any(|row| !row.get::<_, bool>(0)) {
-            return Err(StorageError::ScopeChanged);
-        }
-        let id = String::from_utf8(rows[0].get(1)).map_err(|_| StorageError::ScopeChanged)?;
-        super::native_pages::open(&mut tx, absolute, &crate::source_carrier::ledger(source), crate::storage::proof_lifetime::ProofGenerationId(id))?;
+        super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)?;
         tx.check()?;
         let ledger = crate::source_carrier::ledger(source);
         let relocation = super::native_keys::read_meta(&mut tx, format!("native_catalog_relocation:{absolute}").as_bytes(), 1024 * 1024)?;
