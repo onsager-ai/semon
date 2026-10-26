@@ -1,6 +1,6 @@
 //! Resumable current snapshot capture and authoritative page application.
-//! Capture currently exports reported Facts and its stamp. Other native families
-//! remain unqualified; neither capture nor application grants ownership.
+//! Capture currently exports reported Facts/stamp and fixed core files/events.
+//! Other native families remain unqualified; neither operation grants ownership.
 use super::*;
 use crate::events::ReportedFileStamp;
 
@@ -17,6 +17,7 @@ impl TransferInbox {
     /// Freeze ordinary source writers and advance one bounded capture page.
     /// Retry the same identity after restart or an uncertain commit. Every page
     /// retains the 64-row/1-MiB limit; total history has no row/byte cap.
+    /// This partial inventory is not a full-source completeness witness.
     pub fn capture(&self, operation: &[u8; 32]) -> Result<CaptureProgress, StorageError> {
         match &self.0.backend {
             StoreBackend::Sqlite { .. } => {
@@ -32,6 +33,7 @@ impl TransferInbox {
     /// Apply an already staged page to authoritative native rows. Each page's
     /// rows, exact receipt and applied cursor commit together. Ordinary readers
     /// and writers refuse an unfinished destination; final application opens it.
+    /// Sequence zero finalizes an entirely empty manifest; it never skips rows.
     pub fn apply_page(
         &self,
         manifest: &SnapshotManifest,
