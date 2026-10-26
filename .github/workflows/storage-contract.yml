@@ -6,6 +6,7 @@ on:
     branches:
       - task/479-pg-facts-20261026
       - task/479-pg-catalog-20261026
+      - task/477-current-transfer-20261027
 permissions:
   contents: read
 concurrency:
