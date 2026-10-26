@@ -493,7 +493,20 @@ impl SourceObservationStore for SourceJournal {
         ).optional().map_err(failed)?;
         let applied = current.as_deref() == cursor;
         let done = applied
-            && crate::events::store::recovery_page(&tx).map_err(|_| StorageError::Unavailable)?;
+            && crate::events::store::recovery_page(&tx).map_err(|error| {
+                #[cfg(test)]
+                eprintln!(
+                    "source-journal phase=recovery-page sqlite_extended_code={:?}",
+                    error
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<rusqlite::Error>())
+                        .and_then(rusqlite::Error::sqlite_error)
+                        .map(|code| code.extended_code)
+                );
+                #[cfg(not(test))]
+                let _ = error;
+                StorageError::Unavailable
+            })?;
         insert_recovery_receipt(&tx, namespace, operation, applied, done)?;
         acknowledge_intent_sql(&tx, namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
