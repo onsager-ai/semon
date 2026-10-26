@@ -614,7 +614,13 @@ impl NativeEvidence {
             return Ok(false);
         };
         #[cfg(test)]
-        eprintln!("native_stage phase={:?} epoch={} revision={} sources={}", batch.phase, batch.epoch, batch.source_revision, batch.paths.len());
+        eprintln!(
+            "native_stage phase={:?} epoch={} revision={} sources={}",
+            batch.phase,
+            batch.epoch,
+            batch.source_revision,
+            batch.paths.len()
+        );
         work.pending_sources = true;
         // Runtime/facts qualification also covers scalar reductions and the
         // durable final acknowledgement, which may have no selected sources.
@@ -683,7 +689,10 @@ impl NativeEvidence {
             (cache.record_semantic_batch(&batch, prepared)?, None)
         };
         #[cfg(test)]
-        eprintln!("native_stage outcome={outcome:?} generation={}", generation.is_some());
+        eprintln!(
+            "native_stage outcome={outcome:?} generation={}",
+            generation.is_some()
+        );
         if outcome == crate::events::Outcome::Deferred {
             cache.end_scan();
             cache.release_published_indexes();

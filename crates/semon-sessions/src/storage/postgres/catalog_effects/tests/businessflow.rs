@@ -442,7 +442,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             }
             if advances % 32 == 0 {
                 let cache = work.events.as_ref().unwrap();
-                eprintln!("ordinary_observer advances={advances} qualified={} pending={} backfill={:?}", cache.qualified_catalog().unwrap(), cache.pending_catalog_sources(1).unwrap().len(), cache.backfill_state().unwrap());
+                eprintln!(
+                    "ordinary_observer advances={advances} qualified={} pending={} backfill={:?}",
+                    cache.qualified_catalog().unwrap(),
+                    cache.pending_catalog_sources(1).unwrap().len(),
+                    cache.backfill_state().unwrap()
+                );
             }
         }
         assert!(complete, "SQLite ordinary Catalog oracle did not finish");
@@ -790,12 +795,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         producer_rows(&semantic_model.prepared().rows),
         producer_rows(&oracle.rows)
     );
+    assert!(!pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "active semantic stage cannot acknowledge an audit");
     assert_eq!(
         pg.finish_semantic_stage(semantic_batch.epoch).unwrap(),
         crate::events::Outcome::Written
     );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
+    assert!(!pg.note_catalog_audit(Some("stale"), 1790812802000).unwrap());
+    assert!(pg.note_catalog_audit(Some(&generation), 1790812802000).unwrap());
     let component = pg
         .catalog_component_paths(
             &[inputs
