@@ -1,13 +1,13 @@
 //! Compact source publications for Home and Analytics. Ordinary reads open only
 //! the derived SQLite projection. Visible previews use qualified, bounded native
 //! reads; message text never enters the projection or a workspace ViewerCore.
+#[cfg(test)]
+use crate::events::EventCache;
 use crate::{
     Options, analytics,
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-#[cfg(test)]
-use crate::events::EventCache;
 #[cfg(test)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
