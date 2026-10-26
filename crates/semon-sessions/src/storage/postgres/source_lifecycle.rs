@@ -314,64 +314,165 @@ pub(super) fn resume_runtime(
     tx.check()
 }
 
-pub(super) fn relocation_candidate(tx:&mut PgTxn<'_>,path:&str,id:&str)->Result<Option<String>,StorageError> {
+pub(super) fn relocation_candidate(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    id: &str,
+) -> Result<Option<String>, StorageError> {
     use crate::events::native_commit::relocation_namespace;
-    let Some((root,archived))=relocation_namespace(path) else {return Ok(None);};
-    let Some(generation)=model_cache::generation(tx)? else {return Ok(None);};
-    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    let Some((root, archived)) = relocation_namespace(path) else {
+        return Ok(None);
+    };
+    let Some(generation) = model_cache::generation(tx)? else {
+        return Ok(None);
+    };
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
     let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-    if rows.len()>64 {return Err(StorageError::Busy);}
-    let mut candidates=BTreeSet::new(); let mut used=0usize;
+    if rows.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let mut candidates = BTreeSet::new();
+    let mut used = 0usize;
     for row in rows {
-        let bytes=row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        used=used.saturating_add(bytes.len());if used>1048576 {return Err(StorageError::Busy);}
-        let row:CatalogRow=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+        let bytes = row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
+        used = used.saturating_add(bytes.len());
+        if used > 1048576 {
+            return Err(StorageError::Busy);
+        }
+        let row: CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         for source in row.sources {
-            let Some(old)=source.path.to_str() else {return Err(StorageError::ScopeChanged);};
-            if row.harness=="codex" && source.native_id==id && old!=path && relocation_namespace(old).is_some_and(|(r,a)|r==root && a!=archived) {
+            let Some(old) = source.path.to_str() else {
+                return Err(StorageError::ScopeChanged);
+            };
+            if row.harness == "codex"
+                && source.native_id == id
+                && old != path
+                && relocation_namespace(old).is_some_and(|(r, a)| r == root && a != archived)
+            {
                 candidates.insert(old.to_owned());
             }
         }
     }
     if candidates.is_empty() {
         let rows=tx.driver.query("SELECT old_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND new_path=$2 AND native_id=$3 LIMIT 2", &[&ns,&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
-        for row in rows {candidates.insert(String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?);}
+        for row in rows {
+            candidates
+                .insert(String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?);
+        }
     }
-    if candidates.len()!=1 {return Ok(None);}
-    let old=candidates.into_iter().next().unwrap();
+    if candidates.len() != 1 {
+        return Ok(None);
+    }
+    let old = candidates.into_iter().next().unwrap();
     let announced:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND old_path=$2 AND new_path=$3 AND native_id=$4)", &[&ns,&old.as_bytes(),&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if !announced && !std::fs::symlink_metadata(&old).is_err_and(|e|e.kind()==io::ErrorKind::NotFound) {return Ok(None);}
+    if !announced
+        && !std::fs::symlink_metadata(&old).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
     Ok(Some(old))
 }
 
-pub(super) fn relocate(tx:&mut PgTxn<'_>,old:&str,path:&str,id:&str,stat:&crate::events::Stat,prior:&crate::events::Ledger,summary:crate::native_tree::Summary)->Result<bool,StorageError> {
-    use sha2::{Digest,Sha256};
-    let request=serde_json::to_vec(&("native-relocation-v1",old,path,id,stat,prior)).map_err(|_|StorageError::InvalidArguments)?;
-    let key=format!("native-relocation-ack:{:x}",Sha256::digest(&request));
-    let ns=tx.namespace.as_str().as_bytes().to_vec();
+pub(super) fn relocate(
+    tx: &mut PgTxn<'_>,
+    old: &str,
+    path: &str,
+    id: &str,
+    stat: &crate::events::Stat,
+    prior: &crate::events::Ledger,
+    summary: crate::native_tree::Summary,
+) -> Result<bool, StorageError> {
+    use sha2::{Digest, Sha256};
+    let request = serde_json::to_vec(&("native-relocation-v1", old, path, id, stat, prior))
+        .map_err(|_| StorageError::InvalidArguments)?;
+    let key = format!("native-relocation-ack:{:x}", Sha256::digest(&request));
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
-    if let Some(ack)=super::native_keys::read_meta(tx,key.as_bytes(),1048576)? {return if ack==request {Ok(true)} else {Err(StorageError::Conflict)};}
-    if relocation_candidate(tx,path,id)?.as_deref()!=Some(old) {return Err(StorageError::Conflict);}
-    let Some((actual,mut index))=super::native_reader::file(tx,old)? else {return Err(StorageError::Conflict);};
-    if actual!=*prior || super::native_reader::ledger(tx,path)?.is_some() {return Err(StorageError::Conflict);}
-    if index.codex_header.as_ref().and_then(|h|h.id.as_deref())!=Some(id) {return Err(StorageError::ScopeChanged);}
+    if let Some(ack) = super::native_keys::read_meta(tx, key.as_bytes(), 1048576)? {
+        return if ack == request {
+            Ok(true)
+        } else {
+            Err(StorageError::Conflict)
+        };
+    }
+    if relocation_candidate(tx, path, id)?.as_deref() != Some(old) {
+        return Err(StorageError::Conflict);
+    }
+    let Some((actual, mut index)) = super::native_reader::file(tx, old)? else {
+        return Err(StorageError::Conflict);
+    };
+    if actual != *prior || super::native_reader::ledger(tx, path)?.is_some() {
+        return Err(StorageError::Conflict);
+    }
+    if index.codex_header.as_ref().and_then(|h| h.id.as_deref()) != Some(id) {
+        return Err(StorageError::ScopeChanged);
+    }
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
-    if active || crate::events::Stat::of(std::path::Path::new(path)).ok().as_ref()!=Some(stat) {return Err(StorageError::Conflict);}
-    let mut after=prior.clone();after.stat=*stat;after.stat.size=prior.stat.size.min(stat.size);
-    index.tree_summary=Some(summary);
+    if active
+        || crate::events::Stat::of(std::path::Path::new(path))
+            .ok()
+            .as_ref()
+            != Some(stat)
+    {
+        return Err(StorageError::Conflict);
+    }
+    let mut after = prior.clone();
+    after.stat = *stat;
+    after.stat.size = prior.stat.size.min(stat.size);
+    index.tree_summary = Some(summary);
     tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&request]).map_err(sqlstate::error)?;
     // Reuse the ordinary native commit algorithm to make a complete new path
     // generation. The old native families and immutable proofs remain retained.
-    super::native_bundle::stage(tx,crate::events::native_commit::Input{path,ledger:&after,index:&index,changes:None,expected:None,semantic_change:true})?;
-    let proof=crate::events::native_commit::CatalogRelocation{version:1,new_path:path.to_owned(),native_id:id.to_owned(),prior:prior.clone(),catalog_before:None,after:after.clone()};
-    super::native_keys::put_meta(tx,format!("native_catalog_relocation:{old}").as_bytes(),&serde_json::to_vec(&proof).map_err(|_|StorageError::Unavailable)?)?;
+    super::native_bundle::stage(
+        tx,
+        crate::events::native_commit::Input {
+            path,
+            ledger: &after,
+            index: &index,
+            changes: None,
+            expected: None,
+            semantic_change: true,
+        },
+    )?;
+    let proof = crate::events::native_commit::CatalogRelocation {
+        version: 1,
+        new_path: path.to_owned(),
+        native_id: id.to_owned(),
+        prior: prior.clone(),
+        catalog_before: None,
+        after: after.clone(),
+    };
+    super::native_keys::put_meta(
+        tx,
+        format!("native_catalog_relocation:{old}").as_bytes(),
+        &serde_json::to_vec(&proof).map_err(|_| StorageError::Unavailable)?,
+    )?;
     tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path,native_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", &[&ns,&old.as_bytes(),&path.as_bytes(),&id.as_bytes()]).map_err(sqlstate::error)?;
-    super::source_journal::invalidate(tx,old)?;
+    super::source_journal::invalidate(tx, old)?;
     tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
-    if after.stat!=*stat {
-        let evidence=crate::source_change::AppendEvidence{generation:format!("{:032x}",u128::from_be_bytes(prior.prefix[..16].try_into().map_err(|_|StorageError::ScopeChanged)?)),before:after.stat,after:*stat};
-        super::native_keys::put_meta(tx,format!("native_relocation_append:{path}").as_bytes(),&serde_json::to_vec(&evidence).map_err(|_|StorageError::Unavailable)?)?;
+    if after.stat != *stat {
+        let evidence = crate::source_change::AppendEvidence {
+            generation: format!(
+                "{:032x}",
+                u128::from_be_bytes(
+                    prior.prefix[..16]
+                        .try_into()
+                        .map_err(|_| StorageError::ScopeChanged)?
+                )
+            ),
+            before: after.stat,
+            after: *stat,
+        };
+        super::native_keys::put_meta(
+            tx,
+            format!("native_relocation_append:{path}").as_bytes(),
+            &serde_json::to_vec(&evidence).map_err(|_| StorageError::Unavailable)?,
+        )?;
     }
-    super::native_keys::put_meta(tx,key.as_bytes(),&request)?;
-    tx.check()?;Ok(true)
+    super::native_keys::put_meta(tx,format!("source-retired:{old}").as_bytes(),&serde_json::to_vec(&Some(prior)).map_err(|_|StorageError::Unavailable)?)?;
+    tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
+    super::native_keys::put_meta(tx, key.as_bytes(), &request)?;
+    tx.check()?;
+    Ok(true)
 }

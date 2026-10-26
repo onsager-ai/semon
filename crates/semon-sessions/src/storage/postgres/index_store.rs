@@ -628,7 +628,9 @@ impl IndexStore for NativeIndex {
         if stat.size<prior.offset {return Ok(None);}
         let hashes=crate::events::consumed_hashes(file,prior.offset).map_err(|e|StoreError::Data(e.to_string()))?;
         if hashes!=(prior.prefix,prior.tail) || Stat::of(std::path::Path::new(path)).ok().as_ref()!=Some(stat) {return Ok(None);}
-        let summary=self.summary(&old,&prior)?;
+        let mut summary=self.summary(&old,&prior)?;
+        summary.load_shared_usage().map_err(|e|StoreError::Data(e.to_string()))?;
+        summary.stored=None;
         let result=self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx| {
             super::source_lifecycle::relocate(tx,&old,path,id,stat,&prior,summary)
         }).map_err(err)?;

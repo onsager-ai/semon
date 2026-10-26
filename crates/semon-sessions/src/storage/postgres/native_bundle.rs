@@ -247,6 +247,7 @@ impl Effects for Writer<'_, '_> {
         self.boundary()
     }
     fn retire_mutation(&mut self, path: &str) -> Result<(), StorageError> {
+        super::native_keys::delete_meta(self.tx,format!("source-retired:{path}").as_bytes())?;
         self.tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace=$1 AND source_path=$2", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
         self.boundary()
     }
