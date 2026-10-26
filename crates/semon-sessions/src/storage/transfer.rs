@@ -273,7 +273,12 @@ impl TransferInbox {
     }
 
     pub fn checkpoint(&self, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
-        self.begin(manifest)
+        manifest.bind(&self.0)?;
+        match &self.0.backend {
+            StoreBackend::Sqlite { .. } => super::sqlite::transfer::checkpoint(&self.0, manifest),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => super::postgres::transfer::checkpoint(&self.0, pool, control, manifest),
+        }
     }
 
     pub fn staged_page(&self, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
@@ -318,6 +323,13 @@ fn decode_checkpoint(bytes: &[u8], manifest: &SnapshotManifest) -> Result<Transf
         || value.rows.iter().zip(&manifest.categories).any(|(rows, category)| *rows > category.rows)
     { return Err(StorageError::ScopeChanged); }
     Ok(value)
+}
+
+pub(crate) fn checkpoint_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    let stored = tx.get(&key(&manifest.digest, "manifest"), MAX_MANIFEST_BYTES)?.ok_or(StorageError::ScopeChanged)?;
+    if stored != encode_bounded(manifest, MAX_MANIFEST_BYTES)? { return Err(StorageError::Conflict); }
+    let bytes = tx.get(&key(&manifest.digest, "checkpoint"), MAX_MANIFEST_BYTES)?.ok_or(StorageError::ScopeChanged)?;
+    decode_checkpoint(&bytes, manifest)
 }
 
 pub(crate) fn stage_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManifest, page: &TransferPage, bytes: &[u8]) -> Result<TransferCheckpoint, StorageError> {

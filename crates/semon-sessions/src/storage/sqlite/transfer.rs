@@ -48,6 +48,10 @@ pub(crate) fn page(config: &StoreConfig, manifest: &SnapshotManifest, sequence: 
     transaction(config, |tx| transfer::page_tx(tx, manifest, sequence))
 }
 
+pub(crate) fn checkpoint(config: &StoreConfig, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    transaction(config, |tx| transfer::checkpoint_tx(tx, manifest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

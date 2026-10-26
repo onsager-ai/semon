@@ -33,6 +33,15 @@ impl PgCancellation {
             .as_ref()
             .map_or(pool_deadline, |(_, request)| pool_deadline.min(*request))
     }
+    pub(super) fn bounded(&self, deadline: Instant) -> Self {
+        let (cancelled, existing) = self.request.clone().unwrap_or_else(|| {
+            (Arc::new(AtomicBool::new(false)), deadline)
+        });
+        Self {
+            host: self.host.clone(),
+            request: Some((cancelled, existing.min(deadline))),
+        }
+    }
     pub(super) async fn cancelled(&self) {
         while !self.is_cancelled() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
