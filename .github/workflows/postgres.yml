@@ -208,7 +208,15 @@ jobs:
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-focused.log"
+      - name: Retain focused PostgreSQL diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-focused-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-focused.log
+          if-no-files-found: error
       - name: Reported facts shared codec and SQLite history oracle
         run: |
           cargo test -p semon-sessions --locked --features postgres-test-tls reported_rows -- --nocapture
