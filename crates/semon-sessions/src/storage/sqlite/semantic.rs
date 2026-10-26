@@ -61,7 +61,12 @@ impl AdmittedSource {
     /// Restore the existing native capability for the ordinary publisher. The
     /// publication transaction still validates this capability before effects.
     pub(crate) fn native(owner: crate::events::store::configured::NativeOwnership) -> Self {
-        Self { config: owner.config().clone(), admission: owner.admission(), owner: Some(owner), generation: None }
+        Self {
+            config: owner.config().clone(),
+            admission: owner.admission(),
+            owner: Some(owner),
+            generation: None,
+        }
     }
     pub(super) fn namespace(&self) -> &str {
         self.config.namespace.as_str()
