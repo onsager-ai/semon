@@ -977,6 +977,13 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        #[cfg(feature = "postgres")]
+        if self.sources.machines.iter().any(|(_, source)| source.store_config.as_ref().is_some_and(|config| matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }))) {
+            if matches!(tool, "list_sessions" | "stalls" | "find") {
+                return self.call_catalog_at(tool, args, None, crate::SessionSourceReadMode::LocalThenProvider, now);
+            }
+            return Err(QueryError::new("unavailable", "Configured PostgreSQL body reads require the host-selected Source reader"));
+        }
         if !self.embedded
             && self.sources.machines.len() == 1
             && !self.sources.is_retired()
