@@ -62,6 +62,15 @@ MCP transfers its selection snapshot to the request-owned proof readers and
 retains its later metadata publication checks. The last proof reader drop
 rolls back and closes the connection, releasing its WAL pin on every exit path.
 
+Retained selected Query fields use the embedded recipes of their qualified
+history Catalog and source-generation header. A newer Current publication may
+replace the mutable Query header for the same native owner; that header cannot
+invalidate the independently retained recipe. Selected fields and search recheck
+the complete relationship context after rendering. PostgreSQL selected reads
+also check the namespace/epoch-bound runtime observation before rendering and
+recheck runtime inputs afterward. Search eligibility traverses long recipes in
+64-slot pages under the existing transaction and metadata budgets.
+
 Index mutation preserves the outgoing path proof only while Current or
 retained-history source vectors reference its exact ledger. The reference
 decision, copy and replacement are one transaction. The next path mutation

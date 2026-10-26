@@ -460,7 +460,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // that also remains Current (the connected parent). Keep that full oracle
     // separately from the exact keys whose Current membership disappeared.
     let oracle_history_projection = sqlite_retained.iter().map(stable).collect::<Vec<_>>();
-    assert!(oracle_withdrawn.iter().all(|item| item["lifecycle"] == "retained"));
+    assert!(
+        oracle_withdrawn
+            .iter()
+            .all(|item| item["lifecycle"] == "retained")
+    );
     // Query totals also count virtual relationship stubs, whose membership can
     // change when a sender disappears. Native Catalog custody is the exact
     // difference of the native Current key sets, not that Query total delta.
@@ -1803,14 +1807,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: generation.clone(),
         options: facts_options.clone(),
     };
-    assert!(crate::storage::query::QueryCatalogStore::selected_body(
-        &changed_runtime_store,
-        &namespace,
-        &prepared.rows[0].key,
-        &serde_json::json!({"limit":1}),
-        1790812802000,
-        &retained_host,
-    ).is_err());
+    assert!(
+        crate::storage::query::QueryCatalogStore::selected_body(
+            &changed_runtime_store,
+            &namespace,
+            &prepared.rows[0].key,
+            &serde_json::json!({"limit":1}),
+            1790812802000,
+            &retained_host,
+        )
+        .is_err()
+    );
     let from = fs::metadata(&path).unwrap().len();
     let writer = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -2543,7 +2550,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
     // Membership and lifecycle are exact; removed rows come from custody.
-    let mut expected_retained = before_history.into_iter().collect::<std::collections::BTreeMap<_, _>>();
+    let mut expected_retained = before_history
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
     for (key, _) in &current {
         expected_retained.entry(key.clone()).or_insert(false);
     }
@@ -2554,7 +2563,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // retained scope. Check the exact SQLite projection, including that case.
     for row in &oracle_history_projection {
         if row["harness"] == "claude" {
-            expected_retained.insert(row["key"].as_str().unwrap().to_owned(), row["lifecycle"] == "retained");
+            expected_retained.insert(
+                row["key"].as_str().unwrap().to_owned(),
+                row["lifecycle"] == "retained",
+            );
         }
     }
     let mut expected_retained = expected_retained.into_iter().collect::<Vec<_>>();
@@ -2646,7 +2658,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .filter(|item| sqlite_before_current.contains(item["key"].as_str().unwrap()))
             .map(stable)
             .collect::<Vec<_>>(),
-        oracle_history_projection.iter().filter(|item| item["harness"] == "claude").cloned().collect::<Vec<_>>()
+        oracle_history_projection
+            .iter()
+            .filter(|item| item["harness"] == "claude")
+            .cloned()
+            .collect::<Vec<_>>()
     );
     // P3 search: metadata search over the published PG projection. A key
     // query finds its Current session; a removed key is absent from the

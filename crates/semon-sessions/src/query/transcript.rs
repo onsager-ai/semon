@@ -859,8 +859,8 @@ fn read_inner(
     let mut query_headers = Vec::new();
     if search.is_some() || session {
         for owner in &context {
-            if let Some(encoded) = crate::history_projection::catalog(&tx, &owner.key)
-                .map_err(unavailable)?
+            if let Some(encoded) =
+                crate::history_projection::catalog(&tx, &owner.key).map_err(unavailable)?
             {
                 // History owns its embedded selected recipes. A later Current
                 // publication replaces the mutable Query header for the same
