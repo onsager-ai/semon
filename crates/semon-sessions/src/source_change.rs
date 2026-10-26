@@ -226,6 +226,13 @@ impl SessionSourceWrite {
         })
     }
 
+    // PG fault/replay qualification captures the exact durable request before
+    // dropping the receiver. This is not a new request or a conversion path.
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn intent(&self) -> WriteIntent {
+        self.intent.clone()
+    }
+
     pub fn complete(mut self, to: u64) -> io::Result<()> {
         let after = Stat::of(&self.input.full_path(&self.options))?;
         let evidence = append_plan(
@@ -481,6 +488,11 @@ impl SessionFactsWrite {
             _lock: source_lock,
         })
     }
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn intent(&self) -> FactsIntent {
+        self.intent.clone()
+    }
+
     pub fn complete(mut self) -> io::Result<()> {
         self.store
             .facts_write_complete(&self.options, &self.intent)
@@ -642,16 +654,14 @@ impl SessionSourceRelocation {
 /// its current authoritative inventory and revalidate the native header.
 pub fn indexed_codex_sources(options: &Options, native_id: &str) -> io::Result<Vec<Input>> {
     #[cfg(feature = "postgres")]
-    if let Some(config) = options.source.selected_store() {
-        if matches!(
+    if let Some(config) = options.source.selected_store()
+        && matches!(
             config.backend,
             crate::storage::StoreBackend::Postgres { .. }
-        ) {
-            return crate::storage::postgres::host::indexed_codex_sources(
-                config, options, native_id,
-            )
+        )
+    {
+        return crate::storage::postgres::host::indexed_codex_sources(config, options, native_id)
             .map_err(io::Error::other);
-        }
     }
     let binding =
         crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
