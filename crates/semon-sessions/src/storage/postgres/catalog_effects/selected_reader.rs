@@ -26,6 +26,7 @@ pub(in crate::storage::postgres) fn with_reader<T>(
     host: &dyn SessionSourceReader,
     read: impl FnOnce(&dyn SessionSourceReader) -> io::Result<T>,
 ) -> Result<T, StorageError> {
+    if reference.native_id != source.native_id || reference.offset != source.offset || reference.prefix_sha256 != source.prefix_sha256 || reference.tail_sha256 != source.tail_sha256 { return Err(StorageError::ScopeChanged); }
     snapshot::with_admitted_generation(pool, namespace, control, generation, |_| {
         read(&Reader { pool, namespace, control, generation, source, reference, host }).map_err(|_| StorageError::ScopeChanged)
     })
