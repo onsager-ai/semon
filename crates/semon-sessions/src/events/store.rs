@@ -56,8 +56,8 @@ use super::{
     CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded, MessageUsage,
     ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
 };
-use crate::storage::sqlite::source_journal;
 use crate::storage::StorageError;
+use crate::storage::sqlite::source_journal;
 use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
@@ -7337,10 +7337,7 @@ mod tests {
             .unwrap()
             .source_observations()
             .unwrap();
-        assert_eq!(
-            journal.pending(64).unwrap(),
-            vec![path.clone()]
-        );
+        assert_eq!(journal.pending(64).unwrap(), vec![path.clone()]);
         assert_eq!(
             db.query_row(
                 "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
@@ -7350,7 +7347,7 @@ mod tests {
             .unwrap(),
             revision
         );
-        drop(store);
+        drop(journal);
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         let upgraded = (0..128).any(|_| {
             evidence
