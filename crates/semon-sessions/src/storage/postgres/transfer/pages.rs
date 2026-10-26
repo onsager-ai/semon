@@ -26,7 +26,7 @@ pub(super) fn capture(
         .clone()
         .ok_or(StorageError::ScopeChanged)?;
     if state.native_family == 3 {
-        let row=tx.0.driver.query_one("SELECT s.source_id,s.receipt,s.checkpoint::text,s.parser_version,s.usage_ready,g.generation,CASE WHEN octet_length(g.chunks_header)<=1048576 THEN g.chunks_header END,CASE WHEN octet_length(g.launch_header)<=1048576 THEN g.launch_header END,g.launch_header IS NULL FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) JOIN semon_pg_native_page_current p ON p.namespace=c.namespace AND p.namespace_digest=c.namespace_digest AND p.source_path=c.source_path JOIN semon_pg_native_page_generations g ON g.namespace=p.namespace AND g.namespace_digest=p.namespace_digest AND g.generation=p.generation AND g.source_id=s.source_id WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND c.source_path=$2",&[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+        let row=tx.0.driver.query_one("SELECT s.source_id,s.receipt,s.checkpoint::text,s.parser_version,s.usage_ready,g.generation,CASE WHEN octet_length(g.chunks_header)<=1048576 THEN g.chunks_header END,CASE WHEN octet_length(g.launch_header)<=1048576 THEN g.launch_header END,g.launch_header IS NULL FROM semon_pg_native_page_generations g JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND (($3::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current c WHERE c.namespace=g.namespace AND c.namespace_digest=g.namespace_digest AND c.source_path=g.source_path AND c.generation=g.generation)) OR ($3::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')=$3))",&[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?;
         let launch: Option<Vec<u8>> = row.get(7);
         if launch.is_none() && !row.get::<_, bool>(8) {
             return Err(StorageError::Busy);
@@ -35,6 +35,7 @@ pub(super) fn capture(
             |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged);
         let source = NativeSource {
             path: path.clone(),
+            backing: state.native_backing.clone(),
             generation: u64::try_from(row.get::<_, i64>(0))
                 .map_err(|_| StorageError::ScopeChanged)?,
             receipt: text(row.get(1))?,
@@ -63,12 +64,12 @@ pub(super) fn capture(
             _ => NativePageKind::Tree,
         };
         let cursor = state.native_key.as_ref().map(|s| s.as_bytes());
-        let suffix = "FROM semon_pg_native_page_current c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key";
+        let suffix = "FROM semon_pg_native_page_generations c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path=$2 AND (($5::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace=c.namespace AND p.namespace_digest=c.namespace_digest AND p.source_path=c.source_path AND p.generation=c.generation)) OR ($5::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||c.ledger),'hex')=$5)) AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key";
         let sizes =
             tx.0.driver
                 .query(
                     &format!("SELECT octet_length(b.payload) {suffix} LIMIT 64"),
-                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor],
+                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor, &state.native_backing],
                 )
                 .map_err(sqlstate::error)?;
         let mut count = 0;
@@ -92,7 +93,7 @@ pub(super) fn capture(
             tx.0.driver
                 .query(
                     &format!("SELECT r.page_key,b.payload {suffix} LIMIT {count}"),
-                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor],
+                    &[&ns, &path.as_bytes(), &kind(page_kind), &cursor, &state.native_backing],
                 )
                 .map_err(sqlstate::error)?;
         if rows.is_empty() {
@@ -104,6 +105,7 @@ pub(super) fn capture(
                 .map(|r| {
                     Ok(TransferRecord::NativePage {
                         path: path.clone(),
+                        backing: state.native_backing.clone(),
                         kind: page_kind,
                         key: String::from_utf8(r.get(0)).map_err(|_| StorageError::ScopeChanged)?,
                         payload: String::from_utf8(r.get::<_, Vec<u8>>(1))
@@ -114,6 +116,14 @@ pub(super) fn capture(
             native_pages::append(tx, state, Category::PageBlobs, records)?;
         }
     } else {
+        let next = tx.0.driver.query_opt("SELECT encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex') AS digest FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.source_path=g.source_path AND p.generation=g.generation) AND ($3::text IS NULL OR encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')>$3) ORDER BY digest LIMIT 1", &[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?.map(|r|r.get::<_,String>(0));
+        if let Some(next) = next {
+            state.native_backing = Some(next);
+            state.native_family = 3;
+            state.native_key = None;
+            transfer::reported::save_capture(tx, state)?;
+            return Ok(state.progress());
+        }
         let mut records = Vec::new();
         for prefix in [
             "native_claude_sidecar:",
@@ -135,6 +145,7 @@ pub(super) fn capture(
         if records.is_empty() {
             state.native_family = 8;
             state.native_key = None;
+            state.native_backing = None;
         } else {
             native_pages::append(tx, state, Category::NativeHeaders, records)?;
         }
@@ -148,23 +159,30 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     match record {
         TransferRecord::NativeSource(source) => {
+            if source.backing.is_none() {
             let (_, ledger) = super::super::native_reader::ledger(tx.0, &source.path)?
                 .ok_or(StorageError::ScopeChanged)?;
             native_pages::validate_source_ledger(source, &ledger)?;
+            }
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
-            tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
+            if source.backing.is_none() {
+                tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
+            }
             let id = source.id(tx.0.namespace.as_str())?;
             let launch = source.launch_header.as_ref().map(|s| s.as_bytes());
             tx.0.driver.execute("INSERT INTO semon_pg_native_page_generations(namespace,generation,source_id,source_path,ledger,chunks_header,launch_header) VALUES($1,$2,$3,$4,$5,$6,$7)",&[&ns,&id.0.as_bytes(),&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.chunks_header.as_bytes(),&launch]).map_err(sqlstate::error)?;
-            tx.0.driver.execute("INSERT INTO semon_pg_native_page_current(namespace,path_digest,source_path,generation) VALUES($1,sha256($2::bytea),$2,$3)",&[&ns,&source.path.as_bytes(),&id.0.as_bytes()]).map_err(sqlstate::error)?;
+            if source.backing.is_none() {
+                tx.0.driver.execute("INSERT INTO semon_pg_native_page_current(namespace,path_digest,source_path,generation) VALUES($1,sha256($2::bytea),$2,$3)",&[&ns,&source.path.as_bytes(),&id.0.as_bytes()]).map_err(sqlstate::error)?;
+            }
         }
         TransferRecord::NativePage {
             path,
+            backing,
             kind: page_kind,
             key,
             payload,
         } => {
-            let id:Vec<u8>=tx.0.driver.query_one("SELECT generation FROM semon_pg_native_page_current WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND source_path=$2",&[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            let id:Vec<u8>=tx.0.driver.query_one("SELECT g.generation FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND (($3::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace=g.namespace AND p.namespace_digest=g.namespace_digest AND p.source_path=g.source_path AND p.generation=g.generation)) OR ($3::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')=$3))",&[&ns,&path.as_bytes(),backing]).map_err(sqlstate::error)?.get(0);
             let digest = Sha256::digest(payload.as_bytes()).to_vec();
             tx.0.driver.execute("INSERT INTO semon_pg_native_page_blobs(namespace,digest,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",&[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?;
             let same:bool=tx.0.driver.query_one("SELECT payload=$3 FROM semon_pg_native_page_blobs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND digest=$2",&[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?.get(0);

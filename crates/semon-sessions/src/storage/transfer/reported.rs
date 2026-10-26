@@ -63,6 +63,7 @@ pub(crate) struct CaptureState {
     pub(crate) native_path: Option<String>,
     pub(crate) native_family: u8,
     pub(crate) native_key: Option<String>,
+    pub(crate) native_backing: Option<String>,
 }
 impl CaptureState {
     pub(crate) fn progress(&self) -> CaptureProgress {
@@ -158,6 +159,7 @@ pub(crate) fn start_capture(
         native_path: None,
         native_family: 0,
         native_key: None,
+        native_backing: None,
     };
     tx.put(FREEZE, &encode_bounded(operation, MAX_MANIFEST_BYTES)?)?;
     if let Some(stamp) = stamp {

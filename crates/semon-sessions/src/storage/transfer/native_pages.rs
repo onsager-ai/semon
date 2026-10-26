@@ -5,6 +5,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub struct NativeSource {
     pub path: String,
+    pub backing: Option<String>,
     pub generation: u64,
     pub receipt: String,
     pub checkpoint: u64,
@@ -57,6 +58,11 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
     let bad = || StorageError::ScopeChanged;
     match record {
         TransferRecord::NativeSource(source) => {
+            if let Some(backing) = &source.backing
+                && *backing != crate::source_carrier::ledger_digest_value(&source.receipt)
+            {
+                return Err(bad());
+            }
             if source.path.is_empty()
                 || source.generation == 0
                 || source.generation > i64::MAX as u64
@@ -89,11 +95,12 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
         }
         TransferRecord::NativePage {
             path,
+            backing,
             kind,
             key,
             payload,
         } => {
-            if path.is_empty() {
+            if path.is_empty() || backing.as_ref().is_some_and(|v| v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit())) {
                 return Err(bad());
             }
             match kind {
