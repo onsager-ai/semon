@@ -3,8 +3,8 @@
 //! Credentials, connect deadlines and TLS (including cancellation TLS) belong to
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
-mod changes;
 mod catalog_effects;
+mod changes;
 pub(crate) mod current_sources;
 pub(crate) mod index_store;
 mod model_cache;
@@ -34,11 +34,11 @@ mod tree_writer;
 mod txn;
 
 pub use cancel::PgCancellation;
+pub(super) use changes::MetadataStore;
 pub use operations::{OperationIdentity, Reconciliation};
 pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLimits};
 pub use source_journal::PgSourceJournal;
 pub use store_metadata::PgStoreMetadata;
-pub(super) use changes::MetadataStore;
 
 /// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
 fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
@@ -156,13 +156,8 @@ pub(crate) fn catalog_page(
         control,
         &generation,
         |snapshot| {
-            crate::catalog::read_page_snapshot(
-                options,
-                source,
-                request,
-                snapshot,
-            )
-            .map_err(|_| super::StorageError::Unavailable)
+            crate::catalog::read_page_snapshot(options, source, request, snapshot)
+                .map_err(|_| super::StorageError::Unavailable)
         },
     )
 }

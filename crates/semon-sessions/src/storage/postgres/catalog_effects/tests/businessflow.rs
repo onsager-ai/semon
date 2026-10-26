@@ -2204,21 +2204,55 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(list.to_string().contains("source-write-after158"));
     let metadata = config.clone().open().unwrap();
     let mut hints = metadata.read_snapshot(&namespace).unwrap();
-    for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
-        let page = hints.catalog_changes(&namespace, crate::storage::CatalogChangesRequest {
-            scope, stream_epoch: config.expected_stream_epoch.as_deref(), after: 0, limit: 256,
-        }).unwrap();
+    for scope in [
+        crate::CatalogReadScope::Current,
+        crate::CatalogReadScope::RetainedHistory,
+    ] {
+        let page = hints
+            .catalog_changes(
+                &namespace,
+                crate::storage::CatalogChangesRequest {
+                    scope,
+                    stream_epoch: config.expected_stream_epoch.as_deref(),
+                    after: 0,
+                    limit: 256,
+                },
+            )
+            .unwrap();
         assert_eq!(page.source_generation, facts_generation);
         assert!(page.caught_up);
         assert!(!page.changes.is_empty());
-        assert!(facts_rows.iter().all(|row| page.changes.iter().any(|hint| hint.catalog_key == row.key)));
-        assert!(page.changes.windows(2).all(|pair| pair[0].revision < pair[1].revision));
-        let compacted = metadata.compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256).unwrap();
+        assert!(
+            facts_rows
+                .iter()
+                .all(|row| page.changes.iter().any(|hint| hint.catalog_key == row.key))
+        );
+        assert!(
+            page.changes
+                .windows(2)
+                .all(|pair| pair[0].revision < pair[1].revision)
+        );
+        let compacted = metadata
+            .compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256)
+            .unwrap();
         assert!(compacted.removed > 0);
-        assert!(hints.catalog_changes(&namespace, crate::storage::CatalogChangesRequest {
-            scope, stream_epoch: Some(&page.stream_epoch), after: 0, limit: 256,
-        }).is_err(), "compaction invalidates an old cursor");
-        let repeated = metadata.compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256).unwrap();
+        assert!(
+            hints
+                .catalog_changes(
+                    &namespace,
+                    crate::storage::CatalogChangesRequest {
+                        scope,
+                        stream_epoch: Some(&page.stream_epoch),
+                        after: 0,
+                        limit: 256,
+                    }
+                )
+                .is_err(),
+            "compaction invalidates an old cursor"
+        );
+        let repeated = metadata
+            .compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256)
+            .unwrap();
         assert_eq!(repeated.removed, 0);
         assert_eq!(repeated.compacted_through, compacted.compacted_through);
     }
@@ -2226,11 +2260,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let factory_options = facts_options.clone();
     let factory_rows = facts_rows.clone();
     let factory_namespace = namespace.clone();
-    let facts_readers = move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
-        assert_eq!(source, factory_namespace.as_str());
-        assert!(factory_rows.iter().any(|row| row.key == key));
-        Ok(Box::new(body_host(&factory_options, &factory_rows)))
-    };
+    let facts_readers =
+        move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+            assert_eq!(source, factory_namespace.as_str());
+            assert!(factory_rows.iter().any(|row| row.key == key));
+            Ok(Box::new(body_host(&factory_options, &factory_rows)))
+        };
     for row in &facts_rows {
         for tool in ["read_transcript", "get_session"] {
             let args = serde_json::json!({"id":row.key});
@@ -2259,10 +2294,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "configured ordinary Facts selected {tool} {}",
                 row.key
             );
-            assert_eq!(facts_query.call_catalog_at(
-                tool, &args, Some(&facts_readers),
-                crate::SessionSourceReadMode::LocalThenProvider, 1790812805000,
-            ).unwrap(), expected, "ordinary host-routed {tool} {}", row.key);
+            assert_eq!(
+                facts_query
+                    .call_catalog_at(
+                        tool,
+                        &args,
+                        Some(&facts_readers),
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        1790812805000,
+                    )
+                    .unwrap(),
+                expected,
+                "ordinary host-routed {tool} {}",
+                row.key
+            );
         }
     }
 

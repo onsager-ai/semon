@@ -258,8 +258,17 @@ fn publish_operation(
     let withdrawn_keys = if let Some(previous) = expected {
         tx.driver.query("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[])", &[&ns, &previous.as_bytes(), &leaving]).map_err(sqlstate::error)?
             .iter().map(|row| String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>()?
-    } else { Vec::new() };
-    super::super::changes::publish(tx, publication.rows.iter().map(|row| row.key.as_str()).chain(withdrawn_keys.iter().map(String::as_str)))?;
+    } else {
+        Vec::new()
+    };
+    super::super::changes::publish(
+        tx,
+        publication
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .chain(withdrawn_keys.iter().map(String::as_str)),
+    )?;
     tx.check()?;
     Ok((Outcome::Written, Some(generation)))
 }

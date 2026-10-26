@@ -1,8 +1,13 @@
 //! Durable hydration hints commit with the acknowledged Catalog publication.
-use super::{model_cache, sqlstate, txn::{PgTxn, TxnKind}};
+use super::{
+    model_cache, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
+use crate::storage::{
+    CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
+    StorageError, StoreBackend, StoreConfig,
+};
 use crate::{CatalogChange, CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
-use crate::storage::{CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot,
-    SessionMetadataStore, StorageError, StoreBackend, StoreConfig};
 
 fn scope_key(scope: CatalogReadScope) -> &'static [u8] {
     match scope {
@@ -13,7 +18,10 @@ fn scope_key(scope: CatalogReadScope) -> &'static [u8] {
 
 /// The publisher holds SourceState through commit. Replayed publication ACKs
 /// return before this call, so an uncertain commit cannot duplicate revisions.
-pub(super) fn publish<'a>(tx: &mut PgTxn<'_>, keys: impl Iterator<Item = &'a str>) -> Result<(), StorageError> {
+pub(super) fn publish<'a>(
+    tx: &mut PgTxn<'_>,
+    keys: impl Iterator<Item = &'a str>,
+) -> Result<(), StorageError> {
     let keys = keys.collect::<std::collections::BTreeSet<_>>();
     if keys.iter().any(|key| key.is_empty() || key.len() > 4096)
         || keys.iter().map(|key| key.len() + 32).sum::<usize>() * 2 > 1024 * 1024
@@ -35,7 +43,7 @@ pub(super) fn publish<'a>(tx: &mut PgTxn<'_>, keys: impl Iterator<Item = &'a str
     Ok(())
 }
 
-pub(super) struct MetadataStore(pub(super) StoreConfig);
+pub(in crate::storage) struct MetadataStore(pub(in crate::storage) StoreConfig);
 struct Snapshot {
     config: StoreConfig,
     epoch: String,
@@ -43,14 +51,19 @@ struct Snapshot {
     cursors: [(u64, u64); 2],
 }
 fn index(scope: CatalogReadScope) -> usize {
-    match scope { CatalogReadScope::Current => 0, CatalogReadScope::RetainedHistory => 1 }
+    match scope {
+        CatalogReadScope::Current => 0,
+        CatalogReadScope::RetainedHistory => 1,
+    }
 }
 fn cursor(tx: &mut PgTxn<'_>, scope: CatalogReadScope) -> Result<(u64, u64), StorageError> {
     let rows = tx.driver.query("SELECT head,floor FROM semon_pg_native_change_feed_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND read_scope=$2", &[&tx.namespace.as_str().as_bytes(), &scope_key(scope)]).map_err(sqlstate::error)?;
     let row = rows.first().ok_or(StorageError::ScopeChanged)?;
     let head = u64::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?;
     let floor = u64::try_from(row.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
-    if floor > head { return Err(StorageError::ScopeChanged); }
+    if floor > head {
+        return Err(StorageError::ScopeChanged);
+    }
     Ok((head, floor))
 }
 fn check(tx: &mut PgTxn<'_>, config: &StoreConfig) -> Result<String, StorageError> {
@@ -61,20 +74,48 @@ fn check(tx: &mut PgTxn<'_>, config: &StoreConfig) -> Result<String, StorageErro
     Ok(binding.stream_epoch)
 }
 impl SessionMetadataStore for MetadataStore {
-    fn read_snapshot(&self, namespace: &LogicalSourceNamespace) -> Result<Box<dyn MetadataReadSnapshot>, StorageError> {
-        if namespace != &self.0.namespace { return Err(StorageError::NamespaceMismatch); }
-        let StoreBackend::Postgres { pool, control } = &self.0.backend else { return Err(StorageError::InvalidArguments); };
+    fn read_snapshot(
+        &self,
+        namespace: &LogicalSourceNamespace,
+    ) -> Result<Box<dyn MetadataReadSnapshot>, StorageError> {
+        if namespace != &self.0.namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
+        let StoreBackend::Postgres { pool, control } = &self.0.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
         pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
             let epoch = check(tx, &self.0)?;
             let generation = model_cache::generation(tx)?.ok_or(StorageError::ScopeChanged)?;
-            let cursors = [cursor(tx, CatalogReadScope::Current)?, cursor(tx, CatalogReadScope::RetainedHistory)?];
-            Ok(Box::new(Snapshot { config: self.0.clone(), epoch, generation, cursors }) as Box<dyn MetadataReadSnapshot>)
+            let cursors = [
+                cursor(tx, CatalogReadScope::Current)?,
+                cursor(tx, CatalogReadScope::RetainedHistory)?,
+            ];
+            Ok(Box::new(Snapshot {
+                config: self.0.clone(),
+                epoch,
+                generation,
+                cursors,
+            }) as Box<dyn MetadataReadSnapshot>)
         })
     }
-    fn compact_catalog_changes(&self, namespace: &LogicalSourceNamespace, scope: CatalogReadScope, epoch: &str, acknowledged: u64, limit: usize) -> Result<CatalogChangeCompaction, StorageError> {
-        if namespace != &self.0.namespace { return Err(StorageError::NamespaceMismatch); }
-        if limit == 0 || limit > 256 || acknowledged > i64::MAX as u64 { return Err(StorageError::InvalidArguments); }
-        let StoreBackend::Postgres { pool, control } = &self.0.backend else { return Err(StorageError::InvalidArguments); };
+    fn compact_catalog_changes(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        scope: CatalogReadScope,
+        epoch: &str,
+        acknowledged: u64,
+        limit: usize,
+    ) -> Result<CatalogChangeCompaction, StorageError> {
+        if namespace != &self.0.namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
+        if limit == 0 || limit > 256 || acknowledged > i64::MAX as u64 {
+            return Err(StorageError::InvalidArguments);
+        }
+        let StoreBackend::Postgres { pool, control } = &self.0.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
         pool.transaction(namespace, TxnKind::Write, control, |tx| {
             tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
             if check(tx, &self.0)? != epoch { return Err(StorageError::ScopeChanged); }
@@ -94,14 +135,27 @@ impl SessionMetadataStore for MetadataStore {
     }
 }
 impl MetadataReadSnapshot for Snapshot {
-    fn catalog_changes(&mut self, namespace: &LogicalSourceNamespace, request: CatalogChangesRequest<'_>) -> Result<CatalogChangePage, StorageError> {
+    fn catalog_changes(
+        &mut self,
+        namespace: &LogicalSourceNamespace,
+        request: CatalogChangesRequest<'_>,
+    ) -> Result<CatalogChangePage, StorageError> {
         request.validate()?;
-        if namespace != &self.config.namespace { return Err(StorageError::NamespaceMismatch); }
+        if namespace != &self.config.namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
         let (head, floor) = self.cursors[index(request.scope)];
-        if request.stream_epoch.is_some_and(|epoch| epoch != self.epoch) || request.after < floor || request.after > head {
+        if request
+            .stream_epoch
+            .is_some_and(|epoch| epoch != self.epoch)
+            || request.after < floor
+            || request.after > head
+        {
             return Err(StorageError::ScopeChanged);
         }
-        let StoreBackend::Postgres { pool, control } = &self.config.backend else { return Err(StorageError::InvalidArguments); };
+        let StoreBackend::Postgres { pool, control } = &self.config.backend else {
+            return Err(StorageError::InvalidArguments);
+        };
         pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
             if check(tx, &self.config)? != self.epoch || cursor(tx, request.scope)?.1 > request.after {
                 return Err(StorageError::ScopeChanged);
