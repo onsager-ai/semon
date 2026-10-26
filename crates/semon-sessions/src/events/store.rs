@@ -6768,7 +6768,9 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
     super::reported_rows::ReportedRow::new(&run)
         .and_then(|row| {
             if row.model_usage != model_usage {
-                return Err(<serde_json::Error as serde::de::Error>::custom("noncanonical reported model usage"));
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "noncanonical reported model usage",
+                ));
             }
             Ok(row.run)
         })

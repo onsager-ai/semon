@@ -81,7 +81,9 @@ pub(crate) fn encode_stamp(stamp: &ReportedFileStamp) -> Result<Vec<u8>, serde_j
 
 pub(crate) fn decode_stamp(bytes: &[u8]) -> Result<ReportedFileStamp, serde_json::Error> {
     let stamp = serde_json::from_slice(bytes)?;
-    if encode_stamp(&stamp)? != bytes { return Err(invalid("noncanonical or incomplete reported stamp")); }
+    if encode_stamp(&stamp)? != bytes {
+        return Err(invalid("noncanonical or incomplete reported stamp"));
+    }
     Ok(stamp)
 }
 
@@ -126,6 +128,9 @@ mod tests {
             ..Default::default()
         };
         assert!(plan(&[bad]).is_err());
-        assert!(decode_stamp(br#"{"dev":1,"ino":2,"size":3,"modified_ns":4,"unsupported":true}"#).is_err());
+        assert!(
+            decode_stamp(br#"{"dev":1,"ino":2,"size":3,"modified_ns":4,"unsupported":true}"#)
+                .is_err()
+        );
     }
 }

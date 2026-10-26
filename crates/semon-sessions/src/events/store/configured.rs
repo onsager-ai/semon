@@ -1017,12 +1017,25 @@ struct Intent {
 }
 
 fn read_reported_stamp(db: &Connection) -> Result<Option<ReportedFileStamp>, StorageError> {
-    let text: Option<String> = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'", [], |r| r.get(0)).optional().map_err(failed)?;
+    let text: Option<String> = db
+        .query_row(
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
     if text.is_none() {
         let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=semon_namespace() LIMIT 1)", [], |r| r.get(0)).map_err(failed)?;
-        if exists { return Err(StorageError::Unavailable); }
+        if exists {
+            return Err(StorageError::Unavailable);
+        }
     }
-    text.map(|text| super::super::reported_rows::decode_stamp(text.as_bytes()).map_err(|_| StorageError::Unavailable)).transpose()
+    text.map(|text| {
+        super::super::reported_rows::decode_stamp(text.as_bytes())
+            .map_err(|_| StorageError::Unavailable)
+    })
+    .transpose()
 }
 
 pub(crate) struct Writer {
@@ -1116,7 +1129,9 @@ impl Writer {
         mut begin: impl FnMut(Option<&ReportedFileStamp>) -> Result<(), StorageError>,
         mut record: impl FnMut(ReportedRunSnapshot) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        if self.owner.is_none() { return Err(StorageError::NamespaceUpgradePending); }
+        if self.owner.is_none() {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         check()?;
         let db = self.snapshot()?;
         let stamp = read_reported_stamp(&db)?;
@@ -1125,11 +1140,18 @@ impl Writer {
         let mut rows = statement.query([]).map_err(failed)?;
         loop {
             check()?;
-            let Some(row) = rows.next().map_err(failed)? else { break; };
+            let Some(row) = rows.next().map_err(failed)? else {
+                break;
+            };
             let bytes: i64 = row.get(10).map_err(failed)?;
             let bytes = usize::try_from(bytes).map_err(|_| StorageError::Unavailable)?;
-            let charged = bytes.checked_mul(8).and_then(|n| n.checked_add(512)).ok_or(StorageError::Busy)?;
-            if bytes > 32 * 1024 * 1024 || charged > 64 * 1024 * 1024 { return Err(StorageError::Busy); }
+            let charged = bytes
+                .checked_mul(8)
+                .and_then(|n| n.checked_add(512))
+                .ok_or(StorageError::Busy)?;
+            if bytes > 32 * 1024 * 1024 || charged > 64 * 1024 * 1024 {
+                return Err(StorageError::Busy);
+            }
             check()?;
             record(read_run(row).map_err(failed)?)?;
         }
@@ -2825,23 +2847,70 @@ mod tests {
         let before = writer.reported_stamp().unwrap().unwrap();
         let mut exported = Vec::new();
         let mut exported_stamp = None;
-        writer.export_reported_runs(|| Ok(()), |stamp| { exported_stamp = stamp.cloned(); Ok(()) }, |run| { exported.push(run); Ok(()) }).unwrap();
+        writer
+            .export_reported_runs(
+                || Ok(()),
+                |stamp| {
+                    exported_stamp = stamp.cloned();
+                    Ok(())
+                },
+                |run| {
+                    exported.push(run);
+                    Ok(())
+                },
+            )
+            .unwrap();
         assert_eq!(exported, expected);
         assert_eq!(exported_stamp, Some(before.clone()));
         let mut replacement = expected[0].clone();
         replacement.capture_at += 1000;
-        let advanced_stamp = ReportedFileStamp { size: before.size.wrapping_add(1), ..before.clone() };
+        let advanced_stamp = ReportedFileStamp {
+            size: before.size.wrapping_add(1),
+            ..before.clone()
+        };
         let mut old_snapshot = Vec::new();
-        writer.export_reported_runs(|| Ok(()), |stamp| {
-            assert_eq!(stamp, Some(&before));
-            writer.save_reported_runs(std::slice::from_ref(&replacement), &advanced_stamp, Some(&selected))?;
-            Ok(())
-        }, |run| { old_snapshot.push(run); Ok(()) }).unwrap();
+        writer
+            .export_reported_runs(
+                || Ok(()),
+                |stamp| {
+                    assert_eq!(stamp, Some(&before));
+                    writer.save_reported_runs(
+                        std::slice::from_ref(&replacement),
+                        &advanced_stamp,
+                        Some(&selected),
+                    )?;
+                    Ok(())
+                },
+                |run| {
+                    old_snapshot.push(run);
+                    Ok(())
+                },
+            )
+            .unwrap();
         assert_eq!(old_snapshot, expected);
         assert_eq!(writer.reported_stamp().unwrap(), Some(advanced_stamp));
-        assert_eq!(writer.save_reported_runs(&expected, &before, Some(&selected)).unwrap(), expected);
+        assert_eq!(
+            writer
+                .save_reported_runs(&expected, &before, Some(&selected))
+                .unwrap(),
+            expected
+        );
         let mut checks = 0;
-        assert!(matches!(writer.export_reported_runs(|| { checks += 1; if checks >= 4 { Err(StorageError::Busy) } else { Ok(()) } }, |_| Ok(()), |_| Ok(())), Err(StorageError::Busy)));
+        assert!(matches!(
+            writer.export_reported_runs(
+                || {
+                    checks += 1;
+                    if checks >= 4 {
+                        Err(StorageError::Busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| Ok(()),
+                |_| Ok(())
+            ),
+            Err(StorageError::Busy)
+        ));
         let changed = ReportedFileStamp {
             size: 123,
             ..before.clone()
@@ -2921,14 +2990,34 @@ mod tests {
         ] {
             let (a, _, _) = same_db_sources();
             let writer = Writer::owned(NativeOwnership::admit(&a.config).unwrap());
-            let run = ReportedRunSnapshot { last_session_id: "same\0原生".into(), last_duration: Some(u64::MAX), ..Default::default() };
-            let stamp: ReportedFileStamp = serde_json::from_str(r#"{"dev":1,"ino":2,"size":3,"modified_ns":4}"#).unwrap();
-            writer.save_reported_runs(std::slice::from_ref(&run), &stamp, None).unwrap();
-            connection(&a.config).unwrap().execute_batch(poison).unwrap();
+            let run = ReportedRunSnapshot {
+                last_session_id: "same\0原生".into(),
+                last_duration: Some(u64::MAX),
+                ..Default::default()
+            };
+            let stamp: ReportedFileStamp =
+                serde_json::from_str(r#"{"dev":1,"ino":2,"size":3,"modified_ns":4}"#).unwrap();
+            writer
+                .save_reported_runs(std::slice::from_ref(&run), &stamp, None)
+                .unwrap();
+            connection(&a.config)
+                .unwrap()
+                .execute_batch(poison)
+                .unwrap();
             let before = shared_state(&a);
-            assert!(writer.save_reported_runs(std::slice::from_ref(&run), &stamp, None).is_err(), "{poison}");
+            assert!(
+                writer
+                    .save_reported_runs(std::slice::from_ref(&run), &stamp, None)
+                    .is_err(),
+                "{poison}"
+            );
             assert_eq!(shared_state(&a), before, "{poison}");
-            assert!(writer.reported_runs(&BTreeSet::from([run.last_session_id])).is_err(), "{poison}");
+            assert!(
+                writer
+                    .reported_runs(&BTreeSet::from([run.last_session_id]))
+                    .is_err(),
+                "{poison}"
+            );
         }
     }
 

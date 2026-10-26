@@ -395,7 +395,13 @@ mod tests {
             let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
             assert!(fd >= 0);
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
-            let watch = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN | libc::IN_ACCESS | libc::IN_CREATE) };
+            let watch = unsafe {
+                libc::inotify_add_watch(
+                    fd,
+                    path.as_ptr(),
+                    libc::IN_OPEN | libc::IN_ACCESS | libc::IN_CREATE,
+                )
+            };
             assert!(watch >= 0);
             Self(file)
         }
@@ -403,7 +409,10 @@ mod tests {
         fn assert_no_access(mut self) {
             use std::io::Read;
             let mut events = [0u8; 4096];
-            let error = self.0.read(&mut events).expect_err("PG accessed or created a file in the SQLite fixture directory");
+            let error = self
+                .0
+                .read(&mut events)
+                .expect_err("PG accessed or created a file in the SQLite fixture directory");
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         }
     }
@@ -720,22 +729,59 @@ mod tests {
         let source = ns("snapshot-facts");
         seed(&pool, &source);
         let control = PgCancellation::default();
-        save(&pool, &source, 0, &"a".repeat(64), &runs[..1], &stamp, &control).unwrap();
+        save(
+            &pool,
+            &source,
+            0,
+            &"a".repeat(64),
+            &runs[..1],
+            &stamp,
+            &control,
+        )
+        .unwrap();
         let named = BTreeSet::from([runs[0].last_session_id.clone()]);
-        let returned = save_selected(&pool, &source, 0, &"b".repeat(64), &runs[1..], &stamp, Some(&named), &control).unwrap();
+        let returned = save_selected(
+            &pool,
+            &source,
+            0,
+            &"b".repeat(64),
+            &runs[1..],
+            &stamp,
+            Some(&named),
+            &control,
+        )
+        .unwrap();
         assert_eq!(returned.runs, runs);
         assert_eq!(returned.stamp, Some(stamp.clone()));
         assert_eq!(returned.revision, 0);
         let mut replacement = runs[0].clone();
         replacement.capture_at += 1000;
-        let changed_stamp = ReportedFileStamp { size: stamp.size.wrapping_add(1), ..stamp.clone() };
+        let changed_stamp = self::stamp();
         let mut exported = Vec::new();
         let mut header = None;
-        export_snapshot(&pool, &source, &control, |revision, observed| {
-            header = Some((revision, observed.cloned()));
-            // Advance the same Source after the export has pinned its snapshot.
-            save(&pool, &source, 0, &"c".repeat(64), std::slice::from_ref(&replacement), &changed_stamp, &control)
-        }, |run| { exported.push(run); Ok(()) }).unwrap();
+        export_snapshot(
+            &pool,
+            &source,
+            &control,
+            |revision, observed| {
+                header = Some((revision, observed.cloned()));
+                // Advance the same Source after the export has pinned its snapshot.
+                save(
+                    &pool,
+                    &source,
+                    0,
+                    &"c".repeat(64),
+                    std::slice::from_ref(&replacement),
+                    &changed_stamp,
+                    &control,
+                )
+            },
+            |run| {
+                exported.push(run);
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(header, Some((0, Some(stamp))));
         assert_eq!(exported, runs);
         let current = load(&pool, &source, Some(&named), &control).unwrap();
@@ -755,15 +801,28 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let worker = {
             let (pool, source, control) = (pool.clone(), source.clone(), control.clone());
-            std::thread::spawn(move || export_snapshot(&pool, &source, &control, |_, _| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            }, |_| panic!("empty snapshot produced a row")))
+            std::thread::spawn(move || {
+                export_snapshot(
+                    &pool,
+                    &source,
+                    &control,
+                    |_, _| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    },
+                    |_| panic!("empty snapshot produced a row"),
+                )
+            })
         };
-        entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         control.cancel();
-        assert!(matches!(load(&pool, &source, None, &PgCancellation::default()), Err(StorageError::Busy)));
+        assert!(matches!(
+            load(&pool, &source, None, &PgCancellation::default()),
+            Err(StorageError::Busy)
+        ));
         assert_eq!(pool.accounted(), 1);
         release_tx.send(()).unwrap();
         assert!(matches!(worker.join().unwrap(), Err(StorageError::Busy)));
@@ -964,10 +1023,28 @@ mod tests {
             let source = ns("corrupt-facts");
             seed(&pool, &source);
             let control = PgCancellation::default();
-            let run = ReportedRunSnapshot { last_session_id: "same\0原生".into(), last_duration: Some(u64::MAX), ..Default::default() };
-            save(&pool, &source, 0, &"a".repeat(64), std::slice::from_ref(&run), &stamp(), &control).unwrap();
+            let run = ReportedRunSnapshot {
+                last_session_id: "same\0原生".into(),
+                last_duration: Some(u64::MAX),
+                ..Default::default()
+            };
+            save(
+                &pool,
+                &source,
+                0,
+                &"a".repeat(64),
+                std::slice::from_ref(&run),
+                &stamp(),
+                &control,
+            )
+            .unwrap();
             let mut client = factory.client();
-            client.query_one("SELECT set_config('semon.namespace',$1,false)", &[&super::super::namespace_context(&source)]).unwrap();
+            client
+                .query_one(
+                    "SELECT set_config('semon.namespace',$1,false)",
+                    &[&super::super::namespace_context(&source)],
+                )
+                .unwrap();
             client.batch_execute(poison).unwrap();
             let state = |client: &mut ::postgres::Client| {
                 [
@@ -977,7 +1054,19 @@ mod tests {
                 ].into_iter().map(|sql| client.query(sql, &[]).unwrap().into_iter().map(|r| r.get::<_,String>(0)).collect::<Vec<_>>()).collect::<Vec<_>>()
             };
             let before = state(&mut client);
-            assert!(save(&pool, &source, 0, &"b".repeat(64), std::slice::from_ref(&run), &stamp(), &control).is_err(), "{poison}");
+            assert!(
+                save(
+                    &pool,
+                    &source,
+                    0,
+                    &"b".repeat(64),
+                    std::slice::from_ref(&run),
+                    &stamp(),
+                    &control
+                )
+                .is_err(),
+                "{poison}"
+            );
             assert_eq!(state(&mut client), before, "{poison}");
             if !poison.starts_with("UPDATE semon_pg_source_state") {
                 assert!(load(&pool, &source, None, &control).is_err(), "{poison}");
