@@ -199,7 +199,13 @@ impl OriginalHistoryStore for History<'_, '_> {
         // Match the ordinary SQLite custody contract: any changed owner
         // observation preserves its original recipe, including a same-harness
         // relationship change after a connected Source disappears.
-        if previous.as_deref() == Some(serde_json::to_string(row).map_err(|_| StorageError::ScopeChanged)?.as_str()) {
+        if previous.as_deref()
+            == Some(
+                serde_json::to_string(row)
+                    .map_err(|_| StorageError::ScopeChanged)?
+                    .as_str(),
+            )
+        {
             return Ok(None);
         }
         let old: Option<CatalogRow> = previous
