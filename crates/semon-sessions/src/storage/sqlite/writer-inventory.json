@@ -90,6 +90,7 @@
     "native_tree/tests.rs",
     "overview.rs",
     "overview_repair.rs",
+    "pricing/runtime.rs",
     "query/tests.rs",
     "query/tests/recovery_tests.rs",
     "query/transcript.rs",

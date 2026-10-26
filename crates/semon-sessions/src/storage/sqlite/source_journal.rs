@@ -283,8 +283,8 @@ impl SourceJournal {
         Ok(db)
     }
 
-    // Reuse only this journal's writer connection. Reader snapshots remain
-    // independent. Qualify the committed physical layout before reserving the
+    // Reuse this journal's short operation connection. Long-lived ReaderLease
+    // snapshots remain independent. Qualify physical layout before reserving the
     // writer; validate() still checks live admission and epoch in every tx.
     fn writer(&self) -> Result<std::cell::RefMut<'_, Connection>, StorageError> {
         let mut writer = self.writer.borrow_mut();
@@ -346,12 +346,7 @@ impl SourceJournal {
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 
-    fn snapshot(&self) -> Result<Connection, StorageError> {
-        let db = self.connection()?;
-        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        self.validate(&db)?;
-        Ok(db)
-    }
+
 }
 
 impl SourceJournal {
@@ -369,16 +364,20 @@ impl SourceJournal {
 
 impl SourceObservationStore for SourceJournal {
     fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
-        let db = self.snapshot()?;
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
         self.owner.as_ref().ok_or(StorageError::Unavailable)?;
-        // This adapter opens a fresh transaction for each operation, so it has
-        // no retained owner-connection witness. Run the bounded durable page.
+        // A retained connection is not a committed discovery witness. Run the
+        // bounded durable page until the current producer records completion.
         drop(db);
         Ok(false)
     }
 
     fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
-        let db = self.snapshot()?;
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
         self.owner.as_ref().ok_or(StorageError::Unavailable)?;
         db.query_row(
             "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after'",
@@ -573,7 +572,9 @@ impl SourceObservationStore for SourceJournal {
         paths: &[String],
     ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
         validate_paths(paths)?;
-        let db = self.snapshot()?;
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
         claims(&db, self.config.namespace.as_str(), paths).map_err(failed)
     }
 
@@ -581,7 +582,9 @@ impl SourceObservationStore for SourceJournal {
         if limit == 0 || limit > MAX_PATHS {
             return Err(StorageError::InvalidArguments);
         }
-        let db = self.snapshot()?;
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
         let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
         let paths = statement
             .query_map(params![self.config.namespace.as_str(), limit as i64], |r| {
@@ -594,7 +597,9 @@ impl SourceObservationStore for SourceJournal {
     }
 
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
-        let db = self.snapshot()?;
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
         db.query_row(
             "SELECT backfill_state FROM storage_source_journal WHERE namespace=?1",
             [self.config.namespace.as_str()],

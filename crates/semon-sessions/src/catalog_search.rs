@@ -1617,7 +1617,14 @@ mod sqlite_tests {
         assert_eq!(search(&connection, "replacement", None, 2).rows.len(), 1);
         connection.execute_batch("DELETE FROM catalog_members; INSERT INTO catalog_members SELECT session_key FROM session_catalog WHERE session_key!='candidate-00900';").unwrap();
         let transaction = connection.transaction().unwrap();
-        retire_missing(&transaction).unwrap();
+        {
+            use crate::storage::catalog::SearchPublicationStore;
+            let source = source(&transaction);
+            let writer = crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source).unwrap();
+            writer.begin(&[&row("candidate-00900", "replacement")]).unwrap();
+            writer.validate("candidate-00900").unwrap();
+            writer.remove(CatalogReadScope::Current).unwrap();
+        }
         transaction.execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
         transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
         transaction.commit().unwrap();
