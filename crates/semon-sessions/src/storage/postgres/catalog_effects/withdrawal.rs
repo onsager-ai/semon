@@ -47,74 +47,72 @@ pub(in crate::storage::postgres) fn remove(
         }
     }
     let previous = super::super::model_cache::generation(tx)?.ok_or(StorageError::ScopeChanged)?;
-    let physical=tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY session_key LIMIT 65", &[&ns,&previous.as_bytes()]).map_err(sqlstate::error)?;
-    if physical.len() > 64 {
-        return Err(StorageError::Busy);
-    }
     let paths = files
         .iter()
         .map(|(p, _)| p.as_str())
         .collect::<BTreeSet<_>>();
-    let mut kept = Vec::new();
+    let withdrawn = paths
+        .iter()
+        .map(|p| p.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    // Owners reading a withdrawn Source, by bounded key pages.
     let mut removed = Vec::new();
-    let mut used = 0usize;
-    for row in physical {
-        let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
-        used = used.saturating_add(bytes.len());
-        if used > MAX {
-            return Err(StorageError::Busy);
-        }
-        let value: CatalogRow =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        if value.key.as_bytes() != row.get::<_, Vec<u8>>(0) {
-            return Err(StorageError::ScopeChanged);
-        }
-        let hits = value
-            .sources
-            .iter()
-            .filter(|s| paths.contains(s.path.to_string_lossy().as_ref()))
-            .count();
-        if hits == 0 {
-            kept.push(value);
-            continue;
-        }
-        // A mixed-source owner requires ordinary semantic reconstruction. Never
-        // drop its surviving sources or return a partial-success receipt.
-        if hits != value.sources.len() {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-        for source in &value.sources {
-            let ledger = files
+    let mut after = None;
+    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))? {
+        for (_, value) in &page {
+            let hits = value
+                .sources
                 .iter()
-                .find(|(p, _)| Some(p.as_str()) == source.path.to_str())
-                .and_then(|(_, l)| l.as_ref())
-                .ok_or(StorageError::ScopeChanged)?;
-            if !catalog::source_matches_ledger(source, ledger) {
-                return Ok(Outcome::Conflict);
+                .filter(|s| paths.contains(s.path.to_string_lossy().as_ref()))
+                .count();
+            // A mixed-source owner requires ordinary semantic reconstruction.
+            // Never drop its surviving sources or return a partial-success receipt.
+            if hits != value.sources.len() {
+                return Err(StorageError::NamespaceUpgradePending);
             }
+            for source in &value.sources {
+                let ledger = files
+                    .iter()
+                    .find(|(p, _)| Some(p.as_str()) == source.path.to_str())
+                    .and_then(|(_, l)| l.as_ref())
+                    .ok_or(StorageError::ScopeChanged)?;
+                if !catalog::source_matches_ledger(source, ledger) {
+                    return Ok(Outcome::Conflict);
+                }
+            }
+            removed.push(value.key.clone());
         }
-        removed.push(value.key);
+        after = page.last().map(|(digest, _)| digest.clone());
     }
     // Preserve relationship semantics: withdrawal of one endpoint requires the
     // connected ordinary producer, rather than a stale surviving edge.
-    for row in &kept {
-        if row.parent.as_ref().is_some_and(|p| removed.contains(p))
-            || row
-                .query
-                .as_ref()
-                .and_then(|q| q["selected"]["edges"].as_array())
-                .is_some_and(|edges| {
-                    edges.iter().any(|e| {
-                        ["from", "to"].iter().any(|f| {
-                            e["query"][*f]
-                                .as_str()
-                                .is_some_and(|k| removed.iter().any(|r| r == k))
+    let mut after = None;
+    while !removed.is_empty()
+        && let Some(page) = owners(tx, &previous, &after, None)?
+    {
+        for (_, row) in &page {
+            if removed.contains(&row.key) {
+                continue;
+            }
+            if row.parent.as_ref().is_some_and(|p| removed.contains(p))
+                || row
+                    .query
+                    .as_ref()
+                    .and_then(|q| q["selected"]["edges"].as_array())
+                    .is_some_and(|edges| {
+                        edges.iter().any(|e| {
+                            ["from", "to"].iter().any(|f| {
+                                e["query"][*f]
+                                    .as_str()
+                                    .is_some_and(|k| removed.iter().any(|r| r == k))
+                            })
                         })
                     })
-                })
-        {
-            return Err(StorageError::NamespaceUpgradePending);
+            {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         }
+        after = page.last().map(|(digest, _)| digest.clone());
     }
     let generation = format!("{:x}", Sha256::digest(&operation));
     let stage=tx.driver.query_one("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
@@ -129,70 +127,28 @@ pub(in crate::storage::postgres) fn remove(
         super::super::source_journal::invalidate(tx, path)?;
         tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
-    // Fixed immutable families only. Copy exact payloads for surviving owners;
-    // do not mutate/delete any old generation or its retained native proof.
-    for (table, columns) in [
-        (
-            "catalog_recipe_headers",
-            "key_digest,session_key,recipe_generation,source_generation,version,total",
-        ),
-        (
-            "catalog_recipe_rows",
-            "key_digest,session_key,slot,metadata",
-        ),
-        (
-            "catalog_trace_headers",
-            "key_digest,session_key,trace_generation,source_generation,metadata",
-        ),
-        (
-            "catalog_trace_turns",
-            "key_digest,session_key,turn_digest,turn_id,start_id,metadata",
-        ),
-        (
-            "catalog_trace_edges",
-            "key_digest,session_key,edge_digest,edge_id,metadata",
-        ),
-        (
-            "catalog_trace_bookmarks",
-            "key_digest,session_key,target_digest,target,edge_digest,edge_id",
-        ),
-    ] {
-        let sql = format!(
-            "INSERT INTO semon_pg_native_{table}(namespace,generation,{columns}) SELECT namespace,$3,{columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND NOT(session_key=ANY($4::bytea[]))"
-        );
-        let keys = removed
-            .iter()
-            .map(|k| k.as_bytes().to_vec())
-            .collect::<Vec<_>>();
-        tx.driver
-            .execute(
-                &sql,
-                &[&ns, &previous.as_bytes(), &generation.as_bytes(), &keys],
-            )
-            .map_err(sqlstate::error)?;
-        tx.check()?;
-    }
-    tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original) SELECT namespace,$3,key_digest,session_key,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
-    tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
+    // Surviving owners keep their exact immutable effects and proofs; no old
+    // generation or retained native proof is mutated or deleted.
+    let removed_digests = removed
+        .iter()
+        .map(|k| digest(k.as_bytes()))
+        .collect::<Vec<_>>();
+    super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original) SELECT namespace,$3,key_digest,session_key,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
     let effects = Effects {
         tx: RefCell::new(tx),
         generation: &generation,
     };
-    for row in &kept {
-        let metadata = encoded(row)?;
-        use catalog::CurrentPublicationStore;
-        effects.current(
-            row,
-            std::str::from_utf8(&metadata).map_err(|_| StorageError::ScopeChanged)?,
-        )?;
-        catalog::publish_current_sources(&effects, row)?;
+    {
+        use crate::storage::catalog::SearchPublicationStore;
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            effects.counts(scope)?;
+        }
     }
-    crate::catalog_search::publish_current_rows_port(
-        &effects,
-        &kept.iter().collect::<Vec<_>>(),
-        64,
-        |_, _| {},
-    )?;
     let tx = effects.tx.into_inner();
     if tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation=$3", &[&ns,&generation,&previous]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     if tx.driver.execute("UPDATE semon_pg_native_catalog_stage SET stage_epoch=$2,runtime=$3,generation=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton AND stage_epoch=$5", &[&ns,&epoch,&runtime,&generation.as_bytes(),&prior_epoch]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
@@ -208,4 +164,33 @@ pub(in crate::storage::postgres) fn remove(
     }
     tx.check()?;
     Ok(Outcome::Written)
+}
+
+type Page = Vec<(Vec<u8>, CatalogRow)>;
+
+/// One keyset page of previous Current owners, optionally only those reading
+/// `paths`. Metadata is charged against the shared 1 MiB page budget.
+fn owners(
+    tx: &mut PgTxn<'_>,
+    previous: &str,
+    after: &Option<Vec<u8>>,
+    paths: Option<&Vec<Vec<u8>>>,
+) -> Result<Option<Page>, StorageError> {
+    tx.check()?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let rows = tx.driver.query("WITH page AS MATERIALIZED (SELECT r.key_digest,r.session_key,r.metadata FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND ($3::bytea IS NULL OR r.key_digest>$3) AND ($4::bytea[] IS NULL OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[]))) ORDER BY r.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END FROM page ORDER BY key_digest", &[&ns, &previous.as_bytes(), after, &paths]).map_err(sqlstate::error)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut page = Vec::new();
+    for row in rows {
+        let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
+        let value: CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
+            return Err(StorageError::ScopeChanged);
+        }
+        page.push((row.get(0), value));
+    }
+    Ok(Some(page))
 }

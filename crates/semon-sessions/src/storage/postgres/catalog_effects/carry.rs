@@ -47,26 +47,6 @@ const OWNED: &[(&str, &str)] = &[
         "catalog_search_memberships",
         "key_digest,session_key,gram,last_ms",
     ),
-    (
-        "catalog_history_owners",
-        "key_digest,session_key,owner_generation,original",
-    ),
-    (
-        "catalog_history_headers",
-        "key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header",
-    ),
-    (
-        "catalog_history_slots",
-        "key_digest,session_key,slot,metadata",
-    ),
-    (
-        "catalog_history_sources",
-        "key_digest,session_key,path_digest,source_path,metadata",
-    ),
-    (
-        "catalog_history_progress",
-        "key_digest,session_key,metadata",
-    ),
 ];
 
 // Source-scoped proof inputs of the carried owners.
@@ -100,7 +80,7 @@ pub(super) fn unmentioned(
         let page = tx.driver.query("SELECT key_digest FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND NOT key_digest=ANY($3::bytea[]) AND ($4::bytea IS NULL OR key_digest>$4) ORDER BY key_digest LIMIT $5", &[&ns, &previous.as_bytes(), &mentioned, &after, &PAGE]).map_err(sqlstate::error)?;
         let keys = page.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
         if keys.is_empty() {
-            return Ok(carried);
+            break;
         }
         let connected: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[]) AND source_path=ANY($4::bytea[]))", &[&ns, &previous.as_bytes(), &keys, &claimed]).map_err(sqlstate::error)?.get(0);
         if connected {
@@ -121,5 +101,27 @@ pub(super) fn unmentioned(
         }
         carried += keys.len() as u64;
         after = keys.last().cloned();
+    }
+    history(tx, generation, previous, mentioned)?;
+    Ok(carried)
+}
+
+// Retained history stays owned by its original generation. The successor only
+// maps every unmentioned key, including owners no longer Current.
+fn history(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    previous: &str,
+    mentioned: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        tx.check()?;
+        let page = tx.driver.query("WITH page AS MATERIALIZED (SELECT key_digest FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND NOT key_digest=ANY($4::bytea[]) AND ($5::bytea IS NULL OR key_digest>$5) ORDER BY key_digest LIMIT $6), copied AS (INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original) SELECT namespace,$2,key_digest,session_key,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND key_digest IN (SELECT key_digest FROM page) ON CONFLICT DO NOTHING) SELECT key_digest FROM page ORDER BY key_digest", &[&ns, &generation.as_bytes(), &previous.as_bytes(), &mentioned, &after, &PAGE]).map_err(sqlstate::error)?;
+        let Some(last) = page.last() else {
+            return Ok(());
+        };
+        after = Some(last.get(0));
     }
 }
