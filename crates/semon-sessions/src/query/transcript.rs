@@ -1196,6 +1196,7 @@ pub(crate) fn render_page(
             .collect();
         let mut read = |path: &std::path::Path, offset| source.read(path, offset);
         let mut prompts = |file: &crate::model::SlotFile, offset| source.prompt(file, offset);
+        let mut lines = tx::Lines::provider_with_prompts(&mut read, &mut prompts);
         let page = tx::page_from_window(
             &tx::RenderContext {
                 home: home.as_deref(),
@@ -1215,8 +1216,9 @@ pub(crate) fn render_page(
             },
             now,
             limit,
-            &mut tx::Lines::provider_with_prompts(&mut read, &mut prompts),
+            &mut lines,
         );
+        if lines.failures != 0 {return Err(source.query_error(&io::Error::other("Authorized native transcript read failed")));}
         match page {
             Ok(page) => break page,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {

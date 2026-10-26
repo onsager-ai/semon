@@ -13,11 +13,18 @@ pub(in crate::storage::postgres) mod query;
 /// Lease acquisition checks an acknowledged publication, never just a physical
 /// metadata address. Immutable proof refs survive newer heads; no GC is exposed.
 pub(in crate::storage::postgres) fn with_admitted_generation<T>(
+    pool:&PgPool, namespace:&LogicalSourceNamespace, control:&PgCancellation, generation:&str,
+    read:impl FnOnce(&dyn catalog::CatalogSnapshot)->Result<T,StorageError>,
+)->Result<T,StorageError> {
+    with_admitted_snapshot(pool,namespace,control,generation,|snapshot|read(snapshot))
+}
+
+pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
     control: &PgCancellation,
     generation: &str,
-    read: impl FnOnce(&dyn catalog::CatalogSnapshot) -> Result<T, StorageError>,
+    read: impl FnOnce(&Snapshot<'_, '_>) -> Result<T, StorageError>,
 ) -> Result<T, StorageError> {
     let lease = pool.transaction(namespace, TxnKind::Write, control, |tx| {
         let ns = namespace.as_str().as_bytes();
