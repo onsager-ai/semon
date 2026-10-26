@@ -2281,11 +2281,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>()
     };
     let kept = &current[0].0;
-    assert!(search(&caught, "", kept).contains(kept), "Current search {kept}");
+    assert!(
+        search(&caught, "", kept).contains(kept),
+        "Current search {kept}"
+    );
     let gone = removed.iter().next().unwrap();
-    assert!(!search(&caught, "", gone).contains(gone), "{gone} withdrawn");
+    assert!(
+        !search(&caught, "", gone).contains(gone),
+        "{gone} withdrawn"
+    );
     let old = qualified.as_deref().unwrap();
-    assert!(search(old, "", gone).contains(gone), "{gone} before withdrawal");
+    assert!(
+        search(old, "", gone).contains(gone),
+        "{gone} before withdrawal"
+    );
     // Retained scope finds the withdrawn key through its carried document.
     assert!(
         search(&caught, "scope=retained_history&", gone).contains(gone),

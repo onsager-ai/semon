@@ -453,7 +453,12 @@ impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
         for start in (low..high).step_by(64) {
             let (_, slots) = self
                 .snapshot
-                .recipe(self.key, self.history, start as i64, (high - start).min(64) as i64)
+                .recipe(
+                    self.key,
+                    self.history,
+                    start as i64,
+                    (high - start).min(64) as i64,
+                )
                 .map_err(unavailable)?
                 .ok_or_else(|| unavailable(StorageError::ScopeChanged))?;
             for slot in slots {
@@ -495,7 +500,10 @@ impl Snapshot<'_, '_> {
                 "semon_pg_native_catalog_history_slots",
             )
         } else {
-            (self.generation.clone(), "semon_pg_native_catalog_recipe_rows")
+            (
+                self.generation.clone(),
+                "semon_pg_native_catalog_recipe_rows",
+            )
         };
         let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;

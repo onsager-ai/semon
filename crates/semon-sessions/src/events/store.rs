@@ -1625,12 +1625,9 @@ pub(crate) fn resumed_runtime_native(
 
 pub(crate) fn source_write_store(options: &crate::Options) -> io::Result<Box<dyn IndexStore>> {
     let namespace = options.source.namespace().map_err(io::Error::other)?;
-    let (store, _) = SqliteStore::attempt_scoped(
-        &super::EventCache::path(&options.cache),
-        true,
-        &namespace,
-    )
-    .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) =
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true, &namespace)
+            .map_err(|error| io::Error::other(error.to_string()))?;
     Ok(Box::new(store))
 }
 
