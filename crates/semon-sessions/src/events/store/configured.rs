@@ -1390,7 +1390,8 @@ impl Writer {
         &self,
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StorageError> {
-        super::read_append_evidence(&self.snapshot()?, path).map_err(failed)
+        let snapshot = self.snapshot()?;
+        super::read_append_evidence(&snapshot, path).map_err(failed)
     }
 
     pub(crate) fn session_description(
@@ -1651,7 +1652,8 @@ impl Writer {
         ledger: &Ledger,
         identity: &str,
     ) -> Result<native_usage::Seen, StorageError> {
-        native_usage::seen(&self.snapshot()?, path, ledger, identity).map_err(failed)
+        let snapshot = self.snapshot()?;
+        native_usage::seen(&snapshot, path, ledger, identity).map_err(failed)
     }
 
     pub(crate) fn begin(
@@ -5754,6 +5756,22 @@ mod tests {
         NativeOwnership::validate_physical(&db).unwrap();
         db.execute_batch("DROP INDEX session_trace_starts").unwrap();
         assert!(NativeOwnership::validate_physical(&db).is_err());
+
+        // Exercise the retained production Writer connection as well as the
+        // physical validator: releasing one snapshot must permit the next,
+        // and a cached layout must never cache mutable writer qualification.
+        let f = Fixture::current("writer-cache");
+        let writer = Writer::owned(NativeOwnership::admit(&f.config).unwrap()).unwrap();
+        let path = f.raw.to_string_lossy();
+        assert!(writer.ledger(&path).unwrap().is_none());
+        assert!(writer.ledger(&path).unwrap().is_none());
+        assert!(writer.connection.is_autocommit());
+        writer.connection.execute("UPDATE storage_event_tables SET qualification=1 WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
+        assert!(writer.ledger(&path).is_err());
+        writer.connection.execute("UPDATE storage_event_tables SET qualification=0 WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
+        assert!(writer.ledger(&path).unwrap().is_none());
+        f.db().execute_batch("DROP INDEX session_trace_starts").unwrap();
+        assert!(writer.ledger(&path).is_err());
     }
 
     #[test]

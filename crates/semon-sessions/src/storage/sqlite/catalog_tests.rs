@@ -1430,7 +1430,7 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
         .config(&fixture.options.cache.with_extension("sqlite3"))
         .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
-    let writer = crate::events::store::configured::Writer::owned(owner);
+    let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
     let generation = writer.catalog_generation().unwrap();
     let rows = [row];
     assert_eq!(
