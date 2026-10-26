@@ -235,6 +235,7 @@ fn main() {
         "fixture listener must be loopback"
     );
     let options = Options {
+        source: semon_sessions::storage::HostSource::load_or_create(&PathBuf::from(&args[2]).join("source.json")).unwrap(),
         claude_home: PathBuf::from(&args[2]),
         claude_json: PathBuf::from(&args[2])
             .parent()

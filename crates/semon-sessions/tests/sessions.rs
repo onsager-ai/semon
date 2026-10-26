@@ -77,6 +77,7 @@ impl Fixture {
         ));
         fs::create_dir_all(&root).unwrap();
         let options = Options {
+            source: semon_sessions::storage::HostSource::load_or_create(&root.join("source.json")).unwrap(),
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

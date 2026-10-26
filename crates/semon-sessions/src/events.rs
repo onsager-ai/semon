@@ -3322,9 +3322,7 @@ pub(crate) fn scan_file(
         .as_ref()
         .or(cache.v1_cache.as_ref())
         .filter(|_| cache.store.is_some())
-        .map(|v1| {
-            crate::source_change::SourceLock::acquire_cache(v1, &key, false)
-        })
+        .map(|v1| crate::source_change::SourceLock::acquire_cache(v1, &key, false))
         .transpose()?;
     cache.scan_measurements.record("source_lock", started, 1);
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);

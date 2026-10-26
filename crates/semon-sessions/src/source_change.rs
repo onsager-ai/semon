@@ -158,7 +158,11 @@ impl SourceLock {
         Self::acquire_cache(&options.cache, path, exclusive)
     }
     #[cfg(unix)]
-    pub(crate) fn acquire_cache(cache: &std::path::Path, path: &str, exclusive: bool) -> io::Result<Self> {
+    pub(crate) fn acquire_cache(
+        cache: &std::path::Path,
+        path: &str,
+        exclusive: bool,
+    ) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
@@ -193,7 +197,11 @@ impl SourceLock {
         Ok(Self(file))
     }
     #[cfg(not(unix))]
-    pub(crate) fn acquire_cache(cache: &std::path::Path, path: &str, exclusive: bool) -> io::Result<Self> {
+    pub(crate) fn acquire_cache(
+        cache: &std::path::Path,
+        path: &str,
+        exclusive: bool,
+    ) -> io::Result<Self> {
         let _ = (cache, path);
         if exclusive {
             Err(io::Error::new(
