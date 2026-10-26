@@ -625,7 +625,7 @@ mod namespace_tests {
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
         )
         .unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         for ddl in native_usage::schema(true) {
             db.execute_batch(ddl).unwrap();
         }
@@ -798,7 +798,7 @@ mod namespace_tests {
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
         )
         .unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         for ddl in native_usage::schema(true) {
             db.execute_batch(ddl).unwrap();
         }

@@ -22,65 +22,6 @@ fn decode_json<T: serde::de::DeserializeOwned>(column: usize, value: &str) -> ru
     from_json(column, value)
 }
 
-pub(super) const SCHEMA: &str = "
-CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
-    ON session_catalog(session_key,pricing_fingerprint);
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
-AFTER INSERT ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
-AFTER UPDATE OF metadata ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-";
-
-pub(super) const FILE_SCHEMA: &str = "
-CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
-    ON files(file_id,codex_pricing_fingerprint)
-    WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
-AFTER INSERT ON files
-WHEN NEW.codex_native_usage IS NOT NULL
-BEGIN
-    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'source',NEW.path FROM files f,meta m WHERE f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
-AFTER UPDATE OF codex_native_usage ON files
-BEGIN
-    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
-AFTER UPDATE OF usage_ready ON native_usage_sources
-WHEN NEW.usage_ready=1
-BEGIN
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.path=NEW.source_path AND m.key='pricing_recompute_target'
-      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
-
-const QUEUE_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
-    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('source','session','family')),
-    owner_key TEXT NOT NULL,
-    PRIMARY KEY(owner_kind,owner_key)
-) STRICT, WITHOUT ROWID;
-";
 const COMPOSITE_QUEUE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
     namespace TEXT NOT NULL,
@@ -90,79 +31,18 @@ CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
 ) STRICT, WITHOUT ROWID;
 ";
 
-pub(super) fn queue_schema(composite: bool) -> &'static str {
-    if composite {
-        COMPOSITE_QUEUE_SCHEMA
-    } else {
-        QUEUE_SCHEMA
-    }
+pub(super) fn queue_schema() -> &'static str {
+    COMPOSITE_QUEUE_SCHEMA
 }
 
-fn queue_sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+fn queue_sql<'a>(c: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
     let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pricing_recompute_pending') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    Ok(if composite { scoped } else { legacy })
+    if !composite {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(scoped)
 }
 
-const CATALOG_QUEUE_00: &str = "
-CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
-    ON session_catalog(session_key,pricing_fingerprint);
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
-AFTER INSERT ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
-AFTER UPDATE OF metadata ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-";
-const CATALOG_QUEUE_01: &str = "
-CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
-    ON session_catalog(session_key,pricing_fingerprint);
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
-AFTER INSERT ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
-AFTER UPDATE OF metadata ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-";
-const CATALOG_QUEUE_10: &str = "
-CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
-    ON session_catalog(namespace,session_key,pricing_fingerprint);
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
-AFTER INSERT ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
-AFTER UPDATE OF metadata ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-";
 const CATALOG_QUEUE_11: &str = "
 CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
     ON session_catalog(namespace,session_key,pricing_fingerprint);
@@ -184,52 +64,10 @@ BEGIN
 END;
 ";
 
-pub(super) fn catalog_schema(
-    queue_composite: bool,
-    catalog_composite: bool,
-    meta_composite: bool,
-) -> &'static str {
-    if !queue_composite {
-        return SCHEMA;
-    }
-    match (catalog_composite, meta_composite) {
-        (false, false) => CATALOG_QUEUE_00,
-        (false, true) => CATALOG_QUEUE_01,
-        (true, false) => CATALOG_QUEUE_10,
-        (true, true) => CATALOG_QUEUE_11,
-    }
+pub(super) fn catalog_schema() -> &'static str {
+    CATALOG_QUEUE_11
 }
 
-const COMPOSITE_FILE_QUEUE_0: &str = "
-CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
-    ON files(namespace,file_id,codex_pricing_fingerprint)
-    WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
-AFTER INSERT ON files
-WHEN NEW.codex_native_usage IS NOT NULL
-BEGIN
-    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
-AFTER UPDATE OF codex_native_usage ON files
-BEGIN
-    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
-AFTER UPDATE OF usage_ready ON native_usage_sources
-WHEN NEW.usage_ready=1
-BEGIN
-    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
-    SELECT NEW.namespace,'source',NEW.source_path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.path=NEW.source_path AND m.key='pricing_recompute_target'
-      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
 const COMPOSITE_FILE_QUEUE_1: &str = "
 CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
     ON files(namespace,file_id,codex_pricing_fingerprint)
@@ -261,14 +99,8 @@ BEGIN
 END;
 ";
 
-pub(super) fn file_schema(composite: bool, meta_composite: bool) -> &'static str {
-    if !composite {
-        FILE_SCHEMA
-    } else if meta_composite {
-        COMPOSITE_FILE_QUEUE_1
-    } else {
-        COMPOSITE_FILE_QUEUE_0
-    }
+pub(super) fn file_schema() -> &'static str {
+    COMPOSITE_FILE_QUEUE_1
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -1073,14 +905,20 @@ fn pending_step(
     }
 }
 
-fn catalog_sql<'a>(db: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+fn catalog_sql<'a>(db: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
     let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    Ok(if composite { scoped } else { legacy })
+    if !composite {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(scoped)
 }
 
-fn trace_sql<'a>(db: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+fn trace_sql<'a>(db: &Connection, _legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
     let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_trace_headers') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
-    Ok(if composite { scoped } else { legacy })
+    if !composite {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(scoped)
 }
 
 fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
@@ -1489,8 +1327,7 @@ mod tests {
                         let db = Connection::open_in_memory().unwrap();
                         bind_fixture(&db, "a");
                         db.pragma_update(None, "foreign_keys", true).unwrap();
-                        for ddl in authored_storage_ddl()
-                        {
+                        for ddl in authored_storage_ddl() {
                             db.execute_batch(ddl).unwrap();
                         }
                         assert_eq!(objects(&db), required_objects);
@@ -1572,8 +1409,7 @@ mod tests {
         // This fixture models an existing current store, including its journal
         // contract. Admission must not switch a caller's journal mode for it.
         db.pragma_update(None, "journal_mode", "WAL").unwrap();
-        for ddl in authored_storage_ddl()
-        {
+        for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
         db.execute(
@@ -2065,8 +1901,7 @@ mod tests {
         ] {
             let mut db = Connection::open_in_memory().unwrap();
             bind_fixture(&db, "a");
-            for ddl in authored_storage_ddl()
-            {
+            for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
             // Cache the admitted shape, then invalidate a real authored schema.
@@ -2101,11 +1936,10 @@ mod tests {
 
     #[test]
     fn native_usage_copied_layout_is_independent_of_core_and_native_layout() {
-        for copied_composite in [true] {
+        for _copied_composite in [true] {
             let mut db = Connection::open_in_memory().unwrap();
             bind_fixture(&db, "a");
-            for ddl in authored_storage_ddl()
-            {
+            for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
             let mut index = FileIndex::default();
@@ -2200,8 +2034,7 @@ mod tests {
                     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
                         .unwrap();
                     bind_fixture(&db, "a");
-                    for ddl in authored_storage_ddl()
-                    {
+                    for ddl in authored_storage_ddl() {
                         db.execute_batch(ddl).unwrap();
                     }
                     db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"])
