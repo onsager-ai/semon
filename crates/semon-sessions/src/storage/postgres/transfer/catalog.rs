@@ -552,7 +552,7 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
     // The selected edge names an original publication and exact Native
     // ledger. Bind only backing generations actually carried above; this
     // grants neither a publication operation nor an ordinary reader lease.
-    let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,namespace,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
+    let changed = tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT g.namespace,s.publication,sha256(g.source_path),g.source_path,g.generation,g.source_id,coalesce(u.usage_ready AND u.receipt=g.ledger,false) FROM semon_pg_native_selected_generations s JOIN semon_pg_native_page_generations g ON g.namespace_digest=s.namespace_digest AND g.namespace=s.namespace AND g.source_path=$4 LEFT JOIN semon_pg_native_usage_sources u ON u.namespace_digest=g.namespace_digest AND u.namespace=g.namespace AND u.source_id=g.source_id WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND g.ledger=$5 ON CONFLICT(namespace_digest,generation,path_digest,page_generation) DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?;
     if changed == 0 {
         let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_selected_generations s ON s.namespace_digest=p.namespace_digest AND s.namespace=p.namespace AND s.publication=p.generation JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5)", &[&tx.0.namespace.as_str().as_bytes(), &text(0)?.as_bytes(), &text(1)?.as_bytes(), &text(2)?.as_bytes(), &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
         if !exists {
@@ -566,6 +566,64 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
 mod tests {
     use super::*;
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
+
+    struct AuthorizedOriginals(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
+
+    impl crate::SessionSourceReader for AuthorizedOriginals {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            let (_, bytes) = self.0.iter().find(|(saved, _)| saved == source)
+                .ok_or_else(|| std::io::Error::other("original Source authority denied"))?;
+            if expected.is_some_and(|generation| generation != "authorized-transfer-original")
+                || max > crate::SESSION_SOURCE_CHUNK_MAX
+            {
+                return Err(std::io::Error::other("original generation/range denied"));
+            }
+            let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+            let end = bytes.len().min(start.saturating_add(max));
+            Ok(crate::SessionSourceRange {
+                generation: "authorized-transfer-original".into(),
+                length: bytes.len() as u64,
+                offset,
+                bytes: std::sync::Arc::from(bytes.get(start..end)
+                    .ok_or_else(|| std::io::Error::other("original range denied"))?),
+                cached: false,
+            })
+        }
+    }
+
+    fn selected_receipts(
+        config: &StoreConfig,
+        options: &crate::Options,
+        host: &AuthorizedOriginals,
+    ) -> Vec<(String, Value, Value)> {
+        use crate::storage::proof_lifetime::{ProofGenerationId, ProofReaderLease};
+        let owner = crate::events::store::configured::NativeOwnership::restore_transfer(config).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone()).connection().unwrap();
+        let refs = db.prepare("SELECT DISTINCT session_key,id FROM storage_proof_refs WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
+            .query_map([config.namespace.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(refs.len(), 2, "fixture must qualify both original and successor receipts");
+        drop(db);
+        let runtime = crate::storage::NativeReaderBinding::Semantic(owner).reader_runtime().unwrap();
+        refs.into_iter().enumerate().map(|(index,(key,id))| {
+            let mut lease = runtime.selected_generation(&key,&ProofGenerationId(id.clone()),&format!("{index:064x}"),10_000).unwrap();
+            let page = lease.transcript_records(options,Some((host,crate::SessionSourceReadMode::ProviderOnly)),0,1,&crate::SelectedReadControl::default()).unwrap();
+            assert_eq!(page.snapshot.proof_generation.0,id);
+            assert_eq!(page.records.len(),1);
+            let body = page.records[0].1.clone().unwrap();
+            assert_eq!(body["type"],"user");
+            assert_eq!(body["message"]["content"],"sanitized 0");
+            let row = serde_json::to_value(lease.row()).unwrap();
+            lease.release().unwrap();
+            (id,row,body)
+        }).collect()
+    }
 
     #[test]
     fn pg_current_transfer225_occupied_description_refused_before_native_commit() {
@@ -622,7 +680,7 @@ mod tests {
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
-        {
+        let host = {
             let owner =
                 crate::events::store::configured::NativeOwnership::restore_transfer(&source)
                     .unwrap();
@@ -631,7 +689,29 @@ mod tests {
                 .unwrap();
             let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
             assert!(removed > 0);
-        }
+            // Host authority is captured from the admitted original Source,
+            // never inferred from copied target metadata or a missing Raw path.
+            let rows = db.prepare("SELECT metadata FROM storage_proof_generations WHERE namespace=?1 ORDER BY id,session_key LIMIT 65").unwrap()
+                .query_map([source.namespace.as_str()], |row| row.get::<_,String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let mut originals = Vec::new();
+            for metadata in rows {
+                let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+                for original in &row.sources {
+                    let reference = crate::SessionSourceRef {
+                        root: row.harness.clone(),
+                        path: crate::catalog::source_relative(&options,&row.harness,original).unwrap(),
+                        native_id: original.native_id.clone(),
+                        offset: original.offset,
+                        prefix_sha256: original.prefix_sha256,
+                        tail_sha256: original.tail_sha256,
+                    };
+                    originals.push((reference,std::sync::Arc::from(std::fs::read(&original.path).unwrap())));
+                }
+            }
+            AuthorizedOriginals(originals)
+        };
+        let original_selected = selected_receipts(&source,&options,&host);
         // Capturing the SQLite source performs no PG work. Discard an idle
         // fixture connection before the server's ten-second idle-session cap.
         let (pool, _) = super::super::super::tests::fixture(|limits| {
@@ -812,6 +892,8 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        assert_eq!(selected_receipts(&reverse,&options,&host),original_selected,
+            "formal current/retained reader must use exact original receipts after reverse with Raw absent");
         assert_eq!(
             crate::storage::transfer::reported::tests::cache(&reverse)
                 .session_description(&expected[0].key, 1, "transfer-inputs")
