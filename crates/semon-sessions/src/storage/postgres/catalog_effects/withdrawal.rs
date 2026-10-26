@@ -155,6 +155,7 @@ pub(in crate::storage::postgres) fn remove(
     super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
+    super::carry::retained_search(tx, &generation, &previous, &removed_digests)?;
     let effects = Effects {
         tx: RefCell::new(tx),
         generation: &generation,

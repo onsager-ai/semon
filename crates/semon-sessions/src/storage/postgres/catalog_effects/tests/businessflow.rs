@@ -2276,6 +2276,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(!search(&caught, "", gone).contains(gone), "{gone} withdrawn");
     let old = qualified.as_deref().unwrap();
     assert!(search(old, "", gone).contains(gone), "{gone} before withdrawal");
+    // Retained scope finds the withdrawn key through its carried document.
+    assert!(
+        search(&caught, "scope=retained_history&", gone).contains(gone),
+        "{gone} retained search"
+    );
+    assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
