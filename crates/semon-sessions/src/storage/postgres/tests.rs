@@ -46,9 +46,7 @@ fn pg_vertical140_preparation_scope_shares_nested_budget_and_control() {
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     assert!(!crate::selected_read::active());
-    nested
-        .scope(|| crate::selected_read::charge(1, 0))
-        .unwrap();
+    nested.scope(|| crate::selected_read::charge(1, 0)).unwrap();
     assert!(!crate::selected_read::active());
 }
 
