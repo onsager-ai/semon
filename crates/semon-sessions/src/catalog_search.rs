@@ -1049,16 +1049,27 @@ mod sqlite_tests {
             namespace: crate::storage::LogicalSourceNamespace::new(db.query_row("SELECT semon_namespace()", [], |r| r.get::<_, String>(0)).unwrap()).unwrap(),
             expected_stream_epoch: Some(db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap()),
         };
-        crate::storage::sqlite::semantic::AdmittedSource::native(crate::events::store::configured::NativeOwnership::restore(&config).unwrap())
+        crate::storage::sqlite::semantic::AdmittedSource::native(
+            crate::events::store::configured::NativeOwnership::restore(&config).unwrap(),
+        )
     }
     fn database() -> Connection {
         use crate::storage::LogicalSourceNamespace;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!("semon-current-search-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let path = std::env::temp_dir().join(format!(
+            "semon-current-search-{}-{}.sqlite3",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let connection = crate::events::store::current_search_test_connection(
-            &path, &LogicalSourceNamespace::new("search-current").unwrap(),
+            &path,
+            &LogicalSourceNamespace::new("search-current").unwrap(),
         );
-        connection.execute_batch("CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;").unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;",
+            )
+            .unwrap();
         connection
     }
     fn put(transaction: &Transaction<'_>, row: &CatalogRow) {
@@ -1435,8 +1446,15 @@ mod sqlite_tests {
         }
         transaction.commit().unwrap();
         for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
-            let first =
-                posting_page(&connection, ADMITTED, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
+            let first = posting_page(
+                &connection,
+                ADMITTED,
+                scope,
+                "nee",
+                None,
+                MAX_CANDIDATES + 1,
+            )
+            .unwrap();
             assert_eq!(first.len(), MAX_CANDIDATES + 1);
             assert_eq!(
                 first.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
