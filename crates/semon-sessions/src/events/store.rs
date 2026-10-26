@@ -6624,10 +6624,24 @@ mod tests {
         let (options, rows, _) = catalog_native_fixture(&root, 2, true);
         let selected = &rows[1];
         let path = selected.sources[0].path.to_string_lossy().into_owned();
-        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let mut journal = config.source_observations().unwrap();
+        let paths: Vec<String> = Vec::new();
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            config.namespace.as_str(),
+            "discover",
+            &serde_json::to_vec(&(&paths, true)).unwrap(),
+        );
+        journal.discover(&operation, &paths, true).unwrap();
+        assert_eq!(journal.backfill_state().unwrap().as_deref(), Some("draining"));
+        db.execute_batch("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         db.execute(
-            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key=?1",
             [&selected.key],
         )
         .unwrap();
@@ -6643,12 +6657,6 @@ mod tests {
             )
             .unwrap();
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
-        let journal = options
-            .source
-            .config(&options.cache)
-            .unwrap()
-            .source_observations()
-            .unwrap();
         assert_eq!(journal.pending(64).unwrap(), vec![path.clone()]);
         assert_eq!(
             db.query_row(
