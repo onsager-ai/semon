@@ -221,6 +221,9 @@ pub(crate) fn reported_materialization(
     if previous != checkpoint.digest || facts.len() > MAX_PAGE_ROWS || metadata.len() > 1 {
         return Err(StorageError::Conflict);
     }
+    // An incoming capture must satisfy the same whole-family bound as export,
+    // even when a caller distributed the family across both allowed pages.
+    encode_bounded(&(&facts, &metadata), MAX_PAGE_BYTES - 4096)?;
     let empty = Vec::new();
     for category in &manifest.categories {
         let records = match category.category {
