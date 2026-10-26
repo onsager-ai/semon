@@ -3326,7 +3326,7 @@ pub(crate) fn scan_file(
             crate::source_change::SourceLock::acquire(
                 &crate::Options {
                     cache: v1.clone(),
-                    ..crate::Options::default()
+                    ..crate::Options::from_host()?
                 },
                 &key,
                 false,

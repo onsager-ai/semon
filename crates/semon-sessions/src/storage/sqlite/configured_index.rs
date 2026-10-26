@@ -208,13 +208,11 @@ impl IndexStore for ConfiguredIndex {
     }
     fn catalog_component_paths(
         &self,
-        _paths: &[String],
-        _keys: &[String],
-        _native_parents: &[(String, String)],
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.catalog_component_paths(paths, keys, native_parents)
     }
     fn begin_semantic_stage(
         &mut self,

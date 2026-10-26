@@ -2774,107 +2774,8 @@ impl IndexStore for SqliteStore {
         keys: &[String],
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError> {
-        if paths.is_empty() || paths.len() > 64 || keys.len() > 64 || native_parents.len() > 64 {
-            return Ok(None);
-        }
         let tx = self.connection.unchecked_transaction().map_err(failure)?;
-        let mut pending: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
-        for (harness, id) in native_parents {
-            let mut statement = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
-            let owners = statement
-                .query_map(params![harness, id], |row| row.get::<_, String>(0))
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?;
-            if owners.len() > 64 {
-                return Ok(None);
-            }
-            pending.extend(owners);
-        }
-        for path in paths {
-            let mut statement = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE source_path=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
-            let owners = statement
-                .query_map([path], |row| row.get::<_, String>(0))
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?;
-            if owners.len() > 64 {
-                return Ok(None);
-            }
-            pending.extend(owners);
-        }
-        let mut visited = std::collections::BTreeSet::new();
-        let mut sources = std::collections::BTreeSet::new();
-        for path in paths {
-            let mut statement=tx.prepare("SELECT new_path FROM catalog_relocation_candidates WHERE old_path=?1 UNION SELECT old_path FROM catalog_relocation_candidates WHERE new_path=?1 LIMIT 65").map_err(failure)?;
-            sources.extend(
-                statement
-                    .query_map([path], |row| row.get::<_, String>(0))
-                    .map_err(failure)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(failure)?,
-            );
-            if sources.len() > 64 {
-                return Ok(None);
-            }
-        }
-        while let Some(key) = pending.pop_first() {
-            if !visited.insert(key.clone()) {
-                continue;
-            }
-            if visited.len() > 64 {
-                return Ok(None);
-            }
-            let Some(row) = current_catalog_row(&tx, &key).map_err(failure)? else {
-                continue;
-            };
-            if row.native_ids.len() > 64 || row.sources.len() > 64 {
-                return Ok(None);
-            }
-            sources.extend(
-                row.sources
-                    .iter()
-                    .map(|source| source.path.to_string_lossy().into_owned()),
-            );
-            if sources.len() > 64 {
-                return Ok(None);
-            }
-            let mut related = tx.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 AND lifecycle='current' UNION SELECT session_key FROM session_catalog WHERE parent_key=?1 AND lifecycle='current' UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1) WHERE endpoint IS NOT NULL AND endpoint!='you' ORDER BY endpoint LIMIT 65").map_err(failure)?;
-            let endpoints = related
-                .query_map([&key], |row| row.get::<_, String>(0))
-                .map_err(failure)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?;
-            if endpoints.len() > 64 {
-                return Ok(None);
-            }
-            pending.extend(
-                endpoints
-                    .into_iter()
-                    .filter(|endpoint| !visited.contains(endpoint)),
-            );
-            for id in &row.native_ids {
-                let mut aliases = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
-                let aliases = aliases
-                    .query_map(params![row.harness, id], |row| row.get::<_, String>(0))
-                    .map_err(failure)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(failure)?;
-                if aliases.len() > 64 {
-                    return Ok(None);
-                }
-                pending.extend(
-                    aliases
-                        .into_iter()
-                        .filter(|endpoint| !visited.contains(endpoint)),
-                );
-            }
-            if visited.len() + pending.len() > 64 {
-                return Ok(None);
-            }
-        }
-        tx.commit().map_err(failure)?;
-        Ok(Some(sources.into_iter().collect()))
+        read_catalog_component_paths(&tx, paths, keys, native_parents)
     }
 
     fn resolve_catalog_input(
@@ -12967,4 +12868,106 @@ pub(crate) fn remove_files_tx(transaction: &Transaction<'_>, files: &[(String, O
             crate::storage::sqlite::source_journal::invalidate(transaction, namespace, path, "removed")?;
         }
         Ok(())
+}
+
+pub(crate) fn read_catalog_component_paths(connection: &Connection, paths: &[String], keys: &[String], native_parents: &[(String,String)]) -> Result<Option<Vec<String>>, StoreError> {
+        if paths.is_empty() || paths.len() > 64 || keys.len() > 64 || native_parents.len() > 64 {
+            return Ok(None);
+        }
+        let mut pending: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
+        for (harness, id) in native_parents {
+            let mut statement = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+            let owners = statement
+                .query_map(params![harness, id], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if owners.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(owners);
+        }
+        for path in paths {
+            let mut statement = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE source_path=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
+            let owners = statement
+                .query_map([path], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if owners.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(owners);
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let mut sources = std::collections::BTreeSet::new();
+        for path in paths {
+            let mut statement=connection.prepare("SELECT new_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1 UNION SELECT old_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND new_path=?1 LIMIT 65").map_err(failure)?;
+            sources.extend(
+                statement
+                    .query_map([path], |row| row.get::<_, String>(0))
+                    .map_err(failure)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(failure)?,
+            );
+            if sources.len() > 64 {
+                return Ok(None);
+            }
+        }
+        while let Some(key) = pending.pop_first() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if visited.len() > 64 {
+                return Ok(None);
+            }
+            let Some(row) = current_catalog_row(connection, &key).map_err(failure)? else {
+                continue;
+            };
+            if row.native_ids.len() > 64 || row.sources.len() > 64 {
+                return Ok(None);
+            }
+            sources.extend(
+                row.sources
+                    .iter()
+                    .map(|source| source.path.to_string_lossy().into_owned()),
+            );
+            if sources.len() > 64 {
+                return Ok(None);
+            }
+            let mut related = connection.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 AND lifecycle='current' UNION SELECT session_key FROM session_catalog WHERE parent_key=?1 AND lifecycle='current' UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1) WHERE endpoint IS NOT NULL AND endpoint!='you' ORDER BY endpoint LIMIT 65").map_err(failure)?;
+            let endpoints = related
+                .query_map([&key], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if endpoints.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(
+                endpoints
+                    .into_iter()
+                    .filter(|endpoint| !visited.contains(endpoint)),
+            );
+            for id in &row.native_ids {
+                let mut aliases = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+                let aliases = aliases
+                    .query_map(params![row.harness, id], |row| row.get::<_, String>(0))
+                    .map_err(failure)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(failure)?;
+                if aliases.len() > 64 {
+                    return Ok(None);
+                }
+                pending.extend(
+                    aliases
+                        .into_iter()
+                        .filter(|endpoint| !visited.contains(endpoint)),
+                );
+            }
+            if visited.len() + pending.len() > 64 {
+                return Ok(None);
+            }
+        }
+        Ok(Some(sources.into_iter().collect()))
 }

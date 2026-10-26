@@ -986,6 +986,11 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn catalog_component_paths(&self, paths: &[String], keys: &[String], native_parents: &[(String, String)]) -> Result<Option<Vec<String>>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        crate::storage::sqlite::catalog_namespace::scope_readers(&db).map_err(StoreError::Configured)?;
+        super::read_catalog_component_paths(&db, paths, keys, native_parents)
+    }
     pub(crate) fn slots(&self, row: &crate::model::summary::CatalogRow, expected: Option<&str>, max: usize) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
         let db = self.snapshot().map_err(StoreError::Configured)?;
         match expected {
