@@ -203,9 +203,10 @@ pub(super) fn reuse(
     let [old] = candidates.as_slice() else {
         return Ok(None);
     };
-    let (Some((root, archived)), Some((old_root, old_archived))) =
-        (crate::events::native_commit::relocation_namespace(path), crate::events::native_commit::relocation_namespace(old))
-    else {
+    let (Some((root, archived)), Some((old_root, old_archived))) = (
+        crate::events::native_commit::relocation_namespace(path),
+        crate::events::native_commit::relocation_namespace(old),
+    ) else {
         return Ok(None);
     };
     let candidate: bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM catalog_relocation_candidates WHERE old_path=?1 AND new_path=?2 AND native_id=?3)",params![old,path,native_id],|row|row.get(0)).map_err(failure)?;
