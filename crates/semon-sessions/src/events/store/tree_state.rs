@@ -574,6 +574,13 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
     if !current(&tx)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    let pending = cleanup_work_tx(&tx)?;
+    tx.commit()?;
+    Ok(pending)
+}
+
+// The caller validates its writer authority in this same transaction.
+pub(super) fn cleanup_work_tx(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
     let selected:Option<i64>=tx.query_row(sql(&tx, "SELECT projection_id FROM native_tree_generations WHERE complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1", "SELECT projection_id FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1")?,[],|r|r.get(0)).optional()?;
     if let Some(id) = selected {
         for (table, key) in [
@@ -589,9 +596,7 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
         }
         tx.execute(sql(&tx, "UPDATE native_tree_generations SET work_pending=0 WHERE projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE projection_id=?1)", "UPDATE native_tree_generations SET work_pending=0 WHERE namespace=semon_namespace() AND projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1)")?,[id])?;
     }
-    let pending = work_pending(&tx)?;
-    tx.commit()?;
-    Ok(pending)
+    work_pending(tx)
 }
 
 #[cfg(test)]
