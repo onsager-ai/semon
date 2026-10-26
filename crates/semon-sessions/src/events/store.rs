@@ -1276,7 +1276,7 @@ pub(crate) fn prioritize_projection_sources(
 
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
-fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
+pub(crate) fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     require_current_sql(tx).map_err(io::Error::other)?;
     let after: Option<String> = tx
         .query_row(
@@ -1293,14 +1293,14 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     // Probe the bounded keyset before the driver allocates path or custody
     // payloads. This page owns one aggregate recovery budget on either engine.
     let page_bytes: i64 = tx.query_row(
-        "SELECT coalesce(sum(octet_length(source_path)),0) FROM (SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64)",
+        "SELECT coalesce(sum(octet_length(source_path)),0) FROM (SELECT DISTINCT source_path FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64)",
         [&after], |row| row.get(0),
     ).map_err(io::Error::other)?;
     let mut page_bytes = usize::try_from(page_bytes).map_err(io::Error::other)?;
     if page_bytes > crate::storage::source_observations::recovery::BYTES {
         return Err(io::Error::other(StorageError::Busy));
     }
-    let mut selected=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?;
+    let mut selected=tx.prepare("SELECT DISTINCT source_path FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?;
     let paths = selected
         .query_map([&after], |row| row.get::<_, String>(0))
         .map_err(io::Error::other)?
@@ -1338,13 +1338,13 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     for path in paths {
         if tx
             .execute(
-                "INSERT OR IGNORE INTO catalog_backfill_sources VALUES(?1)",
+                "INSERT OR IGNORE INTO main.catalog_backfill_sources(namespace,source_path) VALUES(semon_namespace(),?1)",
                 [path],
             )
             .map_err(io::Error::other)?
             > 0
         {
-            invalidate_catalog_source(tx, path, "changed").map_err(io::Error::other)?;
+            invalidate_bound_catalog_source(tx, path, "changed").map_err(io::Error::other)?;
         }
     }
     if let Some(last) = &page.next {
@@ -2258,7 +2258,7 @@ impl SourceObservationStore for SqliteStore {
         let witness =
             DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
         require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        if let Some((receipt, done)) = source_journal::recovery_receipt(&tx, operation)? {
+        if let Some((receipt, done)) = source_journal::recovery_receipt(&tx, None, operation)? {
             // Only a matching terminal receipt can consume this intent.
             let terminal: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace='' AND operation_id=?1 AND payload_digest=?2 AND recovery_done IS NOT NULL)",
@@ -2285,7 +2285,7 @@ impl SourceObservationStore for SqliteStore {
         } else {
             false
         };
-        source_journal::insert_recovery_receipt(&tx, operation, applied, done)?;
+        source_journal::insert_recovery_receipt(&tx, None, operation, applied, done)?;
         source_journal::acknowledge_intent_sql(&tx, None, operation)?;
         let complete = applied
             && done
