@@ -306,21 +306,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let fields = expected
                 .rows
                 .iter()
-                .filter(|row| {
-                    oracle_recent[since]["sessions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|session| session["id"] == row.key)
-                })
                 .map(|row| {
-                    let fields = query
-                        .call_at(
-                            "get_session",
-                            &serde_json::json!({"id":row.key}),
-                            recent_now,
-                        )
-                        .expect("SQLite recent-window selected fields");
+                    let fields = query.call_at(
+                        "get_session",
+                        &serde_json::json!({"id":row.key}),
+                        recent_now,
+                    );
                     (row.key.clone(), fields)
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
@@ -432,7 +423,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         evidence.request_metadata_audit();
         let mut work = evidence.work.lock().unwrap();
         let mut complete = false;
-        for _ in 0..64 {
+        // Each advance retains its normal bounded work. Qualify completion
+        // against the existing background budget, not a source-count-sized
+        // number of calls through the producer's multiple durable phases.
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
             if evidence.refresh_catalog(&mut work, recent_now).unwrap() {
                 complete = true;
                 break;
@@ -1108,15 +1103,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
         ));
         for (key, expected) in &oracle_recent_fields[&since] {
-            let fields = query
-                .call_bound_selected_at(
-                    "get_session",
-                    &serde_json::json!({"id":key}),
-                    recent_now,
-                    &store,
-                    &retained_host,
-                )
-                .expect("PG recent-window selected fields");
+            let fields = query.call_bound_selected_at(
+                "get_session",
+                &serde_json::json!({"id":key}),
+                recent_now,
+                &store,
+                &retained_host,
+            );
             assert_eq!(
                 &fields, expected,
                 "recent-window selected fields {since:?} {key}"

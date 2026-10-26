@@ -653,7 +653,11 @@ impl NativeEvidence {
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                 .extend_sources(&self.options, &inputs);
         }
-        let prepared = model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now);
+        let prepared = if batch.phase == Phase::Publication {
+            cache.prepare_semantic_model_batch(&catalog_options, &inputs, &batch, now)
+        } else {
+            model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now)
+        };
         cache.scan_byte_budget = None;
         let prepared = match prepared {
             Ok(prepared) => prepared,
