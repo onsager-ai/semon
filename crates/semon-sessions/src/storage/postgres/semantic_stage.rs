@@ -20,6 +20,7 @@ pub(super) struct Stage {
     epoch: i64,
     paths: Vec<String>,
     runtime: String,
+    binding: String,
     generation: Option<String>,
     phase: Phase,
     context: Context,
@@ -55,6 +56,7 @@ fn load(tx: &mut PgTxn<'_>, active: bool) -> Result<Option<Stage>, StorageError>
     if stage.epoch != row.get::<_, i64>(0) || stage.active != row.get::<_, bool>(3) {
         return Err(StorageError::ScopeChanged);
     }
+    if model_cache::binding(tx)?.witness(&stage.runtime).map_err(|_| StorageError::ScopeChanged)? != stage.binding { return Err(StorageError::Conflict); }
     Ok(Some(stage))
 }
 
@@ -113,12 +115,14 @@ pub(super) fn begin(
     let epoch = load(tx, false)?.map_or(Ok(1), |stage| {
         stage.epoch.checked_add(1).ok_or(StorageError::ScopeChanged)
     })?;
+    let binding = model_cache::binding(tx)?.witness(runtime).map_err(|_| StorageError::ScopeChanged)?;
     save(
         tx,
         &Stage {
             epoch,
             paths: paths.to_vec(),
             runtime: runtime.into(),
+            binding,
             generation,
             phase: Phase::Indexing,
             context: Context::default(),
