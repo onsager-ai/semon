@@ -345,8 +345,6 @@ impl SourceJournal {
         catalog_namespace::validate_guard(&tx, "storage_source_journal")?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
-
-
 }
 
 impl SourceJournal {

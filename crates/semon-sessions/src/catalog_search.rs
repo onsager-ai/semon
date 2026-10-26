@@ -138,18 +138,6 @@ pub(crate) fn publish_current_rows(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn publish_current_rows_probe(
-    transaction: &Transaction<'_>,
-    rows: &[&CatalogRow],
-    owners: usize,
-    probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
-) -> rusqlite::Result<()> {
-    assert!(matches!(owners, 64 | 16 | 8));
-    assert!(rows.len() <= 64);
-    publish_current_rows_order(transaction, rows, owners, probe)
-}
-
 fn posting_order<'a>(
     rows: &[&'a CatalogRow],
     prepared: &'a [(String, BTreeSet<String>, bool)],
@@ -1620,8 +1608,12 @@ mod sqlite_tests {
         {
             use crate::storage::catalog::SearchPublicationStore;
             let source = source(&transaction);
-            let writer = crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source).unwrap();
-            writer.begin(&[&row("candidate-00900", "replacement")]).unwrap();
+            let writer =
+                crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source)
+                    .unwrap();
+            writer
+                .begin(&[&row("candidate-00900", "replacement")])
+                .unwrap();
             writer.validate("candidate-00900").unwrap();
             writer.remove(CatalogReadScope::Current).unwrap();
         }
