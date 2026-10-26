@@ -405,11 +405,22 @@ pub(super) fn relocate(
     }
     let pending = tx.driver.query("SELECT CASE WHEN octet_length(evidence)<=1048576 THEN evidence END FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?;
     if let Some(pending) = pending.first() {
-        let bytes = pending.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        let evidence: crate::source_change::RelocationEvidence = serde_json::from_slice(&bytes).map_err(|_| StorageError::Conflict)?;
-        if evidence.from_path != old || evidence.native_id != id || evidence.before != prior.stat
-            || evidence.after != *stat || evidence.length != prior.offset
-            || evidence.prefix != format!("{:x}", sha2::digest::generic_array::GenericArray::from(prior.prefix)) {
+        let bytes = pending
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or(StorageError::Busy)?;
+        let evidence: crate::source_change::RelocationEvidence =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::Conflict)?;
+        if evidence.from_path != old
+            || evidence.native_id != id
+            || evidence.before != prior.stat
+            || evidence.after != *stat
+            || evidence.length != prior.offset
+            || evidence.prefix
+                != format!(
+                    "{:x}",
+                    sha2::digest::generic_array::GenericArray::from(prior.prefix)
+                )
+        {
             return Err(StorageError::Conflict);
         }
     }

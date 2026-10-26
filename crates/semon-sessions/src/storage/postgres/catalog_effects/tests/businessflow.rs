@@ -1020,8 +1020,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .unwrap();
     assert_eq!(query_list["total"].as_u64(), Some(all_total));
-    assert_eq!(query.call_at("read_transcript", &serde_json::json!({"id":prepared.rows[0].key}), 1790812802000).unwrap_err().code, "unavailable",
-        "ordinary PG Query without a host reader must refuse body authority");
+    assert_eq!(
+        query
+            .call_at(
+                "read_transcript",
+                &serde_json::json!({"id":prepared.rows[0].key}),
+                1790812802000
+            )
+            .unwrap_err()
+            .code,
+        "unavailable",
+        "ordinary PG Query without a host reader must refuse body authority"
+    );
     // Recent window (options.all=false): PG cohort equals the SQLite oracle.
     for since in recent_windows {
         let mut recent_options = options.clone();
@@ -1738,6 +1748,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &withdrawn_store,
         )
         .unwrap();
+    // This is a Query cohort, including virtual peer endpoints, rather than
+    // the physical owner count captured before subsequent publication. The
+    // independent SQLite withdrawal oracle fixes both its total and exact IDs.
     assert_eq!(
         current["total"].as_u64(),
         withdrawal_oracle["total"].as_u64(),
@@ -1830,12 +1843,45 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .join(format!("archived_sessions/rollout-{codex_id}.jsonl"));
     fs::create_dir_all(archived.parent().unwrap()).unwrap();
     let codex_bytes = fs::read(&codex).unwrap();
-    let from_input = crate::Input { root: crate::InputRoot::Codex, path: codex.strip_prefix(&options.codex_home).unwrap().to_str().unwrap().into() };
-    let to_input = crate::Input { root: crate::InputRoot::Codex, path: archived.strip_prefix(&options.codex_home).unwrap().to_str().unwrap().into() };
+    let from_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: codex
+            .strip_prefix(&options.codex_home)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    };
+    let to_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: archived
+            .strip_prefix(&options.codex_home)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    };
     let old_ledger = cache.ledger(codex.to_str().unwrap()).unwrap().unwrap();
-    let relocation = crate::SessionSourceRelocation::begin(&options, &from_input, &to_input, codex_id, "0123456789abcdef0123456789abcdef", old_ledger.offset, &format!("{:x}", sha2::digest::generic_array::GenericArray::from(old_ledger.prefix))).unwrap();
+    let relocation = crate::SessionSourceRelocation::begin(
+        &options,
+        &from_input,
+        &to_input,
+        codex_id,
+        "0123456789abcdef0123456789abcdef",
+        old_ledger.offset,
+        &format!(
+            "{:x}",
+            sha2::digest::generic_array::GenericArray::from(old_ledger.prefix)
+        ),
+    )
+    .unwrap();
     fs::copy(&codex, &archived).unwrap();
-    fs::OpenOptions::new().write(true).open(&archived).unwrap().sync_all().unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&archived)
+        .unwrap()
+        .sync_all()
+        .unwrap();
     relocation.complete().unwrap();
     fs::remove_file(&codex).unwrap();
     let moved_stat = crate::events::Stat::of(&archived).unwrap();
@@ -2002,8 +2048,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // must retain the same physical binding as the public receiver writers.
     let observer = crate::SessionCatalogObserver::new(facts_options.clone());
     let observed = observer.shared_view();
-    assert!(matches!(observed.evidence.store_config.as_ref().unwrap().backend,
-        crate::storage::StoreBackend::Postgres { .. }));
+    assert!(matches!(
+        observed.evidence.store_config.as_ref().unwrap().backend,
+        crate::storage::StoreBackend::Postgres { .. }
+    ));
     // A selected read cannot reuse a publication under different runtime
     // Facts, even when its immutable Raw recipes and host custody still match.
     let changed_runtime_store = super::super::snapshot::query::QueryCatalog {
@@ -2079,8 +2127,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     pid_write.complete(pid_bytes.len() as u64).unwrap();
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
-    let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded)
-    .unwrap();
+    let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded).unwrap();
     let facts_request = facts_writer.intent();
     drop(facts_writer); // Intent/no Facts bytes.
     let facts_writer = crate::SessionFactsWrite::begin_with_store(
@@ -2211,7 +2258,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(bookmark.catalog_key, facts_rows[0].key);
     assert_eq!(bookmark.generation, facts_generation);
-    let page = crate::catalog::page(&facts_options, namespace.as_str(), crate::catalog::Request::parse("limit=50").unwrap());
+    let page = crate::catalog::page(
+        &facts_options,
+        namespace.as_str(),
+        crate::catalog::Request::parse("limit=50").unwrap(),
+    );
     assert_eq!(page.status, 200, "ordinary bound Catalog renderer");
     assert!(String::from_utf8_lossy(&page.body).contains("source-write-after158"));
 
