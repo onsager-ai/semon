@@ -395,11 +395,9 @@ const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, 
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
      rate_limits, codex_native_usage, copilot, ctime_ns";
 
-
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
      script, y, poll, reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m, item, peer, \
      peer_sock, peer_pid, peer_start, u";
-
 
 const COMPOSITE_COPIED_USAGE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS usage_identity (
@@ -586,7 +584,6 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
-
 const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
@@ -604,13 +601,11 @@ const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
-
 const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
      lines_added, lines_removed, model_usage, capture_at";
-
 
 const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
 
@@ -6800,10 +6795,9 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path, &fixture_namespace()) {
-            Ok(opened) => opened,
-            Err(error) => panic!("the store opens: {error}"),
-        }
+        let store = current_test_store(path, &fixture_namespace());
+        let loaded = store.load().unwrap();
+        (store, loaded)
     }
 
     #[test]
@@ -11841,10 +11835,7 @@ pub(crate) fn current_search_test_connection(
     path: &Path,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> Connection {
-    let (mut store, _) = match SqliteStore::attempt(path, namespace) {
-        Ok(opened) => opened,
-        Err(error) => panic!("current search fixture opens: {error}"),
-    };
+    let mut store = current_test_store(path, namespace);
     store
         .publish_catalog_with_generation(
             &crate::slot_projection::Publication {
@@ -11858,4 +11849,23 @@ pub(crate) fn current_search_test_connection(
         )
         .unwrap();
     store.connection
+}
+
+#[cfg(test)]
+fn current_test_store(path: &Path, namespace: &crate::storage::LogicalSourceNamespace) -> SqliteStore {
+    let config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Sqlite { database: path.to_owned() },
+        namespace: namespace.clone(),
+        expected_stream_epoch: Some("a".repeat(64)),
+    };
+    if !path.exists() {
+        config.create_native_store().unwrap();
+    }
+    let owner = configured::NativeOwnership::admit(&config).unwrap();
+    let connection = configured::connection(&config).unwrap();
+    crate::storage::NativeReaderBinding::Semantic(owner.clone()).validate(&connection, namespace).unwrap();
+    SqliteStore {
+        owner, connection, path: path.to_owned(), selected_runs: None,
+        semantic_rejection: None, traversal_observation: None,
+    }
 }

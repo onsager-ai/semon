@@ -582,7 +582,7 @@ fn catalog_step(
     pending_key: Option<&str>,
 ) -> rusqlite::Result<bool> {
     if "1" == "1" {
-        // History/description/overview repricing still has singleton owners.
+        // History/description/overview repricing requires the current namespace owner.
         // Refuse before reading a payload or mutating a Catalog row; public
         // admission remains closed until those producers are ported together.
         return Err(rusqlite::Error::InvalidQuery);
@@ -1218,12 +1218,7 @@ mod tests {
     }
 
     fn foreign_change_state(db: &Connection) -> Vec<(i64, String, String)> {
-        let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_changes') WHERE name='namespace')", [], |r| r.get(0)).unwrap();
-        db.prepare(if composite {
-            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE namespace='b' ORDER BY revision"
-        } else {
-            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE session_key IN ('session-b','child-b') ORDER BY revision"
-        }).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+        db.prepare("SELECT revision,session_key,read_scope FROM main.session_catalog_changes WHERE namespace='b' ORDER BY revision").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 

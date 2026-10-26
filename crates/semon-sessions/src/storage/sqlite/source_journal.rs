@@ -1193,7 +1193,7 @@ mod tests {
             // Seed through the admitted journal and acknowledge one source through
             // the configured consumer; both counters belong to this namespace.
             let seed_paths = vec!["seed".into(), "acknowledged".into()];
-            let mut native = fixture.config.source_observations().unwrap();
+            let mut native = SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap());
             native
                 .discover(
                     &discover_operation(namespace, &seed_paths, true),
@@ -1202,7 +1202,8 @@ mod tests {
                 )
                 .unwrap();
             drop(native);
-            let mut consumer = EventCache::open_configured(&fixture.config).unwrap();
+            let source = crate::storage::HostSource::new(fixture.config.namespace.clone(), "a".repeat(64)).unwrap();
+            let mut consumer = EventCache::open_scoped(&fixture.root.join("index.json"), &source).unwrap();
             assert!(matches!(
                 consumer
                     .acknowledge_source_for_test("acknowledged")
