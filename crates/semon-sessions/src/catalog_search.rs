@@ -728,7 +728,7 @@ fn read_filtered(
             "SELECT octet_length(metadata),CASE WHEN octet_length(metadata)<=?2 THEN metadata ELSE NULL END,last_ms,harness,repo,lifecycle FROM {table}session_catalog WHERE {ns}session_key=?1 AND lifecycle='current'"
         ),
         crate::CatalogReadScope::RetainedHistory => format!(
-            "SELECT octet_length(CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END),CASE WHEN octet_length(CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END)<=?2 THEN CASE WHEN catalog.lifecycle='current' THEN catalog.metadata ELSE history.metadata END ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM {table}session_catalog AS catalog LEFT JOIN {table}session_history_catalog AS history USING({using}session_key) WHERE {ns}session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
+            "SELECT octet_length(catalog.metadata),CASE WHEN octet_length(catalog.metadata)<=?2 THEN catalog.metadata ELSE NULL END,catalog.last_ms,catalog.harness,catalog.repo,catalog.lifecycle FROM {table}session_catalog AS catalog LEFT JOIN {table}session_history_catalog AS history USING({using}session_key) WHERE {ns}session_key=?1 AND (history.metadata IS NOT NULL OR catalog.lifecycle='current')"
         ),
     };
     let mut metadata = connection.prepare(&metadata_sql)?;
@@ -835,6 +835,8 @@ pub(crate) fn select<E>(
             lifecycle,
         }) = metadata(&position.key, MAX_SCAN_BYTES - bytes)?
         else {
+            #[cfg(test)]
+            eprintln!("catalog_search_candidate_metadata_absent");
             return Err(invalid());
         };
         let Some(encoded) = encoded else {
@@ -899,6 +901,8 @@ pub(crate) fn select<E>(
     }
     let partial = partial || more;
     if partial && checked.is_none() {
+        #[cfg(test)]
+        eprintln!("catalog_search_first_candidate_exceeds_budget bytes={bytes}");
         return Err(invalid());
     }
     Ok(Selection {
@@ -1548,7 +1552,7 @@ mod sqlite_tests {
         // has a new Current projection. Search must validate the metadata
         // that produced its Current postings, before page presentation adds
         // the independently preserved history source context.
-        transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained')", []).unwrap();
+        transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained','$.name','Original Harbor name')", []).unwrap();
         transaction.commit().unwrap();
         let query = || Query {
             scope: CatalogReadScope::RetainedHistory,
@@ -1563,6 +1567,7 @@ mod sqlite_tests {
         let found = read(&connection, query()).unwrap();
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].key, "current");
+        assert_eq!(found.rows[0].name, "Harbor queue");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Current);
         assert!(!found.report.partial);
         connection
@@ -1572,9 +1577,19 @@ mod sqlite_tests {
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].key, "current");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Current);
+        // Withdrawal keeps the Catalog metadata that produced the postings.
+        // An older custody header does not replace indexed search fields.
+        connection.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata) SELECT namespace,session_key,json_set(metadata,'$.lifecycle','retained','$.name','Original Harbor name') FROM main.session_catalog", []).unwrap();
+        connection
+            .execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained')", [])
+            .unwrap();
+        let found = read(&connection, query()).unwrap();
+        assert_eq!(found.rows.len(), 1);
+        assert_eq!(found.rows[0].name, "Harbor queue");
+        assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Retained);
         // An absent retained source is not a readable current fallback.
         connection
-            .execute("UPDATE main.session_catalog SET lifecycle='retained'", [])
+            .execute("DELETE FROM main.session_history_catalog", [])
             .unwrap();
         assert!(read(&connection, query()).is_err());
     }
