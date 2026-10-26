@@ -627,6 +627,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let expected =
         crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
             .unwrap();
+    // The retained-row oracle consumes the same restored physical witnesses.
+    // Its order remains the independently observed SQLite page order above.
+    ordered = oracle_history
+        .iter()
+        .map(|key| {
+            expected
+                .rows
+                .iter()
+                .find(|row| &row.key == key)
+                .unwrap()
+                .clone()
+        })
+        .collect();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -756,10 +769,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             assert_eq!(received.count, 1);
             // Native locations retain the physical SourceFile path, just as
             // Location::local requires when checking the consumed witness.
-            assert_eq!(
-                received.location.unwrap().source.path,
-                claude_agent
-            );
+            assert_eq!(received.location.unwrap().source.path, claude_agent);
             assert_eq!(
                 pg.semantic_select(
                     batch.epoch,
