@@ -753,22 +753,6 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
         Self::new(transaction)
     }
 
-    fn core<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
-        current
-    }
-
-    fn meta<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
-        current
-    }
-
-    fn copied_usage<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
-        current
-    }
-
-    fn support<'a>(&self, _singleton: &'a str, current: &'a str) -> &'a str {
-        current
-    }
-
     fn ensure_current(&self) -> rusqlite::Result<()> {
         let observed: i64 = self
             .transaction
@@ -1012,11 +996,12 @@ pub(crate) fn note_catalog_audit(
     expected: Option<&str>,
     now: i64,
 ) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
-    let ready: bool = tx.query_row(configured::metadata_sql(&tx, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage)", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage)").map_err(io::Error::other)?, [expected], |r| r.get(0)).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
+    let ready: bool = tx.query_row(configured::metadata_sql(&tx, "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())", "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace()) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace())").map_err(io::Error::other)?, [expected], |r| r.get(0)).map_err(io::Error::other)?;
     if ready {
         tx.execute(
             configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_observed_at',?1)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at',?1)").map_err(io::Error::other)?,
@@ -1278,16 +1263,16 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
     let _ = archived_index(&tx, &evidence.from_path).map_err(io::Error::other)?;
     tx.execute(
-        "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
+        "INSERT OR REPLACE INTO main.session_source_mutations(namespace,source_path,evidence) VALUES(semon_namespace(),?1,?2)",
         params![
             path,
             serde_json::to_string(evidence).map_err(io::Error::other)?
@@ -1295,12 +1280,12 @@ pub(crate) fn complete_relocation(
     )
     .map_err(io::Error::other)?;
     tx.execute(
-        "INSERT OR IGNORE INTO catalog_relocation_candidates VALUES(?1,?2,?3)",
+        "INSERT OR IGNORE INTO main.catalog_relocation_candidates(namespace,old_path,new_path,native_id) VALUES(semon_namespace(),?1,?2,?3)",
         params![evidence.from_path, path, evidence.native_id],
     )
     .map_err(io::Error::other)?;
-    invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
-    invalidate_catalog_source(&tx, &evidence.from_path, "changed").map_err(io::Error::other)?;
+    invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+    invalidate_bound_catalog_source(&tx, &evidence.from_path, "changed").map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
 }
 
@@ -1310,11 +1295,11 @@ pub(crate) fn prioritize_projection_sources(
     options: &crate::Options,
     sources: &[crate::model::summary::CatalogSource],
 ) -> io::Result<()> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     for source in sources {
         let path = source.path.to_string_lossy();
         let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
@@ -1333,13 +1318,13 @@ pub(crate) fn prioritize_projection_sources(
         .map_err(io::Error::other)?;
         let pending: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)",
                 [path.as_ref()],
                 |row| row.get(0),
             )
             .map_err(io::Error::other)?;
         if !pending {
-            invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+            invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
         }
     }
     tx.commit().map_err(io::Error::other)
@@ -1915,34 +1900,35 @@ pub(crate) fn begin_source_write(
     options: &crate::Options,
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     let previous = read_append_evidence(&tx, &path).map_err(io::Error::other)?;
     #[cfg(test)]
     if let Some(hook) = BEFORE_SOURCE_INVALIDATION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+    invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     if input.path.ends_with(".meta.json") {
         let log = input
             .full_path(options)
             .with_extension("")
             .with_extension("jsonl");
-        invalidate_catalog_source(&tx, log.to_string_lossy().as_ref(), "changed")
+        invalidate_bound_catalog_source(&tx, log.to_string_lossy().as_ref(), "changed")
             .map_err(io::Error::other)?;
     }
     let revision = tx
         .query_row(
-            "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+            "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
             [&path],
             |row| row.get(0),
         )
         .map_err(io::Error::other)?;
     tx.execute(
-        "DELETE FROM session_source_mutations WHERE source_path=?1",
+        "DELETE FROM main.session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
         [&path],
     )
     .map_err(io::Error::other)?;
@@ -1961,7 +1947,7 @@ pub(crate) fn begin_source_write(
             )?,
         };
         tx.execute(
-            "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
+            "INSERT OR REPLACE INTO main.session_source_mutations(namespace,source_path,evidence) VALUES(semon_namespace(),?1,?2)",
             params![path, json(&evidence).map_err(io::Error::other)?],
         )
         .map_err(io::Error::other)?;
@@ -1981,14 +1967,15 @@ pub(crate) fn complete_source_write(
     revision: i64,
     evidence: Option<&crate::source_change::AppendEvidence>,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     let actual: Option<i64> = tx
         .query_row(
-            "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+            "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
             [&path],
             |row| row.get(0),
         )
@@ -2001,13 +1988,13 @@ pub(crate) fn complete_source_write(
         && let Some(evidence) = evidence
     {
         tx.execute(
-            "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
+            "INSERT OR REPLACE INTO main.session_source_mutations(namespace,source_path,evidence) VALUES(semon_namespace(),?1,?2)",
             params![path, json(evidence).map_err(io::Error::other)?],
         )
         .map_err(io::Error::other)?;
     } else {
         tx.execute(
-            "DELETE FROM session_source_mutations WHERE source_path=?1",
+            "DELETE FROM main.session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
             [&path],
         )
         .map_err(io::Error::other)?;
@@ -2017,7 +2004,7 @@ pub(crate) fn complete_source_write(
     // Keeping the revision also processes the input before its newly dirtied
     // native logs, avoiding an unnecessary second publication of those logs.
     if !input.path.ends_with(".json") || actual != Some(revision) {
-        invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     }
     tx.commit().map_err(io::Error::other)
 }
@@ -6582,7 +6569,7 @@ fn write_file_with_usage_deletes<'tx>(
     let file_id: i64 = {
         let started = measurements.start();
         let mut statement =
-            transaction.prepare_cached(layout.core(PUT_FILE, configured::PUT_FILE))?;
+            transaction.prepare_cached(configured::PUT_FILE)?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -6625,9 +6612,9 @@ fn write_file_with_usage_deletes<'tx>(
     };
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(layout.core(PUT_EVENT, configured::PUT_EVENT))?;
+    let mut put = transaction.prepare_cached(configured::PUT_EVENT)?;
     let mut cut = transaction
-        .prepare_cached(layout.core("DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3"))?;
+        .prepare_cached("DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?;
     for (extra, rows) in [(false, &row_plan.events), (true, &row_plan.extras)] {
         rows.apply(
             |seq, event| put_event(&mut put, file_id, extra, seq, event),
@@ -6643,7 +6630,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(layout.core(PUT_SIGNAL, configured::PUT_SIGNAL))?;
+    let mut put = transaction.prepare_cached(configured::PUT_SIGNAL)?;
     row_plan.signals.apply(
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
@@ -6662,7 +6649,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    layout.core("DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
+                    "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2",
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -6692,7 +6679,7 @@ fn write_file_with_usage_deletes<'tx>(
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
     let mut put = transaction
-        .prepare_cached(layout.copied_usage(PUT_CODEX_USAGE, COMPOSITE_PUT_CODEX_USAGE))?;
+        .prepare_cached(COMPOSITE_PUT_CODEX_USAGE)?;
     row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
@@ -6721,7 +6708,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    layout.copied_usage("DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
+                    "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2",
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -6791,16 +6778,13 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
     let mut put =
-        transaction.prepare_cached(layout.copied_usage(PUT_USAGE, COMPOSITE_PUT_USAGE))?;
+        transaction.prepare_cached(COMPOSITE_PUT_USAGE)?;
     let mut put_identity = transaction.prepare_cached(
-        layout.copied_usage("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)"),
+        "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)",
     )?;
     for (id, usage) in rows.iter() {
         let started = measurements.start();
-        let selected = layout.copied_usage(
-            "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
-            "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-        );
+        let selected = "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2";
         measurements.record("usage_identity_delete_qualification", started, 1);
         if deletes
             .identity
@@ -6830,10 +6814,7 @@ fn write_copied_usage_rows_with_deletes<'tx>(
             }
         } else {
             let started = measurements.start();
-            let selected = layout.copied_usage(
-                "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
-                "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-            );
+            let selected = "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2";
             measurements.record("usage_delete_qualification", started, 1);
             if deletes
                 .usage

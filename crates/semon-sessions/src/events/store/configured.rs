@@ -710,6 +710,7 @@ impl NativeOwnership {
                         "session_search_documents",
                         "session_search_memberships",
                         "session_search_counts",
+                        "session_overview",
                         "session_trace_headers",
                         "session_trace_turns",
                         "session_trace_edges",
@@ -789,7 +790,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key='claude_json_stamp' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -943,7 +944,7 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key='claude_json_stamp' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
             } else {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
@@ -3425,6 +3426,34 @@ mod tests {
             cache: cache_path.clone(),
             ..Default::default()
         };
+        let foreign_options = crate::Options {
+            source: other.clone(),
+            ..repair_options.clone()
+        };
+        assert!(!super::super::catalog_work_pending(&repair_options).unwrap());
+        assert!(super::super::catalog_work_pending(&foreign_options).unwrap());
+        assert!(super::super::catalog_dependents(&repair_options, &[]).unwrap().is_empty());
+        let ledger = expected.as_ref().unwrap();
+        assert!(super::super::verify_relocation_prefix(
+            &repair_options,
+            &f.raw,
+            &ledger.stat,
+            ledger.offset,
+            &format!("{:x}", sha2::digest::generic_array::GenericArray::from(ledger.prefix)),
+        ).unwrap());
+        let write_options = crate::Options {
+            codex_home: f.root.clone(),
+            ..repair_options.clone()
+        };
+        let input = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: f.raw.file_name().unwrap().to_str().unwrap().to_owned(),
+        };
+        let (write_revision, _) = super::super::begin_source_write(&write_options, &input).unwrap();
+        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, Some(write_revision));
+        super::super::complete_source_write(&write_options, &input, write_revision, None).unwrap();
+        assert!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1.unwrap() > write_revision);
+        assert_eq!(isolated.catalog_claims(&[key.clone()]).unwrap(), foreign_claim);
         restarted
             .store
             .as_mut()
@@ -7205,16 +7234,32 @@ mod tests {
                 "every relation field"
             );
             for (actual, reference) in prepared.transcripts.iter().zip(&expected.transcripts) {
-                let actual = serde_json::to_value((&actual.key, &actual.slots, actual.repair)).unwrap();
-                let reference = serde_json::to_value((&reference.key, &reference.slots, reference.repair)).unwrap();
+                let actual =
+                    serde_json::to_value((&actual.key, &actual.slots, actual.repair)).unwrap();
+                let reference =
+                    serde_json::to_value((&reference.key, &reference.slots, reference.repair))
+                        .unwrap();
                 if actual != reference {
                     // Only structural differences are logged; source bytes and
                     // native field values remain out of CI diagnostics.
                     let slots = actual[1].as_array().unwrap();
                     let expected_slots = reference[1].as_array().unwrap();
-                    eprintln!("native oracle transcript: key_equal={} repair_equal={} slots={}/{}", actual[0] == reference[0], actual[2] == reference[2], slots.len(), expected_slots.len());
+                    eprintln!(
+                        "native oracle transcript: key_equal={} repair_equal={} slots={}/{}",
+                        actual[0] == reference[0],
+                        actual[2] == reference[2],
+                        slots.len(),
+                        expected_slots.len()
+                    );
                     for (slot, expected_slot) in slots.iter().zip(expected_slots) {
-                        let fields: Vec<_> = slot.as_object().unwrap().iter().filter_map(|(field, value)| (expected_slot.get(field) != Some(value)).then_some(field.as_str())).collect();
+                        let fields: Vec<_> = slot
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|(field, value)| {
+                                (expected_slot.get(field) != Some(value)).then_some(field.as_str())
+                            })
+                            .collect();
                         if !fields.is_empty() {
                             eprintln!("native oracle slot differs: fields={fields:?}");
                         }
