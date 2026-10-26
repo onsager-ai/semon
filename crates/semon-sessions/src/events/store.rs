@@ -5705,11 +5705,10 @@ pub(crate) fn metadata_schema() -> &'static str {
     "CREATE TABLE IF NOT EXISTS meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;"
 }
 
-const NATIVE_METADATA_VALUE: &str =
-    "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1";
+const NATIVE_METADATA_VALUE: &str = "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1";
 
 fn native_metadata_value(_: &Connection) -> rusqlite::Result<&'static str> {
-    Ok("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1")
+    Ok(NATIVE_METADATA_VALUE)
 }
 
 fn native_metadata_put(_: &Connection) -> rusqlite::Result<&'static str> {
