@@ -452,6 +452,40 @@ pub(crate) fn sqlite_core(config: &StoreConfig, path: &Path) -> serde_json::Valu
 }
 
 #[test]
+fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledger() {
+    let root = root();
+    let source = sqlite(&root, "usage-unavailable-source");
+    let target = sqlite(&root, "usage-unavailable-target");
+    let path = root.join("unavailable.jsonl");
+    seed_native(&source, &path, 130, '8');
+    let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&source).unwrap();
+    let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+    let (ledger, _) = store.load_file(path.to_str().unwrap()).unwrap().unwrap();
+    drop(store);
+    let manifest = stage(&source, &target, &[122; 32]);
+    let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    let mut witnessed = false;
+    for sequence in 1..=pages {
+        for record in source.transfer_inbox().staged_page(&manifest, sequence).unwrap().records {
+            if let TransferRecord::NativeSource(mut native) = record {
+                assert!(!native.usage_ready);
+                assert_eq!(native.checkpoint, 0);
+                assert!(ledger.offset > 0);
+                native_pages::validate_source_ledger(&native, &ledger).unwrap();
+                let mut header: serde_json::Value = serde_json::from_str(&native.chunks_header).unwrap();
+                header["consumed_offset"] = (ledger.offset + 1).into();
+                native.chunks_header = serde_json::to_string(&header).unwrap();
+                assert!(native_pages::validate_source_ledger(&native, &ledger).is_err());
+                witnessed = true;
+            }
+        }
+    }
+    assert!(witnessed);
+    apply(&target, &manifest);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn current_transfer225_native_rows_real_ingest_paged_absent_raw_and_reverse() {
     let root = root();
     let source = sqlite(&root, "native-source");
