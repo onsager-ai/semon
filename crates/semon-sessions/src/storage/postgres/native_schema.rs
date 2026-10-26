@@ -14,6 +14,16 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "change_feed",
+        columns: "read_scope bytea,revision bigint,session_key bytea",
+        key: "read_scope,revision",
+    },
+    Table {
+        name: "change_feed_state",
+        columns: "read_scope bytea,head bigint,floor bigint",
+        key: "read_scope",
+    },
+    Table {
         name: "catalog_stage_items",
         columns: "stage_epoch bigint,seq bigint,payload bytea,payload_hash bytea,active boolean",
         key: "stage_epoch,seq",

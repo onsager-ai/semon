@@ -2187,6 +2187,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
+    let metadata = config.clone().open().unwrap();
+    let mut hints = metadata.read_snapshot(&namespace).unwrap();
+    for scope in [crate::CatalogReadScope::Current, crate::CatalogReadScope::RetainedHistory] {
+        let page = hints.catalog_changes(&namespace, crate::storage::CatalogChangesRequest {
+            scope, stream_epoch: config.expected_stream_epoch.as_deref(), after: 0, limit: 256,
+        }).unwrap();
+        assert_eq!(page.source_generation, facts_generation);
+        assert!(page.caught_up);
+        assert!(!page.changes.is_empty());
+        assert!(facts_rows.iter().all(|row| page.changes.iter().any(|hint| hint.catalog_key == row.key)));
+        assert!(page.changes.windows(2).all(|pair| pair[0].revision < pair[1].revision));
+        let compacted = metadata.compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256).unwrap();
+        assert!(compacted.removed > 0);
+        assert!(hints.catalog_changes(&namespace, crate::storage::CatalogChangesRequest {
+            scope, stream_epoch: Some(&page.stream_epoch), after: 0, limit: 256,
+        }).is_err(), "compaction invalidates an old cursor");
+        let repeated = metadata.compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256).unwrap();
+        assert_eq!(repeated.removed, 0);
+        assert_eq!(repeated.compacted_through, compacted.compacted_through);
+    }
     let facts_host = body_host(&facts_options, &facts_rows);
     let factory_options = facts_options.clone();
     let factory_rows = facts_rows.clone();
