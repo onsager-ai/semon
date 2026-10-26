@@ -1362,3 +1362,62 @@ mod proof_error_tests {
         assert_eq!(mapped.stage, None);
     }
 }
+
+#[cfg(test)]
+mod namespace_isolation_tests {
+    use super::*;
+    use rusqlite::functions::FunctionFlags;
+
+    fn bind(db: &Connection, namespace: &'static str) {
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |_| Ok(namespace.to_owned()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bound_transcript_reads_never_see_another_namespace() {
+        // Both namespaces hold the same session key and edge identity; only
+        // namespace b has live edges, a live turn and retained history.
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(crate::storage::sqlite::trace::SCHEMA)
+            .unwrap();
+        db.execute_batch(crate::storage::sqlite::history::SCHEMA)
+            .unwrap();
+        db.execute_batch(
+            "CREATE TABLE meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;
+             CREATE TABLE session_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,session_key));
+             INSERT INTO meta VALUES('a','catalog_generation','generation-a'),('b','catalog_generation','generation-b');
+             INSERT INTO session_catalog VALUES('a','shared','{\"query\":{\"last\":1}}'),('b','shared','{\"query\":{\"state\":\"work\"}}');
+             INSERT INTO session_trace_edges VALUES('a','shared','edge','{\"status\":\"done\",\"at\":1}'),('b','shared','edge','{\"status\":\"work\",\"at\":1}'),('b','shared','b-only','{\"status\":\"work\"}');
+             INSERT INTO session_trace_turns VALUES('b','shared','turn','edge','{\"start\":\"edge\",\"last\":1}');
+             INSERT INTO session_history_catalog VALUES('b','shared','{\"key\":\"shared\"}');",
+        )
+        .unwrap();
+        let stale = serde_json::json!({"last": 1});
+        bind(&db, "a");
+        assert_eq!(generation(&db).unwrap(), "generation-a");
+        assert!(!edge_timed(&db, "edge", 100).unwrap());
+        assert!(!edge_timed(&db, "b-only", 100).unwrap());
+        assert!(!edge_kept(&db, "edge", 100).unwrap());
+        assert!(!window_member(&db, "shared", &stale, 100).unwrap());
+        assert_eq!(
+            crate::history_projection::admitted_catalog(&db, "shared").unwrap(),
+            None
+        );
+        bind(&db, "b");
+        assert_eq!(generation(&db).unwrap(), "generation-b");
+        assert!(edge_timed(&db, "edge", 100).unwrap());
+        assert!(edge_timed(&db, "b-only", 100).unwrap());
+        assert!(window_member(&db, "shared", &stale, 100).unwrap());
+        assert_eq!(
+            crate::history_projection::admitted_catalog(&db, "shared")
+                .unwrap()
+                .as_deref(),
+            Some("{\"key\":\"shared\"}")
+        );
+    }
+}
