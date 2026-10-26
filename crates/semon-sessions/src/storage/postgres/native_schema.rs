@@ -13,6 +13,31 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "catalog_rows",
+        columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_sources",
+        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea",
+        key: "generation,key_digest,path_digest",
+    },
+    Table {
+        name: "catalog_dependencies",
+        columns: "generation bytea,path_digest bytea,source_path bytea,harness_digest bytea,harness bytea,native_digest bytea,native_id bytea",
+        key: "generation,path_digest,harness_digest,native_digest",
+    },
+    Table {
+        name: "catalog_recipe_headers",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea,version bigint,total bigint",
+        key: "generation,key_digest",
+    },
+    Table {
+        name: "catalog_recipe_rows",
+        columns: "generation bytea,key_digest bytea,session_key bytea,slot bigint,metadata bytea",
+        key: "generation,key_digest,slot",
+    },
+    Table {
         name: "page_blobs",
         columns: "digest bytea,payload bytea",
         key: "digest",
