@@ -653,11 +653,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
-    let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
-        pool: pool.clone(), control: control.clone(),
-    }).unwrap();
+    let config = options
+        .source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
     config.create_native_store().unwrap();
-    assert_eq!(config.create_native_store().err(), Some(StorageError::Conflict));
+    assert_eq!(
+        config.create_native_store().err(),
+        Some(StorageError::Conflict)
+    );
     let mut pg = EventCache::open_configured(&config).unwrap();
     for (at, input) in inputs.iter().enumerate() {
         pg.ingest(
@@ -2115,24 +2122,64 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     assert_eq!(facts_generation.len(), 64);
-    let facts_store = crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
-    let mut facts_query =
-        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_configured_machines(
-            vec![(namespace.as_str().into(), facts_options.clone(), config.clone())],
-        ).unwrap()));
+    let facts_store =
+        crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
+    let mut facts_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_configured_machines(vec![(
+            namespace.as_str().into(),
+            facts_options.clone(),
+            config.clone(),
+        )])
+        .unwrap(),
+    ));
     let list = facts_query
-        .call_catalog_at("list_sessions", &serde_json::json!({}), None, crate::SessionSourceReadMode::LocalThenProvider, 1790812805000)
+        .call_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            1790812805000,
+        )
         .unwrap();
-    let bound_list = facts_query.call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812805000, facts_store.as_ref()).unwrap();
+    let bound_list = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812805000,
+            facts_store.as_ref(),
+        )
+        .unwrap();
     assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
     let facts_host = body_host(&facts_options, &facts_rows);
     for row in &facts_rows {
         for tool in ["read_transcript", "get_session"] {
             let args = serde_json::json!({"id":row.key});
-            let expected = facts_query.call_bound_selected_at(tool, &args, 1790812805000, facts_store.as_ref(), &facts_host).unwrap();
-            let actual = facts_query.call_selected_at(namespace.as_str(), &row.key, tool, &args, Some(&facts_host), crate::SessionSourceReadMode::LocalThenProvider, 1790812805000).unwrap();
-            assert_eq!(actual, expected, "configured ordinary Facts selected {tool} {}", row.key);
+            let expected = facts_query
+                .call_bound_selected_at(
+                    tool,
+                    &args,
+                    1790812805000,
+                    facts_store.as_ref(),
+                    &facts_host,
+                )
+                .unwrap();
+            let actual = facts_query
+                .call_selected_at(
+                    namespace.as_str(),
+                    &row.key,
+                    tool,
+                    &args,
+                    Some(&facts_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    1790812805000,
+                )
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "configured ordinary Facts selected {tool} {}",
+                row.key
+            );
         }
     }
 
