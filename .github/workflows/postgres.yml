@@ -7,6 +7,7 @@ on:
     branches:
       - task/479-pg-foundation-20261025
       - task/479-pg-facts-20261026
+      - task/479-pg-native-ingest-20261026
       - task/479-pg-catalog-20261026
 
 permissions:
@@ -104,6 +105,16 @@ jobs:
         with:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
+          if-no-files-found: error
+      - name: Actual native EventCache PostgreSQL integration
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native126 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-native126.log"
+      - name: Retain early native ingest diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-native126-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-native126.log
           if-no-files-found: error
       - name: Private immutable Catalog Current and recipe producer qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}

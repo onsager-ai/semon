@@ -30,6 +30,7 @@ use crate::{Tokens, attachments, field, sealed::LogFile};
 pub(crate) mod file_rows;
 pub(crate) mod native_aux;
 pub(crate) mod native_commit;
+pub(crate) mod native_decode;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 pub(crate) mod reported_rows;
@@ -1761,6 +1762,31 @@ impl EventCache {
             .map_err(|_| crate::storage::StorageError::Unavailable)?;
         Ok(cache)
     }
+    /// Explicit authorized PG native capability. No public backend readiness,
+    /// SQLite coordinates, Options-derived path or alternate-engine fallback.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)] // Private integration until complete backend qualification.
+    pub(crate) fn open_pg_native(
+        pool: crate::storage::postgres::PgPool,
+        namespace: crate::storage::LogicalSourceNamespace,
+        control: crate::storage::postgres::PgCancellation,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let observation_namespace = namespace.as_str().to_owned();
+        let (store, claude_json_stamp) =
+            crate::storage::postgres::index_store::open(pool, namespace, control)?;
+        let mut cache = Self {
+            store: Some(store),
+            claude_json_stamp,
+            observation_namespace,
+            scoped: true,
+            explicit_store: true,
+            ..Self::default()
+        };
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
+    }
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
     /// No store is attached, so native projection cannot mutate global rows.
@@ -1942,12 +1968,12 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        let path = self
+        // A database path is an optional SQLite timing coordinate, never the
+        // identity or admission requirement of a logical Source journal.
+        let _probe = self
             .observation_path
             .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&path, "recovery");
+            .map(|path| crate::native_timing::DiscoveryProbe::new(path, "recovery"));
         // A failed/unknown ACK retains the exact identity before any new capture.
         if self.reconciled_recovery.is_none()
             && (self.pending_source_operation.is_some() || self.deferred_source_operations)
@@ -1993,12 +2019,10 @@ impl EventCache {
         inputs: &[crate::Input],
         complete: bool,
     ) -> io::Result<()> {
-        let observation_path = self
-            .observation_path
+        let observation_path = self.observation_path.clone();
+        let _probe = observation_path
             .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&observation_path, "publication");
+            .map(|path| crate::native_timing::DiscoveryProbe::new(path, "publication"));
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let paths = inputs
@@ -2030,9 +2054,9 @@ impl EventCache {
             }
         };
         measurements.record("source_journal_inclusive", started, paths.len());
-        if timing {
+        if timing && let Some(observation_path) = observation_path.as_deref() {
             measurements.emit(
-                &crate::native_timing::id(&observation_path),
+                &crate::native_timing::id(observation_path),
                 "discovery_publication_work",
             );
         }
