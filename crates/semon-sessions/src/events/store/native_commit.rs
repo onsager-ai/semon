@@ -138,6 +138,25 @@ impl Effects for Writer<'_, '_, '_> {
         configured::effect("native_usage")?;
         Ok(())
     }
+    fn tree(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
+        write_native_tree(
+            self.transaction,
+            input.path,
+            input.ledger,
+            input.index,
+            self.measurements,
+        )
+    }
+    fn auxiliary(&mut self, input: &Input<'_>, stage: shared::Auxiliary) -> rusqlite::Result<()> {
+        write_native_aux(
+            self.transaction,
+            input.path,
+            input.ledger,
+            input.index,
+            self.measurements,
+            stage,
+        )
+    }
     fn relationships(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
         shared::relationships(self, input.path, input.index)
     }

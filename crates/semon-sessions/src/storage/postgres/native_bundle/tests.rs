@@ -31,7 +31,8 @@ fn bundle_fixture(harness: &str) -> Fixture {
     ));
     std::fs::create_dir(&root).unwrap();
     let physical = root.join("one.jsonl");
-    let value = serde_json::json!({"type":"session.start","data":{"sessionId":"s🦀"}});
+    let value =
+        serde_json::json!({"id":"start🦀","type":"session.start","data":{"sessionId":"s🦀"}});
     std::fs::write(&physical, format!("{value}\n")).unwrap();
     let cache_path = root.join("index.json");
     let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
@@ -42,6 +43,7 @@ fn bundle_fixture(harness: &str) -> Fixture {
     let ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
     let path = format!("{}\0🦀", physical.to_str().unwrap());
     assert!(index.tree_summary.is_none());
+    assert!(index.copilot.is_some(), "production Copilot identity");
     Fixture {
         root,
         path: path.clone(),
@@ -481,12 +483,25 @@ fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, Str
 
 #[test]
 fn pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart() {
+    // SQLite's process-wide connection hook must not interfere with unrelated
+    // parallel SQLite tests. Run this actual parity test in an isolated test
+    // process, not a mock adapter or a counter on EventCache reads.
+    const CHILD: &str = "SEMON_NATIVE122_SQLITE_GUARD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::postgres::native_bundle::tests::pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart", "--nocapture"])
+            .env(CHILD, "1")
+            .status().unwrap();
+        assert!(status.success(), "isolated no-SQLite parity phase");
+        return;
+    }
     use crate::storage::postgres::{PgPool, native_pages, tests::limits};
     let data = complete_fixture(parser_fixture("codex"), "codex");
     let oracle = page_oracle(&data);
     let next = complete_fixture(append_fixture(&data, "codex"), "codex");
     let next_oracle = page_oracle(&next);
     // All SQLite work and independent oracle materialization precedes PG.
+    let _no_sqlite = NoSqlite::new();
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("pages\0🦀");
     let control = PgCancellation::default();
@@ -562,6 +577,50 @@ fn pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart() {
     drop(reopened);
     drop(factory);
     std::fs::remove_dir_all(data.root).unwrap();
+}
+
+static SQLITE_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" fn reject_sqlite(
+    _: *mut rusqlite::ffi::sqlite3,
+    _: *mut *mut std::ffi::c_char,
+    _: *const rusqlite::ffi::sqlite3_api_routines,
+) -> std::ffi::c_int {
+    SQLITE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    rusqlite::ffi::SQLITE_AUTH
+}
+
+// Every rusqlite production open/flags/in-memory entrypoint reaches SQLite's
+// connection initializer. All oracle connections are closed before this scope;
+// the rejection also catches a swallowed failed fallback through its counter.
+struct NoSqlite;
+impl NoSqlite {
+    fn new() -> Self {
+        SQLITE_ATTEMPTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let result = unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(reject_sqlite)) };
+        assert_eq!(result, rusqlite::ffi::SQLITE_OK);
+        assert!(
+            rusqlite::Connection::open_in_memory().is_err(),
+            "guard must reject an actual SQLite connection"
+        );
+        assert_eq!(
+            SQLITE_ATTEMPTS.swap(0, std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        Self
+    }
+}
+impl Drop for NoSqlite {
+    fn drop(&mut self) {
+        unsafe {
+            rusqlite::ffi::sqlite3_cancel_auto_extension(Some(reject_sqlite));
+        }
+        assert_eq!(
+            SQLITE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "PG phase attempted SQLite access"
+        );
+    }
 }
 
 #[test]
@@ -699,6 +758,108 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
             }
         }
         assert_eq!(pinned.launch(tx)?, expected);
+        Ok(())
+    })
+    .unwrap();
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_bundle_relocation_advance_matches_sqlite_and_rolls_back() {
+    // Exercise advancement, not Raw/Catalog move qualification. The prior
+    // evidence is a supplement; the next bytes come from the real SQLite
+    // producer's append path before the PG phase begins.
+    let data = complete_fixture(parser_fixture("codex"), "codex");
+    let (_, ledger, index) = &data.sources[0];
+    let physical = data.path.strip_suffix("\0🦀").unwrap();
+    let old = "old\0🦀";
+    let key = format!("native_catalog_relocation:{old}");
+    let evidence = serde_json::to_string(&shared::CatalogRelocation {
+        version: 1,
+        new_path: physical.to_owned(),
+        native_id: "qualified-native".into(),
+        prior: ledger.clone(),
+        catalog_before: None,
+        after: ledger.clone(),
+    })
+    .unwrap();
+    let db_path = crate::events::EventCache::path(&data.root.join("index.json"));
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute("INSERT INTO catalog_relocation_candidates(old_path,new_path,native_id) VALUES(?1,?2,?3)", rusqlite::params![old, physical, "qualified-native"]).unwrap();
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![key, evidence],
+        )
+        .unwrap();
+    }
+    let next = complete_fixture(append_fixture(&data, "codex"), "codex");
+    let oracle: String = {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+            .unwrap()
+    };
+    assert!(
+        oracle != evidence,
+        "actual SQLite producer advanced evidence"
+    );
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("relocation-advance\0🦀");
+    let control = PgCancellation::default();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)?;
+        let ns = tx.namespace.as_str().as_bytes();
+        tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path) VALUES($1,$2,$3)", &[&ns,&old.as_bytes(),&data.path.as_bytes()]).map_err(sqlstate::error)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&key.as_bytes(),&evidence.as_bytes()]).map_err(sqlstate::error)?;
+        Ok(())
+    }).unwrap();
+    let stable = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
+    let (_, next_ledger, next_index) = &next.sources[0];
+    let changes = DirtyRows::between(index, next_index);
+    FAIL_AFTER.with(|point| point.set(Some(1)));
+    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(
+            tx,
+            &data.path,
+            next_ledger,
+            next_index,
+            Some(ledger),
+            Some(&changes),
+        )
+    });
+    FAIL_AFTER.with(|point| point.set(None));
+    assert!(matches!(result, Err(StorageError::Unavailable)));
+    assert!(
+        stable
+            == pool
+                .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+                .unwrap(),
+        "evidence and every native family roll back together"
+    );
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(
+            tx,
+            &data.path,
+            next_ledger,
+            next_index,
+            Some(ledger),
+            Some(&changes),
+        )?;
+        let row = tx
+            .driver
+            .query_one(
+                "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
+                &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        assert!(
+            row.get::<_, Vec<u8>>(0) == oracle.as_bytes(),
+            "independent SQLite advancement bytes"
+        );
         Ok(())
     })
     .unwrap();
