@@ -126,6 +126,20 @@ pub(crate) struct Stage {
     begun: bool,
 }
 
+/// Cost recomputation writes the same admitted Catalog and retained metadata
+/// as publication. Use that existing producer connection, including its owner
+/// checks and namespace guards, rather than an unbound event connection.
+pub(crate) fn pricing_connection(
+    owner: &crate::events::store::configured::NativeOwnership,
+) -> Result<Connection, StorageError> {
+    Ok(Stage::open(SemanticStaging {
+        config: owner.config().clone(),
+        reduction: true,
+        owner: Some(owner.clone()),
+    })?
+    .db)
+}
+
 /// Internal runtime qualification, deliberately absent from public configuration.
 /// It qualifies primitive Codex reduction; composite ownership also admits the
 /// bounded initial Current publisher. No public configuration constructs it.
