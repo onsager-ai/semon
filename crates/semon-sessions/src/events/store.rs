@@ -1467,9 +1467,19 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
     let Some(after) = after else {
         return Ok(true);
     };
+    // Probe the bounded keyset before the driver allocates path or custody
+    // payloads. This page owns one aggregate recovery budget on either engine.
+    let page_bytes: i64 = tx.query_row(
+        "SELECT coalesce(sum(octet_length(source_path)),0) FROM (SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64)",
+        [&after], |row| row.get(0),
+    ).map_err(io::Error::other)?;
+    let mut page_bytes = usize::try_from(page_bytes).map_err(io::Error::other)?;
+    if page_bytes > crate::storage::source_observations::recovery::BYTES {
+        return Err(io::Error::other(StorageError::Busy));
+    }
     let mut selected=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?;
     let paths = selected
-        .query_map([after], |row| row.get::<_, String>(0))
+        .query_map([&after], |row| row.get::<_, String>(0))
         .map_err(io::Error::other)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(io::Error::other)?;
@@ -1480,14 +1490,29 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
         });
     }
     drop(selected);
+    let page = crate::storage::source_observations::recovery::Page::plan(&after, paths)
+        .map_err(io::Error::other)?;
+    let paths = &page.paths;
     crate::native_timing::discovery_count(|counts| {
         counts.statements += 1;
         counts.rows += paths.len();
     });
-    for path in &paths {
+    for path in paths {
+        let bytes: Option<i64> = tx.query_row(
+            configured::metadata_sql(tx,
+                "SELECT octet_length(value) FROM meta WHERE key=?1",
+                "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1").map_err(io::Error::other)?,
+            [archive_index_key(path)], |row| row.get(0),
+        ).optional().map_err(io::Error::other)?;
+        page_bytes = page_bytes
+            .checked_add(usize::try_from(bytes.unwrap_or(0)).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        if page_bytes > crate::storage::source_observations::recovery::BYTES {
+            return Err(io::Error::other(StorageError::Busy));
+        }
         let _ = archived_index(tx, path).map_err(io::Error::other)?;
     }
-    for path in &paths {
+    for path in paths {
         if tx
             .execute(
                 "INSERT OR IGNORE INTO catalog_backfill_sources VALUES(?1)",
@@ -1499,7 +1524,7 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
             invalidate_catalog_source(tx, path, "changed").map_err(io::Error::other)?;
         }
     }
-    if let Some(last) = paths.last() {
+    if let Some(last) = &page.next {
         tx.execute(
             configured::metadata_sql(tx, "UPDATE meta SET value=?1 WHERE key='catalog_recovery_after'", "UPDATE meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?,
             [last],
@@ -1509,7 +1534,7 @@ fn recovery_page(tx: &Transaction<'_>) -> io::Result<bool> {
         tx.execute(configured::metadata_sql(tx, "DELETE FROM meta WHERE key='catalog_recovery_after'", "DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_after') AND key='catalog_recovery_after'").map_err(io::Error::other)?, [])
             .map_err(io::Error::other)?;
     }
-    Ok(paths.is_empty())
+    Ok(page.done)
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
@@ -5688,16 +5713,24 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         [archive_index_key(path)], |row| row.get(0),
     ).optional()?;
     encoded
-        .map(|value| {
-            let record: ArchivedIndex =
-                serde_json::from_str(&value.ok_or(rusqlite::Error::InvalidQuery)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if record.version != 6 || record.parser_version != CACHE_VERSION {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            Ok(record)
-        })
+        .map(|value| decode_archive_marker(&value.ok_or(rusqlite::Error::InvalidQuery)?))
         .transpose()
+}
+
+fn decode_archive_marker(value: &str) -> rusqlite::Result<ArchivedIndex> {
+    let record: ArchivedIndex =
+        serde_json::from_str(value).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if record.version != 6 || record.parser_version != CACHE_VERSION {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(record)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_archive_marker(value: &str) -> Result<(), StorageError> {
+    decode_archive_marker(value)
+        .map(|_| ())
+        .map_err(|_| StorageError::ScopeChanged)
 }
 
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
@@ -12866,8 +12899,15 @@ mod tests {
                 rows.models.iter().map(String::as_str),
                 rows.tools
                     .iter()
-                    .filter(|(id, _)| !rows.closed_tools.contains(*id))
-                    .map(|(id, name)| (id.as_str(), name.as_str())),
+                    .map(|(id, name)| {
+                        (id.as_str(), Some(name.as_str()), rows.closed_tools.contains(id))
+                    })
+                    .chain(
+                        rows.closed_tools
+                            .iter()
+                            .filter(|id| !rows.tools.contains_key(*id))
+                            .map(|id| (id.as_str(), None, true)),
+                    ),
             );
             assert_eq!(
                 tree_state::witness(&store.connection, &path, &ledger).unwrap(),

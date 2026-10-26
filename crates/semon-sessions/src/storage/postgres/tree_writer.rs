@@ -308,12 +308,7 @@ pub(super) fn persisted_witness(
     for (family, key, columns, filter) in [
         ("labels", "label", "label,value", ""),
         ("models", "model_digest", "model", ""),
-        (
-            "tools",
-            "tool_id_digest",
-            "tool_id,name,closed",
-            "",
-        ),
+        ("tools", "tool_id_digest", "tool_id,name,closed", ""),
     ] {
         match family {
             "labels" => writer.labels(),
@@ -389,7 +384,10 @@ pub(super) fn persisted_witness(
                 }
                 _ => {
                     let name: Option<Vec<u8>> = row.get(1);
-                    let name = name.as_deref().map(std::str::from_utf8).transpose()
+                    let name = name
+                        .as_deref()
+                        .map(std::str::from_utf8)
+                        .transpose()
                         .map_err(|_| StorageError::Unavailable)?;
                     writer.tool(key, name, row.get(2));
                 }

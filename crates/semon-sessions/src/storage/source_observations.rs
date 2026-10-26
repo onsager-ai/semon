@@ -1,6 +1,7 @@
 //! Durable source observation revisions, consumed as publication claims.
 //! Recording observations grants no Raw access and does not publish a Catalog.
 use super::StorageError;
+pub(crate) mod recovery;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -1,5 +1,25 @@
 # Native session storage contract (#478, implementation checkpoints)
 
+Worker136 adds an unaccepted current recovery increment. SQLite and PostgreSQL
+consume one bounded recovery-page reducer and current archive-marker decoder.
+The private PG Source port persists typed recovery intents, validates the current
+physical profile under the existing store/publication/Source locks, seeks at most
+64 immutable Catalog source keys, probes the aggregate 1 MiB before payload
+decode, validates typed owner/path/lifecycle facts and custody markers, and queues
+Source repairs without changing Raw, native projections or retained history.
+The cursor binds the immutable Catalog head and full keyset position. The existing
+borrowed operation protocol retains the original applied/done result with page
+effects and the intent ACK in one commit. Replay never derives done from a peer's
+later cursor. Missing current head, malformed state and stale cursors refuse.
+
+`pg_native126_recovery136` authors a SQLite-first real-parser/ordinary-EventCache
+recovery oracle followed by PG under the process-wide SQLite-deny guard, including
+restart/ACK loss, stale cursors and selected measured rollback boundaries. Its
+Catalog head is a physical test fixture, not admitted-publication qualification.
+Exact-head CI and fresh review are pending. Complete recovery admission, all-effect
+fault/cancel/noise qualification, the accumulating full-scan ledger API, retirement
+and compact/deferred restoration remain open. This is not full #477 acceptance.
+
 Status: partial implementation. #477 is not complete. Change delivery,
 Catalog/Query metadata, bounded native navigation and source observations now
 have semantic storage interfaces, with SQLite adapters, explicit `StoreConfig`
