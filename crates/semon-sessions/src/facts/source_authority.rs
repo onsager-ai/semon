@@ -247,59 +247,55 @@ impl CurrentSources {
     }
 }
 
-/// A producer-owned snapshot of canonical Raw Facts. It has the same current
-/// selection semantics as the SQLite selected projection, with no database
-/// coordinates. The exact file identity fences deferred model publication.
-pub(crate) struct RawSources {
-    path: PathBuf,
-    identity: Identity,
-    facts: Facts,
+/// Bounded backend authority. Raw parsing belongs to producer preparation.
+pub(crate) enum Sources {
+    Sqlite(CurrentSources),
+    #[cfg(feature = "postgres")]
+    Postgres(crate::storage::postgres::current_sources::CurrentSources),
 }
-impl RawSources {
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        let identity = current(path)?;
-        let bytes = crate::read_regular_at_most(path, 64 * 1024 * 1024)?;
-        let facts: Facts = serde_json::from_slice(&bytes)?;
-        let source = Self {
-            path: path.to_owned(),
-            identity,
-            facts,
-        };
-        source.validate()?;
-        Ok(source)
+impl std::fmt::Debug for Sources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CurrentSources")
+    }
+}
+impl Sources {
+    pub(crate) fn sqlite(path: &Path) -> io::Result<Self> {
+        CurrentSources::open(path).map(Self::Sqlite)
     }
     pub(crate) fn validate(&self) -> io::Result<()> {
-        if current(&self.path)? != self.identity {
-            return Err(unavailable());
+        match self {
+            Self::Sqlite(source) => source.validate(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(source) => source.validate(),
         }
-        Ok(())
     }
     pub(crate) fn facts_known(&self) -> bool {
-        self.facts.version == FACTS_VERSION
+        match self {
+            Self::Sqlite(source) => source.facts_known(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(source) => source.facts_known(),
+        }
     }
     pub(crate) fn selection_known(&self) -> bool {
-        self.facts_known() && self.facts.codex_rollouts.is_some()
+        match self {
+            Self::Sqlite(source) => source.selection_known(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(source) => source.selection_known(),
+        }
     }
     pub(crate) fn hostname(&self) -> Option<String> {
-        (self.facts_known() && self.facts.hostname.len() <= 4096)
-            .then(|| self.facts.hostname.clone())
+        match self {
+            Self::Sqlite(source) => source.hostname(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(source) => source.hostname(),
+        }
     }
     pub(crate) fn codex_current(&self, relative: &str) -> io::Result<Option<bool>> {
-        self.validate()?;
-        if !self.selection_known() {
-            return Ok(None);
+        match self {
+            Self::Sqlite(source) => source.codex_current(relative),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(source) => source.codex_current(relative),
         }
-        Ok(Some(
-            self.facts
-                .codex_rollouts
-                .as_ref()
-                .is_some_and(|paths| paths.contains(relative))
-                || self
-                    .facts
-                    .codex_provisional_rollouts
-                    .as_ref()
-                    .is_some_and(|paths| paths.contains(relative)),
-        ))
     }
 }
 

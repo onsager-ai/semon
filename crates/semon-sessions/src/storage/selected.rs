@@ -368,7 +368,7 @@ pub(crate) struct PresentationObservations {
 }
 struct PresentationAuthority {
     options: crate::Options,
-    recorded: Option<std::sync::Mutex<crate::facts::source_authority::RawSources>>,
+    recorded: Option<std::sync::Mutex<crate::facts::source_authority::Sources>>,
 }
 impl std::fmt::Debug for PresentationAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -393,11 +393,17 @@ impl PresentationObservations {
         binding: Option<&crate::storage::QueryRuntimeBinding>,
         rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
     ) -> Self {
+        let recorded = options.facts.as_ref()
+            .and_then(|path| crate::facts::source_authority::Sources::sqlite(path).ok());
+        Self::capture_with_authority(options, binding, rows, recorded)
+    }
+    pub(crate) fn capture_with_authority<'a>(
+        options: &crate::Options,
+        binding: Option<&crate::storage::QueryRuntimeBinding>,
+        rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
+        recorded: Option<crate::facts::source_authority::Sources>,
+    ) -> Self {
         let runtime = crate::native_evidence::query_runtime_generation(options).ok();
-        let recorded = options
-            .facts
-            .as_ref()
-            .and_then(|path| crate::facts::source_authority::RawSources::open(path).ok());
         let mut facts_known =
             options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
         let mut selection_known = options.facts.is_none()

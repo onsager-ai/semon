@@ -3,6 +3,7 @@
 //! Credentials, connect deadlines and TLS (including cancellation TLS) belong to
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
+pub(crate) mod current_sources;
 mod catalog_effects;
 pub(crate) mod index_store;
 mod model_cache;
