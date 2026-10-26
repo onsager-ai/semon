@@ -120,6 +120,14 @@ leaves the ordinary producer responsible for completing the upgrade.
 
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 
+Hosts prepare identity and captured proofs inside
+`request.scope(|| { /* synchronous preparation returning io::Result */ })`
+on their existing blocking worker. Create the request and its cancellation guard
+before spawning that worker and retain the guard until it exits. This enters
+the same thread-local budget used by selected reads; PostgreSQL identity and
+proof lookups bind its cancellation/deadline before metadata SQL. Nested scopes
+retain the outer request and accounting. The scope grants no source authority.
+
 `StoreConfig::call_captured_query_at(options, machine, generation, tool, args,
 now, request, provider)` enters that same request control before PostgreSQL
 metadata admission. The scope spans binding SQL, host factory admission, leased

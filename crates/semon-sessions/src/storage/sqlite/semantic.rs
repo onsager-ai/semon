@@ -2942,6 +2942,31 @@ impl Stage {
                     prepared.removed_sources.contains(path),
                     removed_source(&tx, ns, path).map_err(error)?
                 );
+                #[cfg(test)]
+                {
+                    let reason: Option<String> = tx.query_row(
+                        "SELECT reason FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2",
+                        params![ns, path], |r| r.get(0),
+                    ).optional().map_err(error)?;
+                    let reason = match reason.as_deref() {
+                        None => "absent",
+                        Some("removed") => "removed",
+                        Some("changed") => "changed",
+                        Some(_) => "other",
+                    };
+                    let ledger = crate::events::store::ledger_row(&tx, path).map_err(error)?;
+                    let retained = ledger.as_ref().map(|(_, ledger)| {
+                        crate::events::store::archive_ledger_retained(&tx, path, ledger)
+                    }).transpose().map_err(error)?;
+                    let marker: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2)",
+                        params![ns, format!("archive_event_index:{path}")], |r| r.get(0),
+                    ).map_err(error)?;
+                    let current = super::source_journal::claims(&tx, ns, std::slice::from_ref(path)).map_err(error)?;
+                    eprintln!("semantic_removal_state reason={reason} ledger={} marker={marker} retained={retained:?} claim={:?} prepared_claim={:?}",
+                        ledger.is_some(), current[0].1,
+                        prepared.claims.iter().find(|(p, _)| p == path).map(|(_, claim)| claim));
+                }
                 return Ok(Outcome::Conflict);
             }
             let retained = crate::events::store::ledger_row(&tx, path)

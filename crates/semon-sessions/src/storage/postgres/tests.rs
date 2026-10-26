@@ -39,7 +39,10 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
         },
     };
     let options = crate::Options {
-        source: crate::storage::HostSource::new(namespace, "a".repeat(64)).unwrap(),
+        source: crate::storage::HostSource::new(namespace, "a".repeat(64))
+            .unwrap()
+            .with_store(config.clone())
+            .unwrap(),
         all: true,
         ..crate::Options::default()
     };
@@ -68,6 +71,26 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
             .unwrap_err();
         assert_eq!(error.code, "unavailable");
         assert!(error.message.contains(reason));
+        let reference = crate::SessionSourceRef {
+            root: "claude".into(),
+            path: "one.jsonl".into(),
+            native_id: "one".into(),
+            offset: 0,
+            prefix_sha256: [0; 32],
+            tail_sha256: [0; 32],
+        };
+        let identity = request.scope(|| {
+            crate::session_catalog_history_identity(&options, "external-machine-z", "claude:one")
+                .map_err(std::io::Error::other)
+        });
+        let proof = request.scope(|| {
+            config
+                .captured_source_proof_at(&options, &"b".repeat(64), "claude:one", &reference)
+                .map_err(std::io::Error::other)
+        });
+        for error in [identity.unwrap_err(), proof.unwrap_err()] {
+            assert!(error.to_string().contains(reason));
+        }
     }
 }
 
