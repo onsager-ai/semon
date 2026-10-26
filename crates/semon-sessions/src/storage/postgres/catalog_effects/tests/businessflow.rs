@@ -393,6 +393,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         query_list["total"].as_u64(),
         Some(prepared.rows.len() as u64)
     );
+    // Recent window (options.all=false): PG cohort equals the SQLite oracle.
+    for since in [Duration::from_secs(1), Duration::from_secs(86400 * 365 * 100)] {
+        let mut recent_options = options.clone();
+        recent_options.all = false;
+        recent_options.since = since;
+        let recent_store = super::super::snapshot::query::QueryCatalog {
+            pool: pool.clone(),
+            namespace: namespace.clone(),
+            control: control.clone(),
+            generation: generation.clone(),
+            options: recent_options.clone(),
+        };
+        let recent = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(namespace.as_str().into(), recent_options)]),
+        ))
+        .call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &recent_store)
+        .unwrap();
+        let mut oracle_options = sqlite_options.clone();
+        oracle_options.all = false;
+        oracle_options.since = since;
+        let oracle_recent = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(namespace.as_str().into(), oracle_options)]),
+        ))
+        .call_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            1790812802000,
+        )
+        .unwrap();
+        assert_eq!(recent["total"], oracle_recent["total"], "recent window {since:?}");
+        assert!(recent["total"].as_u64() <= query_list["total"].as_u64());
+    }
     super::super::snapshot::with_admitted_generation(
         &pool,
         &namespace,
