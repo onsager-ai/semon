@@ -10,6 +10,8 @@ pub(crate) mod inventory;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 pub(crate) mod reported;
+pub(crate) mod catalog_rows;
+pub use catalog_rows::CatalogRowKind;
 pub use native_pages::{NativePageKind, NativeSource};
 pub use native_rows::NativeRowKind;
 pub use reported::CaptureProgress;
@@ -193,6 +195,11 @@ impl SnapshotManifest {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum TransferRecord {
+    CatalogRow {
+        generation: String,
+        kind: CatalogRowKind,
+        values: Vec<serde_json::Value>,
+    },
     Metadata {
         key: String,
         value: String,
@@ -284,6 +291,7 @@ impl TransferRecord {
 
     fn category(&self) -> Category {
         match self {
+            Self::CatalogRow { kind, .. } => kind.category(),
             Self::Metadata { .. } => Category::Metadata,
             Self::ReportedFact(_) => Category::ReportedFacts,
             Self::SourceIntent(_) => Category::SourceObservations,
@@ -469,6 +477,7 @@ impl TransferInbox {
         }
         for record in &page.records {
             match record {
+                TransferRecord::CatalogRow { .. } => catalog_rows::validate(record)?,
                 TransferRecord::SourceIntent(intent) => {
                     super::source_observations::validate_intent(Some(&manifest.namespace), intent)?;
                 }

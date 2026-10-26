@@ -2,6 +2,7 @@
 mod native;
 mod pages;
 mod rows;
+mod catalog;
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,
@@ -293,6 +294,7 @@ pub(crate) fn apply(
                     tx.put(key, value.as_bytes())?
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,

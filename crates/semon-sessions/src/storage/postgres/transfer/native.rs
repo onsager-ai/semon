@@ -8,6 +8,7 @@ pub(super) fn capture_native(
     tx: &mut Inbox<'_, '_>,
     state: &mut CaptureState,
 ) -> Result<CaptureProgress, StorageError> {
+    if state.native_family >= 32 { return super::catalog::capture(tx, state); }
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let id = state
         .cursor
@@ -32,7 +33,9 @@ pub(super) fn capture_native(
             &[&ns, &id],
         )?;
         let Some(mut values) = rows.into_iter().next().map(|v| v.0) else {
-            transfer::reported::finish_capture(tx, state)?;
+            state.native_family = 32;
+            state.native_key = None;
+            transfer::reported::save_capture(tx, state)?;
             return Ok(state.progress());
         };
         let next = values[0].as_i64().ok_or(StorageError::ScopeChanged)?;
