@@ -242,9 +242,6 @@ impl IndexStore for NativeIndex {
     ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
         Some(&mut self.journal)
     }
-    fn describe(&self) -> String {
-        "private PostgreSQL native index".to_owned()
-    }
     fn prepare_file(
         &mut self,
         path: &str,
