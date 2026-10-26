@@ -210,7 +210,8 @@ fn scoped_publication_rejects_runtime_change_after_initial_observation() {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let mut changed = facts;
                 changed.hostname = "new runtime observation".into();
-                crate::write_facts(&facts_path, &changed, &crate::Options::default().source).unwrap();
+                crate::write_facts(&facts_path, &changed, &crate::Options::default().source)
+                    .unwrap();
             }));
         });
         let error = if selected {
@@ -5488,7 +5489,12 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
     assert_eq!(live.sessions["reader"].state, "work");
     assert!(pages(&live).concat().contains("~/notes.md"));
     // Offline: the same machine, nothing running.
-    crate::write_facts(&path, &facts.offline(1_790_000_000_000), &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        &path,
+        &facts.offline(1_790_000_000_000),
+        &crate::Options::default().source,
+    )
+    .unwrap();
     let offline = home.build_at(&options, NOW);
     assert_eq!(offline.machine_id, "laptop");
     assert_ne!(offline.sessions["reader"].state, "work");
@@ -11060,7 +11066,12 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
     };
     home.options.facts = Some(home.root.join("facts.json"));
     let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        home.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
@@ -11112,7 +11123,12 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             facts.codex_locks.insert("ack-root".into(), 42);
             facts.proc_starts.insert(42, 100);
             let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-            crate::write_facts(home.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+            crate::write_facts(
+                home.options.facts.as_ref().unwrap(),
+                &facts,
+                &crate::Options::default().source,
+            )
+            .unwrap();
             intent.complete().unwrap();
             injected = true;
         }
@@ -11178,7 +11194,12 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     };
     home.options.facts = Some(home.root.join("facts.json"));
     let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(
+        home.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();

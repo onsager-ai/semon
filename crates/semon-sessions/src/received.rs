@@ -383,7 +383,12 @@ mod tests {
         };
         let mut warned = BTreeSet::new();
         let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
-            crate::write_facts(&incoming.join("facts.json"), facts, &Options::default().source).unwrap();
+            crate::write_facts(
+                &incoming.join("facts.json"),
+                facts,
+                &Options::default().source,
+            )
+            .unwrap();
             let listing = receiver.scan();
             let seen = listing["synthetic"].as_ref().unwrap();
             receiver.copy_facts("synthetic", seen, &[], warned);

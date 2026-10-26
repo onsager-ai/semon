@@ -2413,7 +2413,7 @@ fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
         ])
     );
     let path = home.root.join("facts.json");
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     assert_no_secrets("the facts file", &fs::read_to_string(&path).unwrap());
     assert_eq!(crate::read_facts(&path).unwrap(), facts);
     // A mirror: the same logs, the recorded facts, and no /proc at all.

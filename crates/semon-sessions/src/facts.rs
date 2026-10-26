@@ -696,7 +696,10 @@ pub fn write_facts(
     let file = crate::save_json_file(path, facts)?;
     #[cfg(feature = "postgres")]
     if source.selected_store().is_some_and(|config| {
-        matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })
+        matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        )
     }) {
         return Ok(());
     }

@@ -427,7 +427,12 @@ mod tests {
         let a = fixture(Some(&["a.jsonl"]));
         let file_a = crate::save_json_file(&path, &a).unwrap();
         let identity_a = Identity::of(&file_a.metadata().unwrap()).unwrap();
-        write_facts(&path, &fixture(Some(&["b.jsonl"])), &crate::Options::default().source).unwrap();
+        write_facts(
+            &path,
+            &fixture(Some(&["b.jsonl"])),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         assert!(publish(&path, &a, &identity_a).is_err());
         let b = CurrentSources::open(&path).unwrap();
         assert_eq!(b.codex_current("a.jsonl").unwrap(), Some(false));
@@ -439,9 +444,19 @@ mod tests {
     fn replacement_in_place_change_and_disappearance_invalidate_open_reader() {
         let root = root();
         let path = root.join("facts.json");
-        write_facts(&path, &fixture(Some(&["a.jsonl"])), &crate::Options::default().source).unwrap();
+        write_facts(
+            &path,
+            &fixture(Some(&["a.jsonl"])),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         let old = CurrentSources::open(&path).unwrap();
-        write_facts(&path, &fixture(Some(&["b.jsonl"])), &crate::Options::default().source).unwrap();
+        write_facts(
+            &path,
+            &fixture(Some(&["b.jsonl"])),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         assert!(old.codex_current("a.jsonl").is_err());
         let old = CurrentSources::open(&path).unwrap();
         fs::write(&path, b"{}").unwrap();
@@ -482,7 +497,12 @@ mod tests {
     fn symlink_substitution_never_supplies_current_authority() {
         let root = root();
         let path = root.join("facts.json");
-        write_facts(&path, &fixture(Some(&["a.jsonl"])), &crate::Options::default().source).unwrap();
+        write_facts(
+            &path,
+            &fixture(Some(&["a.jsonl"])),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         fs::rename(&path, root.join("original.json")).unwrap();
         std::os::unix::fs::symlink(root.join("original.json"), &path).unwrap();
         assert!(CurrentSources::open(&path).is_err());
