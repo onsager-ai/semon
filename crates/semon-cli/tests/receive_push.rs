@@ -296,7 +296,7 @@ fn push_mirrors_a_home_into_semon_receive() {
         copilot_home: fixture.path("viewer/copilot"),
         proc_root: fixture.path("home/proc"),
         all: true,
-        ..Default::default()
+        ..semon_sessions::Options::from_host().unwrap()
     };
     let core = semon_sessions::ViewerCore::with_received(
         Vec::new(),
