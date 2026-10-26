@@ -105,8 +105,12 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         return Ok(admission);
     }
     // Check the supported current contract before any DDL, binding or data write.
-    let mode: String = tx.pragma_query_value(None, "journal_mode", |row| row.get(0)).map_err(failed)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |row| row.get(0)).map_err(failed)?;
+    let mode: String = tx
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(failed)?;
+    let application: i64 = tx
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(failed)?;
     if !mode.eq_ignore_ascii_case("wal") || application != 0 {
         return Err(StorageError::Unavailable);
     }

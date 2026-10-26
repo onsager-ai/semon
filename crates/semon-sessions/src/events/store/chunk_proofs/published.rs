@@ -17,7 +17,11 @@ fn namespaces(prefix: &str) -> [String; 2] {
 // Every reference belongs to the current namespace-leading Catalog family.
 // Refuse an unsupported physical shape before decoding owners or collecting proofs.
 fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> {
-    for table in ["session_catalog", "session_catalog_sources", "session_history_catalog"] {
+    for table in [
+        "session_catalog",
+        "session_catalog_sources",
+        "session_history_catalog",
+    ] {
         let (namespace_key, session_key): (i64, i64) = db.query_row(
             "SELECT coalesce(max(CASE WHEN name='namespace' AND [notnull]=1 THEN pk END),0),coalesce(max(CASE WHEN name='session_key' THEN pk END),0) FROM pragma_table_info(?1,'main')",
             [table], |r| Ok((r.get(0)?,r.get(1)?)),

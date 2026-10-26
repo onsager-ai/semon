@@ -1215,7 +1215,8 @@ pub(crate) fn enqueue_sources(
     let (_, _, journal) = open_admitted(&super::EventCache::path(&options.cache), &options.source)
         .map_err(io::Error::other)?;
     let mut db = journal.connection().map_err(io::Error::other)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     for input in inputs {

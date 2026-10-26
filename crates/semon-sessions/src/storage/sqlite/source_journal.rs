@@ -1443,6 +1443,16 @@ mod tests {
             2,
             "one original operation plus the later operation"
         );
+        let later_id = added
+            .iter()
+            .copied()
+            .find(|id| id.as_str() != operation.id.as_str())
+            .unwrap();
+        let later_digest: String = db.query_row("SELECT payload_digest FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2", params![namespace, later_id], |row| row.get(0)).unwrap();
+        assert_eq!(
+            later_digest,
+            discover_operation(namespace, std::slice::from_ref(&later_path), true).payload_digest
+        );
         assert_eq!(
             stored_receipt(&db, namespace, &operation).unwrap(),
             Some(SourceMutationReceipt::AlreadyApplied)

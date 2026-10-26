@@ -282,7 +282,8 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let file = options.open(database)
+    let file = options
+        .open(database)
         .map_err(|_| StorageError::Unavailable)?;
     let mut db = Connection::open_with_flags(
         database,
