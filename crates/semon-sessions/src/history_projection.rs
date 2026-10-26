@@ -1,8 +1,6 @@
 //! Producer-materialized history context. Current catalog/native authority stays
 //! independent. Missing source paths retain their original generation recipes;
 //! rewrites at the same path are not silently treated as that original source.
-#[cfg(test)]
-use crate::slot_projection::SavedSlot;
 use crate::{
     model::summary::CatalogRow,
     slot_projection::{Publication, VERSION},
@@ -10,10 +8,6 @@ use crate::{
 #[cfg(test)]
 use rusqlite::params;
 use rusqlite::{Connection, OptionalExtension, Transaction};
-#[cfg(test)]
-use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_history_catalog (
@@ -103,7 +97,6 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
         publication.transcripts,
     )
 }
-
 
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
@@ -317,4 +310,3 @@ mod tests {
 }
 
 // Frozen pre-extraction custody implementation, CI oracle only.
-

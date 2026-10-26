@@ -371,7 +371,13 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 impl Focused {
     #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        Self::open_with_raw(&super::fixture_reader_binding(cache)?, cache, path, ledger, None)
+        Self::open_with_raw(
+            &super::fixture_reader_binding(cache)?,
+            cache,
+            path,
+            ledger,
+            None,
+        )
     }
 
     pub(crate) fn open_with_raw(

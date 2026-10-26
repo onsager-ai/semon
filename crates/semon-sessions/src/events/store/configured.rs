@@ -9643,8 +9643,7 @@ mod tests {
                 if batch.paths.is_empty() {
                     continue;
                 }
-                if matches!(batch.phase, Phase::Indexing | Phase::Identity)
-                {
+                if matches!(batch.phase, Phase::Indexing | Phase::Identity) {
                     let error = cache
                         .semantic_select(
                             batch.epoch,

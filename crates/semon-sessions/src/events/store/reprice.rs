@@ -139,11 +139,9 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
         return Ok(false);
     }
     let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
-        .query_row(
-            PROGRESS_SQL,
-            params![TARGET, COMPLETED],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        .query_row(PROGRESS_SQL, params![TARGET, COMPLETED], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
     Ok(target.as_deref() == Some(fingerprint)
         && completed.as_deref() == Some(fingerprint)
         && !pending)
@@ -1301,11 +1299,10 @@ mod tests {
                 assert!(current_objects_present(&db).unwrap());
             }
             assert_eq!(
-                db.query_row(
-                    "SELECT count(*) FROM pragma_foreign_key_check",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
+                db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
                 .unwrap(),
                 0
             );
@@ -1321,8 +1318,25 @@ mod tests {
                     2
                 );
             }
-            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "DDL cannot enroll a Source");
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM meta WHERE key GLOB 'catalog_changes_floor_*'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0,
+                "DDL cannot enroll a Source"
+            );
             db.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA)
                 .unwrap();
             db.execute("INSERT INTO storage_namespaces VALUES('a',1,0,1,0)", [])
@@ -1338,12 +1352,40 @@ mod tests {
             // Catalog triggers use the row's owner, even when
             // the executing connection is bound to Source A.
             db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('b','same-session',1,'codex','{}')", []).unwrap();
-            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-            db.execute("UPDATE session_catalog SET metadata='{\"changed\":true}' WHERE namespace='b'", []).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog_changes WHERE namespace='b'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+            db.execute(
+                "UPDATE session_catalog SET metadata='{\"changed\":true}' WHERE namespace='b'",
+                [],
+            )
+            .unwrap();
             db.execute("DELETE FROM session_catalog WHERE namespace='b'", [])
                 .unwrap();
-            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
-            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog_changes WHERE namespace='b'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                6
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM session_catalog_changes WHERE namespace='a'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
         }
     }
 
@@ -1765,7 +1807,6 @@ mod tests {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
             db.execute_batch(configured::CORE_SCHEMA).unwrap();
-            db.execute_batch(crate::events::store::SCHEMA).unwrap();
             db.execute_batch(metadata_schema()).unwrap();
             for ddl in native_usage::schema() {
                 db.execute_batch(ddl).unwrap();
