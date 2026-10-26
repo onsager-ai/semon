@@ -8125,15 +8125,19 @@ mod tests {
         );
         let index = scan_file(&rollout, "codex", &mut cache, &mut false).unwrap();
         assert_eq!(index.signals.len(), 5);
-        let mut fresh = EventCache::open(&root.join("fresh.json"), &crate::Options::default().source).unwrap();
+        let mut fresh =
+            EventCache::open(&root.join("fresh.json"), &crate::Options::default().source).unwrap();
         let fresh_index = scan_file(&rollout, "codex", &mut fresh, &mut false).unwrap();
         let reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
         let key = rollout.to_string_lossy();
-        let (_, persisted) = reopened.store.as_ref().unwrap().load_file(&key).unwrap().expect("the rollout is stored");
-        assert_eq!(
-            index_snapshot(&persisted),
-            index_snapshot(&fresh_index)
-        );
+        let (_, persisted) = reopened
+            .store
+            .as_ref()
+            .unwrap()
+            .load_file(&key)
+            .unwrap()
+            .expect("the rollout is stored");
+        assert_eq!(index_snapshot(&persisted), index_snapshot(&fresh_index));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8272,7 +8276,9 @@ mod tests {
         assert!(dirty);
         drop(cache);
         let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        cache.select_reported_runs(&BTreeSet::from(["run-one".to_owned()])).unwrap();
+        cache
+            .select_reported_runs(&BTreeSet::from(["run-one".to_owned()]))
+            .unwrap();
         assert_eq!(cache.reported_runs().count(), 1);
         let bytes = store_text(&v1);
         for secret in secrets.into_iter().chain([
@@ -8302,11 +8308,21 @@ mod tests {
         cache
             .refresh_reported_runs(&claude_json, 5000, &mut dirty)
             .unwrap();
-        cache.select_reported_runs(&BTreeSet::from(["run-one".to_owned(), "run-two".to_owned()])).unwrap();
+        cache
+            .select_reported_runs(&BTreeSet::from([
+                "run-one".to_owned(),
+                "run-two".to_owned(),
+            ]))
+            .unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
         let mut reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        reopened.select_reported_runs(&BTreeSet::from(["run-one".to_owned(), "run-two".to_owned()])).unwrap();
+        reopened
+            .select_reported_runs(&BTreeSet::from([
+                "run-one".to_owned(),
+                "run-two".to_owned(),
+            ]))
+            .unwrap();
         let ids: BTreeSet<_> = reopened
             .reported_runs()
             .map(|snapshot| snapshot.last_session_id.as_str())
@@ -8947,7 +8963,17 @@ mod tests {
             .write_all(&FIXTURE.as_bytes()[boundary..])
             .unwrap();
         let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
-        let cold = scan_file(&log, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
+        let cold = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(
+                &root.join("cold-reference.json"),
+                &crate::Options::default().source,
+            )
+            .unwrap(),
+            &mut false,
+        )
+        .unwrap();
         assert_eq!(
             codex_fixture_snapshot(&appended),
             codex_fixture_snapshot(&cold)
@@ -9258,7 +9284,8 @@ mod tests {
         let log = root.join("rollout-parser-cases.jsonl");
         let cache_path = root.join("index.json");
         fs::write(&log, FIXTURE).unwrap();
-        let mut cold_cache = EventCache::open(&root.join("cold.json"), &crate::Options::default().source).unwrap();
+        let mut cold_cache =
+            EventCache::open(&root.join("cold.json"), &crate::Options::default().source).unwrap();
         let cold = scan_file(&log, "codex", &mut cold_cache, &mut false).unwrap();
         let cold_debug = codex_fixture_snapshot(&cold);
 
@@ -9555,7 +9582,11 @@ mod tests {
         let reopened_replay = &reopened_final.events[by_id(&reopened_final, "replay-poll-95583")];
         assert_eq!(reopened_replay.poll_target.as_deref(), Some("95583"));
         assert!(reopened_replay.result_source);
-        let mut final_cold_cache = EventCache::open(&root.join("final-cold.json"), &crate::Options::default().source).unwrap();
+        let mut final_cold_cache = EventCache::open(
+            &root.join("final-cold.json"),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
         assert_eq!(codex_fixture_snapshot(&final_cold), incremental_debug);
         let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
@@ -9676,7 +9707,17 @@ mod tests {
             }
         }
         assert!(index.yields.is_empty());
-        let cold = scan_file(&log, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
+        let cold = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(
+                &root.join("cold-reference.json"),
+                &crate::Options::default().source,
+            )
+            .unwrap(),
+            &mut false,
+        )
+        .unwrap();
         assert_eq!(
             codex_fixture_snapshot(&index),
             codex_fixture_snapshot(&cold)
@@ -9721,8 +9762,17 @@ mod tests {
                 .is_none()
         );
         assert!(record["payload"]["item"].get("requester").is_none());
-        let separate =
-            scan_file(&paginated, "codex", &mut EventCache::open(&root.join("cold-reference.json"), &crate::Options::default().source).unwrap(), &mut false).unwrap();
+        let separate = scan_file(
+            &paginated,
+            "codex",
+            &mut EventCache::open(
+                &root.join("cold-reference.json"),
+                &crate::Options::default().source,
+            )
+            .unwrap(),
+            &mut false,
+        )
+        .unwrap();
         assert!(separate.events.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -9768,8 +9818,13 @@ mod tests {
             Sha256::digest(path.to_string_lossy().as_bytes())
         );
         for missing in [false, true] {
-            let config = crate::Options::default().source.config(&cache_path).unwrap();
-            let connection = crate::storage::sqlite::source_journal::SourceJournal(config).connection().unwrap();
+            let config = crate::Options::default()
+                .source
+                .config(&cache_path)
+                .unwrap();
+            let connection = crate::storage::sqlite::source_journal::SourceJournal(config)
+                .connection()
+                .unwrap();
             if missing {
                 connection
                     .execute("DELETE FROM meta WHERE key=?1", [&key])
@@ -9980,7 +10035,11 @@ mod tests {
             writer.sync_all().unwrap();
             intent.complete(from + append.len() as u64).unwrap();
             drop(cache);
-            let db = crate::storage::sqlite::source_journal::SourceJournal(options.source.config(&options.cache).unwrap()).connection().unwrap();
+            let db = crate::storage::sqlite::source_journal::SourceJournal(
+                options.source.config(&options.cache).unwrap(),
+            )
+            .connection()
+            .unwrap();
             db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
             let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let full = HASHED_BYTES.with(std::cell::Cell::get);

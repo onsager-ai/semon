@@ -335,8 +335,10 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(StorageError::Unavailable);
     }
-    db.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT).map_err(failed)?;
-    db.pragma_update(None, "synchronous", "NORMAL").map_err(failed)?;
+    db.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)
+        .map_err(failed)?;
+    db.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(failed)?;
     file.sync_all().map_err(|_| StorageError::CommitUncertain)?;
     Ok(())
 }
