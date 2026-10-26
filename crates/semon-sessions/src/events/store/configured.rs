@@ -424,7 +424,14 @@ pub(crate) fn effect(name: &'static str) -> rusqlite::Result<()> {
     })
 }
 
+#[track_caller]
 fn failed(error: rusqlite::Error) -> StorageError {
+    #[cfg(test)]
+    eprintln!(
+        "configured SQL failure at {}: code={:?}",
+        std::panic::Location::caller(),
+        error.sqlite_error_code()
+    );
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,
@@ -7197,6 +7204,23 @@ mod tests {
                 serde_json::to_value(&expected.relationships.relations).unwrap(),
                 "every relation field"
             );
+            for (actual, reference) in prepared.transcripts.iter().zip(&expected.transcripts) {
+                let actual = serde_json::to_value((&actual.key, &actual.slots, actual.repair)).unwrap();
+                let reference = serde_json::to_value((&reference.key, &reference.slots, reference.repair)).unwrap();
+                if actual != reference {
+                    // Only structural differences are logged; source bytes and
+                    // native field values remain out of CI diagnostics.
+                    let slots = actual[1].as_array().unwrap();
+                    let expected_slots = reference[1].as_array().unwrap();
+                    eprintln!("native oracle transcript: key_equal={} repair_equal={} slots={}/{}", actual[0] == reference[0], actual[2] == reference[2], slots.len(), expected_slots.len());
+                    for (slot, expected_slot) in slots.iter().zip(expected_slots) {
+                        let fields: Vec<_> = slot.as_object().unwrap().iter().filter_map(|(field, value)| (expected_slot.get(field) != Some(value)).then_some(field.as_str())).collect();
+                        if !fields.is_empty() {
+                            eprintln!("native oracle slot differs: fields={fields:?}");
+                        }
+                    }
+                }
+            }
             assert_eq!(
                 serde_json::to_value(
                     prepared
