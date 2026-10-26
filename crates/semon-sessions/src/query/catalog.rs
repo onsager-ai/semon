@@ -237,13 +237,13 @@ impl Query {
         store: &dyn crate::storage::query::QueryCatalogStore,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        if self.sources.machines.len() != 1 || !matches!(tool, "list_sessions" | "read_transcript") {
+        if self.sources.machines.len() != 1 || !matches!(tool, "list_sessions" | "read_transcript" | "get_session") {
             return Err(QueryError::new(
                 "namespace_upgrade_pending",
                 "Admitted Query selector is not qualified",
             ));
         }
-        if tool == "read_transcript" {
+        if matches!(tool,"read_transcript"|"get_session") {
             return Err(unavailable("Selected Query requires an authorized Raw reader"));
         }
         self.execute_catalog_store_at(
@@ -264,10 +264,12 @@ impl Query {
         host: &dyn crate::SessionSourceReader,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        if self.sources.is_retired() || self.sources.machines.len() != 1 || tool != "read_transcript" {
+        if self.sources.is_retired() || self.sources.machines.len() != 1 || !matches!(tool,"read_transcript"|"get_session") {
             return Err(unavailable("Admitted selected Query tool unavailable"));
         }
-        store.selected_body(args["id"].as_str().expect("validated selected id"), args, now, host)
+        let mut selected_args=args.clone();
+        selected_args["_session"]=serde_json::Value::Bool(tool=="get_session");
+        store.selected_body(args["id"].as_str().expect("validated selected id"), &selected_args, now, host)
     }
 
     fn execute_catalog_store_at(

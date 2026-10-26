@@ -177,3 +177,15 @@ impl std::io::Seek for SelectedFile<'_, '_> {
         Ok(position)
     }
 }
+
+impl crate::query::transcript::QueryRecords for SelectedRecords<'_> {
+    fn reader(&self)->&dyn SessionSourceReader { self }
+    fn source_ref(&self,path:&std::path::Path)->Option<&SessionSourceRef> { self.reference(path).ok() }
+    fn record_bytes(&self,path:&std::path::Path,offset:u64,max:u64)->io::Result<Option<Vec<u8>>> {
+        let reference=self.reference(path)?;
+        if offset>=reference.offset {return Ok(None);}
+        let bound=usize::try_from(max).map_err(io::Error::other)?.min(crate::tx::LINE_MAX as usize);
+        crate::source_reader::read_record_bytes_bounded(self,reference,offset,bound,&mut (bound.saturating_add(1))).map(Some)
+    }
+    fn prompt(&self,file:&crate::model::SlotFile,offset:u64)->Option<(serde_json::Value,u64)> { self.prompt(file,offset) }
+}

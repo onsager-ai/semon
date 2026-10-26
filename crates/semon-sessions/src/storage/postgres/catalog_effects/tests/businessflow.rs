@@ -87,7 +87,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let expected_bodies = expected.rows.iter().map(|row| {
         let body = crate::query::transcript::read(&sqlite_options,&row.key,&serde_json::json!({"id":row.key,"limit":100}),None,crate::SessionSourceReadMode::LocalThenProvider,1790812802000).unwrap().expect("SQLite ordinary body");
         assert!(body.to_string().contains("sanitized"));
-        (row.key.clone(),body)
+        let session=crate::query::transcript::session(&sqlite_options,&row.key,&serde_json::json!({"id":row.key}),None,crate::SessionSourceReadMode::LocalThenProvider,1790812802000).unwrap().expect("SQLite ordinary session fields");
+        (row.key.clone(),serde_json::json!({"body":body,"fields":session}))
     }).collect::<std::collections::BTreeMap<_,_>>();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
@@ -305,7 +306,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let read_bodies = |query:&mut crate::Query,store:&super::super::snapshot::query::QueryCatalog,host:&BodyHost| {
         prepared.rows.iter().map(|row| {
             let body = query.call_bound_selected_at("read_transcript",&serde_json::json!({"id":row.key,"limit":100}),1790812802000,store,host).unwrap();
-            (row.key.clone(),body)
+            let fields=query.call_bound_selected_at("get_session",&serde_json::json!({"id":row.key}),1790812802000,store,host).unwrap();
+            (row.key.clone(),serde_json::json!({"body":body,"fields":fields}))
         }).collect::<std::collections::BTreeMap<_,_>>()
     };
     assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies);
