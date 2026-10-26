@@ -325,6 +325,17 @@ impl CompositeHistoryStore for History<'_, '_> {
     }
     fn retain_source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), StorageError> {
         let path = path(source)?.as_bytes();
+        // Retain the exact Native prefix alongside the historical source.
+        // A successor can also publish a newer prefix for this same path.
+        let receipt = crate::events::store::header_ledger(&crate::source_carrier::ledger(source));
+        let tx = self.effects.tx.borrow_mut();
+        let ns = tx.namespace.as_str().as_bytes();
+        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT p.namespace,$2,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5 ON CONFLICT DO NOTHING", &[&ns, &self.effects.generation.as_bytes(), &self.previous.as_bytes(), &path, &receipt.as_bytes()]).map_err(sqlstate::error)?;
+        if changed == 0 {
+            let retained: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3 AND g.ledger=$4)", &[&ns, &self.effects.generation.as_bytes(), &path, &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            if !retained { return Err(StorageError::ScopeChanged); }
+        }
+        drop(tx);
         self.effects.put(
             "semon_pg_native_catalog_history_sources",
             &[
