@@ -133,7 +133,7 @@ pub struct SessionSourceWrite {
 }
 
 impl SessionSourceWrite {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres"))]
     pub(crate) fn intent(&self) -> WriteIntent {
         self.intent.clone()
     }
@@ -416,7 +416,7 @@ pub struct SessionFactsWrite {
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres"))]
     pub(crate) fn intent(&self) -> FactsIntent {
         self.intent.clone()
     }
