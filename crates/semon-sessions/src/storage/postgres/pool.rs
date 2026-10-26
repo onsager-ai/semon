@@ -160,6 +160,7 @@ impl Driver {
 pub struct PgConnection {
     pub(super) client: Driver,
     io: Option<JoinHandle<()>>,
+    pub(super) schema_binding: Option<super::schema::Binding>,
     pub(super) created_at: Instant,
     pub(super) returned_at: Instant,
 }
@@ -228,6 +229,7 @@ impl PgConnection {
                 interrupted: std::cell::Cell::new(false),
             },
             io: Some(io),
+            schema_binding: None,
             created_at: now,
             returned_at: now,
         })
@@ -450,6 +452,8 @@ impl Lease {
         if namespace.is_some_and(|value| !value.is_empty()) {
             return Err(StorageError::NamespaceMismatch);
         }
+        // Also releases the session-scoped schema admission lock used to
+        // serialize repeatable-read snapshots against controlled DDL.
         connection
             .client
             .batch_execute("DISCARD ALL")

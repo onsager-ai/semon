@@ -8,23 +8,125 @@ use std::sync::Arc;
 #[path = "native_schema.rs"]
 mod native;
 
-pub(super) const VERSION: i32 = 9;
+pub(super) const VERSION: i32 = 10;
 
-pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Binding {
+    database_oid: i64,
+    database_name: String,
+    session_role_oid: i64,
+    role_oid: i64,
+    schema_oid: i64,
+    version: i32,
+    epoch: i64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_VERIFY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_verify_count() {
+    FULL_VERIFY_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn verify_count() -> usize {
+    FULL_VERIFY_COUNT.with(std::cell::Cell::get)
+}
+
+/// Read the cheap per-transaction admission tuple while holding the existing
+/// schema-scoped advisory lock. Namespace context is checked on every call but
+/// is deliberately not part of the connection's reusable schema identity.
+pub(super) fn binding(
+    tx: &mut PgTxn<'_>,
+    namespace: &LogicalSourceNamespace,
+) -> Result<Binding, StorageError> {
     let rows = tx
         .driver
-        .query("SELECT version FROM semon_pg_schema LIMIT 2", &[])
+        .query(
+            "SELECT d.oid::bigint,d.datname::text,sr.oid::bigint,cr.oid::bigint,n.oid::bigint,marker.version,marker.epoch,cr.rolsuper,cr.rolbypassrls,(owner.owner=CURRENT_USER),has_schema_privilege(CURRENT_USER,n.oid,'CREATE'),(has_table_privilege(CURRENT_USER,marker_table.oid,'SELECT') AND (owner.owner=CURRENT_USER OR NOT (has_table_privilege(CURRENT_USER,marker_table.oid,'INSERT') OR has_table_privilege(CURRENT_USER,marker_table.oid,'UPDATE') OR has_table_privilege(CURRENT_USER,marker_table.oid,'DELETE')))),current_setting('semon.namespace',true) FROM pg_database d JOIN pg_roles sr ON sr.rolname=session_user JOIN pg_roles cr ON cr.rolname=current_user JOIN pg_namespace n ON n.nspname=current_schema() JOIN pg_class marker_table ON marker_table.relnamespace=n.oid AND marker_table.relname='semon_pg_schema' AND marker_table.relkind='r' JOIN semon_pg_schema marker ON marker.tableoid=marker_table.oid JOIN pg_class owner_table ON owner_table.relnamespace=n.oid AND owner_table.relname='semon_pg_store_owner' AND owner_table.relkind='r' JOIN semon_pg_store_owner owner ON owner.tableoid=owner_table.oid AND owner.singleton WHERE d.datname=current_database()",
+            &[],
+        )
+        .map_err(sqlstate::error)?;
+    if rows.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let row = &rows[0];
+    let is_store_owner: bool = row.get(9);
+    if row.get::<_, bool>(7)
+        || row.get::<_, bool>(8)
+        || (!is_store_owner && row.get::<_, bool>(10))
+        || !row.get::<_, bool>(11)
+        || row.get::<_, Option<String>>(12).as_deref()
+            != Some(super::namespace_context(namespace).as_str())
+        || row.get::<_, i64>(6) < 1
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(Binding {
+        database_oid: row.get(0),
+        database_name: row.get(1),
+        session_role_oid: row.get(2),
+        role_oid: row.get(3),
+        schema_oid: row.get(4),
+        version: row.get(5),
+        epoch: row.get(6),
+    })
+}
+
+pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    #[cfg(test)]
+    FULL_VERIFY_COUNT.with(|count| count.set(count.get() + 1));
+    let rows = tx
+        .driver
+        .query(
+            "SELECT marker.version,marker.epoch FROM semon_pg_schema marker JOIN pg_class c ON c.oid=marker.tableoid AND c.relnamespace=current_schema()::regnamespace AND c.relname='semon_pg_schema' AND c.relkind='r' LIMIT 2",
+            &[],
+        )
         .map_err(sqlstate::error)?;
     if rows.len() != 1
         || rows[0]
             .try_get::<_, i32>(0)
             .map_err(|_| StorageError::Unavailable)?
             != VERSION
+        || rows[0]
+            .try_get::<_, i64>(1)
+            .map_err(|_| StorageError::ScopeChanged)?
+            < 1
     {
+        return Err(StorageError::ScopeChanged);
+    }
+    let marker_shape = tx
+        .driver
+        .query_one(
+            "SELECT c.relkind='r' AND pg_get_userbyid(c.relowner)::name=o.owner AND ARRAY(SELECT a.attname::text||' '||format_type(a.atttypid,a.atttypmod)||CASE WHEN a.attnotnull THEN '' ELSE '?' END FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum)=ARRAY['version integer','epoch bigint']::text[] AND ARRAY(SELECT a.attname::text FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.num WHERE k.conrelid=c.oid AND k.contype='p' ORDER BY x.ord)=ARRAY['version']::text[] AND ARRAY(SELECT pg_get_expr(k.conbin,k.conrelid) FROM pg_constraint k WHERE k.conrelid=c.oid AND k.contype='c' AND k.convalidated ORDER BY 1)=ARRAY['(epoch > 0)']::text[] AND NOT EXISTS(SELECT 1 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND (a.attidentity<>'' OR a.attgenerated<>'' OR d.oid IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=c.oid AND (NOT convalidated OR contype NOT IN ('p','c'))) AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal) AND NOT EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=c.oid) AND has_table_privilege(CURRENT_USER,c.oid,'SELECT') AND (o.owner=CURRENT_USER OR NOT (has_table_privilege(CURRENT_USER,c.oid,'INSERT') OR has_table_privilege(CURRENT_USER,c.oid,'UPDATE') OR has_table_privilege(CURRENT_USER,c.oid,'DELETE'))) FROM pg_class c JOIN pg_class owner_table ON owner_table.relnamespace=current_schema()::regnamespace AND owner_table.relname='semon_pg_store_owner' AND owner_table.relkind='r' JOIN semon_pg_store_owner o ON o.tableoid=owner_table.oid AND o.singleton WHERE c.relnamespace=current_schema()::regnamespace AND c.relname='semon_pg_schema'",
+            &[],
+        )
+        .map_err(sqlstate::error)?
+        .get::<_, bool>(0);
+    if !marker_shape {
         return Err(StorageError::ScopeChanged);
     }
     native::verify(tx)?;
     super::store_metadata::verify(tx)
+}
+
+/// Must be called after controlled DDL while holding the exclusive schema
+/// advisory lock. The epoch and DDL commit atomically in the caller's txn.
+pub(super) fn advance_epoch(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+    let rows = tx
+        .driver
+        .query(
+            "UPDATE semon_pg_schema marker SET epoch=marker.epoch+1 FROM pg_class c WHERE marker.tableoid=c.oid AND c.relnamespace=current_schema()::regnamespace AND c.relname='semon_pg_schema' AND c.relkind='r' AND marker.version=$1 AND marker.epoch>0 RETURNING marker.epoch",
+            &[&VERSION],
+        )
+        .map_err(sqlstate::error)?;
+    if rows.len() != 1 || rows[0].get::<_, i64>(0) < 2 {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
 }
 
 impl PgPool {
@@ -46,8 +148,8 @@ impl PgPool {
                 tx.driver
                     .batch_execute(
                         "
-                CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY);
-                INSERT INTO semon_pg_schema VALUES (9);
+                CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY,epoch bigint NOT NULL CHECK(epoch>0));
+                INSERT INTO semon_pg_schema VALUES (10,1);
                 CREATE TABLE semon_pg_operations(
                     namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
                     namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
