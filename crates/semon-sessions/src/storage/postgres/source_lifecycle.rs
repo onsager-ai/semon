@@ -7,10 +7,7 @@ use crate::{
     },
     storage::StorageError,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-};
+use std::{cell::RefCell, collections::BTreeSet, io};
 
 pub(super) fn component_paths(
     tx: &mut PgTxn<'_>,
@@ -24,103 +21,31 @@ pub(super) fn component_paths(
     let Some(generation) = model_cache::generation(tx)? else {
         return Ok(Some(Vec::new()));
     };
-    let ns = tx.namespace.as_str().as_bytes();
-    let values=tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY session_key LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-    if values.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-    let mut rows = BTreeMap::new();
-    let mut used = 0usize;
-    for value in values {
-        let key: Vec<u8> = value.get(0);
-        let bytes: Vec<u8> = value
-            .get::<_, Option<Vec<u8>>>(1)
-            .ok_or(StorageError::Busy)?;
-        used = used.saturating_add(bytes.len());
-        if used > 1048576 {
-            return Err(StorageError::Busy);
-        }
-        let row: CatalogRow =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        if row.key.as_bytes() != key {
-            return Err(StorageError::ScopeChanged);
-        }
-        rows.insert(row.key.clone(), row);
-    }
-    struct Lookup {
-        rows: BTreeMap<String, CatalogRow>,
-        links: BTreeMap<String, BTreeSet<String>>,
-    }
-    impl LifecycleStore for Lookup {
-        fn path_owners(&self, path: &str) -> io::Result<Vec<String>> {
-            Ok(self
-                .rows
-                .values()
-                .filter(|r| r.sources.iter().any(|s| s.path.to_str() == Some(path)))
-                .map(|r| r.key.clone())
-                .collect())
-        }
-        fn owner(&self, key: &str) -> io::Result<CatalogRow> {
-            self.rows
-                .get(key)
-                .cloned()
-                .ok_or_else(|| io::Error::other("missing Current source owner"))
-        }
-        fn neighbors(&self, key: &str) -> io::Result<Vec<String>> {
-            Ok(self.links.get(key).into_iter().flatten().cloned().collect())
-        }
-    }
-    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut connect = |a: &str, b: &str| {
-        if a != b && rows.contains_key(a) && rows.contains_key(b) {
-            links.entry(a.to_owned()).or_default().insert(b.to_owned());
-            links.entry(b.to_owned()).or_default().insert(a.to_owned());
-        }
+    let lookup = Lookup {
+        tx: RefCell::new(tx),
+        generation,
     };
-    for row in rows.values() {
-        if let Some(parent) = &row.parent {
-            connect(&row.key, parent);
-        }
-        for other in rows.values() {
-            if row.harness == other.harness
-                && row
-                    .native_ids
-                    .iter()
-                    .any(|id| other.native_ids.contains(id))
-            {
-                connect(&row.key, &other.key);
-            }
-        }
-        let edges = row
-            .query
-            .as_ref()
-            .and_then(|q| q["selected"]["edges"].as_array())
-            .ok_or(StorageError::NamespaceUpgradePending)?;
-        for edge in edges {
-            for field in ["from", "to"] {
-                if let Some(owner) = edge["query"][field].as_str() {
-                    connect(&row.key, owner);
-                }
-            }
-        }
-    }
     let mut seeds = paths.to_vec();
-    for row in rows.values() {
-        if keys.contains(&row.key)
-            || native
-                .iter()
-                .any(|(h, id)| row.harness == *h && row.native_ids.contains(id))
-        {
-            seeds.extend(
-                row.sources
-                    .iter()
-                    .map(|s| s.path.to_string_lossy().into_owned()),
-            );
+    let mut seeded = Vec::new();
+    for key in keys {
+        if lookup.exists(key)? {
+            seeded.push(key.clone());
         }
     }
-    let lookup = Lookup { rows, links };
-    let owners =
-        relation_stage::affected_owners(&lookup, &seeds).map_err(|_| StorageError::Busy)?;
+    for (harness, id) in native {
+        seeded.extend(lookup.native_owners(harness, id)?);
+    }
+    for key in seeded {
+        let row = lookup.owner(&key).map_err(storage)?;
+        seeds.extend(
+            row.sources
+                .iter()
+                .map(|s| s.path.to_string_lossy().into_owned()),
+        );
+    }
+    let owners = relation_stage::affected_owners(&lookup, &seeds).map_err(storage)?;
+    let tx = lookup.tx.into_inner();
+    let ns = tx.namespace.as_str().as_bytes();
     let mut sources = owners
         .values()
         .flat_map(|r| {
@@ -143,6 +68,85 @@ pub(super) fn component_paths(
     }
     tx.check()?;
     Ok(Some(sources.into_iter().collect()))
+}
+
+fn storage(error: io::Error) -> StorageError {
+    error
+        .into_inner()
+        .and_then(|error| error.downcast::<StorageError>().ok())
+        .map_or(StorageError::Busy, |error| *error)
+}
+
+/// Keyed lookups over one physical Current generation. Each call is bounded
+/// by its own page; the shared reducer owns the 64 owner / 1 MiB budget.
+struct Lookup<'t, 'c> {
+    tx: RefCell<&'t mut PgTxn<'c>>,
+    generation: String,
+}
+
+impl Lookup<'_, '_> {
+    fn keys(&self, sql: &str, value: &[u8], extra: &[u8]) -> io::Result<Vec<String>> {
+        let mut tx = self.tx.borrow_mut();
+        tx.check().map_err(io::Error::other)?;
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let rows = tx
+            .driver
+            .query(sql, &[&ns, &self.generation.as_bytes(), &value, &extra])
+            .map_err(sqlstate::error)
+            .map_err(io::Error::other)?;
+        if rows.len() > 64 {
+            return Err(io::Error::other(StorageError::Busy));
+        }
+        rows.iter()
+            .map(|row| String::from_utf8(row.get(0)))
+            .collect::<Result<_, _>>()
+            .map_err(|_| io::Error::other(StorageError::ScopeChanged))
+    }
+    fn exists(&self, key: &str) -> Result<bool, StorageError> {
+        let found = self.keys("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND $4::bytea IS NOT NULL", key.as_bytes(), b"").map_err(storage)?;
+        Ok(!found.is_empty())
+    }
+    fn native_owners(&self, harness: &str, id: &str) -> Result<Vec<String>, StorageError> {
+        self.keys("SELECT DISTINCT r.session_key FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.generation=s.generation AND r.key_digest=s.key_digest WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 ORDER BY r.session_key LIMIT 65", id.as_bytes(), harness.as_bytes()).map_err(storage)
+    }
+}
+
+impl LifecycleStore for Lookup<'_, '_> {
+    fn path_owners(&self, path: &str) -> io::Result<Vec<String>> {
+        self.keys("SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND $4::bytea IS NOT NULL ORDER BY session_key LIMIT 65", path.as_bytes(), b"")
+    }
+    fn owner(&self, key: &str) -> io::Result<CatalogRow> {
+        let mut tx = self.tx.borrow_mut();
+        tx.check().map_err(io::Error::other)?;
+        let ns = tx.namespace.as_str().as_bytes().to_vec();
+        let rows = tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error).map_err(io::Error::other)?;
+        let row = rows
+            .first()
+            .ok_or_else(|| io::Error::other("missing Current source owner"))?;
+        let bytes = row
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        let row: CatalogRow = serde_json::from_slice(&bytes)
+            .map_err(|_| io::Error::other(StorageError::ScopeChanged))?;
+        if row.key != key {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        // Relationship incidence is indexed from the saved selected edges.
+        if row
+            .query
+            .as_ref()
+            .and_then(|q| q["selected"]["edges"].as_array())
+            .is_none()
+        {
+            return Err(io::Error::other(StorageError::NamespaceUpgradePending));
+        }
+        Ok(row)
+    }
+    fn neighbors(&self, key: &str) -> io::Result<Vec<String>> {
+        // Parent/trace incidence in both directions, plus same-harness owners
+        // sharing a native ID. Only Current owners of this generation qualify.
+        self.keys("WITH peers AS (SELECT peer AS k FROM semon_pg_native_catalog_links WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION SELECT session_key FROM semon_pg_native_catalog_links WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND peer_digest=sha256($3::bytea) AND peer=$3 UNION SELECT p.session_key FROM semon_pg_native_catalog_sources o JOIN semon_pg_native_catalog_rows orow ON orow.namespace_digest=o.namespace_digest AND orow.namespace=o.namespace AND orow.generation=o.generation AND orow.key_digest=o.key_digest JOIN semon_pg_native_catalog_sources p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.generation AND p.native_digest=o.native_digest JOIN semon_pg_native_catalog_rows prow ON prow.namespace_digest=p.namespace_digest AND prow.namespace=p.namespace AND prow.generation=p.generation AND prow.key_digest=p.key_digest AND prow.harness=orow.harness WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND $4::bytea IS NOT NULL) SELECT DISTINCT r.session_key FROM peers JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND r.key_digest=sha256(peers.k) AND r.session_key=peers.k WHERE peers.k<>$3 ORDER BY r.session_key LIMIT 65", key.as_bytes(), b"")
+    }
 }
 
 /// Resolve an observed non-log input under the same namespace writer fence.
@@ -230,32 +234,17 @@ fn dependent_paths(
         affected.insert(String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?);
     }
     if let Some(generation) = model_cache::generation(tx)? {
-        let owners=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
-        if owners.len() > 64 {
+        // Every Source of a same-harness Current owner of this native ID.
+        let paths=tx.driver.query("SELECT DISTINCT s.source_path FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest IN (SELECT o.key_digest FROM semon_pg_native_catalog_sources o JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace AND r.generation=o.generation AND r.key_digest=o.key_digest WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.native_digest=sha256($3::bytea) AND r.harness=$4) ORDER BY s.source_path LIMIT 65", &[&ns,&generation.as_bytes(),&id.as_bytes(),&harness.as_bytes()]).map_err(sqlstate::error)?;
+        if paths.len() > 64 {
             return Err(StorageError::Busy);
         }
-        let mut used = 0usize;
-        for owner in owners {
-            let bytes: Vec<u8> = owner
-                .get::<_, Option<Vec<u8>>>(0)
-                .ok_or(StorageError::Busy)?;
-            used = used.saturating_add(bytes.len());
-            if used > 1048576 {
-                return Err(StorageError::Busy);
-            }
-            let owner: CatalogRow =
-                serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-            if owner.harness == harness && owner.native_ids.iter().any(|n| n == id) {
-                affected.extend(
-                    owner
-                        .sources
-                        .iter()
-                        .map(|s| s.path.to_string_lossy().into_owned()),
-                );
-            }
+        for row in paths {
+            affected.insert(
+                String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?,
+            );
         }
     }
-
     if affected.len() > 64 {
         return Err(StorageError::Busy);
     }
