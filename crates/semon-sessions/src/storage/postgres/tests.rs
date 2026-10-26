@@ -103,7 +103,7 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
         assert!(error.message.contains(reason));
         let reference = crate::SessionSourceRef {
             root: "claude".into(),
-            path: "one.jsonl".into(),
+            path: "projects/project/one.jsonl".into(),
             native_id: "one".into(),
             offset: 0,
             prefix_sha256: [0; 32],
