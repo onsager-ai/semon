@@ -142,6 +142,7 @@ fn native_usage_append_work_depends_on_touched_rows_and_pricing_dimensions() {
             json!(index.codex_cost().finish())
         };
         let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        crate::storage::sqlite::catalog_namespace::register(&db, &home.options.source.namespace().unwrap()).unwrap();
         db.execute_batch("CREATE TRIGGER facts_immutable BEFORE UPDATE ON native_usage_facts BEGIN SELECT RAISE(ABORT,'old fact rewritten'); END;").unwrap();
         let restored =
             events::store::native_usage::RESTORED_DIMENSION_ROWS.with(std::cell::Cell::get);
@@ -197,7 +198,7 @@ fn native_usage_append_work_depends_on_touched_rows_and_pricing_dimensions() {
             assert!(changed <= previous + 4, "append writes grew with history");
         }
         writes = Some(changed);
-        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT native_offset FROM native_usage_identities WHERE source_id=?1 AND scope='model' AND identity=?2",rusqlite::params![1,"synthetic"],|r|r.get(3)).unwrap();
+        let plan = db.prepare(&format!("EXPLAIN QUERY PLAN {}", events::store::native_usage::SEEN_SQL)).unwrap().query_map(rusqlite::params![1, "synthetic"], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
         assert!(
             plan.contains("PRIMARY KEY"),
             "identity lookup scans history: {plan}"

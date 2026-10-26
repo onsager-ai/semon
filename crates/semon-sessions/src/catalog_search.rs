@@ -1585,7 +1585,7 @@ mod sqlite_tests {
         assert!(!first.report.partial);
         let next = first.next.clone().unwrap();
         let template = serde_json::to_string(&row("unrelated", "Irrelevant history")).unwrap();
-        connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog SELECT 'unrelated-'||printf('%05d',x),1,'claude','fixture','current',json_set(?1,'$.key','unrelated-'||printf('%05d',x),'$.native_ids',json_array('unrelated-'||printf('%05d',x))) FROM n",[template]).unwrap();
+        connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,repo,lifecycle,metadata) SELECT semon_namespace(),'unrelated-'||printf('%05d',x),1,'claude','fixture','current',json_set(?1,'$.key','unrelated-'||printf('%05d',x),'$.native_ids',json_array('unrelated-'||printf('%05d',x))) FROM n",[template]).unwrap();
         connection.execute_batch("INSERT INTO main.session_search_memberships SELECT semon_namespace(),session_key,'irr',last_ms,NULL FROM session_catalog WHERE session_key LIKE 'unrelated-%'; INSERT INTO main.session_search_counts VALUES(semon_namespace(),'current','irr',20000);").unwrap();
         SQL_STEPS.with(|steps| steps.set(0));
         let grown_started = std::time::Instant::now();
