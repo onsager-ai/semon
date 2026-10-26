@@ -589,6 +589,28 @@ fn run_of(environ: &[u8]) -> Option<BTreeMap<String, String>> {
     Some(run)
 }
 
+/// Pure selectors shared by physical Facts journal adapters.
+pub(crate) struct Changes {
+    pub(crate) global:bool,
+    pub(crate) native:std::collections::BTreeSet<(String,String)>,
+    pub(crate) pids:std::collections::BTreeSet<u32>,
+    pub(crate) repos:std::collections::BTreeSet<String>,
+}
+pub(crate) fn changes(before:&Facts,after:&Facts)->Changes {
+    let mut native=std::collections::BTreeSet::new();
+    for id in before.codex_locks.keys().chain(after.codex_locks.keys()) {
+        if before.codex_locks.get(id)!=after.codex_locks.get(id) {native.insert(("codex".into(),id.clone()));}
+    }
+    let names=|facts:&Facts|facts.native_names.iter().map(|n|((n.harness.clone(),n.native_id.clone()),(n.name.clone(),n.source.clone(),n.updated_at.clone(),n.freshness.clone()))).collect::<BTreeMap<_,_>>();
+    let old=names(before);let new=names(after);
+    for key in old.keys().chain(new.keys()) {if old.get(key)!=new.get(key) {native.insert(key.clone());}}
+    for run in before.reported_runs.iter().chain(&after.reported_runs) {if before.reported_runs.contains(run)!=after.reported_runs.contains(run) {native.insert(("claude".into(),run.last_session_id.clone()));}}
+    let pids=before.proc_starts.keys().chain(after.proc_starts.keys()).chain(before.runs.keys()).chain(after.runs.keys()).chain(before.process_ancestors.keys()).chain(after.process_ancestors.keys()).filter(|p|before.proc_starts.get(*p)!=after.proc_starts.get(*p)||before.runs.get(*p)!=after.runs.get(*p)||before.process_ancestors.get(*p)!=after.process_ancestors.get(*p)).copied().collect::<std::collections::BTreeSet<_>>();
+    for (id,pid) in before.codex_locks.iter().chain(&after.codex_locks) {if pids.contains(pid) {native.insert(("codex".into(),id.clone()));}}
+    let repos=before.repos.keys().chain(after.repos.keys()).filter(|p|before.repos.get(*p)!=after.repos.get(*p)).cloned().collect();
+    Changes {global:before.hostname!=after.hostname||before.home!=after.home||before.offline_since!=after.offline_since,native,pids,repos}
+}
+
 /// Reads a facts file written by [`write_facts`] (or received as JSON).
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
     let mut file = fs::File::open(path)?;

@@ -1696,10 +1696,8 @@ pub(crate) fn enqueue_facts(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
-    let global = before.hostname != after.hostname
-        || before.home != after.home
-        || before.offline_since != after.offline_since;
-    if global {
+    let changes=crate::facts::changes(before,after);
+    if changes.global {
         // These fields are actual dependencies of every recorded observation.
         // Queue their source paths; bounded workers still never build a cohort.
         let paths = {
@@ -1714,43 +1712,8 @@ pub(crate) fn enqueue_facts(
             invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
         }
     }
-    for id in before.codex_locks.keys().chain(after.codex_locks.keys()) {
-        if before.codex_locks.get(id) != after.codex_locks.get(id) {
-            enqueue_native_tx(&tx, "codex", id).map_err(io::Error::other)?;
-        }
-    }
-    let names = |facts: &crate::Facts| {
-        facts
-            .native_names
-            .iter()
-            .map(|name| {
-                (
-                    (name.harness.clone(), name.native_id.clone()),
-                    (
-                        name.name.clone(),
-                        name.source.clone(),
-                        name.updated_at.clone(),
-                        name.freshness.clone(),
-                    ),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let previous_names = names(before);
-    let current_names = names(after);
-    for (harness, id) in previous_names.keys().chain(current_names.keys()) {
-        if previous_names.get(&(harness.clone(), id.clone()))
-            != current_names.get(&(harness.clone(), id.clone()))
-        {
-            enqueue_native_tx(&tx, harness, id).map_err(io::Error::other)?;
-        }
-    }
-    for run in before.reported_runs.iter().chain(&after.reported_runs) {
-        if before.reported_runs.contains(run) != after.reported_runs.contains(run) {
-            enqueue_native_tx(&tx, "claude", &run.last_session_id).map_err(io::Error::other)?;
-        }
-    }
-    for cwd in before.repos.keys().chain(after.repos.keys()) {
+    for (harness,id) in &changes.native {enqueue_native_tx(&tx,harness,id).map_err(io::Error::other)?;}
+    for cwd in &changes.repos {
         if before.repos.get(cwd) != after.repos.get(cwd) {
             let paths = {
                 let mut statement = tx
@@ -1767,28 +1730,7 @@ pub(crate) fn enqueue_facts(
             }
         }
     }
-    for pid in before
-        .proc_starts
-        .keys()
-        .chain(after.proc_starts.keys())
-        .chain(before.runs.keys())
-        .chain(after.runs.keys())
-        .chain(before.process_ancestors.keys())
-        .chain(after.process_ancestors.keys())
-    {
-        if before.proc_starts.get(pid) != after.proc_starts.get(pid)
-            || before.runs.get(pid) != after.runs.get(pid)
-            || before.process_ancestors.get(pid) != after.process_ancestors.get(pid)
-        {
-            enqueue_dependency_tx(&tx, "runtime:pid", &pid.to_string())
-                .map_err(io::Error::other)?;
-            for (id, owner) in before.codex_locks.iter().chain(&after.codex_locks) {
-                if owner == pid {
-                    enqueue_native_tx(&tx, "codex", id).map_err(io::Error::other)?;
-                }
-            }
-        }
-    }
+    for pid in &changes.pids {enqueue_dependency_tx(&tx,"runtime:pid",&pid.to_string()).map_err(io::Error::other)?;}
     for pid in crate::model::pid_files(
         options,
         &crate::facts::MachineFacts::Recorded(Box::new(after.clone())),
@@ -2666,6 +2608,12 @@ impl SourceObservationStore for SqliteStore {
 }
 
 impl IndexStore for SqliteStore {
+    fn facts_write_begin(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
+        enqueue_facts(options,&intent.before,&intent.wanted,intent.push_driven).map_err(|e|StoreError::Data(e.to_string()))
+    }
+    fn facts_write_complete(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
+        enqueue_facts(options,&intent.before,&intent.wanted,intent.push_driven).map_err(|e|StoreError::Data(e.to_string()))
+    }
     fn source_write_begin(&mut self, options: &crate::Options, input: &crate::Input, _: &crate::source_change::WriteIntent) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
         let path=input.full_path(options).to_string_lossy().into_owned();
         resume_runtime_input(options,&path).map_err(|e|StoreError::Data(e.to_string()))?;

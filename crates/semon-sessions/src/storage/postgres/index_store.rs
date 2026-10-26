@@ -585,6 +585,19 @@ impl IndexStore for NativeIndex {
             })
             .map_err(err)
     }
+    fn facts_write_begin(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
+        let path=options.facts.as_ref().ok_or_else(||err(StorageError::InvalidArguments))?;
+        if path.to_string_lossy()!=intent.path {return Err(err(StorageError::InvalidArguments));}
+        let actual=match crate::read_facts(path) {Ok(f)=>f,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>crate::Facts::default(),Err(e)=>return Err(StoreError::Data(e.to_string()))};
+        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::facts_begin(tx,intent,&actual)).map_err(err)
+    }
+    fn facts_write_complete(&mut self,options:&crate::Options,intent:&crate::source_change::FactsIntent)->Result<(),StoreError> {
+        let path=options.facts.as_ref().ok_or_else(||err(StorageError::InvalidArguments))?;
+        if path.to_string_lossy()!=intent.path {return Err(err(StorageError::InvalidArguments));}
+        let actual=crate::read_facts(path).map_err(|e|StoreError::Data(e.to_string()))?;
+        let pids=crate::model::pid_files(options,&crate::facts::MachineFacts::Recorded(Box::new(actual.clone()))).into_iter().map(|p|(p.pid,p.session)).collect::<Vec<_>>();
+        self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx|super::source_lifecycle::facts_complete(tx,options,intent,&actual,&pids)).map_err(err)
+    }
     fn source_write_prepare(&self,options:&crate::Options,input:&crate::Input,intent:&mut crate::source_change::WriteIntent)->Result<(),StoreError> {
         let until=std::time::Instant::now()+std::time::Duration::from_secs(60);
         let check=|| if self.control.is_cancelled() || std::time::Instant::now()>=until {Err(std::io::Error::new(std::io::ErrorKind::Interrupted,"source proof cancelled"))} else {Ok(())};

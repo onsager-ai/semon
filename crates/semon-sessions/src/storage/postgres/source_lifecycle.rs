@@ -575,3 +575,57 @@ pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&cr
     super::native_keys::delete_meta(tx,inflight.as_bytes())?;
     tx.check()?;Ok(())
 }
+
+fn facts_request(tx:&PgTxn<'_>,intent:&crate::source_change::FactsIntent)->Result<Vec<u8>,StorageError> {
+    if intent.operation.is_empty()||intent.operation.len()>512||intent.path.is_empty()||intent.path.len()>4096 {return Err(StorageError::InvalidArguments);}
+    let request=serde_json::to_vec(&("facts-source-write-v1",tx.namespace.as_str(),intent)).map_err(|_|StorageError::InvalidArguments)?;
+    if request.len()>1048576 {return Err(StorageError::Busy);}Ok(request)
+}
+pub(super) fn facts_begin(tx:&mut PgTxn<'_>,intent:&crate::source_change::FactsIntent,actual:&crate::Facts)->Result<(),StorageError> {
+    let request=facts_request(tx,intent)?;let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let key=format!("facts-write-intent:{}",intent.operation);
+    if let Some(prior)=super::native_keys::read_meta(tx,key.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
+    if model_cache::generation(tx)?!=intent.head || actual!=&intent.before || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.is_some() {return Err(StorageError::Conflict);}
+    super::native_keys::put_meta(tx,key.as_bytes(),&request)?;
+    super::native_keys::put_meta(tx,b"facts-write-inflight",&request)?;tx.check()
+}
+pub(super) fn facts_complete(tx:&mut PgTxn<'_>,options:&crate::Options,intent:&crate::source_change::FactsIntent,actual:&crate::Facts,pids:&[(u32,String)])->Result<(),StorageError> {
+    let request=facts_request(tx,intent)?;let ns=tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let ack=format!("facts-write-ack:{}",intent.operation);
+    if let Some(prior)=super::native_keys::read_meta(tx,ack.as_bytes(),1048576)? {return if prior==request {Ok(())} else {Err(StorageError::Conflict)};}
+    if actual!=&intent.wanted || model_cache::generation(tx)?!=intent.head || super::native_keys::read_meta(tx,format!("facts-write-intent:{}",intent.operation).as_bytes(),1048576)?.as_ref()!=Some(&request) || super::native_keys::read_meta(tx,b"facts-write-inflight",1048576)?.as_ref()!=Some(&request) {return Err(StorageError::Conflict);}
+    let changes=crate::facts::changes(&intent.before,&intent.wanted);
+    let mut affected=BTreeSet::new();
+    for (harness,id) in &changes.native {affected.extend(dependent_paths(tx,harness,id)?);}
+    for pid in &changes.pids {affected.extend(dependent_paths(tx,"runtime:pid",&pid.to_string())?);}
+    for (pid,id) in pids {if changes.pids.contains(pid) {affected.extend(dependent_paths(tx,"claude",id)?);}}
+    if let Some(generation)=model_cache::generation(tx)? {
+        let rows=tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len()>64 {return Err(StorageError::Busy);}
+        let selected=|facts:&crate::Facts|facts.codex_rollouts.iter().flatten().chain(facts.codex_provisional_rollouts.iter().flatten()).cloned().collect::<BTreeSet<_>>();
+        let old=selected(&intent.before);let new=selected(&intent.wanted);
+        for row in rows {
+            let bytes=row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
+            let row:CatalogRow=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
+            for source in row.sources {
+                let Some(path)=source.path.to_str() else {return Err(StorageError::ScopeChanged);};
+                let codex=source.path.strip_prefix(&options.codex_home).ok().and_then(|p|p.to_str());
+                let changed_selection=codex.is_some_and(|p|old.contains(p)!=new.contains(p)||intent.before.codex_rollouts.is_none()!=intent.wanted.codex_rollouts.is_none());
+                if changes.global||changed_selection {affected.insert(path.to_owned());}
+            }
+        }
+        for relative in old.symmetric_difference(&new) {if crate::is_input_path("codex",relative) {affected.insert(options.codex_home.join(relative).to_string_lossy().into_owned());}}
+    }
+    for cwd in &changes.repos {
+        let rows=tx.driver.query("SELECT path FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND cwd=$2 LIMIT 65", &[&ns,&cwd.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len()>64 {return Err(StorageError::Busy);}
+        for row in rows {affected.insert(String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?);}
+    }
+    if affected.len()>64 {return Err(StorageError::Busy);}
+    for path in affected {super::source_journal::invalidate(tx,&path)?;}
+    // Completion promises durable Facts and catch-up work, never NativeReady.
+    super::native_keys::put_meta(tx,ack.as_bytes(),&request)?;
+    super::native_keys::delete_meta(tx,b"facts-write-inflight")?;tx.check()
+}
