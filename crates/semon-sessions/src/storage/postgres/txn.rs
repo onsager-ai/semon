@@ -152,7 +152,10 @@ impl PgPool {
 
     /// Run host-controlled schema DDL under the existing exclusive schema
     /// lock and commit its epoch invalidation with the DDL. This remains an
-    /// internal capability until a public schema-evolution operation exists.
+    /// internal test capability until a public schema-evolution operation
+    /// exists. The runtime role has no DDL privilege, and this must not become
+    /// an accidental public backend capability.
+    #[cfg(test)]
     pub(super) fn controlled_schema_change<T>(
         &self,
         control: &PgCancellation,
