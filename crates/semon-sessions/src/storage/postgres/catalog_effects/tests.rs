@@ -152,13 +152,24 @@ fn oracle() -> Input {
     .collect();
     db.execute_batch("SAVEPOINT composite_oracle").unwrap();
     let mut missing = prepared.rows.clone();
-    for row in &mut missing { row.sources.clear(); }
-    let missing_recipes = missing.iter().map(|row| crate::slot_projection::Projection { key: row.key.clone(), slots: vec![], repair: false }).collect::<Vec<_>>();
+    for row in &mut missing {
+        row.sources.clear();
+    }
+    let missing_recipes = missing
+        .iter()
+        .map(|row| crate::slot_projection::Projection {
+            key: row.key.clone(),
+            slots: vec![],
+            repair: false,
+        })
+        .collect::<Vec<_>>();
     let history = crate::storage::sqlite::history::OriginalHistory::unbound(&db);
     catalog::publish_history_rows(&history, &missing, Some(&missing_recipes)).unwrap();
     let composite = read("SELECT metadata FROM session_history_catalog ORDER BY session_key");
-    let composite_slots = read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
-    db.execute_batch("ROLLBACK TO composite_oracle; RELEASE composite_oracle").unwrap();
+    let composite_slots =
+        read("SELECT metadata FROM session_history_slots ORDER BY session_key,slot");
+    db.execute_batch("ROLLBACK TO composite_oracle; RELEASE composite_oracle")
+        .unwrap();
     for row in &prepared.rows {
         assert!(catalog::preserve_original(&history, row).unwrap());
     }
@@ -194,15 +205,44 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let data = oracle();
     let (pool, _) = fixture(|_| {});
     let mut missing = data.rows.clone();
-    for row in &mut missing { row.sources.clear(); }
-    let recipes = missing.iter().map(|row| crate::slot_projection::Projection { key: row.key.clone(), slots: vec![], repair: false }).collect::<Vec<_>>();
+    for row in &mut missing {
+        row.sources.clear();
+    }
+    let recipes = missing
+        .iter()
+        .map(|row| crate::slot_projection::Projection {
+            key: row.key.clone(),
+            slots: vec![],
+            repair: false,
+        })
+        .collect::<Vec<_>>();
     for name in ["history127-a", "history127-b"] {
         let namespace = ns(name);
-        pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| stage(tx, L1, &data.publication())).unwrap();
-        pool.transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
-            assert!(history::preserve(tx, L2, L1, &crate::slot_projection::Publication { rows: &missing, transcripts: Some(&recipes) })?);
-            Ok(())
-        }).unwrap();
+        pool.transaction(
+            &namespace,
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| stage(tx, L1, &data.publication()),
+        )
+        .unwrap();
+        pool.transaction(
+            &namespace,
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| {
+                assert!(history::preserve(
+                    tx,
+                    L2,
+                    L1,
+                    &crate::slot_projection::Publication {
+                        rows: &missing,
+                        transcripts: Some(&recipes)
+                    }
+                )?);
+                Ok(())
+            },
+        )
+        .unwrap();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
             assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), data.composite);
