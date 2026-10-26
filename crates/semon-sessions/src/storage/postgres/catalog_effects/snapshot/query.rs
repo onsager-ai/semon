@@ -248,7 +248,12 @@ impl QueryCatalogStore for QueryCatalog {
                     now,
                     &page,
                 )
-                .map_err(|_| StorageError::Unavailable)?;
+                .map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("pg_selected_render_page key={key:?}: {error:?}");
+                    let _ = error;
+                    StorageError::Unavailable
+                })?;
                 records.finish().map_err(|error| {
                     #[cfg(test)]
                     eprintln!("pg_selected_records_finish key={key:?}: {error}");
