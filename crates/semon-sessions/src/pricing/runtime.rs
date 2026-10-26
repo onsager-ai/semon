@@ -1049,7 +1049,8 @@ pub fn start_default_refresh() {
 static STARTED: OnceLock<()> = OnceLock::new();
 #[derive(Default)]
 struct IndexRegistry {
-    entries: BTreeMap<(PathBuf, String), (Instant, crate::events::store::configured::NativeOwnership)>,
+    entries:
+        BTreeMap<(PathBuf, String), (Instant, crate::events::store::configured::NativeOwnership)>,
     wake_epoch: u64,
 }
 impl IndexRegistry {
@@ -1432,11 +1433,23 @@ mod tests {
         let over_cap = root.join("index-over-cap.sqlite3");
         registry.register(registry_owner(over_cap), start + Duration::from_secs(71));
         assert_eq!(registry.entries.len(), MAX_INDEXES);
-        assert!(registry.entries.contains_key(&(recently_used.clone(), "pricing-registry".into())));
-        assert!(!registry.entries.contains_key(&(root.join("index-1.sqlite3"), "pricing-registry".into())));
+        assert!(
+            registry
+                .entries
+                .contains_key(&(recently_used.clone(), "pricing-registry".into()))
+        );
+        assert!(
+            !registry
+                .entries
+                .contains_key(&(root.join("index-1.sqlite3"), "pricing-registry".into()))
+        );
         fs::remove_file(&recently_used).unwrap();
         registry.prune(start + Duration::from_secs(72));
-        assert!(!registry.entries.contains_key(&(recently_used.clone(), "pricing-registry".into())));
+        assert!(
+            !registry
+                .entries
+                .contains_key(&(recently_used.clone(), "pricing-registry".into()))
+        );
         registry.prune(start + INDEX_RETIRE_AFTER + Duration::from_secs(72));
         assert!(registry.entries.is_empty());
         fs::remove_dir_all(root).unwrap();
@@ -1470,7 +1483,11 @@ mod tests {
 
         let retired_at = start + INDEX_RETIRE_AFTER + Duration::from_secs(9);
         registry.prune(retired_at);
-        assert!(!registry.entries.contains_key(&(first.clone(), "pricing-registry".into())));
+        assert!(
+            !registry
+                .entries
+                .contains_key(&(first.clone(), "pricing-registry".into()))
+        );
         let before_reregister = registry.wake_epoch;
         assert!(registry.register(registry_owner(first.clone()), retired_at));
         assert_eq!(registry.wake_epoch, before_reregister + 1);
