@@ -612,13 +612,28 @@ impl IndexStore for NativeIndex {
     }
     fn relocate_codex(
         &mut self,
-        _: &str,
-        _: &Stat,
-        _: &str,
-        _: &mut crate::sealed::LogFile,
-        _: &mut crate::native_timing::Measurements,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut crate::sealed::LogFile,
+        measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        pending()
+        let started=measurements.start();
+        let candidate=self.pool.transaction(&self.namespace,TxnKind::ReadSnapshot,&self.control,|tx| {
+            super::source_lifecycle::relocation_candidate(tx,path,id)
+        }).map_err(err)?;
+        let Some(old)=candidate else {return Ok(None);};
+        let prior=self.pool.transaction(&self.namespace,TxnKind::ReadSnapshot,&self.control,|tx|native_reader::ledger(tx,&old)).map_err(err)?.map(|(_,l)|l);
+        let Some(prior)=prior else {return Ok(None);};
+        if stat.size<prior.offset {return Ok(None);}
+        let hashes=crate::events::consumed_hashes(file,prior.offset).map_err(|e|StoreError::Data(e.to_string()))?;
+        if hashes!=(prior.prefix,prior.tail) || Stat::of(std::path::Path::new(path)).ok().as_ref()!=Some(stat) {return Ok(None);}
+        let summary=self.summary(&old,&prior)?;
+        let result=self.pool.transaction(&self.namespace,TxnKind::Write,&self.control,|tx| {
+            super::source_lifecycle::relocate(tx,&old,path,id,stat,&prior,summary)
+        }).map_err(err)?;
+        measurements.record("relocation_candidate",started,1);
+        Ok(result.then_some(old))
     }
     fn append_evidence(
         &self,

@@ -880,6 +880,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(cache.remove_files(&removal).unwrap(),crate::events::Outcome::Written);
     assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies,"withdrawal preserves authorized old body after reopen");
     assert_eq!(fs::read(&retained_copy).unwrap(),retained_host.0.values().find(|(r,_)|r.root=="copilot").unwrap().1.as_ref());
+    let archived=options.codex_home.join(format!("archived_sessions/rollout-{codex_id}.jsonl"));
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    let codex_bytes=fs::read(&codex).unwrap();
+    fs::rename(&codex,&archived).unwrap();
+    let moved_stat=crate::events::Stat::of(&archived).unwrap();
+    let mut moved_file=crate::sealed::LogFile::open(&archived).unwrap();
+    let mut timing=crate::native_timing::Measurements::new(false);
+    assert_eq!(cache.relocate_codex(archived.to_str().unwrap(),&moved_stat,codex_id,&mut moved_file,&mut timing).unwrap().as_deref(),codex.to_str());
+    assert_eq!(cache.relocate_codex(archived.to_str().unwrap(),&moved_stat,codex_id,&mut moved_file,&mut timing).unwrap().as_deref(),codex.to_str(),"exact relocation ACK replay");
+    assert_eq!(fs::read(&archived).unwrap(),codex_bytes);
+    assert_eq!(read_bodies(&mut query,&query_store,&retained_host),expected_bodies,"old authorized body survives native relocation");
     let collision = ns("vertical140\0🦀other");
     let (other, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
