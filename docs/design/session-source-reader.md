@@ -140,6 +140,13 @@ This audit describes the pre-repair implementation. A confirmed diagnostic defec
 
 Raw owns physical bytes. Receiver `SessionSourceWrite` withdraws append trust before mutation and completes after fsync under its publication fence. The durable mutation/invalidation journals retain generation-bound evidence and monotonically increasing claims across restart. These mechanisms protect against acknowledged-but-unindexed writes; they do not make Raw, Index and Catalog one transaction. Unjournaled local writes retain conservative verification.
 
+The private PostgreSQL SourceWrite/FactsWrite ports preserve these same boundaries.
+Their completion `io::Result<()>` acknowledges the durable Raw/Facts observation and
+persisted catch-up work; it does not promise NativeReady or Catalog readiness.
+Native `EventReceipt` is returned only by the ordinary native-ingest transaction,
+which commits its rows, ledger and immutable byte proof atomically. Catalog's
+separate publication acknowledgement remains generation and claim fenced.
+
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
 
 `write_one_dirty` commits Index ledger, native rows and `chunk_proofs::write` together in one SQLite `BEGIN IMMEDIATE` transaction. The same database file also contains Catalog, recipes and proof metadata: `EventCache::path(options.cache)`. `invalidate_catalog_source` only advances the durable revision journal. Catalog publication is a later `BEGIN IMMEDIATE` transaction in `publish_catalog_with_writer`, with collection-generation, source-ledger, claim and closure checks. Catalog identity, recipes and source context advance atomically; failed claims remain pending on restart. Index can therefore lead the published Catalog. This is a reachable interleaving, not a missing Index/Catalog CAS.
