@@ -12687,6 +12687,10 @@ mod tests {
 
     #[test]
     fn recovery_scalar119_sqlite_current_record_refusal_preserves_bytes() {
+        const SCOPED_VALUE: &str =
+            "SELECT value FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1";
+        const SCOPED_UPDATE: &str =
+            "UPDATE meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1";
         let root = scratch("strict-tree-scalar");
         let path = root.join("one.jsonl");
         fs::write(
@@ -12705,21 +12709,27 @@ mod tests {
         let index = crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         cache.flush_cold_writes().unwrap();
         drop(cache);
-        let (store, _) = opened(&crate::events::EventCache::path(&cache_path));
+        // The real current factory admitted this store; write through its
+        // bound source-journal writer connection.
+        let config = crate::Options::default()
+            .source
+            .config(&cache_path)
+            .unwrap();
+        let connection = crate::storage::sqlite::source_journal::SourceJournal(config)
+            .connection()
+            .unwrap();
         let path = path.to_str().unwrap();
-        let (_, ledger) = ledger_row(&store.connection, path).unwrap().unwrap();
+        let (_, ledger) = ledger_row(&connection, path).unwrap().unwrap();
         let key = tree_summary_key(path);
-        let original: String = store
-            .connection
-            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+        let original: String = connection
+            .query_row(SCOPED_VALUE, [&key], |r| r.get(0))
             .unwrap();
         let base: serde_json::Value = serde_json::from_str(&original).unwrap();
         let read = || {
-            let mut statement = store
-                .connection
-                .prepare(native_metadata_value(&store.connection).unwrap())
+            let mut statement = connection
+                .prepare(native_metadata_value(&connection).unwrap())
                 .unwrap();
-            read_tree_summary(&store.connection, &mut statement, path, &ledger).unwrap()
+            read_tree_summary(&connection, &mut statement, path, &ledger).unwrap()
         };
         let actual = read().unwrap();
         let expected = index.tree_summary.as_ref().unwrap();
@@ -12745,45 +12755,37 @@ mod tests {
         unsupported["version"] = serde_json::json!(2);
         invalid.push(unsupported.to_string());
         for encoded in invalid {
-            store
-                .connection
-                .execute(
-                    "UPDATE meta SET value=?2 WHERE key=?1",
-                    params![key, encoded],
-                )
+            connection
+                .execute(SCOPED_UPDATE, params![key, encoded])
                 .unwrap();
             assert!(read().is_none());
-            let after: String = store
-                .connection
-                .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+            let after: String = connection
+                .query_row(SCOPED_VALUE, [&key], |r| r.get(0))
                 .unwrap();
             assert_eq!(
                 after, encoded,
                 "refusal must leave unsupported bytes untouched"
             );
         }
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value=?2 WHERE key=?1",
-                params![key, original],
-            )
+        connection
+            .execute(SCOPED_UPDATE, params![key, original])
             .unwrap();
         let failure = format!("native_tree_failure:{path}");
-        store
-            .connection
+        connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES(?1,'failed')",
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'failed')",
                 [&failure],
             )
             .unwrap();
         assert!(read().is_none());
-        store
-            .connection
-            .execute("DELETE FROM meta WHERE key=?1", [&failure])
+        connection
+            .execute(
+                "DELETE FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+                [&failure],
+            )
             .unwrap();
         assert_eq!(read().unwrap().line_count, expected.line_count);
-        drop(store);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
