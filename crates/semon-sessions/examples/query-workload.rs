@@ -92,6 +92,7 @@ fn main() -> io::Result<()> {
         inputs.push((
             machine.to_string(),
             Options {
+                source: semon_sessions::storage::HostSource::load_or_create(&home.join("source.json"))?,
                 claude_home,
                 claude_json: home.join(".claude.json"),
                 codex_home: home.join("codex"),
