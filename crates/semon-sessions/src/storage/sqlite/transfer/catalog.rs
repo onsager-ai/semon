@@ -45,6 +45,8 @@ pub(super) fn capture(tx: &mut Inbox<'_>, state: &mut CaptureState) -> Result<tr
     };
     let Some(generation) = generation else {
         // Absence of a publication is not an empty replacement publication.
+        let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1)", [tx.1], |r| r.get(0)).map_err(failed)?;
+        if occupied { return Err(StorageError::ScopeChanged); }
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
@@ -99,6 +101,12 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
     for value in &values { binds.push(sql_value(value)?); }
     let slots = (1..=binds.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
     tx.0.execute(&format!("INSERT INTO main.{table}(namespace,{columns}) VALUES({slots})"), rusqlite::params_from_iter(binds)).map_err(failed)?;
+    if *kind == CatalogRowKind::History {
+        let row: crate::model::summary::CatalogRow = serde_json::from_str(values[1].as_str().ok_or(StorageError::ScopeChanged)?).map_err(|_|StorageError::ScopeChanged)?;
+        // Retained-only sessions still need the normal SQLite listing owner;
+        // an existing Current row for a composite keeps its own observation.
+        tx.0.execute("INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'retained',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO NOTHING", params![tx.1,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,values[1].as_str()]).map_err(failed)?;
+    }
     if *kind == CatalogRowKind::Current {
         let row: crate::model::summary::CatalogRow = serde_json::from_str(values[1].as_str().ok_or(StorageError::ScopeChanged)?).map_err(|_|StorageError::ScopeChanged)?;
         for source in &row.sources {

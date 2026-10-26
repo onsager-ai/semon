@@ -71,6 +71,7 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             let (key, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
             let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).map_err(bad)?;
             if row.key != key || row.sources.len() > 64 { return Err(StorageError::ScopeChanged); }
+            if *kind == Current && row.lifecycle != crate::model::summary::CatalogLifecycle::Current { return Err(StorageError::ScopeChanged); }
         }
         HistoryOriginal => {
             let (_, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
