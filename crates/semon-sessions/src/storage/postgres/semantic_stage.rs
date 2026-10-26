@@ -385,3 +385,62 @@ pub(super) fn native_key(
         .map(|(_, _, key)| key.clone())
         .ok_or(StorageError::ScopeChanged)
 }
+
+// The ordinary relationship recipe owns candidate cardinality and endpoint
+// validation. This adapter supplies the epoch-fenced, native-derived cohort.
+pub(super) fn select(
+    tx: &mut PgTxn<'_>, epoch: i64,
+    selector: &crate::model::relation_stage::Selector,
+) -> Result<crate::model::relation_stage::Selection, StorageError> {
+    use crate::model::relation_stage::{self, SelectorLookup, Selection, SelectorEndpointRow};
+    struct Lookup { context: Context }
+    impl Lookup {
+        fn keys(&self, predicate: impl Fn(&relation_stage::Endpoint) -> bool) -> Vec<String> {
+            self.context.endpoints.values().filter(|e| predicate(e))
+                .take(2).map(|e| e.row.key.clone()).collect()
+        }
+    }
+    impl SelectorLookup for Lookup {
+        type Error = StorageError;
+        fn invalid(&self, _: &'static str) -> StorageError { StorageError::ScopeChanged }
+        fn native_key(&self, _: &str, _: &str) -> Result<Selection, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn receipt_first(&self, _: &str) -> Result<Option<Option<String>>, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn call_owners(&self, _: &str) -> Result<Vec<(String,String)>, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn event_metadata(&self, _: &str, _: &str) -> Result<Option<String>, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn event_owner(&self, _: &str) -> Result<String, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, StorageError> {
+            let e=self.context.endpoints.get(key).ok_or(StorageError::ScopeChanged)?;
+            let encoded=serde_json::to_string(e).map_err(|_| StorageError::Unavailable)?;
+            if encoded.len()>1048576 { return Err(StorageError::Busy); }
+            Ok((Some(encoded),e.parent.clone(),Some(e.root.clone())))
+        }
+        fn root_alive(&self, key: &str) -> Result<bool, StorageError> {
+            Ok(self.context.endpoints.get(key).is_some_and(|e| e.alive))
+        }
+        // Claude names can also be established by qualified send/receipt
+        // pairs. Refuse until that native-event projection is connected;
+        // endpoint names alone cannot prove a negative selection.
+        fn name_candidates(&self, _: &str) -> Result<Vec<String>, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn name_hints(&self, _: &str) -> Result<Vec<String>, StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn request_members_replay(&mut self, _: Vec<String>) -> Result<(), StorageError> { Err(StorageError::NamespaceUpgradePending) }
+        fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, StorageError> {
+            for e in self.context.endpoints.values() {
+                if e.native_parents.iter().collect::<std::collections::BTreeSet<_>>().len()>1 {
+                    return Err(StorageError::ScopeChanged);
+                }
+            }
+            Ok(self.keys(|e| {
+                let name=e.paths.first().and_then(|p| p.rsplit('/').next()).filter(|p| !p.is_empty()).or(e.nickname.as_deref());
+                e.row.harness=="codex" && e.native_parents.first().is_some_and(|p| p.1==parent) && name==Some(task)
+            }))
+        }
+        fn codex_relay(&self, root: &str, target: &str) -> Result<Vec<String>, StorageError> {
+            Ok(self.keys(|e| e.row.harness=="codex" && e.root==root && (e.nickname.as_deref()==Some(target) || e.paths.iter().any(|p|p==target))))
+        }
+        fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> Result<Vec<String>, StorageError> {
+            Ok(self.keys(|e| e.row.harness=="codex" && e.root==root && e.row.key!=exclude && (e.row.key==target || e.paths.iter().any(|p|p==target))))
+        }
+    }
+    let mut lookup=Lookup { context: context(tx,epoch)? };
+    relation_stage::select_with(&mut lookup,selector)
+}

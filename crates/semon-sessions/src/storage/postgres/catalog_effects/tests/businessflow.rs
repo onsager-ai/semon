@@ -69,6 +69,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"id":"start","type":"session.start","timestamp":"2026-10-01T00:00:00Z","data":{"version":1,"copilotVersion":"1.0.91","sessionId":copilot_id,"context":{"cwd":"/synthetic/project"}}}),
         serde_json::json!({"id":"user","type":"user.message","timestamp":"2026-10-01T00:00:01Z","data":{"content":"sanitized copilot input"}}),
     ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    use std::io::Write as _;
+    writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
+        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"related-spawn","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"}})).unwrap();
+    let child_id = "21234567-89ab-4cde-8123-456789abcdef";
+    let child = options.codex_home.join(format!("sessions/2026/10/01/rollout-{child_id}.jsonl"));
+    fs::write(&child, [
+        serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:02Z","payload":{"id":child_id,"cwd":"/synthetic/project","originator":"codex_exec","parent_thread_id":codex_id,"thread_source":"subagent","agent_path":"root/worker","agent_nickname":"worker","timestamp":"2026-10-01T00:00:02Z"}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:03Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized related codex input"}]}}),
+    ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");
