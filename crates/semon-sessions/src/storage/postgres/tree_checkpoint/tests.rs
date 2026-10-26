@@ -1195,7 +1195,7 @@ fn pg_tree_scalar119_committed_interpretation_drift_refuses_deferred_payload() {
                     tx.driver.batch_execute("UPDATE semon_pg_native_files SET codex_pricing_fingerprint='new-fingerprint'::bytea").map_err(sqlstate::error)?;
                 } else {
                     let key = if dependency == "recipe" { "catalog_semantic_recipe".into() } else { format!("native_tree_failure:{}", data.path) };
-                    tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &b"drift".as_slice()]).map_err(sqlstate::error)?;
+                    super::super::native_keys::put_meta(tx, key.as_bytes(), b"drift")?;
                 }
                 Ok(())
             }).unwrap();
