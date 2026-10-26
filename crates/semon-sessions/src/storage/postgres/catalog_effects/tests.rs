@@ -382,11 +382,8 @@ fn build_oracle(keep_raw: bool) -> Input {
             .as_nanos()
     ));
     let options = Options {
-        source: crate::storage::HostSource::new(
-            ns("catalog-effects-oracle"),
-            "c".repeat(64),
-        )
-        .unwrap(),
+        source: crate::storage::HostSource::new(ns("catalog-effects-oracle"), "c".repeat(64))
+            .unwrap(),
         claude_home: root.join("claude"),
         claude_json: root.join("claude.json"),
         codex_home: root.join("codex"),
