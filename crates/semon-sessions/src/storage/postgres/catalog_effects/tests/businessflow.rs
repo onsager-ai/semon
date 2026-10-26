@@ -764,8 +764,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         // Reopen mid-stage: resume must preserve the exact phase and epoch.
         if batch.phase == crate::model::relation_stage::Phase::Identity {
             drop(pg);
-            pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
-                .unwrap();
+            pg = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             assert_eq!(
                 pg.begin_semantic_stage(&paths, &stage_runtime).unwrap(),
                 crate::events::Outcome::Written
@@ -1214,6 +1213,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             );
         }
     }
+    assert_eq!(
+        crate::native_evidence::query_runtime_generation(&options).unwrap(),
+        stage_runtime,
+        "the selected fixture's runtime changed after its publication"
+    );
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
@@ -1229,7 +1233,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         store,
                         host,
                     )
-                    .unwrap();
+                    .unwrap_or_else(|error| panic!("PG selected body {}: {error:?}", row.key));
                 let fields = query
                     .call_bound_selected_at(
                         "get_session",
@@ -1378,7 +1382,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     assert_eq!(read_selected(), expected_field);
     drop(pg);
-    let mut resumed = EventCache::open_configured(&config).unwrap();
+    let mut resumed = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let after = resumed.query_runtime_binding().unwrap().unwrap();
     assert_eq!(binding.admission, after.admission);
     assert_eq!(binding.stream_epoch, after.stream_epoch);
@@ -2062,7 +2066,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         hostname: "source-write-before158".into(),
         ..Default::default()
     };
-    crate::save_json_file(&facts_path, &recorded).unwrap();
+    crate::write_facts(&facts_path, &recorded, &options.source).unwrap();
     let mut facts_options = options.clone();
     facts_options.facts = Some(facts_path.clone());
     let before_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
@@ -2160,7 +2164,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Some(facts_request.clone()),
     )
     .unwrap();
-    crate::save_json_file(&facts_path, &recorded).unwrap();
+    crate::write_facts(&facts_path, &recorded, &facts_options.source).unwrap();
+    assert!(
+        !facts_path.with_extension("json.sources.sqlite").exists(),
+        "the public PG Facts writer must not create a SQLite projection"
+    );
     drop(facts_writer); // Bytes/no SQL completion.
     let facts_writer = crate::SessionFactsWrite::begin_with_store(
         &facts_options,
