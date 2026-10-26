@@ -367,22 +367,47 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
-        let Some(generation) = expected else { return Ok(None); };
-        if max == 0 || max > 64 { return Err(err(StorageError::Busy)); }
-        super::catalog_effects::snapshot::with_generation(&self.pool, &self.namespace, &self.control, generation, |snapshot| {
-            let Some((stored, header, slots)) = snapshot.selected(&row.key, false, 0, max as i64)? else { return Ok(None); };
-            if serde_json::to_vec(&stored.sources).ok() != serde_json::to_vec(&row.sources).ok() || header.3 > max as i64 { return Ok(None); }
-            slots.iter().map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>().map(Some)
-        }).map_err(err)
+        let Some(generation) = expected else {
+            return Ok(None);
+        };
+        if max == 0 || max > 64 {
+            return Err(err(StorageError::Busy));
+        }
+        super::catalog_effects::snapshot::with_generation(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            generation,
+            |snapshot| {
+                let Some((stored, header, slots)) =
+                    snapshot.selected(&row.key, false, 0, max as i64)?
+                else {
+                    return Ok(None);
+                };
+                if serde_json::to_vec(&stored.sources).ok() != serde_json::to_vec(&row.sources).ok()
+                    || header.3 > max as i64
+                {
+                    return Ok(None);
+                }
+                slots
+                    .iter()
+                    .map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Some)
+            },
+        )
+        .map_err(err)
     }
     fn publish_session_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
+            })
+            .map_err(err)
     }
     fn publish_partial_catalog(
         &mut self,
@@ -390,9 +415,17 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, claims, false)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(
+                    tx,
+                    publication,
+                    expected,
+                    claims,
+                    false,
+                )
+            })
+            .map_err(err)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
@@ -400,9 +433,18 @@ impl IndexStore for NativeIndex {
         expected: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-            super::catalog_effects::publication::publish(tx, publication, expected, claims, true).map(Some)
-        }).map_err(err)
+        self.pool
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::catalog_effects::publication::publish(
+                    tx,
+                    publication,
+                    expected,
+                    claims,
+                    true,
+                )
+                .map(Some)
+            })
+            .map_err(err)
     }
     fn resolve_catalog_input(
         &mut self,

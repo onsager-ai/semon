@@ -172,8 +172,12 @@ mod tests {
                 put_meta(tx, b"preserved-key", b"preserved-value")
             })
             .unwrap();
-            let mut client = factory.client();
-            client.batch_execute(alteration).unwrap();
+            // The runtime role cannot author DDL. Exercise the host's actual
+            // controlled-change protocol so warm admission observes its epoch.
+            pool.controlled_schema_change(&control, |tx| {
+                tx.driver.batch_execute(alteration).map_err(sqlstate::error)
+            })
+            .unwrap();
             let mut entered = false;
             assert!(
                 pool.transaction(&namespace, TxnKind::Write, &control, |_| {
@@ -186,6 +190,7 @@ mod tests {
                 !entered,
                 "warm admission rejected the changed physical contract"
             );
+            let mut client = factory.client();
             client
                 .query_one(
                     "SELECT set_config('semon.namespace',$1,false)",
