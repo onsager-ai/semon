@@ -206,26 +206,26 @@ impl QueryCatalogStore for QueryCatalog {
                     last: row.last.unwrap_or(0), key: row.key.clone(),
                 });
                 for row in catalog {
-                if snapshot.has_history(&row.key).map_err(|_| StorageError::Unavailable)? { return Err(StorageError::NamespaceUpgradePending); }
-                if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
-                let expected = observations.expected(&row);
-                let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-                if !crate::model::summary::query_observation_matches(saved, &row.sources, true, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
-                let witness = saved.to_string();
-                *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
-                let summaries = saved["rows"].as_object().ok_or(StorageError::ScopeChanged)?;
-                if !summaries.contains_key(&row.key) { return Err(StorageError::ScopeChanged); }
-                for (id, value) in summaries {
-                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(StorageError::ScopeChanged); }
-                    rows.insert(id.clone(), value.clone());
-                    owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                    if snapshot.has_history(&row.key).map_err(|_| StorageError::Unavailable)? { return Err(StorageError::NamespaceUpgradePending); }
+                    if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
+                    let expected = observations.expected(&row);
+                    let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+                    if !crate::model::summary::query_observation_matches(saved, &row.sources, true, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
+                    let witness = saved.to_string();
+                    *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
+                    let summaries = saved["rows"].as_object().ok_or(StorageError::ScopeChanged)?;
+                    if !summaries.contains_key(&row.key) { return Err(StorageError::ScopeChanged); }
+                    for (id, value) in summaries {
+                        if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(StorageError::ScopeChanged); }
+                        rows.insert(id.clone(), value.clone());
+                        owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                    }
+                    witnesses.push((row.key.clone(), witness));
+                    // Content generation belongs to the same immutable selected trace.
+                    use crate::storage::selected::ContextLookup;
+                    let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
+                    if let Some((_, Some(version))) = version { content.insert(row.key, version); }
                 }
-                witnesses.push((row.key.clone(), witness));
-                // Content generation belongs to the same immutable selected trace.
-                use crate::storage::selected::ContextLookup;
-                let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
-                if let Some((_, Some(version))) = version { content.insert(row.key, version); }
-            }
                 if !more { break; }
                 request.cursor = Some(next.ok_or(StorageError::ScopeChanged)?);
             }
