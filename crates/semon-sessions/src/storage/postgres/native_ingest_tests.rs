@@ -60,6 +60,7 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         body: Vec<u8>,
         oracle: serde_json::Value,
         consumed: u64,
+        lifecycle: Vec<(Vec<u8>, bool, serde_json::Value, u64)>,
     }
     let mut cases = Vec::new();
     for harness in ["claude", "codex", "copilot"] {
@@ -90,7 +91,27 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         let receipt = sqlite.ingest(&"1".repeat(64), &path, harness).unwrap();
         let oracle = crate::events::scan_file(&path, harness, &mut sqlite, &mut false).unwrap();
         let oracle = fingerprint(&oracle);
+        let mut lifecycle = Vec::new();
+        let first_line = body.iter().position(|b| *b == b'\n').unwrap() + 1;
+        for (step, (bytes, replace)) in [
+            ([body.as_slice(), b"\n"].concat(), false),
+            ([body.as_slice(), b"\n{"].concat(), false),
+            (body.clone(), true),
+            (body[..first_line].to_vec(), false),
+        ].into_iter().enumerate() {
+            if replace {
+                let replacement = root.join("replace130.jsonl");
+                std::fs::write(&replacement, &bytes).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            } else {
+                std::fs::write(&path, &bytes).unwrap();
+            }
+            let receipt = sqlite.ingest(&format!("{:064x}", step + 16), &path, harness).unwrap();
+            let index = crate::events::scan_file(&path, harness, &mut sqlite, &mut false).unwrap();
+            lifecycle.push((bytes, replace, fingerprint(&index), receipt.consumed_bytes));
+        }
         drop(sqlite);
+        std::fs::write(&path, &body).unwrap();
         cases.push(Case {
             root,
             path,
@@ -98,6 +119,7 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             body,
             oracle,
             consumed: receipt.consumed_bytes,
+            lifecycle,
         });
     }
     let _guard = Guard::new();
@@ -126,6 +148,23 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             .ingest(&"2".repeat(64), &case.path, case.harness)
             .unwrap();
         assert_eq!(noop.consumed_bytes, receipt.consumed_bytes);
+        // Metadata-only enumeration and discovery must not acquire a SQLite
+        // coordinate. The process-wide hook remains active on every thread.
+        restarted.begin_full_scan().unwrap();
+        restarted.discover_catalog_sources(&crate::Options::default(), &[], false).unwrap();
+        for (step, (bytes, replace, oracle, consumed)) in case.lifecycle.iter().enumerate() {
+            if *replace {
+                let replacement = case.root.join("replace130.jsonl");
+                std::fs::write(&replacement, bytes).unwrap();
+                std::fs::rename(replacement, &case.path).unwrap();
+            } else {
+                std::fs::write(&case.path, bytes).unwrap();
+            }
+            let receipt = restarted.ingest(&format!("{:064x}", step + 16), &case.path, case.harness).unwrap();
+            assert_eq!(receipt.consumed_bytes, *consumed);
+            let index = crate::events::scan_file(&case.path, case.harness, &mut restarted, &mut false).unwrap();
+            assert!(fingerprint(&index) == *oracle, "native lifecycle step {step} for {}", case.harness);
+        }
         assert!(restarted.ingest(&id, &case.path, "invalid").is_err());
         assert!(
             restarted
