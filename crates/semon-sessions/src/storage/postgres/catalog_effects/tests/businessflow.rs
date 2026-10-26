@@ -1448,12 +1448,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     assert_eq!(captured_bodies(&pool), expected_bodies);
-    for phase in ["captured_factory", "captured_proof", "captured_body", "captured_final"] {
+    for phase in [
+        "captured_factory",
+        "factory_call",
+        "captured_proof",
+        "captured_body",
+        "captured_final",
+    ] {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = cancelled.clone();
-        crate::selected_read::set_hook(phase, 0, move || {
-            signal.store(true, std::sync::atomic::Ordering::Release);
-        });
+        if phase != "factory_call" {
+            crate::selected_read::set_hook(phase, 0, move || {
+                signal.store(true, std::sync::atomic::Ordering::Release);
+            });
+        }
         let request = crate::SelectedReadControl::new(
             std::time::Instant::now() + Duration::from_secs(20),
             cancelled.clone(),
@@ -1461,22 +1469,33 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let expected_namespace = namespace.as_str().to_owned();
         let expected_key = prepared.rows[0].key.clone();
         let authorized = retained_host.clone();
-        let host = move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        let signal = cancelled.clone();
+        let host = move |source: &str,
+                         key: &str|
+              -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
             assert_eq!(source, expected_namespace);
             assert_eq!(key, expected_key);
+            if phase == "factory_call" {
+                signal.store(true, std::sync::atomic::Ordering::Release);
+            }
             Ok(Box::new(authorized.clone()))
         };
-        let error = config.call_captured_query_at(
-            &options,
-            "external-machine-z",
-            &generation,
-            "read_transcript",
-            &serde_json::json!({"id":prepared.rows[0].key,"limit":100}),
-            1790812802000,
-            &request,
-            &host,
-        ).unwrap_err();
-        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire), "phase not reached: {phase}");
+        let error = config
+            .call_captured_query_at(
+                &options,
+                "external-machine-z",
+                &generation,
+                "read_transcript",
+                &serde_json::json!({"id":prepared.rows[0].key,"limit":100}),
+                1790812802000,
+                &request,
+                &host,
+            )
+            .unwrap_err();
+        assert!(
+            cancelled.load(std::sync::atomic::Ordering::Acquire),
+            "phase not reached: {phase}"
+        );
         assert_eq!(error.code, "unavailable", "{phase}");
         assert!(error.message.contains("cancelled"), "{phase}: {error:?}");
     }
