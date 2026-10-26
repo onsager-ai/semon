@@ -120,12 +120,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             assert_eq!(query["runtime"].as_str(), Some(runtime.as_str()));
         }
     }
+    let published = pg.publish_partial_catalog_fenced(&prepared).unwrap();
+    assert_eq!(published.0, crate::events::Outcome::Written);
+    let generation = published.1.unwrap();
+    // A lost response retries the identical full request, even though its
+    // expected head and acknowledged claims have advanced.
+    assert_eq!(pg.publish_partial_catalog_fenced(&prepared).unwrap().1.as_deref(), Some(generation.as_str()));
+    let mut competing = prepared.rows.clone();
+    competing[0].name.push_str(" competing publisher");
+    assert!(pg.publish_catalog_projection_fenced(&crate::slot_projection::Publication { rows: &competing, transcripts: Some(&prepared.transcripts) }, prepared.base_generation.as_deref()).is_err());
+    let page = super::super::snapshot::with_admitted_generation(&pool, &namespace, &control, &generation, |snapshot| {
+        crate::catalog::read_page_snapshot(&options, "", &crate::catalog::Request::parse("limit=20").unwrap(), snapshot).map_err(|_| StorageError::ScopeChanged)
+    }).unwrap();
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    assert!(page.to_string().contains(&prepared.rows[0].key));
     drop(pg);
     let mut resumed =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let after = resumed.query_runtime_binding().unwrap().unwrap();
     assert_eq!(binding.admission, after.admission);
     assert_eq!(binding.stream_epoch, after.stream_epoch);
+    assert_eq!(resumed.session_catalog_generation().as_deref(), Some(generation.as_str()));
     let repeated =
         crate::model::prepare_sources(&options, &mut resumed, &inputs, 1790812802000).unwrap();
     assert_eq!(
@@ -158,7 +174,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         receipt.consumed_bytes,
         raw[0].len() as u64 + append.len() as u64
     );
-    assert_eq!(continued.rows[0].sources[0].offset, receipt.consumed_bytes);
+    assert_eq!(continued.rows.iter().flat_map(|row| &row.sources).find(|source| source.path == path).unwrap().offset, receipt.consumed_bytes);
+    let continued_generation = resumed.publish_partial_catalog_fenced(&continued).unwrap().1.unwrap();
+    assert_ne!(continued_generation, generation);
     assert_eq!(
         fs::read(&path).unwrap(),
         [raw[0].as_slice(), append.as_bytes()].concat()

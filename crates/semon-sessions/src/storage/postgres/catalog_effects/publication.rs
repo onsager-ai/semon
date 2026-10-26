@@ -10,6 +10,7 @@ pub(super) fn request(
     publication: &crate::slot_projection::Publication<'_>,
     expected: Option<&str>,
     claims: &[(String, Option<i64>)],
+    closed: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), StorageError> {
     if publication.rows.len() > 64 || claims.len() > 64 {
         return Err(StorageError::Busy);
@@ -17,18 +18,19 @@ pub(super) fn request(
     let recipes = publication.transcripts.map(|projections| {
         projections.iter().map(|p| (&p.key, &p.slots, p.repair)).collect::<Vec<_>>()
     });
-    let payload = encoded(&("catalog-publication-v1", publication.rows, recipes, expected, claims))?;
+    let derivations = publication.rows.iter().map(|row| (&row.overview, row.trace.as_ref().map(|trace| trace.publication_witness(row)))).collect::<Vec<_>>();
+    let payload = encoded(&("catalog-publication-v1", publication.rows, derivations, recipes, expected, claims, closed))?;
     Ok((digest(&payload), payload))
 }
 
-pub(super) fn publish(
+pub(in crate::storage::postgres) fn publish(
     tx: &mut PgTxn<'_>,
     publication: &crate::slot_projection::Publication<'_>,
     expected: Option<&str>,
     claims: &[(String, Option<i64>)],
     closed: bool,
 ) -> Result<(Outcome, Option<String>), StorageError> {
-    let (operation, payload) = request(publication, expected, claims)?;
+    let (operation, payload) = request(publication, expected, claims, closed)?;
     publish_operation(tx, publication, expected, claims, closed, &operation, &payload)
 }
 

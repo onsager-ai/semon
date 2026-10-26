@@ -14,6 +14,11 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "catalog_leases",
+        columns: "lease_id bytea,generation bytea,expires_at bigint",
+        key: "lease_id",
+    },
+    Table {
         name: "catalog_operations",
         columns: "operation_id bytea,payload bytea,generation bytea,stage_epoch bigint",
         key: "operation_id",
