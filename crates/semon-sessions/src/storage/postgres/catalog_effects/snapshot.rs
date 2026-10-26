@@ -67,7 +67,8 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
 impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
     fn catalog_generation(&self) -> Result<String, StorageError> {
         use crate::storage::catalog::CatalogSnapshot;
-        self.require_current().map_err(|_| StorageError::ScopeChanged)?;
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
         Ok(self.generation.clone())
     }
 
@@ -76,7 +77,8 @@ impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
         if target.len() > 4096 {
             return Err(StorageError::InvalidArguments);
         }
-        self.require_current().map_err(|_| StorageError::ScopeChanged)?;
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
         let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let rows = tx.driver.query(
@@ -101,14 +103,16 @@ impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
         {
             return Err(StorageError::InvalidArguments);
         }
-        self.require_current().map_err(|_| StorageError::ScopeChanged)?;
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
         if expected_generation.is_some_and(|expected| expected != self.generation) {
             return Err(StorageError::ScopeChanged);
         }
         let mut observation = crate::storage::navigation::NativeResolutionObservation {
             version: Some(crate::model::summary::CATALOG_VERSION.to_string()),
             generation: Some(self.generation.clone()),
-            completeness: self.publication_value("catalog_completeness")
+            completeness: self
+                .publication_value("catalog_completeness")
                 .map_err(|_| StorageError::Unavailable)?,
             ..Default::default()
         };
@@ -116,7 +120,10 @@ impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let args: &[&(dyn ToSql + Sync)] = &[
-            &ns, &self.generation.as_bytes(), &native_id.as_bytes(), &harness.as_bytes(),
+            &ns,
+            &self.generation.as_bytes(),
+            &native_id.as_bytes(),
+            &harness.as_bytes(),
         ];
         let current = tx.driver.query(
             "SELECT DISTINCT s.session_key FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r USING(namespace_digest,namespace,generation,key_digest) WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 AND convert_from(s.metadata,'UTF8')::jsonb->>'native_id'=convert_from($3,'UTF8') ORDER BY s.session_key LIMIT 2",
@@ -131,11 +138,15 @@ impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
         } else {
             current
         };
-        observation.keys = matches.iter().map(|row| text(row.get(0))).collect::<Result<_, _>>()?;
+        observation.keys = matches
+            .iter()
+            .map(|row| text(row.get(0)))
+            .collect::<Result<_, _>>()?;
         tx.check()?;
         drop(tx);
         if let [key] = observation.keys.as_slice() {
-            observation.metadata = self.catalog(key, history)?
+            observation.metadata = self
+                .catalog(key, history)?
                 .map(|row| serde_json::to_string(&row).map_err(|_| StorageError::Unavailable))
                 .transpose()?;
         }
