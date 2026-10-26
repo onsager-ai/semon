@@ -1362,8 +1362,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         prefix_sha256: source.prefix_sha256,
                         tail_sha256: source.tail_sha256,
                     };
-                    let proof = captured_config
-                        .captured_source_proof_at(&options, &generation, &row.key, &reference);
+                    let proof = captured_config.captured_source_proof_at(
+                        &options,
+                        &generation,
+                        &row.key,
+                        &reference,
+                    );
                     if row.harness == "copilot" && !source.path.exists() {
                         // This fixture's host independently retained the bytes
                         // outside the input roots. It can authorize the body,
