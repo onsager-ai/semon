@@ -1779,14 +1779,8 @@ impl EventCache {
     ) -> Result<Self, crate::storage::StorageError> {
         #[cfg(feature = "postgres")]
         if let crate::storage::StoreBackend::Postgres { pool, control } = &config.backend {
-            let cache = Self::open_pg_native(pool.clone(), config.namespace.clone(), control.clone())?;
-            let binding = cache.query_runtime_binding()
-                .map_err(|_| crate::storage::StorageError::Unavailable)?
-                .ok_or(crate::storage::StorageError::ScopeChanged)?;
-            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
-                return Err(crate::storage::StorageError::ScopeChanged);
-            }
-            return Ok(cache);
+            crate::storage::postgres::require_configured(config, pool, control)?;
+            return Self::open_pg_native(pool.clone(), config.namespace.clone(), control.clone());
         }
         let store = crate::storage::sqlite::open_configured_index(config)?;
         let database = config.backend.sqlite_database()?;

@@ -22,6 +22,7 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    pub(crate) store_config: Option<crate::storage::StoreConfig>,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     query: RwLock<Option<Arc<QueryCache>>>,
@@ -56,6 +57,20 @@ impl SessionSources {
                 .map(|(key, options)| (key, NativeEvidence::new(options)))
                 .collect(),
         )
+    }
+
+    /// Host-authorized physical placement for each independent Source. A
+    /// configured backend error never falls back to the machine's cache path.
+    pub fn with_configured_machines(
+        machines: Vec<(String, Options, crate::storage::StoreConfig)>,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let machines = machines.into_iter().map(|(key, options, config)| {
+            if options.source.namespace()? != config.namespace {
+                return Err(crate::storage::StorageError::NamespaceMismatch);
+            }
+            Ok((key, NativeEvidence::with_store(options, Some(config))))
+        }).collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_evidence(machines))
     }
 
     /// Adopt existing Catalog evidence owners without closing their producers,
@@ -240,8 +255,13 @@ impl SessionSources {
 impl NativeEvidence {
     /// Construction is lazy: no source, cache or refresh worker is opened.
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        Self::with_store(options, None)
+    }
+
+    fn with_store(options: Options, store_config: Option<crate::storage::StoreConfig>) -> Arc<Self> {
         Arc::new(Self {
             options,
+            store_config,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             query: RwLock::default(),
@@ -249,6 +269,13 @@ impl NativeEvidence {
             audit_request: AtomicU64::new(0),
             audit_completed: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn query_catalog(&self) -> Result<Box<dyn crate::storage::query::QueryCatalogStore>, crate::storage::StorageError> {
+        match &self.store_config {
+            Some(config) => crate::storage::configured_query_catalog(&self.options, config.clone()),
+            None => crate::storage::local_query_catalog(&self.options, self.options.source.namespace()?),
+        }
     }
 
     pub(crate) fn request_metadata_audit_if_idle(&self) {
@@ -329,8 +356,10 @@ impl NativeEvidence {
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
             work.events = Some(
-                EventCache::open_scoped(&self.options.cache, &self.options.source)
-                    .map_err(io::Error::other)?,
+                match &self.store_config {
+                    Some(config) => EventCache::open_configured(config),
+                    None => EventCache::open_scoped(&self.options.cache, &self.options.source),
+                }.map_err(io::Error::other)?,
             );
         }
         let cache = work.events.as_mut().expect("event cache initialized");

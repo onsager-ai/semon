@@ -103,7 +103,7 @@ impl Query {
             // before creating another archive reader or decoding its evidence.
             if search.at_capacity() {
                 let namespace = source.options.source.namespace().map_err(unavailable)?;
-                if crate::storage::local_query_catalog(&source.options, namespace.clone())
+                if source.query_catalog()
                     .map_err(unavailable)?
                     .has_search_slots(&namespace, key, since)?
                 {
@@ -378,7 +378,7 @@ impl Query {
             let store = if let Some(store) = bound {
                 store
             } else {
-                local = crate::storage::local_query_catalog(&source.options, namespace.clone())
+                local = source.query_catalog()
                     .map_err(unavailable)?;
                 &*local
             };
@@ -538,7 +538,7 @@ impl Query {
             if let Some(store) = bound {
                 store.validate(&namespace, &part)?;
             } else {
-                crate::storage::local_query_catalog(&source.options, namespace.clone())
+                source.query_catalog()
                     .map_err(unavailable)?
                     .validate(&namespace, &part)?;
             }
