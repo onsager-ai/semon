@@ -447,13 +447,21 @@ fn failed(error: rusqlite::Error) -> StorageError {
     }
     #[cfg(test)]
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
-        let kind = if message.contains("ON CONFLICT clause does not match") { "conflict_target" }
-            else if message.contains("view") { "view_effect" }
-            else if message.contains("no such column") { "missing_column" }
-            else if message.contains("no such function") { "missing_function" }
-            else if message.contains("has no column named") { "insert_column" }
-            else if message.contains("constraint failed") { "constraint" }
-            else { "other_sql_contract" };
+        let kind = if message.contains("ON CONFLICT clause does not match") {
+            "conflict_target"
+        } else if message.contains("view") {
+            "view_effect"
+        } else if message.contains("no such column") {
+            "missing_column"
+        } else if message.contains("no such function") {
+            "missing_function"
+        } else if message.contains("has no column named") {
+            "insert_column"
+        } else if message.contains("constraint failed") {
+            "constraint"
+        } else {
+            "other_sql_contract"
+        };
         eprintln!("configured SQL failure category={kind}");
     }
     match error.sqlite_error_code() {
@@ -1062,9 +1070,21 @@ impl Writer {
             traversal_observation: None,
         };
         let result = store.publish_catalog_owned(
-            publication, expected, claims, closed, None, super::CatalogWriter::Auto, Some(owner),
+            publication,
+            expected,
+            claims,
+            closed,
+            None,
+            super::CatalogWriter::Auto,
+            Some(owner),
         )?;
-        Ok(if closed && store.semantic_rejection == Some("closed_scope") { None } else { Some(result) })
+        Ok(
+            if closed && store.semantic_rejection == Some("closed_scope") {
+                None
+            } else {
+                Some(result)
+            },
+        )
     }
 
     pub(crate) fn relocate_codex(
@@ -3379,24 +3399,28 @@ mod tests {
         let f = Fixture::current("ordinary-publication");
         let source = crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
         let options = crate::Options {
-            source: source.clone(), cache: f.root.join("index.json"), codex_home: f.root.clone(),
+            source: source.clone(), cache: f.root.join("index.json"), codex_home: f.root.join("codex"),
             claude_home: f.root.join("claude"), claude_json: f.root.join("claude.json"),
             copilot_home: f.root.join("copilot"), proc_root: f.root.join("proc"),
             all: true, ..Default::default()
         };
         fs::create_dir_all(&options.proc_root).unwrap();
         fs::write(options.proc_root.join("locks"), "").unwrap();
-        let input = crate::Input { root: crate::InputRoot::Codex, path: f.raw.file_name().unwrap().to_str().unwrap().to_owned() };
+        let relative = "sessions/2026/10/26/rollout-native.jsonl";
+        let raw = options.codex_home.join(relative);
+        fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        fs::copy(&f.raw, &raw).unwrap();
+        let input = crate::Input { root: crate::InputRoot::Codex, path: relative.to_owned() };
         let mut cache = EventCache::open_scoped(&options.cache, &source).unwrap();
         let prepared = crate::model::prepare_sources(&options, &mut cache, &[input.clone()], 1_790_000_000_000).unwrap();
         assert!(!prepared.rows.is_empty());
-        let native = cache.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap();
+        let native = cache.store.as_ref().unwrap().ledger(raw.to_str().unwrap()).unwrap();
         let publication = crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) };
         let (outcome, partial) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
         assert_eq!(outcome, Outcome::Written);
         let full = cache.publish_catalog_projection_fenced(&publication, partial.as_deref()).unwrap().unwrap();
-        assert_eq!(cache.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap(), native);
-        let claims = cache.catalog_claims(&[f.raw.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(cache.store.as_ref().unwrap().ledger(raw.to_str().unwrap()).unwrap(), native);
+        let claims = cache.catalog_claims(&[raw.to_string_lossy().into_owned()]).unwrap();
         let closed = cache.store.as_mut().unwrap().publish_closed_catalog_fenced(&publication, Some(&full), &claims).unwrap().expect("ordinary closed publication");
         assert_eq!(closed.0, Outcome::Written);
         // A stale publisher remains a conflict, with the admitted native ledger intact.
@@ -3404,7 +3428,7 @@ mod tests {
         drop(cache);
         let restored = EventCache::open_scoped(&options.cache, &source).unwrap();
         assert_eq!(restored.session_catalog_generation(), closed.1);
-        assert_eq!(restored.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap(), native);
+        assert_eq!(restored.store.as_ref().unwrap().ledger(raw.to_str().unwrap()).unwrap(), native);
         let db = connection(&f.config).unwrap();
         let current: i64 = db.query_row("SELECT count(*) FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current'", [f.config.namespace.as_str()], |r|r.get(0)).unwrap();
         assert_eq!(current, prepared.rows.len() as i64);
