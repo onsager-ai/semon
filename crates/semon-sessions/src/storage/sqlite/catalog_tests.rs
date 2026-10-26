@@ -1432,7 +1432,7 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
         &path,
         format!(
             "{}\n",
-            json!({"type":"user","sessionId":"session-00000","uuid":"replacement","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"replacement native prompt"}})
+            json!({"type":"user","sessionId":"session-00000","uuid":"replacement","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"replacement native prompt"}})
         ),
     )
     .unwrap();
