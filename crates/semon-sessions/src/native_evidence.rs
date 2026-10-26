@@ -633,11 +633,7 @@ impl NativeEvidence {
             }
             return Ok(true);
         }
-        let mut paths: BTreeSet<_> = batch.paths.iter().cloned().collect();
-        if batch.phase == Phase::Relations {
-            paths.extend(batch.context.parent_paths(&batch.paths));
-            paths.extend(batch.context.companions.iter().cloned());
-        }
+        let paths: BTreeSet<_> = batch.paths.iter().cloned().collect();
         if paths.len() > 64 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -663,26 +659,8 @@ impl NativeEvidence {
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                 .extend_sources(&self.options, &inputs);
         }
-        let prepared = if batch.phase == Phase::Indexing {
-            model::prepare_semantic_index_sources(&catalog_options, cache, &inputs, now)
-        } else if batch.phase == Phase::Identity {
-            model::prepare_semantic_identity_sources(
-                &catalog_options,
-                cache,
-                &inputs,
-                &batch.context,
-                now,
-            )
-        } else {
-            model::prepare_staged_sources(
-                &catalog_options,
-                cache,
-                &inputs,
-                &batch.context,
-                batch.phase == Phase::Relations,
-                now,
-            )
-        };
+        let prepared =
+            model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now);
         cache.scan_byte_budget = None;
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -696,13 +674,14 @@ impl NativeEvidence {
             }
             Err(error) => return Err(error),
         };
+        let prepared = prepared.prepared();
         if let Some(discovery) = &mut work.cold_catalog {
             discovery.pids.extend(prepared.pids.iter().copied());
         }
         let (outcome, generation) = if batch.phase == Phase::Publication {
-            cache.publish_semantic_catalog(&batch, &prepared)?
+            cache.publish_semantic_catalog(&batch, prepared)?
         } else {
-            (cache.record_semantic_batch(&batch, &prepared)?, None)
+            (cache.record_semantic_batch(&batch, prepared)?, None)
         };
         if outcome == crate::events::Outcome::Deferred {
             cache.end_scan();
@@ -724,7 +703,7 @@ impl NativeEvidence {
         }
         if batch.phase == Phase::Publication {
             work.observed_catalog_generation = generation;
-            crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+            crate::events::store::requeue_concurrent_sources(&self.options, prepared)?;
             cache.publish_session_descriptions();
         }
         cache.end_scan();
