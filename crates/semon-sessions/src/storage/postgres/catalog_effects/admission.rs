@@ -14,6 +14,47 @@ pub(super) struct NativeReference {
     pub(super) pages: ProofGenerationId,
 }
 
+/// Captured from actual database state before model construction. This does
+/// not claim runtime/epoch ownership, which has no PG port yet.
+pub(super) struct Fence {
+    namespace: String,
+    revision: i64,
+    head: Option<String>,
+    claims: BTreeMap<String, Option<i64>>,
+}
+
+pub(super) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, StorageError> {
+    tx.check()?;
+    if paths.len() > 64 || paths.iter().map(String::len).sum::<usize>() > MAX {
+        return Err(StorageError::Busy);
+    }
+    let rows = tx.driver.query(
+        "SELECT revision,CASE WHEN octet_length(catalog_generation)<=64 THEN catalog_generation END,catalog_generation IS NULL FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+        &[&tx.namespace.as_str().as_bytes()],
+    ).map_err(sqlstate::error)?;
+    let row = rows.first().ok_or(StorageError::ScopeChanged)?;
+    let head: Option<String> = row.get(1);
+    if head.is_none() && !row.get::<_, bool>(2) {
+        return Err(StorageError::ScopeChanged);
+    }
+    if head.as_ref().is_some_and(|head| head.len() != 64 || !head.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut claims = BTreeMap::new();
+    for path in paths {
+        let rows = tx.driver.query(
+            "SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
+            &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        let revision = rows.first().map(|r| r.get::<_, i64>(0));
+        if claims.insert(path.clone(), revision).is_some() {
+            return Err(StorageError::InvalidArguments);
+        }
+        tx.check()?;
+    }
+    Ok(Fence { namespace: tx.namespace.as_str().to_owned(), revision: row.get(0), head, claims })
+}
+
 /// Validate the entire source cohort before the first Catalog effect. The
 /// caller must retain the SourceState lock through commit, preventing native
 /// advancement between these checks and its metadata writes.
@@ -84,6 +125,7 @@ pub(super) fn stage_bound(
     tx: &mut PgTxn<'_>,
     generation: &str,
     publication: &crate::slot_projection::Publication<'_>,
+    fence: &Fence,
 ) -> Result<Vec<NativeReference>, StorageError> {
     tx.check()?;
     let rows = tx.driver.query(
@@ -91,6 +133,18 @@ pub(super) fn stage_bound(
         &[&tx.namespace.as_str().as_bytes()],
     ).map_err(sqlstate::error)?;
     if rows.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
+    if fence.namespace != tx.namespace.as_str() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let actual = capture(tx, &fence.claims.keys().cloned().collect::<Vec<_>>())?;
+    if actual.revision != fence.revision || actual.head != fence.head || actual.claims != fence.claims {
+        return Err(StorageError::Conflict);
+    }
+    if publication.rows.iter().flat_map(|row| &row.sources).any(|source| {
+        source.path.to_str().is_none_or(|path| !fence.claims.contains_key(path))
+    }) {
         return Err(StorageError::ScopeChanged);
     }
     let refs = bind(tx, publication)?;
