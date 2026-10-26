@@ -144,6 +144,9 @@ other endpoint continuing to publish that relationship. Each descriptor binds
 its exact consumed source witness; a later Current source cannot silently
 replace that witness during rendering. Existing selected context, host, proof
 and byte budgets still apply.
+This work remains under qualification: complete PostgreSQL business flow,
+current-format transfer/reverse and the full paired host regression are required
+before backend readiness can be claimed.
 Physical-corruption recovery is unchanged. Unsupported individual recipe versions
 in a current store remain explicitly unavailable; they are never interpreted as
 current versions.
