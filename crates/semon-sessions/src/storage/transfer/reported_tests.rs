@@ -1,5 +1,5 @@
-use crate::storage::native_events::NativeEventStore;
 use crate::facts::ReportedRunSnapshot;
+use crate::storage::native_events::NativeEventStore;
 
 use super::*;
 use std::{
