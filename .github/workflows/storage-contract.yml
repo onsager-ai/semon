@@ -71,6 +71,7 @@ jobs:
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         run: |
+          cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib reported_rows -- --nocapture
           cargo test --locked -p semon-sessions --lib reported_runs -- --nocapture
