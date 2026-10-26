@@ -4000,7 +4000,8 @@ impl SqliteStore {
                         let mut statement = transaction.prepare("SELECT session_key,octet_length(metadata),CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key>?1 ORDER BY session_key LIMIT 64").map_err(failure)?;
                         let mut values = statement.query([&after]).map_err(failure)?;
                         while let Some(value) = values.next().map_err(failure)? {
-                            let size: usize = value.get(1).map_err(failure)?;
+                            let size = usize::try_from(value.get::<_, i64>(1).map_err(failure)?)
+                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
                             if size > 1048576 {
                                 return Err(failure(rusqlite::Error::InvalidQuery));
                             }
