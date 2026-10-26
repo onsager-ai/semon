@@ -104,8 +104,7 @@ impl AdmittedSource {
         if let Some(owner) = &self.owner {
             return owner.validate_ready(db);
         }
-        NativeReaderBinding::Admitted(self.config.clone())
-            .validate(db, &self.config.namespace)?;
+        NativeReaderBinding::Admitted(self.config.clone()).validate(db, &self.config.namespace)?;
         crate::events::store::configured::validate_staging_owner(db, &self.config)?;
         if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
             return Err(StorageError::ScopeChanged);

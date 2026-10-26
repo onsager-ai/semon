@@ -3987,7 +3987,9 @@ pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
     let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    Ok(application == 0 && schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
+    Ok(application == 0
+        && schema == SCHEMA_VERSION
+        && parser_version(connection)? == Some(CACHE_VERSION))
 }
 
 /// A versioned retention marker in the existing metadata region. Event rows

@@ -641,7 +641,7 @@ impl NativeOwnership {
         if !profile {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND ((key='catalog_version' AND value<>?2) OR (key='search_version' AND value<>?3)))",params![self.config.namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
+        let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_version','search_version') AND value<>CASE key WHEN 'catalog_version' THEN ?2 ELSE ?3 END)",params![self.config.namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
         if !publications {
             return Err(StorageError::NamespaceUpgradePending);
         }
