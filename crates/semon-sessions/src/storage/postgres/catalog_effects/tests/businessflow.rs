@@ -72,6 +72,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     use std::io::Write as _;
     writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
         serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"related-spawn","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"}})).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(&codex).unwrap(), "{}",
+        serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call_output","call_id":"related-spawn","output":"{\"task_name\":\"worker\"}"}})).unwrap();
     let child_id = "21234567-89ab-4cde-8123-456789abcdef";
     let child = options
         .codex_home
@@ -110,7 +112,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .unwrap()
             .expect("SQLite ordinary body");
-            assert!(body.to_string().contains("sanitized"));
+            assert!(body.to_string().contains("sanitized"), "ordinary body missing for {} {} {:?}", row.harness, row.kind, row.native_ids);
             let session = crate::query::transcript::session(
                 &sqlite_options,
                 &row.key,
