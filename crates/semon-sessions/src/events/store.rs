@@ -5291,7 +5291,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 /// Physical families, not API qualification or permission to publish. The
 /// unported support/history/stage owners remain singleton and fenced even in
 /// private composite fixtures. No individual member table can be selected.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct PhysicalLayout {
     core: bool,
     metadata: bool,
@@ -5402,37 +5402,84 @@ fn storage_ddl() -> [&'static str; 22] {
     authored_storage_ddl(PhysicalLayout::default()).expect("authored singleton profile")
 }
 
-/// Check the fixed current object inventory without reading source/history rows
-/// or executing repair DDL. Physical family validators qualify their columns
-/// and keys separately; namespace-leading families are current adapter work.
+/// Qualify the complete authored current profile without changing the store.
+/// Reference databases contain only schema and seed metadata, never user data.
+/// Comparing definitions also checks columns, keys, constraints and trigger
+/// bodies; an object with the right name alone cannot qualify a corrupt family.
 fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
-    static INVENTORY: OnceLock<String> = OnceLock::new();
-    let sql = INVENTORY.get_or_init(|| {
-        let mut objects = std::collections::BTreeSet::new();
-        for ddl in storage_ddl() {
-            for (kind, prefix) in [
-                ("table", "CREATE TABLE IF NOT EXISTS "),
-                ("index", "CREATE INDEX IF NOT EXISTS "),
-                ("index", "CREATE UNIQUE INDEX IF NOT EXISTS "),
-                ("trigger", "CREATE TRIGGER IF NOT EXISTS "),
-            ] {
-                for tail in ddl.split(prefix).skip(1) {
-                    let name = tail
-                        .split(|ch: char| ch.is_whitespace() || ch == '(')
-                        .next()
-                        .unwrap_or_default();
-                    objects.insert(format!("('{kind}','{}')", name.replace('\'', "''")));
-                }
-            }
+    let scoped = connection.prepare_cached("SELECT s.name FROM main.sqlite_schema s JOIN pragma_table_info(s.name,'main') p ON p.name='namespace' WHERE s.type='table' AND s.name IN ('files','meta','session_catalog','session_trace_headers','usage_identity','native_usage_sources','native_tree_headers','pricing_recompute_pending','reported_runs','catalog_semantic_stage')")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+    let mut flags = [false; 10];
+    for (flag, table) in flags.iter_mut().zip([
+        "files",
+        "meta",
+        "session_catalog",
+        "session_trace_headers",
+        "usage_identity",
+        "native_usage_sources",
+        "native_tree_headers",
+        "pricing_recompute_pending",
+        "reported_runs",
+        "catalog_semantic_stage",
+    ]) {
+        *flag = scoped.contains(table);
+    }
+    let [
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
+    ] = flags;
+    let profile = PhysicalLayout {
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
+    };
+    let Ok(ddl) = authored_storage_ddl(profile) else {
+        return Ok(false);
+    };
+    static INVENTORIES: OnceLock<Mutex<BTreeMap<PhysicalLayout, std::sync::Arc<String>>>> =
+        OnceLock::new();
+    let mut inventories = INVENTORIES
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(profile) {
+        let reference = Connection::open_in_memory()?;
+        for chunk in ddl {
+            reference.execute_batch(chunk)?;
         }
-        format!(
-            "SELECT count(*)={} FROM sqlite_schema WHERE (type,name) IN (VALUES {})",
+        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY type,name")?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+            .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        entry.insert(std::sync::Arc::new(format!(
+            "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
             objects.len(),
-            objects.into_iter().collect::<Vec<_>>().join(",")
-        )
-    });
+            objects.join(",")
+        )));
+    }
+    let sql = inventories
+        .get(&profile)
+        .cloned()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    drop(inventories);
     connection
-        .prepare_cached(sql)?
+        .prepare_cached(sql.as_str())?
         .query_row([], |row| row.get(0))
 }
 
@@ -12487,7 +12534,7 @@ mod tests {
                     row.get::<_, String>(0)
                 })
                 .unwrap(),
-            "retained custody"
+            "{\"custody\":\"retained custody\"}"
         );
         assert_eq!(
             store
