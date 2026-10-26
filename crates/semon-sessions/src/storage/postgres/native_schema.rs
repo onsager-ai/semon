@@ -226,7 +226,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "tree_models",
         columns: "projection_id bigint,model bytea",
-        key: "projection_id,model",
+        key: "projection_id,model_digest",
     },
     Table {
         name: "tree_labels",
@@ -236,7 +236,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "tree_tools",
         columns: "projection_id bigint,tool_id bytea,name bytea?,closed boolean",
-        key: "projection_id,tool_id",
+        key: "projection_id,tool_id_digest",
     },
     Table {
         name: "tree_usage_models",
@@ -343,7 +343,7 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
         "tree_open_tools",
         "tree_tools",
-        "projection_id,closed,tool_id,name",
+        "projection_id,closed,tool_id_digest",
         false,
     ),
     (

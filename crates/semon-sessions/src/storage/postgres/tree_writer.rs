@@ -80,13 +80,13 @@ impl Writer<'_, '_> {
         // DO UPDATE (including identical values) gives an exact affected-row
         // check while retaining historical models and closed tool names.
         for model in rows.models {
-            self.effect("INSERT INTO semon_pg_native_tree_models(namespace,projection_id,model) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,projection_id,model) DO UPDATE SET model=excluded.model", &[&ns,&projection,&model.as_bytes()])?;
+            self.effect("INSERT INTO semon_pg_native_tree_models(namespace,projection_id,model) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,projection_id,model_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_models.model,sha256(excluded.model),excluded.model)", &[&ns,&projection,&model.as_bytes()])?;
         }
         for (id, name) in rows.tools {
-            self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,$4,false) ON CONFLICT(namespace_digest,projection_id,tool_id) DO UPDATE SET name=excluded.name", &[&ns,&projection,&id.as_bytes(),&name.as_bytes()])?;
+            self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,$4,false) ON CONFLICT(namespace_digest,projection_id,tool_id_digest) DO UPDATE SET name=excluded.name WHERE semon_pg_native_tree_tools.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_tools.tool_id,sha256(excluded.tool_id),excluded.tool_id)", &[&ns,&projection,&id.as_bytes(),&name.as_bytes()])?;
         }
         for id in rows.closed_tools {
-            self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id) DO UPDATE SET closed=true", &[&ns,&projection,&id.as_bytes()])?;
+            self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id_digest) DO UPDATE SET closed=true WHERE semon_pg_native_tree_tools.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_tools.tool_id,sha256(excluded.tool_id),excluded.tool_id)", &[&ns,&projection,&id.as_bytes()])?;
         }
         for (id, model) in rows.usage_models {
             self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()])?;
@@ -307,12 +307,12 @@ pub(super) fn persisted_witness(
     let mut writer = witness::Writer::new();
     for (family, key, columns, filter) in [
         ("labels", "label", "label,value", ""),
-        ("models", "model", "model", ""),
+        ("models", "model_digest", "model", ""),
         (
             "tools",
-            "tool_id",
-            "tool_id,name",
-            " AND NOT closed AND name IS NOT NULL",
+            "tool_id_digest",
+            "tool_id,name,closed",
+            "",
         ),
     ] {
         match family {
@@ -325,7 +325,13 @@ pub(super) fn persisted_witness(
         );
         let sizes = columns
             .split(',')
-            .map(|col| format!("octet_length({col})::bigint"))
+            .map(|col| {
+                if col == "closed" {
+                    "1::bigint".to_owned()
+                } else {
+                    format!("coalesce(octet_length({col}),0)::bigint")
+                }
+            })
             .collect::<Vec<_>>()
             .join(",");
         let mut cursor: Option<Vec<u8>> = None;
@@ -354,28 +360,41 @@ pub(super) fn persisted_witness(
             let row = tx
                 .driver
                 .query_one(
-                    &format!("SELECT {columns} {predicate}"),
+                    &format!("SELECT {columns},{key} {predicate}"),
                     &[&tx.namespace.as_str().as_bytes(), &projection, &cursor],
                 )
                 .map_err(sqlstate::error)?;
             #[cfg(test)]
             DECODED.with(|n| n.set(n.get() + 1));
             let first: Vec<u8> = row.get(0);
+            let address: Vec<u8> = row.get(columns.split(',').count());
+            let domain = match family {
+                "models" => Some("tree.model"),
+                "tools" => Some("tree.tool"),
+                _ => None,
+            };
+            if let Some(domain) = domain
+                && address.as_slice() != witness::address(domain, &first)
+            {
+                return Err(StorageError::ScopeChanged);
+            }
             let key = std::str::from_utf8(&first).map_err(|_| StorageError::Unavailable)?;
             match family {
                 "models" => writer.model(key),
-                _ => {
+                "labels" => {
                     let value: Vec<u8> = row.get(1);
                     let value =
                         std::str::from_utf8(&value).map_err(|_| StorageError::Unavailable)?;
-                    if family == "labels" {
-                        writer.label(key, value);
-                    } else {
-                        writer.tool(key, value);
-                    }
+                    writer.label(key, value);
+                }
+                _ => {
+                    let name: Option<Vec<u8>> = row.get(1);
+                    let name = name.as_deref().map(std::str::from_utf8).transpose()
+                        .map_err(|_| StorageError::Unavailable)?;
+                    writer.tool(key, name, row.get(2));
                 }
             }
-            cursor = Some(first);
+            cursor = Some(address);
         }
     }
     Ok(writer.finish())
