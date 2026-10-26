@@ -99,6 +99,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
         serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
+    // Positive ClaudeReceipt: a verified peer cross-session message (xsm).
+    let claude_receipt = options.claude_home.join("projects/project/receipt177.jsonl");
+    fs::write(&claude_receipt, [
+        serde_json::json!({"type":"user","sessionId":"receipt177","uuid":"receipt177-user","timestamp":"2026-10-01T00:00:01Z","origin":{"kind":"human"},"message":{"role":"user","content":"sanitized receipt177 prompt"}}),
+        serde_json::json!({"type":"user","sessionId":"receipt177","uuid":"receipt177-peer","parentUuid":"receipt177-user","timestamp":"2026-10-01T00:00:02Z",
+            "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/177.sock","name":"sender177","fromMode":"prompting","msg_id":"m177","body":"sanitized receipt177 body","verifiedPeerPid":177,"verifiedPeerProcStart":"999"},
+            "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/177.sock\" from-name=\"sender177\">sanitized receipt177 body</cross-session-message>"}}),
+    ].iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
     // Larger indexed history with a fixed small receiver append below.
     let padding=format!("{}\n",serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"one","padding":"x".repeat(8192)}));
     let mut history=fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
@@ -212,6 +220,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .any(|list| list["total"].as_u64().is_some_and(|total| total > 0 && total < all_total)),
         "recent-window fixture lacks a boundary: {:?}",
         oracle_recent.values().map(|list| &list["total"]).collect::<Vec<_>>()
+    );
+    assert!(
+        expected_bodies.values().any(|value| value.to_string().contains("sanitized receipt177 body")),
+        "SQLite oracle body lacks the Claude receipt"
     );
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
