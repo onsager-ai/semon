@@ -9,8 +9,14 @@ use tokio_postgres::types::{ToSql, Type};
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
     use CatalogRowKind::*;
     match kind {
-        Dependency => ("semon_pg_native_catalog_dependencies", "source_path,harness,native_id"),
-        Description => ("semon_pg_native_descriptions", "session_key,version,inputs,metadata"),
+        Dependency => (
+            "semon_pg_native_catalog_dependencies",
+            "source_path,harness,native_id",
+        ),
+        Description => (
+            "semon_pg_native_descriptions",
+            "session_key,version,inputs,metadata",
+        ),
         HistoryProgress => (HISTORY_PROGRESS, "session_key,metadata"),
         Current => ("semon_pg_native_catalog_rows", "session_key,metadata"),
         Recipe => (
@@ -58,6 +64,17 @@ const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.ses
 const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,s.session_key,s.slot,s.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_slots s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key) AS history_slots";
 const HISTORY_PROGRESS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,p.session_key,p.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_progress p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.owner_generation AND p.key_digest=o.key_digest AND p.session_key=o.session_key) AS history_progress";
 const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.original_header FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE h.original_header IS NOT NULL) AS history_original";
+
+/// Check the fixed authoritative families in one bounded SQL statement before
+/// any page commits. Namespace binding remains explicit on every relation.
+pub(super) fn occupied(tx: &mut Inbox<'_, '_>) -> Result<bool, StorageError> {
+    let ns = tx.0.namespace.as_str().as_bytes();
+    let terms = CatalogRowKind::ALL.iter().map(|kind| {
+        let (table, _) = spec(*kind);
+        format!("EXISTS(SELECT 1 FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)")
+    }).collect::<Vec<_>>();
+    Ok(tx.0.driver.query_one(&format!("SELECT {}", terms.join(" OR ")), &[&ns]).map_err(sqlstate::error)?.get(0))
+}
 
 pub(super) fn capture(
     tx: &mut Inbox<'_, '_>,
@@ -129,7 +146,11 @@ pub(super) fn capture(
         .map(|v| &**v as &(dyn ToSql + Sync))
         .collect::<Vec<_>>();
     // Descriptions are namespace-owned rather than publication-generation rows.
-    let generation_filter = if kind == CatalogRowKind::Description { " AND $2::bytea IS NOT NULL" } else { " AND generation=$2" };
+    let generation_filter = if kind == CatalogRowKind::Description {
+        " AND $2::bytea IS NOT NULL"
+    } else {
+        " AND generation=$2"
+    };
     let suffix = format!(
         "FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1{generation_filter}{after} ORDER BY {keys}"
     );
@@ -232,6 +253,18 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         let key = row.key.as_bytes();
         if *kind == Current {
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
+            // Rebuild the producer's physical incident index from the exact
+            // transferred metadata; this is content, never publication authority.
+            let edges = row.query.as_ref()
+                .and_then(|query| query["selected"]["edges"].as_array())
+                .into_iter().flatten()
+                .flat_map(|edge| ["from", "to"].map(move |field| edge["query"][field].as_str()));
+            let peers = row.parent.as_deref().into_iter().chain(edges.flatten())
+                .filter(|peer| *peer != row.key)
+                .collect::<std::collections::BTreeSet<_>>();
+            for peer in peers {
+                tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_links(namespace,generation,key_digest,session_key,peer_digest,peer) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4)", &[&ns,&generation.as_bytes(),&key,&peer.as_bytes()]).map_err(sqlstate::error)?;
+            }
         } else {
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,NULL,$5,$6,$7,$8)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7)", &[&ns,&generation.as_bytes(),&key,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
@@ -360,7 +393,12 @@ mod tests {
         let manifest = stage(&source, &config, &[120; 32]);
         std::fs::remove_dir_all(&options.claude_home).unwrap();
         apply(&config, &manifest);
-        assert_eq!(crate::storage::transfer::reported::tests::cache(&config).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
+        assert_eq!(
+            crate::storage::transfer::reported::tests::cache(&config)
+                .session_description(&expected[0].key, 1, "transfer-inputs")
+                .as_deref(),
+            Some("sanitized transfer description")
+        );
         pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
             let ns = config.namespace.as_str().as_bytes();
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY session_key", &[&ns]).map_err(sqlstate::error)?;
@@ -393,7 +431,12 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
-        assert_eq!(crate::storage::transfer::reported::tests::cache(&reverse).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
+        assert_eq!(
+            crate::storage::transfer::reported::tests::cache(&reverse)
+                .session_description(&expected[0].key, 1, "transfer-inputs")
+                .as_deref(),
+            Some("sanitized transfer description")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

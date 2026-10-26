@@ -232,6 +232,10 @@ pub(super) fn apply_native(
         &format!("INSERT INTO {table}(namespace,{columns}) VALUES({slots})"),
         rusqlite::params_from_iter(binds),
     )
-    .map_err(failed)?;
+    .map_err(|error| {
+        #[cfg(test)]
+        eprintln!("transfer SQLite native apply failed: table={table}");
+        failed(error)
+    })?;
     Ok(())
 }

@@ -68,7 +68,10 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             if header.version != 1
                 || header.parser_version != source.parser_version
                 || header.ledger != source.receipt
-                || header.consumed_offset.is_none_or(|offset| source.checkpoint > offset || (source.usage_ready && source.checkpoint != offset))
+                || header.consumed_offset.is_none_or(|offset| {
+                    source.checkpoint > offset
+                        || (source.usage_ready && source.checkpoint != offset)
+                })
             {
                 return Err(bad());
             }
@@ -139,9 +142,15 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(crate) fn validate_source_ledger(source: &NativeSource, ledger: &crate::events::Ledger) -> Result<(), StorageError> {
-    let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&source.chunks_header).map_err(|_|StorageError::ScopeChanged)?;
-    if source.receipt != crate::events::store::header_ledger(ledger) || header.consumed_offset != Some(ledger.offset) {
+pub(crate) fn validate_source_ledger(
+    source: &NativeSource,
+    ledger: &crate::events::Ledger,
+) -> Result<(), StorageError> {
+    let header: crate::events::native_pages::chunks::Header =
+        serde_json::from_str(&source.chunks_header).map_err(|_| StorageError::ScopeChanged)?;
+    if source.receipt != crate::events::store::header_ledger(ledger)
+        || header.consumed_offset != Some(ledger.offset)
+    {
         return Err(StorageError::ScopeChanged);
     }
     Ok(())

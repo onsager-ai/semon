@@ -164,10 +164,20 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
     native_pages::validate(record)?;
     match record {
         TransferRecord::NativeSource(source) => {
-            let (_,ledger) = crate::events::store::ledger_row(tx.0,&source.path).map_err(failed)?.ok_or(StorageError::ScopeChanged)?;
-            native_pages::validate_source_ledger(source,&ledger)?;
-            tx.0.execute("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![tx.1,source.generation as i64,source.path,source.receipt,source.checkpoint as i64,source.parser_version,source.usage_ready]).map_err(failed)?;
-            tx.0.execute("INSERT INTO native_usage_current(namespace,source_path,source_id) VALUES(?1,?2,?3)",params![tx.1,source.path,source.generation as i64]).map_err(failed)?;
+            let (_, ledger) = crate::events::store::ledger_row(tx.0, &source.path)
+                .map_err(failed)?
+                .ok_or(StorageError::ScopeChanged)?;
+            native_pages::validate_source_ledger(source, &ledger)?;
+            tx.0.execute("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![tx.1,source.generation as i64,source.path,source.receipt,source.checkpoint as i64,source.parser_version,source.usage_ready]).map_err(|error| {
+                #[cfg(test)]
+                eprintln!("transfer SQLite NativeSource apply failed: table=native_usage_sources");
+                failed(error)
+            })?;
+            tx.0.execute("INSERT INTO native_usage_current(namespace,source_path,source_id) VALUES(?1,?2,?3)",params![tx.1,source.path,source.generation as i64]).map_err(|error| {
+                #[cfg(test)]
+                eprintln!("transfer SQLite NativeSource apply failed: table=native_usage_current");
+                failed(error)
+            })?;
             tx.put(
                 &format!("{}header", prefix(&source.path, NativePageKind::Chunks)),
                 source.chunks_header.as_bytes(),

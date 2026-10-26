@@ -377,9 +377,19 @@ pub(crate) fn seed_catalog(
                 crate::events::Outcome::Written
             );
             let key = &model.prepared().rows[0].key;
-            cache.save_session_description(key, 1, "transfer-inputs", "sanitized transfer description");
+            cache.save_session_description(
+                key,
+                1,
+                "transfer-inputs",
+                "sanitized transfer description",
+            );
             cache.publish_session_descriptions();
-            assert_eq!(cache.session_description(key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
+            assert_eq!(
+                cache
+                    .session_description(key, 1, "transfer-inputs")
+                    .as_deref(),
+                Some("sanitized transfer description")
+            );
             return (options, model.prepared().rows.clone());
         }
     }
@@ -405,7 +415,12 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     );
     std::fs::remove_dir_all(&options.claude_home).unwrap();
     apply(&target, &manifest);
-    assert_eq!(cache(&target).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
+    assert_eq!(
+        cache(&target)
+            .session_description(&expected[0].key, 1, "transfer-inputs")
+            .as_deref(),
+        Some("sanitized transfer description")
+    );
     let owner =
         crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
     let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
@@ -446,7 +461,12 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
         );
     }
     apply(&reverse, &backwards);
-    assert_eq!(cache(&reverse).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
+    assert_eq!(
+        cache(&reverse)
+            .session_description(&expected[0].key, 1, "transfer-inputs")
+            .as_deref(),
+        Some("sanitized transfer description")
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -469,16 +489,26 @@ fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledge
     let (ledger, _) = store.load_file(path.to_str().unwrap()).unwrap().unwrap();
     drop(store);
     let manifest = stage(&source, &target, &[122; 32]);
-    let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    let pages = source
+        .transfer_inbox()
+        .checkpoint(&manifest)
+        .unwrap()
+        .sequence;
     let mut witnessed = false;
     for sequence in 1..=pages {
-        for record in source.transfer_inbox().staged_page(&manifest, sequence).unwrap().records {
+        for record in source
+            .transfer_inbox()
+            .staged_page(&manifest, sequence)
+            .unwrap()
+            .records
+        {
             if let TransferRecord::NativeSource(mut native) = record {
                 assert!(!native.usage_ready);
                 assert_eq!(native.checkpoint, 0);
                 assert!(ledger.offset > 0);
                 native_pages::validate_source_ledger(&native, &ledger).unwrap();
-                let mut header: serde_json::Value = serde_json::from_str(&native.chunks_header).unwrap();
+                let mut header: serde_json::Value =
+                    serde_json::from_str(&native.chunks_header).unwrap();
                 header["consumed_offset"] = (ledger.offset + 1).into();
                 native.chunks_header = serde_json::to_string(&header).unwrap();
                 assert!(native_pages::validate_source_ledger(&native, &ledger).is_err());
@@ -488,6 +518,27 @@ fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledge
     }
     assert!(witnessed);
     apply(&target, &manifest);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_transfer246_occupied_description_refused_before_native_pages_commit() {
+    let root = root();
+    let source = sqlite(&root, "occupied-source");
+    let target = sqlite(&root, "occupied-target");
+    let path = root.join("native.jsonl");
+    seed_native_usage(&source, &path, 130);
+    let mut writer = cache(&target);
+    writer.save_session_description("existing", 1, "inputs", "owned destination");
+    writer.publish_session_descriptions();
+    assert_eq!(writer.session_description("existing", 1, "inputs").as_deref(), Some("owned destination"));
+    drop(writer);
+    let manifest = stage(&source, &target, &[122; 32]);
+    assert_eq!(target.transfer_inbox().apply_page(&manifest, 1), Err(StorageError::Conflict));
+    let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    assert_eq!(crate::events::store::read_session_description(&db, "existing", 1, "inputs").unwrap().as_deref(), Some("owned destination"));
+    assert_eq!(db.query_row("SELECT count(*) FROM main.files WHERE namespace=?1", [target.namespace.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 0);
     std::fs::remove_dir_all(root).unwrap();
 }
 
