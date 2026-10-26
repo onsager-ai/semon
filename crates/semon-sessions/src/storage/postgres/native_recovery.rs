@@ -18,7 +18,7 @@ pub(super) fn cursor(tx: &mut PgTxn<'_>) -> Result<Option<String>, StorageError>
         .map_err(|_| StorageError::ScopeChanged)
 }
 
-fn page(tx: &mut PgTxn<'_>, after: &str) -> Result<bool, StorageError> {
+fn head(tx: &mut PgTxn<'_>) -> Result<String, StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     // The locked Source head selects the immutable current generation. An
@@ -31,6 +31,12 @@ fn page(tx: &mut PgTxn<'_>, after: &str) -> Result<bool, StorageError> {
     if generation.len() != 64 || !generation.bytes().all(|v| v.is_ascii_hexdigit()) {
         return Err(StorageError::ScopeChanged);
     }
+    Ok(generation)
+}
+
+fn page(tx: &mut PgTxn<'_>, after: &str) -> Result<bool, StorageError> {
+    let generation = head(tx)?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
     let key = if after.is_empty() {
         ""
     } else {
@@ -180,7 +186,7 @@ pub(super) fn recover(
         let current = cursor(tx)?;
         let applied = current == *expected;
         let done = if applied {
-            if let Some(after) = current.as_deref() { page(tx, after)? } else { true }
+            if let Some(after) = current.as_deref() { page(tx, after)? } else { head(tx)?; true }
         } else { false };
         let outcome = if applied { "applied" } else { "conflict" };
         tx.driver.execute("INSERT INTO semon_pg_source_receipts(namespace,operation_id,payload_digest,outcome) VALUES($1,$2,$3,$4)", &[&ns, &operation.id, &operation.payload_digest, &outcome]).map_err(sqlstate::error)?;
