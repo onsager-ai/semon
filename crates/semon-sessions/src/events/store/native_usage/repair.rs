@@ -112,7 +112,12 @@ fn prepare(
         return Err(io::ErrorKind::WouldBlock.into());
     }
     let snapshot = input.binding.proof_snapshot().map_err(io::Error::other)?;
-    let database = input.binding.config().backend.sqlite_database().map_err(io::Error::other)?;
+    let database = input
+        .binding
+        .config()
+        .backend
+        .sqlite_database()
+        .map_err(io::Error::other)?;
     if database != &store.path {
         return Err(io::ErrorKind::PermissionDenied.into());
     }

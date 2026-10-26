@@ -360,7 +360,10 @@ impl SourceJournal {
 
 impl SourceJournal {
     pub(crate) fn database_path(&self) -> &PathBuf {
-        self.config.backend.sqlite_database().expect("admitted SQLite Source journal")
+        self.config
+            .backend
+            .sqlite_database()
+            .expect("admitted SQLite Source journal")
     }
 
     pub(crate) fn namespace(&self) -> &str {
@@ -944,9 +947,9 @@ pub(crate) fn acknowledge_intent_sql(
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::StoreBackend;
     use super::*;
     use crate::events::{EventCache, FileIndex, Ledger, Stat, StoreError};
+    use crate::storage::StoreBackend;
     use crate::storage::{LogicalSourceNamespace, source_observations::SourceObservationStore};
     use std::{
         fs,

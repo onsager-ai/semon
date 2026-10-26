@@ -103,7 +103,8 @@ impl Query {
             // before creating another archive reader or decoding its evidence.
             if search.at_capacity() {
                 let namespace = source.options.source.namespace().map_err(unavailable)?;
-                if source.query_catalog()
+                if source
+                    .query_catalog()
                     .map_err(unavailable)?
                     .has_search_slots(&namespace, key, since)?
                 {
@@ -378,8 +379,7 @@ impl Query {
             let store = if let Some(store) = bound {
                 store
             } else {
-                local = source.query_catalog()
-                    .map_err(unavailable)?;
+                local = source.query_catalog().map_err(unavailable)?;
                 &*local
             };
             let part = store.read_cohort(&namespace, now, &mut bytes_left)?;
@@ -538,7 +538,8 @@ impl Query {
             if let Some(store) = bound {
                 store.validate(&namespace, &part)?;
             } else {
-                source.query_catalog()
+                source
+                    .query_catalog()
                     .map_err(unavailable)?
                     .validate(&namespace, &part)?;
             }

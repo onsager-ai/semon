@@ -1,9 +1,7 @@
 //! Durable first-source admission and a closed multi-source writer gate.
 //! Enrollment is opt-in, content-free and atomic. Native rows are never reset.
 use super::failed;
-use crate::storage::{
-    LogicalSourceNamespace, NamespaceAdmission, StorageError, StoreConfig,
-};
+use crate::storage::{LogicalSourceNamespace, NamespaceAdmission, StorageError, StoreConfig};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -285,8 +283,8 @@ pub(crate) fn unenroll(
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::StoreBackend;
     use super::*;
+    use crate::storage::StoreBackend;
     use crate::{Options, events::EventCache};
     use std::{
         fs,

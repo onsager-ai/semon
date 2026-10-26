@@ -195,7 +195,9 @@ impl LogicalSourceNamespace {
 /// or database placement from the logical Source namespace or Raw root.
 #[derive(Clone)]
 pub enum StoreBackend {
-    Sqlite { database: PathBuf },
+    Sqlite {
+        database: PathBuf,
+    },
     #[cfg(feature = "postgres")]
     Postgres {
         pool: postgres::PgPool,
@@ -206,7 +208,10 @@ pub enum StoreBackend {
 impl std::fmt::Debug for StoreBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Sqlite { database } => f.debug_struct("Sqlite").field("database", database).finish(),
+            Self::Sqlite { database } => f
+                .debug_struct("Sqlite")
+                .field("database", database)
+                .finish(),
             #[cfg(feature = "postgres")]
             Self::Postgres { .. } => f.write_str("Postgres"),
         }
@@ -241,7 +246,9 @@ impl StoreConfig {
         match &self.backend {
             StoreBackend::Sqlite { .. } => crate::events::store::configured::create(self),
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { pool, control } => postgres::create_native_store(self, pool, control),
+            StoreBackend::Postgres { pool, control } => {
+                postgres::create_native_store(self, pool, control)
+            }
         }
     }
 
@@ -251,7 +258,7 @@ impl StoreConfig {
         match &self.backend {
             StoreBackend::Sqlite { .. } => crate::events::store::configured::prepare(self)?,
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { .. } => {},
+            StoreBackend::Postgres { .. } => {}
         }
         Ok(Box::new(crate::events::EventCache::open_configured(self)?))
     }
@@ -267,9 +274,11 @@ impl StoreConfig {
             StoreBackend::Postgres { pool, control } => {
                 postgres::require_configured(self, pool, control)?;
                 Ok(Box::new(postgres::PgSourceJournal::configured(
-                    pool.clone(), self.namespace.clone(), control.clone(),
+                    pool.clone(),
+                    self.namespace.clone(),
+                    control.clone(),
                 )))
-            },
+            }
         }
     }
 

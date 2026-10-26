@@ -22,8 +22,16 @@ pub struct PgSourceJournal {
 }
 
 impl PgSourceJournal {
-    pub(crate) fn configured(pool: PgPool, namespace: LogicalSourceNamespace, control: PgCancellation) -> Self {
-        Self { pool, namespace, control }
+    pub(crate) fn configured(
+        pool: PgPool,
+        namespace: LogicalSourceNamespace,
+        control: PgCancellation,
+    ) -> Self {
+        Self {
+            pool,
+            namespace,
+            control,
+        }
     }
 
     fn read<T>(

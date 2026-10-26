@@ -64,12 +64,15 @@ impl SessionSources {
     pub fn with_configured_machines(
         machines: Vec<(String, Options, crate::storage::StoreConfig)>,
     ) -> Result<Self, crate::storage::StorageError> {
-        let machines = machines.into_iter().map(|(key, options, config)| {
-            if options.source.namespace()? != config.namespace {
-                return Err(crate::storage::StorageError::NamespaceMismatch);
-            }
-            Ok((key, NativeEvidence::with_store(options, Some(config))))
-        }).collect::<Result<Vec<_>, _>>()?;
+        let machines = machines
+            .into_iter()
+            .map(|(key, options, config)| {
+                if options.source.namespace()? != config.namespace {
+                    return Err(crate::storage::StorageError::NamespaceMismatch);
+                }
+                Ok((key, NativeEvidence::with_store(options, Some(config))))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::from_evidence(machines))
     }
 
@@ -258,7 +261,10 @@ impl NativeEvidence {
         Self::with_store(options, None)
     }
 
-    fn with_store(options: Options, store_config: Option<crate::storage::StoreConfig>) -> Arc<Self> {
+    fn with_store(
+        options: Options,
+        store_config: Option<crate::storage::StoreConfig>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             options,
             store_config,
@@ -271,10 +277,15 @@ impl NativeEvidence {
         })
     }
 
-    pub(crate) fn query_catalog(&self) -> Result<Box<dyn crate::storage::query::QueryCatalogStore>, crate::storage::StorageError> {
+    pub(crate) fn query_catalog(
+        &self,
+    ) -> Result<Box<dyn crate::storage::query::QueryCatalogStore>, crate::storage::StorageError>
+    {
         match &self.store_config {
             Some(config) => crate::storage::configured_query_catalog(&self.options, config.clone()),
-            None => crate::storage::local_query_catalog(&self.options, self.options.source.namespace()?),
+            None => {
+                crate::storage::local_query_catalog(&self.options, self.options.source.namespace()?)
+            }
         }
     }
 
@@ -359,7 +370,8 @@ impl NativeEvidence {
                 match &self.store_config {
                     Some(config) => EventCache::open_configured(config),
                     None => EventCache::open_scoped(&self.options.cache, &self.options.source),
-                }.map_err(io::Error::other)?,
+                }
+                .map_err(io::Error::other)?,
             );
         }
         let cache = work.events.as_mut().expect("event cache initialized");

@@ -67,7 +67,11 @@ pub(crate) fn configured_query_catalog(
 ) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
     let generation = configured_generation(config, &pool, &control)?;
     Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
-        pool, namespace: config.namespace.clone(), control, generation, options: options.clone(),
+        pool,
+        namespace: config.namespace.clone(),
+        control,
+        generation,
+        options: options.clone(),
     }))
 }
 
@@ -76,7 +80,9 @@ pub(crate) fn create_native_store(
     pool: &PgPool,
     control: &PgCancellation,
 ) -> Result<(), super::StorageError> {
-    let epoch = config.expected_stream_epoch.as_deref()
+    let epoch = config
+        .expected_stream_epoch
+        .as_deref()
         .filter(|epoch| epoch.len() == 64 && epoch.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or(super::StorageError::InvalidArguments)?;
     pool.transaction(&config.namespace, txn::TxnKind::Write, control, |tx| {
@@ -98,13 +104,18 @@ pub(crate) fn require_configured(
     pool: &PgPool,
     control: &PgCancellation,
 ) -> Result<(), super::StorageError> {
-    pool.transaction(&config.namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
-        let binding = model_cache::binding(tx)?;
-        if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
-            return Err(super::StorageError::ScopeChanged);
-        }
-        Ok(())
-    })
+    pool.transaction(
+        &config.namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| {
+            let binding = model_cache::binding(tx)?;
+            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+                return Err(super::StorageError::ScopeChanged);
+            }
+            Ok(())
+        },
+    )
 }
 
 fn configured_generation(
@@ -112,13 +123,18 @@ fn configured_generation(
     pool: &PgPool,
     control: &PgCancellation,
 ) -> Result<String, super::StorageError> {
-    pool.transaction(&config.namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
-        let binding = model_cache::binding(tx)?;
-        if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
-            return Err(super::StorageError::ScopeChanged);
-        }
-        model_cache::generation(tx)?.ok_or(super::StorageError::ScopeChanged)
-    })
+    pool.transaction(
+        &config.namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| {
+            let binding = model_cache::binding(tx)?;
+            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+                return Err(super::StorageError::ScopeChanged);
+            }
+            model_cache::generation(tx)?.ok_or(super::StorageError::ScopeChanged)
+        },
+    )
 }
 
 pub(crate) fn catalog_page(
@@ -129,8 +145,19 @@ pub(crate) fn catalog_page(
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, super::StorageError> {
     let generation = configured_generation(config, pool, control)?;
-    catalog_effects::snapshot::with_admitted_generation(pool, &config.namespace, control, &generation, |snapshot| {
-        crate::catalog::read_page_snapshot(options, config.namespace.as_str(), request, snapshot)
+    catalog_effects::snapshot::with_admitted_generation(
+        pool,
+        &config.namespace,
+        control,
+        &generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                options,
+                config.namespace.as_str(),
+                request,
+                snapshot,
+            )
             .map_err(|_| super::StorageError::Unavailable)
-    })
+        },
+    )
 }

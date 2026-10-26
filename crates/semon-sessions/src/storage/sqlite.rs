@@ -186,8 +186,8 @@ impl SessionMetadataStore for SqliteMetadataStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::StoreBackend;
     use super::*;
+    use crate::storage::StoreBackend;
     use crate::storage::conformance::{MetadataFixture, metadata_conformance};
     use std::{
         path::PathBuf,
