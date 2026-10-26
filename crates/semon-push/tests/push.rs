@@ -1382,12 +1382,8 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
                 facts: Some(home.root.join("facts.json")),
                 ..home.options.clone()
             };
-            semon_sessions::write_facts(
-                options.facts.as_ref().unwrap(),
-                &facts,
-                &options.source,
-            )
-            .unwrap();
+            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts, &options.source)
+                .unwrap();
             options
         };
         let local = configure(&expected);
@@ -1626,12 +1622,8 @@ fn native_compressed_history_keeps_paginated_query_and_web_parity_after_restart(
                 facts: Some(home.root.join("facts.json")),
                 ..home.options.clone()
             };
-            semon_sessions::write_facts(
-                options.facts.as_ref().unwrap(),
-                &facts,
-                &options.source,
-            )
-            .unwrap();
+            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts, &options.source)
+                .unwrap();
             options
         };
         let local = configure(&expected);
