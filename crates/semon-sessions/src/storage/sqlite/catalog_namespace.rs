@@ -106,26 +106,42 @@ pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
 mod current_navigation_tests {
     use super::*;
     use crate::storage::{StoreBackend, StoreConfig};
-    struct Fixture { db: Connection, config: StoreConfig }
+    struct Fixture {
+        db: Connection,
+        config: StoreConfig,
+    }
     impl Fixture {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!("semon-current-navigation-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            let path = std::env::temp_dir().join(format!(
+                "semon-current-navigation-{}-{}.sqlite3",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
             let ns = LogicalSourceNamespace::new("A").unwrap();
             let db = crate::events::store::current_search_test_connection(&path, &ns);
             let epoch = db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
             for key in ["same", "tail", "third"] {
                 db.execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('A',?1,10,'codex','{\"owner\":\"A\"}')", [key]).unwrap();
             }
-            Self { db, config: StoreConfig { backend: StoreBackend::Sqlite { database: path }, namespace: ns, expected_stream_epoch: Some(epoch) } }
+            Self {
+                db,
+                config: StoreConfig {
+                    backend: StoreBackend::Sqlite { database: path },
+                    namespace: ns,
+                    expected_stream_epoch: Some(epoch),
+                },
+            }
         }
-        fn db(&self) -> &Connection { &self.db }
+        fn db(&self) -> &Connection {
+            &self.db
+        }
     }
     #[test]
     fn current_owner_navigation_pins_epoch_namespace_and_refuses_without_mutation() {
         use super::super::navigation::SqliteNavigation;
-        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
         use crate::events::store::configured::NativeOwnership;
+        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
         let f = Fixture::new();
         let db = f.db();
         for (key, edge) in [("d", "1"), ("b", "1"), ("a", "1"), ("c", "1"), ("a", "2")] {
@@ -139,25 +155,54 @@ mod current_navigation_tests {
         let StoreBackend::Sqlite { database } = &f.config.backend;
         let wal = database.with_extension("sqlite3-wal");
         let state = || {
-            [database.as_path(), wal.as_path()].map(|path| (
-                std::fs::read(path).ok(),
-                std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
-            ))
+            [database.as_path(), wal.as_path()].map(|path| {
+                (
+                    std::fs::read(path).ok(),
+                    std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
+                )
+            })
         };
         let before = state();
         let changes = db.total_changes();
-        assert_eq!(store.bookmarked_target_keys("target").unwrap(), ["a", "b", "c"]);
+        assert_eq!(
+            store.bookmarked_target_keys("target").unwrap(),
+            ["a", "b", "c"]
+        );
         assert!(store.bookmarked_target_keys("missing").unwrap().is_empty());
-        assert_eq!(store.bookmarked_target_keys(&"x".repeat(4097)), Err(StorageError::InvalidArguments));
-        let observation = store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&generation)).unwrap();
+        assert_eq!(
+            store.bookmarked_target_keys(&"x".repeat(4097)),
+            Err(StorageError::InvalidArguments)
+        );
+        let observation = store
+            .native_resolution(
+                "codex",
+                "native-same",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
         assert_eq!(observation.keys, ["same"]);
         assert_eq!(observation.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
         assert_eq!(observation.generation.as_deref(), Some(generation.as_str()));
-        assert!(matches!(store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&"b".repeat(64))), Err(StorageError::ScopeChanged)));
-        assert!(matches!(binding.validate(db, &LogicalSourceNamespace::new("foreign").unwrap()), Err(StorageError::NamespaceMismatch)));
+        assert!(matches!(
+            store.native_resolution(
+                "codex",
+                "native-same",
+                crate::CatalogReadScope::Current,
+                Some(&"b".repeat(64))
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
+        assert!(matches!(
+            binding.validate(db, &LogicalSourceNamespace::new("foreign").unwrap()),
+            Err(StorageError::NamespaceMismatch)
+        ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("f".repeat(64));
-        assert!(matches!(NativeOwnership::restore(&stale), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            NativeOwnership::restore(&stale),
+            Err(StorageError::ScopeChanged)
+        ));
         let mut foreign = f.config.clone();
         foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
         assert!(NativeOwnership::restore(&foreign).is_err());
@@ -200,7 +245,9 @@ mod current_navigation_tests {
             [],
         )
         .unwrap();
-        let store = SqliteNavigation(NativeReaderBinding::Semantic(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap()));
+        let store = SqliteNavigation(NativeReaderBinding::Semantic(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        ));
         let retained = store
             .native_resolution(
                 "codex",
@@ -283,5 +330,4 @@ mod current_navigation_tests {
             assert!(plan.contains(expected), "{plan}");
         }
     }
-
 }

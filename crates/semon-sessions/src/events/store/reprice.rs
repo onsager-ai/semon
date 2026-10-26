@@ -582,7 +582,7 @@ fn catalog_step(
     pending_key: Option<&str>,
 ) -> rusqlite::Result<bool> {
     if "1" == "1" {
-        // History/description/overview repricing still has singleton owners.
+        // History/description/overview repricing requires the current namespace owner.
         // Refuse before reading a payload or mutating a Catalog row; public
         // admission remains closed until those producers are ported together.
         return Err(rusqlite::Error::InvalidQuery);
@@ -1218,12 +1218,7 @@ mod tests {
     }
 
     fn foreign_change_state(db: &Connection) -> Vec<(i64, String, String)> {
-        let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_changes') WHERE name='namespace')", [], |r| r.get(0)).unwrap();
-        db.prepare(if composite {
-            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE namespace='b' ORDER BY revision"
-        } else {
-            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE session_key IN ('session-b','child-b') ORDER BY revision"
-        }).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+        db.prepare("SELECT revision,session_key,read_scope FROM main.session_catalog_changes WHERE namespace='b' ORDER BY revision").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 
@@ -1907,7 +1902,7 @@ mod tests {
 
     #[test]
     fn native_usage_copied_layout_is_independent_of_core_and_native_layout() {
-        for _copied_composite in [true] {
+        {
             let mut db = Connection::open_in_memory().unwrap();
             bind_fixture(&db, "a");
             for ddl in authored_storage_ddl() {
@@ -1994,11 +1989,10 @@ mod tests {
     #[test]
     fn native_usage_copied_tree_pricing_collision_restart_and_rollback() {
         // Assemble the complete authored usage/Tree/repair families, with
-        // Catalog and metadata layouts selected independently of the core.
-        for meta_composite in [true] {
-            for catalog_composite in [true] {
-                for trace_composite in [true] {
-                    let collide = catalog_composite && trace_composite;
+        // all families following the same current namespace contract.
+        {
+            {
+                {
                     let root = root();
                     let database = root.join("families.sqlite3");
                     let mut db = Connection::open(&database).unwrap();
@@ -2010,7 +2004,7 @@ mod tests {
                     }
                     db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"])
                         .unwrap();
-                    if meta_composite {
+                    {
                         // A source-owned poison target must not replace the store target.
                         db.execute("INSERT INTO meta VALUES('a',?1,'stale')", [TARGET])
                             .unwrap();
@@ -2076,11 +2070,7 @@ mod tests {
                         assert_eq!(records["same-message"].len(), 1);
                         assert_eq!(tokens["same-message"].input, amount);
                         assert_eq!(tx.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-                        let key = if collide {
-                            "same-session".to_owned()
-                        } else {
-                            format!("session-{namespace}")
-                        };
+                        let key = { "same-session".to_owned() };
                         let mut owner = row(
                             "same/source.jsonl",
                             &ledger,
@@ -2093,23 +2083,13 @@ mod tests {
                         );
                         owner.key = key.clone();
                         let encoded = json(&owner).unwrap();
-                        if catalog_composite {
+                        {
                             tx.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,1,'codex',?2)", params![key, encoded]).unwrap();
-                        } else {
-                            tx.execute(
-                                "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,1,'codex',?2)",
-                                params![key, encoded],
-                            )
-                            .unwrap();
                         }
                         tx.execute("INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')",
                             params![key, crate::retention::source_generation(&owner.sources).unwrap()]).unwrap();
                         // Equal child IDs and parent IDs must remain in their Source family.
-                        let child = if collide {
-                            "same-child".to_owned()
-                        } else {
-                            format!("child-{namespace}")
-                        };
+                        let child = { "same-child".to_owned() };
                         owner.key = child.clone();
                         owner.parent = Some(key.clone());
                         let child_metadata = json(&owner).unwrap();
@@ -2121,7 +2101,7 @@ mod tests {
                         tx.commit().unwrap();
                     }
                     bind_fixture(&db, "a");
-                    if meta_composite {
+                    {
                         let stamp: String = db.query_row("SELECT codex_pricing_fingerprint FROM files WHERE namespace='a' AND file_id=1", [], |r| r.get(0)).unwrap();
                         db.execute(native_metadata_put(&db).unwrap(), params![TARGET, stamp])
                             .unwrap();
@@ -2147,7 +2127,7 @@ mod tests {
                     assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                     assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='b' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
                     db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='a' AND file_id=1", []).unwrap();
-                    if catalog_composite {
+                    {
                         db.execute(
                             "DELETE FROM pricing_recompute_pending WHERE owner_kind='session'",
                             [],
@@ -2155,7 +2135,7 @@ mod tests {
                         .unwrap();
                         db.execute(
                             "UPDATE session_catalog SET metadata=metadata WHERE namespace='b' AND session_key=?1",
-                            [if collide { "same-session" } else { "session-b" }],
+                            [{ "same-session" }],
                         )
                         .unwrap();
                         assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='session'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
@@ -2165,14 +2145,14 @@ mod tests {
                     let a = usage_family_state(&db, "a");
                     let catalog_before = catalog_family_state(&db);
                     let trace_before = trace_family_state(&db);
-                    let family_key = if collide { "same-session" } else { "session-a" };
+                    let family_key = { "same-session" };
                     let b_trace = foreign_trace_state(&db);
                     let b_changes = foreign_change_state(&db);
                     bind_fixture(&db, "a");
                     {
                         let tx = db.transaction().unwrap();
                         let target = table("openai", "gpt-6.1-sol", 7.0, 1);
-                        if catalog_composite {
+                        {
                             let before: i64 = tx
                                 .query_row("SELECT total_changes()", [], |r| r.get(0))
                                 .unwrap();
@@ -2247,7 +2227,7 @@ mod tests {
                     tx.execute("DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session'", []).unwrap();
                     assert!(pending_step(&tx, &mut work, &target).unwrap());
                     assert!(!pending_step(&tx, &mut work, &target).unwrap());
-                    let child_key = if collide { "same-child" } else { "child-a" };
+                    let child_key = { "same-child" };
                     tx.execute("INSERT INTO pricing_recompute_pending(namespace,owner_kind,owner_key) VALUES(semon_namespace(),'family',?1)", [child_key]).unwrap();
                     let mut family_target = (*target).clone();
                     family_target.fingerprint = "family-price".into();
