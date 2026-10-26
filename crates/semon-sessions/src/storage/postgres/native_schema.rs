@@ -709,12 +709,30 @@ mod tests {
         for (change, controlled) in [
             ("ALTER TABLE semon_pg_native_files DROP COLUMN title", true),
             ("DROP INDEX semon_pg_native_files_cwd", true),
-            ("DROP POLICY native_namespace ON semon_pg_native_events", true),
-            ("ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY", true),
-            ("ALTER TABLE semon_pg_native_signals ALTER COLUMN v TYPE numeric", true),
-            ("ALTER TABLE semon_pg_native_recovery DROP CONSTRAINT semon_pg_native_recovery_pkey", true),
-            ("ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION", true),
-            ("UPDATE semon_pg_schema SET native_contract=decode('00','hex')", false),
+            (
+                "DROP POLICY native_namespace ON semon_pg_native_events",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_tree_labels NO FORCE ROW LEVEL SECURITY",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_signals ALTER COLUMN v TYPE numeric",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_recovery DROP CONSTRAINT semon_pg_native_recovery_pkey",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION",
+                true,
+            ),
+            (
+                "UPDATE semon_pg_schema SET native_contract=decode('00','hex')",
+                false,
+            ),
         ] {
             let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
             let control = PgCancellation::default();

@@ -1125,8 +1125,10 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
-    fn resume_runtime_input(&mut self,_:&crate::Options,_:&str)->Result<(),StoreError> {
-        Err(StoreError::Configured(crate::storage::StorageError::Unavailable))
+    fn resume_runtime_input(&mut self, _: &crate::Options, _: &str) -> Result<(), StoreError> {
+        Err(StoreError::Configured(
+            crate::storage::StorageError::Unavailable,
+        ))
     }
     fn resolve_catalog_input(
         &mut self,
@@ -1920,8 +1922,11 @@ impl EventCache {
             false,
         )?;
         if options.facts.is_some() {
-            self.store.as_mut().ok_or_else(||io::Error::other("native producer unavailable"))?
-                .resume_runtime_input(options,path).map_err(|error|io::Error::other(error.to_string()))?;
+            self.store
+                .as_mut()
+                .ok_or_else(|| io::Error::other("native producer unavailable"))?
+                .resume_runtime_input(options, path)
+                .map_err(|error| io::Error::other(error.to_string()))?;
         }
         let revision = self.catalog_claims(&[path.to_owned()])?[0]
             .1
