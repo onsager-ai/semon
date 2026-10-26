@@ -1254,9 +1254,13 @@ impl Stage {
             .map_err(StoreError::Configured)?;
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND runtime=?3 AND resetting=0)",params![ns,batch.epoch,batch.runtime],|r|r.get(0)).map_err(error)?;
         if !valid || self.epoch != Some(batch.epoch) {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=stage_epoch");
             return Ok((Outcome::Conflict, None));
         }
         if !lifecycle_current(prepared) {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=lifecycle_authority");
             return Ok((Outcome::Conflict, None));
         }
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",[ns],|r|r.get(0)).map_err(error)?;
@@ -1264,6 +1268,8 @@ impl Stage {
             return Err(refuse("semantic_publication_recovery_intent_pending"));
         }
         if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=reduction_witness");
             return Ok((Outcome::Conflict, None));
         }
         for source in prepared.rows.iter().flat_map(|row| &row.sources) {
@@ -1305,6 +1311,8 @@ impl Stage {
             return Ok((Outcome::Conflict, None));
         }
         if previous != batch.base_generation || self.source.generation != batch.base_generation {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=base_generation");
             return Ok((Outcome::Conflict, None));
         }
         let revision: i64 = tx
@@ -1315,6 +1323,8 @@ impl Stage {
             )
             .map_err(error)?;
         if revision != batch.source_revision {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=source_revision");
             return Ok((Outcome::Conflict, None));
         }
         let staged:Vec<String>=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path LIMIT 65").map_err(error)?.query_map([ns],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
@@ -1329,10 +1339,14 @@ impl Stage {
                 != staged
             || super::source_journal::claims(&tx, ns, &staged).map_err(error)? != prepared.claims
         {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=source_membership_claims");
             return Ok((Outcome::Conflict, None));
         }
         let unfinished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (index_done=0 OR events_done=0 OR identity_done=0 OR relation_done=0)) OR EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0) OR EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND (parent_resolved=0 OR root_key IS NULL OR cost_done=0))",[ns],|r|r.get(0)).map_err(error)?;
         if unfinished {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=unfinished");
             return Ok((Outcome::Conflict, None));
         }
         let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
@@ -1361,6 +1375,8 @@ impl Stage {
             if serde_json::to_string(&endpoint.row).map_err(|e| StoreError::Data(e.to_string()))?
                 != serde_json::to_string(&identity).map_err(|e| StoreError::Data(e.to_string()))?
             {
+                #[cfg(test)]
+                eprintln!("semantic_publication_conflict reason=staged_identity");
                 return Ok((Outcome::Conflict, None));
             }
             let old:Option<String>=tx.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
@@ -1392,6 +1408,8 @@ impl Stage {
             }
         }
         if covered.into_iter().collect::<Vec<_>>() != staged {
+            #[cfg(test)]
+            eprintln!("semantic_publication_conflict reason=source_coverage");
             return Ok((Outcome::Conflict, None));
         }
         let retired = retirement_plan(&tx, &self.source, prepared)?;
@@ -1411,6 +1429,8 @@ impl Stage {
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5)",params![ns,batch.epoch,metadata_text,witness,claims_text],|r|r.get(0)).map_err(error)?;
             if !exact {
+                #[cfg(test)]
+                eprintln!("semantic_publication_conflict reason=staged_model_witness");
                 return Ok((Outcome::Conflict, None));
             }
         }

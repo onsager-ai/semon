@@ -34,6 +34,20 @@ impl QueryCatalogStore for QueryCatalog {
         }
         let runtime = crate::native_evidence::query_runtime_generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
+        // Use the same qualified window closure as listing. Its generation is
+        // immutable; the selected snapshot below also fences its runtime.
+        let window = if !self.options.all && !self.options.scan_window {
+            let part = self.read_cohort(namespace, now, &mut (8 * 1024 * 1024))?;
+            if part.generation != self.generation || part.runtime != runtime {
+                return Err(unavailable(StorageError::ScopeChanged));
+            }
+            if !part.rows.contains_key(key) {
+                return Err(QueryError::unknown_session(key));
+            }
+            Some(part)
+        } else {
+            None
+        };
         with_admitted_snapshot(
             &self.pool,
             &self.namespace,
@@ -151,9 +165,19 @@ impl QueryCatalogStore for QueryCatalog {
                                 .map(|(_, slot)| slot)
                                 .map_err(unavailable)
                         },
-                        &|_| Ok(true),
-                        &|_| Ok(true),
-                        &|_| Ok(true),
+                        &|turn| {
+                            Ok(window.as_ref().is_none_or(|part| {
+                                turn["id"]
+                                    .as_str()
+                                    .is_some_and(|id| part.turns.contains(id))
+                            }))
+                        },
+                        &|id| Ok(window.as_ref().is_none_or(|part| part.edges.contains(id))),
+                        &|id| {
+                            Ok(window
+                                .as_ref()
+                                .is_none_or(|part| part.rows.contains_key(id)))
+                        },
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
@@ -364,6 +388,7 @@ impl QueryCatalogStore for QueryCatalog {
                     after = page.last().map(|row| (row.get(0), row.get(1)));
                 }
             }
+            let timed_edges = edges.clone();
             for owner in keep.clone() {
                 let mut links = Vec::new();
                 {
@@ -376,7 +401,7 @@ impl QueryCatalogStore for QueryCatalog {
                             let id = text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
                             let metadata = json(row.get(2))?;
                             let last = metadata["last"] == serde_json::json!(1) || metadata["last"] == serde_json::json!(true);
-                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c)) { continue; }
+                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["start"].as_str().is_some_and(|id| timed_edges.contains(id))) { continue; }
                             let start = metadata["start"].as_str().map(str::to_owned);
                             let sent: Vec<String> = metadata["sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
                             *bytes_left = bytes_left.checked_sub(id.len() + start.as_ref().map_or(0, String::len) + sent.iter().map(String::len).sum::<usize>()).ok_or(StorageError::Busy)?;

@@ -144,7 +144,7 @@ impl QueryError {
         Self::new("invalid_arguments", message)
     }
 
-    fn unknown_session(id: &str) -> Self {
+    pub(crate) fn unknown_session(id: &str) -> Self {
         Self::new(
             "unknown_session",
             format!("no session {id:?} in these logs"),
