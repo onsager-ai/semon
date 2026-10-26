@@ -50,7 +50,13 @@ impl NativeReaderBinding {
         match self {
             Self::Semantic(owner) => owner.validate_ready(db)?,
             Self::Admitted(_) => {
-                namespace::require_admitted(db, requested)?;
+                let admission = namespace::require_admitted(db, requested)?;
+                crate::events::store::configured::NativeOwnership::validate_physical(db)?;
+                crate::events::store::configured::validate_read_profile(
+                    db,
+                    requested,
+                    i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)?,
+                )?;
             }
         }
         if !crate::events::store::current_contract(db).map_err(failed)? {
