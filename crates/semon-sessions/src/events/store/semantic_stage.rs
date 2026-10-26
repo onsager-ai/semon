@@ -3326,6 +3326,7 @@ mod tests {
             )
             .unwrap(),
             runtime: b.runtime.clone(),
+            authority: None,
         };
         assert!(authority.authority_current().unwrap());
         store

@@ -93,6 +93,27 @@ impl NativeIndex {
 }
 
 impl IndexStore for NativeIndex {
+    fn prepare_facts_authority(&self, options: &crate::Options) -> std::io::Result<()> {
+        if options.facts.is_some() {
+            super::current_sources::prepare(&self.pool, &self.namespace, &self.control, options)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+    fn facts_authority(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<crate::facts::source_authority::Sources> {
+        super::current_sources::CurrentSources::open(
+            self.pool.clone(),
+            self.namespace.clone(),
+            self.control.clone(),
+            path,
+        )
+        .map(crate::facts::source_authority::Sources::Postgres)
+        .map_err(std::io::Error::other)
+    }
+
     fn begin_semantic_stage(
         &mut self,
         paths: &[String],
