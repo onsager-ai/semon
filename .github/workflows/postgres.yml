@@ -110,7 +110,14 @@ jobs:
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog124 -- --nocapture
       - name: Private Catalog original custody shared-producer qualification
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog127.log"
+      - name: Retain private Catalog custody diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-catalog127-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-catalog127.log
       - name: Native keys125 long file and metadata producer oracle
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
