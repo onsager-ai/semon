@@ -872,6 +872,12 @@ mod tests {
             let root = cleanup_root();
             let path = root.join("index.sqlite3");
             let mut store = cleanup_store(&root, "index.sqlite3");
+            // Fixture writes target physical metadata through the existing
+            // owned writer; the scoped reader exposes a read-only view.
+            store.connection =
+                crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                    .connection()
+                    .unwrap();
             let bytes = vec![b'x'; crate::source_chunks::SIZE];
             let (ledger, mut index) = cleanup_proof(1, 0);
             index.source_chunks = Some(Arc::new(Chunks {
@@ -900,12 +906,6 @@ mod tests {
             } else {
                 value.as_object_mut().unwrap().remove(field);
             }
-            // Corrupt physical metadata through the existing owned writer;
-            // the scoped reader exposes a read-only metadata view.
-            store.connection =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
-                    .connection()
-                    .unwrap();
             store
                 .connection
                 .execute(
