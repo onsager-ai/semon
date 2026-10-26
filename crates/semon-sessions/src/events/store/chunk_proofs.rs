@@ -371,10 +371,44 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 impl Focused {
     #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        Self::open_with_raw(cache, path, ledger, None)
+        Self::open_unbound_with_raw(cache, path, ledger, None)
+    }
+
+    /// Held legacy-fixture tests only; runtime readers carry their binding.
+    #[cfg(test)]
+    pub(crate) fn open_unbound_with_raw(
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        raw_before: Option<u64>,
+    ) -> io::Result<Self> {
+        Self::open_connected(
+            || super::focused_unbound_connection(cache),
+            cache,
+            path,
+            ledger,
+            raw_before,
+        )
     }
 
     pub(crate) fn open_with_raw(
+        binding: &crate::storage::NativeReaderBinding,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        raw_before: Option<u64>,
+    ) -> io::Result<Self> {
+        Self::open_connected(
+            || super::focused_connection(binding),
+            cache,
+            path,
+            ledger,
+            raw_before,
+        )
+    }
+
+    fn open_connected(
+        connect: impl FnOnce() -> io::Result<Connection>,
         cache: &Path,
         path: &str,
         ledger: &Ledger,
@@ -382,8 +416,7 @@ impl Focused {
     ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
         let result = (|| {
-            let db = super::focused_connection(cache)
-                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+            let db = connect().map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
             Self::with_db_inner(Snapshot::new(db), cache, path, ledger, &mut diagnostic)
