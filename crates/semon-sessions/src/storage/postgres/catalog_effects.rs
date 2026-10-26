@@ -251,12 +251,16 @@ impl CurrentPublicationStore for Effects<'_, '_> {
         }
         self.put(
             "semon_pg_native_catalog_rows",
-            &["key_digest", "session_key", "metadata"],
+            &["key_digest", "session_key", "metadata", "last_ms", "harness", "repo", "model"],
             "key_digest",
             &[
                 &digest(row.key.as_bytes()),
                 &row.key.as_bytes(),
                 &metadata.as_bytes(),
+                &row.last.unwrap_or(0),
+                &row.harness.as_bytes(),
+                &row.repo.as_deref().unwrap_or("").as_bytes(),
+                &row.model.as_bytes(),
             ],
         )?;
         Ok(true)

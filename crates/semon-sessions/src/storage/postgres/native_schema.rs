@@ -115,7 +115,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_rows",
-        columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea,last_ms bigint,harness bytea,repo bytea,model bytea",
         key: "generation,key_digest",
     },
     Table {
@@ -335,6 +335,7 @@ const FOUNDATION: &[Table] = &[
 
 // Indexes are part of the same authoritative manifest, including key order.
 const INDEXES: &[(&str, &str, &str, bool)] = &[
+    ("catalog_order", "catalog_rows", "generation,last_ms,key_digest", false),
     (
         "relocation_new",
         "relocation_candidates",
