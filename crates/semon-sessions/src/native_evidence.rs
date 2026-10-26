@@ -1315,7 +1315,14 @@ impl NativeEvidence {
                     before_build()?;
                 }
                 let cache = work.events.as_mut().expect("event cache initialized");
-                if cache.finish_catalog_backfill(&generation)? != crate::events::Outcome::Written {
+                if cache
+                    .finish_catalog_backfill(&generation)
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("native catalog phase=finish_backfill table=meta");
+                    })?
+                    != crate::events::Outcome::Written
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "backfill completion changed",
