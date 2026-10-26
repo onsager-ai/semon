@@ -343,7 +343,8 @@ fn virtual_read(
     if requested != served {
         return Err(QueryError::unknown_session(requested));
     }
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
@@ -354,6 +355,11 @@ fn virtual_read(
         Err(error) => return Err(unavailable(error)),
     };
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
+    let runtime_observations = match binding.runtime_binding().map_err(unavailable)? {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+            .map_err(unavailable)?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     let catalog_generation = generation(&tx)?;
     let cutoff = (!options.all && !options.scan_window)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
@@ -364,7 +370,7 @@ fn virtual_read(
         let Some(query) = &row.query else {
             return Ok(None);
         };
-        let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(row);
+        let row_runtime = runtime_observations.expected(row);
         if !crate::model::summary::query_observation_matches(
             query,
             &row.sources,
@@ -444,13 +450,18 @@ fn virtual_read(
     // Later metadata reads retain their existing publication rechecks.
     tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(tx);
-    let sources = crate::query_source::Sources::capture_focused_snapshot(
-        options,
-        &sources.into_values().collect::<Vec<_>>(),
-        db,
-    )
+    let sources = sources.into_values().collect::<Vec<_>>();
+    let sources = match &binding {
+        crate::storage::NativeReaderBinding::Semantic(owner) => {
+            crate::query_source::Sources::capture_bound_snapshot(options, &sources, db, owner)
+        }
+        crate::storage::NativeReaderBinding::Admitted(_) => {
+            crate::query_source::Sources::capture_focused_snapshot(options, &sources, db)
+        }
+    }
     .map_err(|error| proof_unavailable(&error))?;
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
@@ -698,7 +709,8 @@ fn read_inner(
     if requested != key && !suffixed {
         return Ok(None);
     }
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
@@ -713,8 +725,6 @@ fn read_inner(
         .optional()
         .map_err(unavailable)?;
     if projection_generation.as_deref() != Some(&catalog_generation) {
-        #[cfg(test)]
-        eprintln!("selected transcript {key}: projection generation mismatch");
         return Ok(None);
     }
     let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
@@ -734,8 +744,6 @@ fn read_inner(
         return Ok(None);
     }
     let Some(saved) = &row.query else {
-        #[cfg(test)]
-        eprintln!("selected transcript {key}: query profile missing");
         return Ok(None);
     };
     // Recorded native IDs are global. Machine suffixes belong only to virtual
@@ -763,12 +771,15 @@ fn read_inner(
         return Err(QueryError::unknown_session(key));
     }
     if saved["transcript_observation"].is_null() {
-        #[cfg(test)]
-        eprintln!("selected transcript {key}: transcript observation missing");
         return Ok(None);
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
-    let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(&row);
+    let row_runtime = match binding.runtime_binding().map_err(unavailable)? {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+            .map_err(unavailable)?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    }
+    .expected(&row);
     // Retention preserves byte custody, not a live process observation. Its
     // pending tools and backgrounds need the same runtime qualification.
     if !crate::model::summary::query_observation_matches(
@@ -779,8 +790,6 @@ fn read_inner(
     )
     .map_err(unavailable)?
     {
-        #[cfg(test)]
-        eprintln!("selected transcript {key}: runtime observation mismatch");
         return Ok(None);
     }
     let observation: QueryObservation =
@@ -794,8 +803,6 @@ fn read_inner(
         "SELECT generation,version,total,source_generation FROM main.{headers} WHERE namespace=semon_namespace() AND session_key=?1"
     ), [key], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(unavailable)?;
     let Some((slot_generation, version, total, source_generation)) = header else {
-        #[cfg(test)]
-        eprintln!("selected transcript {key}: slot header missing");
         return Ok(None);
     };
     let total = usize::try_from(total).map_err(unavailable)?;
@@ -900,9 +907,20 @@ fn read_inner(
     }
     tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(tx);
-    let sources =
-        crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
-            .map_err(|error| proof_unavailable(&error))?;
+    let sources = match &binding {
+        crate::storage::NativeReaderBinding::Semantic(owner) => {
+            crate::query_source::Sources::capture_bound_snapshot(
+                options,
+                &selected_sources,
+                db,
+                owner,
+            )
+        }
+        crate::storage::NativeReaderBinding::Admitted(_) => {
+            crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
+        }
+    }
+    .map_err(|error| proof_unavailable(&error))?;
     let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
