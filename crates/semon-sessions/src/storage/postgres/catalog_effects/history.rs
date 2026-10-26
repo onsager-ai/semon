@@ -116,6 +116,13 @@ impl History<'_, '_> {
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
         let original = original.map(|value| value.as_bytes().to_vec());
+        // Header columns mirror catalog_rows so retained history filters and
+        // keysets in SQL; the reader re-checks them against the metadata.
+        let row: CatalogRow =
+            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != key {
+            return Err(StorageError::ScopeChanged);
+        }
         self.effects.put(
             "semon_pg_native_catalog_history_headers",
             &[
@@ -128,6 +135,10 @@ impl History<'_, '_> {
                 "incomplete",
                 "metadata",
                 "original_header",
+                "last_ms",
+                "harness",
+                "repo",
+                "model",
             ],
             "key_digest",
             &[
@@ -140,6 +151,10 @@ impl History<'_, '_> {
                 &incomplete,
                 &metadata.as_bytes(),
                 &original,
+                &row.last.unwrap_or(0),
+                &row.harness.as_bytes(),
+                &row.repo.as_deref().unwrap_or("").as_bytes(),
+                &row.model.as_bytes(),
             ],
         )?;
         self.link(key, self.effects.generation, original.is_some())
