@@ -1350,6 +1350,13 @@ mod tests {
         };
         let first_path = first.full_path(&options).to_string_lossy().into_owned();
         let later_path = later.full_path(&options).to_string_lossy().into_owned();
+        // The ordinary fixture already committed its seed discovery. Track its
+        // exact OpIDs separately from the two operations exercised below.
+        let baseline = {
+            let db = Connection::open(database).unwrap();
+            let mut statement = db.prepare("SELECT operation_id FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied' ORDER BY operation_id").unwrap();
+            statement.query_map([namespace], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut cache = open_cache();
         let block_replay = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1418,9 +1425,13 @@ mod tests {
         let db = Connection::open(database).unwrap();
         let count: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND outcome='applied'", params![namespace, operation.id], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
-        let applied: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied'", [namespace], |row| row.get(0)).unwrap();
+        let mut statement = db.prepare("SELECT operation_id FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied' ORDER BY operation_id").unwrap();
+        let applied = statement.query_map([namespace], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(baseline.iter().all(|id| applied.contains(id)));
+        let added: Vec<_> = applied.iter().filter(|id| !baseline.contains(id)).collect();
+        assert!(added.contains(&&operation.id));
         assert_eq!(
-            applied, 2,
+            added.len(), 2,
             "one original operation plus the later operation"
         );
         assert_eq!(
@@ -1515,25 +1526,8 @@ mod tests {
             .expect("real publisher generation");
         drop(cache);
         let database = EventCache::path(&fixture.cache_path);
-        let config = {
-            let db = Connection::open(&database).unwrap();
-            let epoch = db
-                .query_row(
-                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let config = StoreConfig {
-                backend: StoreBackend::Sqlite {
-                    database: database.clone(),
-                },
-                namespace: crate::Options::default().source.namespace().unwrap(),
-                expected_stream_epoch: Some(epoch),
-            };
-            crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
-            config
-        };
+        let config = crate::Options::default().source.config(&fixture.cache_path).unwrap();
+        crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
         let open = || {
             Box::new(SourceJournal::owned(
                 crate::events::store::configured::NativeOwnership::restore(&config).unwrap(),
