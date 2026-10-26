@@ -12281,7 +12281,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO session_history_catalog VALUES('retained','retained custody')",
+                "INSERT INTO session_history_catalog VALUES('retained','{\"custody\":\"retained custody\"}')",
                 [],
             )
             .unwrap();
