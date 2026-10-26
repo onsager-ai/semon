@@ -245,7 +245,7 @@ mod current_navigation_tests {
         .unwrap();
 
         let db = f.db();
-        register(&db, &f.config.namespace).unwrap();
+        register(db, &f.config.namespace).unwrap();
         db.execute(
             "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','same','retained','codex','retained-history','retained/same')",
             [],

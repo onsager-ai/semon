@@ -441,15 +441,14 @@ fn failed(error: rusqlite::Error) -> StorageError {
         error.sqlite_error_code()
     );
     #[cfg(test)]
-    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
-        if (message.starts_with("no such ") || message.starts_with("private native"))
-            && message.len() < 160
-            && message
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
-        {
-            eprintln!("configured SQL contract failure: {message}");
-        }
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error
+        && (message.starts_with("no such ") || message.starts_with("private native"))
+        && message.len() < 160
+        && message
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
+    {
+        eprintln!("configured SQL contract failure: {message}");
     }
     #[cfg(test)]
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
@@ -758,9 +757,19 @@ impl NativeOwnership {
             )
             .map_err(failed)?;
         if bound {
-            let admission = tx.query_row("SELECT admission_generation FROM storage_namespaces WHERE namespace=?1", [config.namespace.as_str()], |r|r.get(0)).optional().map_err(failed)?;
+            let admission = tx
+                .query_row(
+                    "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                    [config.namespace.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(failed)?;
             if let Some(admission) = admission {
-                let owner = Self { config: config.clone(), admission };
+                let owner = Self {
+                    config: config.clone(),
+                    admission,
+                };
                 owner.validate_ready(&tx)?;
                 return Ok(owner);
             }
@@ -3617,7 +3626,7 @@ mod tests {
         let prepared = crate::model::prepare_sources(
             &options,
             &mut cache,
-            &[input.clone()],
+            std::slice::from_ref(&input),
             1_790_000_000_000,
         )
         .unwrap();

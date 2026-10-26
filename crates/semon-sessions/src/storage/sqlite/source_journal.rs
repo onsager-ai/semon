@@ -309,11 +309,16 @@ impl SourceJournal {
         for table in ["source_observation_receipts", "source_observation_intents"] {
             for (action, predicate) in [
                 ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-                ("UPDATE", "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),
+                (
+                    "UPDATE",
+                    "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
+                ),
                 ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
             ] {
                 let name = format!("storage_source_guard_{table}_{action}");
-                let expected = format!("CREATE TRIGGER {name} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END");
+                let expected = format!(
+                    "CREATE TRIGGER {name} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END"
+                );
                 let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", params![name,table], |r|r.get(0)).optional().map_err(failed)?;
                 if actual.as_deref() != Some(expected.as_str()) {
                     return Err(StorageError::NamespaceUpgradePending);
@@ -1155,18 +1160,27 @@ mod tests {
     #[test]
     fn current_reopen_needs_no_writer_and_refuses_missing_profile_without_repair() {
         let fixture = Fixture::new();
-        let owner = crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap();
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap();
         let journal = SourceJournal::owned(owner);
         let blocker = fixture.db();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         journal.prepare().unwrap();
-        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
         drop(crate::storage::sqlite::semantic::Stage::open(capability).unwrap());
-        blocker.execute_batch("ROLLBACK; DROP TABLE storage_semantic_profiles").unwrap();
-        let cookie: i64 = blocker.query_row("PRAGMA schema_version", [], |r|r.get(0)).unwrap();
-        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
+        blocker
+            .execute_batch("ROLLBACK; DROP TABLE storage_semantic_profiles")
+            .unwrap();
+        let cookie: i64 = blocker
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
         assert!(crate::storage::sqlite::semantic::Stage::open(capability).is_err());
-        let after: i64 = blocker.query_row("PRAGMA schema_version", [], |r|r.get(0)).unwrap();
+        let after: i64 = blocker
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(cookie, after);
         let absent: bool = blocker.query_row("SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_semantic_profiles')", [], |r|r.get(0)).unwrap();
         assert!(absent);
