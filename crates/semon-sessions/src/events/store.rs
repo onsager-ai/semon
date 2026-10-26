@@ -2831,7 +2831,7 @@ impl IndexStore for SqliteStore {
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        relocation::reuse(self, path, stat, id, file, measurements)
+        relocation::reuse(self, path, stat, id, file, measurements, None)
     }
 
     fn append_evidence(
