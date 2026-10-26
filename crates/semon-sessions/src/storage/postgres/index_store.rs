@@ -460,8 +460,10 @@ impl IndexStore for NativeIndex {
             )
             .map_err(err)
     }
-    fn remove_files(&mut self, _: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
-        pending()
+    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+            super::catalog_effects::withdrawal::remove(tx, files)
+        }).map_err(err)
     }
     fn session_description(
         &self,
