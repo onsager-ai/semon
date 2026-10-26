@@ -1104,13 +1104,22 @@ mod generation_tests {
         };
         config.create_native_store().unwrap();
         let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-        let mut connection =
+        let connection =
             crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
                 .connection()
                 .unwrap();
-        let tx = connection.transaction().unwrap();
-        publish_owned(&tx, &owner, &row, &projection).unwrap();
-        tx.commit().unwrap();
+        row.trace = Some(projection.clone());
+        let rows = [row];
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: None,
+        };
+        let writer = crate::events::store::configured::Writer::owned(owner);
+        let (outcome, generation) = writer
+            .publish_catalog(&publication, None, None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
         let saved: (String, String) = connection
             .query_row(
                 "SELECT generation,metadata FROM session_trace_headers WHERE namespace='trace-publication' AND session_key='owner'",
@@ -1124,17 +1133,26 @@ mod generation_tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(rows, (1, 1, 2));
-        let changes: i64 = connection
-            .query_row("SELECT total_changes()", [], |row| row.get(0))
+        // Count actual trace effects across the ordinary publisher's separate
+        // connection; Catalog observation bookkeeping is independent of trace.
+        connection
+            .execute_batch("CREATE TABLE trace_effects(writes INTEGER NOT NULL); INSERT INTO trace_effects VALUES(0);")
             .unwrap();
-        let tx = connection.transaction().unwrap();
-        publish_owned(&tx, &owner, &row, &projection).unwrap();
-        tx.commit().unwrap();
+        for table in crate::storage::sqlite::trace::TABLES {
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                connection.execute_batch(&format!("CREATE TRIGGER audit_{table}_{operation} AFTER {operation} ON {table} BEGIN UPDATE trace_effects SET writes=writes+1; END;")).unwrap();
+            }
+        }
+        let (outcome, _) = writer
+            .publish_catalog(&publication, generation.as_deref(), None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
         assert_eq!(
             connection
-                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT writes FROM trace_effects", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            changes
+            0
         );
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();
