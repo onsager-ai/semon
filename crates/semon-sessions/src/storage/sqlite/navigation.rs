@@ -36,13 +36,7 @@ impl NativeNavigationStore for SqliteNavigation {
         expected_generation: Option<&str>,
     ) -> Result<NativeResolutionObservation, StorageError> {
         let db = self.0.snapshot(&self.0.config().namespace)?;
-        let observation = read_observation(
-            &db,
-            harness,
-            native_id,
-            scope,
-            expected_generation,
-        )?;
+        let observation = read_observation(&db, harness, native_id, scope, expected_generation)?;
         if matches!(self.0, NativeReaderBinding::Admitted(_))
             && observation.qualified_head().is_none()
         {
@@ -51,10 +45,7 @@ impl NativeNavigationStore for SqliteNavigation {
         Ok(observation)
     }
 }
-fn bookmark_keys(
-    db: &Connection,
-    target: &str,
-) -> Result<Vec<String>, StorageError> {
+fn bookmark_keys(db: &Connection, target: &str) -> Result<Vec<String>, StorageError> {
     let sql = "SELECT DISTINCT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?1 ORDER BY session_key LIMIT 3";
     db.prepare(sql)
         .map_err(failed)?
@@ -101,7 +92,9 @@ fn read_observation(
     observation.keys = lookup(sql)?;
     let current = !observation.keys.is_empty();
     if !current && scope == CatalogReadScope::RetainedHistory {
-        observation.keys = lookup("SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2")?;
+        observation.keys = lookup(
+            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2",
+        )?;
     }
     if let [key] = observation.keys.as_slice() {
         let metadata = |table: &str| -> Result<Option<Option<String>>, StorageError> {
@@ -145,8 +138,15 @@ mod tests {
     }
     fn fixture() -> Connection {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!("semon-navigation-current-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        crate::events::store::current_search_test_connection(&path, &crate::storage::LogicalSourceNamespace::new("navigation-current").unwrap())
+        let path = std::env::temp_dir().join(format!(
+            "semon-navigation-current-{}-{}.sqlite3",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        crate::events::store::current_search_test_connection(
+            &path,
+            &crate::storage::LogicalSourceNamespace::new("navigation-current").unwrap(),
+        )
     }
     use serde_json::json;
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         assert!(matches!(
             read_observation(
                 &db,
-                    "codex",
+                "codex",
                 "native",
                 CatalogReadScope::Current,
                 Some(&"b".repeat(64))
@@ -186,10 +186,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(
-            bookmark_keys(&db, "target").unwrap(),
-            ["a", "b", "c"]
-        );
+        assert_eq!(bookmark_keys(&db, "target").unwrap(), ["a", "b", "c"]);
         assert!(bookmark_keys(&db, "missing").unwrap().is_empty());
     }
 

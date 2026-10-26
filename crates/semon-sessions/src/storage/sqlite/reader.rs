@@ -91,8 +91,8 @@ impl NativeReaderBinding {
         }
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        let qualified = self.validate(&db, requested)?;
-        Ok(ReadSnapshot(db, qualified))
+        self.validate(&db, requested)?;
+        Ok(ReadSnapshot(db))
     }
 
     /// Only the private Query listing adapter can consume producer custody.
@@ -109,17 +109,12 @@ impl NativeReaderBinding {
         }
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        let qualified = self.validate_listing(&db, requested)?;
-        Ok(ReadSnapshot(db, qualified))
+        self.validate_listing(&db, requested)?;
+        Ok(ReadSnapshot(db))
     }
 }
 
-pub(super) struct ReadSnapshot(Connection, bool);
-impl ReadSnapshot {
-    pub(super) fn qualified(&self) -> bool {
-        self.1
-    }
-}
+pub(super) struct ReadSnapshot(Connection);
 impl Deref for ReadSnapshot {
     type Target = Connection;
     fn deref(&self) -> &Connection {

@@ -395,34 +395,9 @@ const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, 
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
      rate_limits, codex_native_usage, copilot, ctime_ns";
 
-const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resume_at, \
-     head_sha256, tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, \
-     last_ms, cwd, branch, pending, tool_ids, yields, busy, links, codex_tokens, \
-     codex_tokens_by_model, rate_limits, codex_native_usage, copilot, ctime_ns) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28) \
-     ON CONFLICT (path) DO UPDATE SET dev = excluded.dev, ino = excluded.ino, \
-     size = excluded.size, mtime_ns = excluded.mtime_ns, resume_at = excluded.resume_at, \
-     head_sha256 = excluded.head_sha256, tail_sha256 = excluded.tail_sha256, \
-     entrypoint = excluded.entrypoint, title = excluded.title, \
-     agent_name = excluded.agent_name, last_model = excluded.last_model, \
-     failed = excluded.failed, first_ms = excluded.first_ms, last_ms = excluded.last_ms, \
-     cwd = excluded.cwd, branch = excluded.branch, pending = excluded.pending, \
-     tool_ids = excluded.tool_ids, yields = excluded.yields, busy = excluded.busy, \
-     links = excluded.links, codex_tokens = excluded.codex_tokens, \
-     codex_tokens_by_model = excluded.codex_tokens_by_model, \
-     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot, ctime_ns = excluded.ctime_ns \
-     RETURNING file_id";
-
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
      script, y, poll, reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m, item, peer, \
      peer_sock, peer_pid, peer_start, u";
-
-const PUT_EVENT: &str = "INSERT OR REPLACE INTO events (file_id, extra, seq, k, o, b, t, id, n, \
-     code_mode, code_mode_open, parent, script, y, poll, reply, reply_o, reply_b, reply_t, \
-     reply_e, reply_f, reply_m, item, peer, peer_sock, peer_pid, peer_start, u) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)";
 
 const COMPOSITE_COPIED_USAGE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS usage_identity (
@@ -609,9 +584,6 @@ impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
-const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
-
 const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
@@ -629,18 +601,11 @@ const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
-const PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (file_id, seq, model, input, \
-     output, cache_write, cache_read, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
-
 const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
      lines_added, lines_removed, model_usage, capture_at";
-
-const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, cost, duration, \
-     api_duration, tool_duration, lines_added, lines_removed, model_usage, capture_at) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
 const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
 
@@ -704,17 +669,6 @@ pub(super) fn open_scoped(
     source: &crate::storage::HostSource,
 ) -> Result<Admitted, String> {
     open_admitted(path, source).map_err(|error| error.to_string())
-}
-
-/// Qualify an exact selected or recovery path without traversing unrelated
-/// archived markers. An existing database is never initialized or reset here.
-pub(crate) fn open_selected(
-    path: &Path,
-    namespace: &crate::storage::LogicalSourceNamespace,
-) -> Result<(), String> {
-    SqliteStore::attempt_selected(path, namespace)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Restart/read interest can resume durable work without opening Event payloads.
@@ -4256,20 +4210,6 @@ fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Renames a damaged store to `<path>.corrupt` and drops its `-wal` and
-/// `-shm`, which belong to it and must not meet the new file.
-fn set_aside(path: &Path) -> io::Result<()> {
-    // The WAL first: were it left, even for a moment, beside a new file at
-    // the path, SQLite could replay it into that file.
-    for suffix in ["-wal", "-shm"] {
-        match fs::remove_file(sibling(path, suffix)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-    }
-    fs::rename(path, sibling(path, ".corrupt"))
-}
-
 /// CI-only paired measurements reuse the producer's connection-local policy.
 #[cfg(test)]
 pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connection> {
@@ -6899,10 +6839,9 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path, &fixture_namespace()) {
-            Ok(opened) => opened,
-            Err(error) => panic!("the store opens: {error}"),
-        }
+        let store = current_test_store(path, &fixture_namespace());
+        let loaded = store.load().unwrap();
+        (store, loaded)
     }
 
     #[test]
@@ -11940,10 +11879,7 @@ pub(crate) fn current_search_test_connection(
     path: &Path,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> Connection {
-    let (mut store, _) = match SqliteStore::attempt(path, namespace) {
-        Ok(opened) => opened,
-        Err(error) => panic!("current search fixture opens: {error}"),
-    };
+    let mut store = current_test_store(path, namespace);
     store
         .publish_catalog_with_generation(
             &crate::slot_projection::Publication {
@@ -11957,4 +11893,34 @@ pub(crate) fn current_search_test_connection(
         )
         .unwrap();
     store.connection
+}
+
+#[cfg(test)]
+fn current_test_store(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+) -> SqliteStore {
+    let config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Sqlite {
+            database: path.to_owned(),
+        },
+        namespace: namespace.clone(),
+        expected_stream_epoch: Some("a".repeat(64)),
+    };
+    if !path.exists() {
+        config.create_native_store().unwrap();
+    }
+    let owner = configured::NativeOwnership::admit(&config).unwrap();
+    let connection = configured::connection(&config).unwrap();
+    crate::storage::NativeReaderBinding::Semantic(owner.clone())
+        .validate(&connection, namespace)
+        .unwrap();
+    SqliteStore {
+        owner,
+        connection,
+        path: path.to_owned(),
+        selected_runs: None,
+        semantic_rejection: None,
+        traversal_observation: None,
+    }
 }
