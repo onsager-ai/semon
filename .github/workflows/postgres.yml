@@ -109,8 +109,16 @@ jobs:
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
       - name: Current transfer inbox durable page and exact OpID qualification
+        id: current_transfer
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls current_transfer225 -- --nocapture
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls current_transfer225 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/current-transfer225.log"
+      - name: Retain current transfer qualification diagnostics
+        if: ${{ !cancelled() && steps.current_transfer.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-transfer225-${{ github.sha }}
+          path: ${{ runner.temp }}/current-transfer225.log
       - name: Ordinary PG model producer without SQLite fallback
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         shell: bash
