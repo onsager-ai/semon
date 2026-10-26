@@ -2122,6 +2122,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     expected_retained.sort();
     retained.sort();
     assert_eq!(retained, expected_retained);
+    // Owner-side filters: the withdrawn Claude sessions stay Retained under
+    // the harness filter and are absent under another harness.
+    let claude = scoped(&caught, "scope=retained_history&harness=claude&");
+    let codex = scoped(&caught, "scope=retained_history&harness=codex&");
+    for key in &removed {
+        assert!(claude.contains(&(key.clone(), true)), "{key} under harness=claude");
+        assert!(codex.iter().all(|(other, _)| other != key));
+    }
+    assert!(claude.len() + codex.len() <= retained.len());
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
