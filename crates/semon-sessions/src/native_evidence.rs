@@ -2286,8 +2286,14 @@ mod catalog_owner_tests {
         fs::write(unrelated.full_path(&options), "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"unrelated\"}}\n").unwrap();
         let evidence = NativeEvidence::new(options.clone());
         drain_catalog(&evidence, &std::cell::Cell::new(0));
+        // A completed publication advances the head. Start this separate
+        // producer operation with a fresh admitted head, rather than asking
+        // the old stage handle to seize a successor generation.
+        evidence.retire();
+        let evidence = NativeEvidence::new(options.clone());
         {
             let mut work = lock(&evidence.work);
+            work.events = Some(EventCache::open_scoped(&options.cache, &options.source).unwrap());
             assert_eq!(
                 work.events
                     .as_mut()
