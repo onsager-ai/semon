@@ -1058,11 +1058,9 @@ impl Writer {
                 |_| Ok(1i64),
             )
             .map_err(failure)?;
-        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
             connection,
-            discovery,
             path: database.clone(),
             selected_runs: None,
             semantic_rejection: None,
@@ -1101,11 +1099,9 @@ impl Writer {
             ));
         }
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
-        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
             connection,
-            discovery,
             path: database.clone(),
             selected_runs: None,
             semantic_rejection: None,
@@ -1127,11 +1123,9 @@ impl Writer {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
-        let discovery = super::DiscoveryState::new(&connection).map_err(std::io::Error::other)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
             connection,
-            discovery,
             path: database.clone(),
             selected_runs: None,
             semantic_rejection: None,

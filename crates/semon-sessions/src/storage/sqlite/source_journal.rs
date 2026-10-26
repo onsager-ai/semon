@@ -283,11 +283,6 @@ pub(crate) fn configured(config: &StoreConfig) -> Box<dyn SourceObservationStore
     Box::new(SourceJournal(config.clone()))
 }
 
-#[cfg(test)]
-pub(crate) fn legacy(database: impl Into<PathBuf>) -> Box<dyn SourceObservationStore> {
-    Box::new(LegacySourceJournal::new(database))
-}
-
 impl SourceJournal {
     pub(crate) fn owned(owner: crate::events::store::configured::NativeOwnership) -> Self {
         Self {
@@ -724,314 +719,6 @@ impl SourceObservationStore for SourceJournal {
     }
 }
 
-/// Isolated test connection for restart/fault conformance. Production native
-/// observations borrow SqliteStore; the shared authored SQL remains here.
-#[cfg(test)]
-pub(crate) struct LegacySourceJournal {
-    database: PathBuf,
-}
-
-#[cfg(test)]
-impl LegacySourceJournal {
-    pub(crate) fn new(database: impl Into<PathBuf>) -> Self {
-        Self {
-            database: database.into(),
-        }
-    }
-
-    fn connection(&self) -> Result<Connection, StorageError> {
-        let db = Connection::open_with_flags(
-            &self.database,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(failed)?;
-        db.busy_timeout(Duration::from_millis(100))
-            .map_err(failed)?;
-        Ok(db)
-    }
-}
-
-#[cfg(test)]
-fn local_persist_intent(
-    connection: &mut Connection,
-    intent: &SourceIntent,
-) -> Result<(), StorageError> {
-    let db = connection;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    persist_intent_sql(&tx, None, intent)?;
-    tx.commit().map_err(|_| StorageError::CommitUncertain)
-}
-
-pub(crate) fn local_pending_intents(
-    connection: &Connection,
-) -> Result<Vec<SourceIntent>, StorageError> {
-    let db = connection;
-    let tx = db.unchecked_transaction().map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    let intents = load_intents(&tx, None)?;
-    tx.commit().map_err(failed)?;
-    Ok(intents)
-}
-
-pub(crate) fn local_acknowledge_intent(
-    connection: &mut Connection,
-    operation: &SourceOperation,
-) -> Result<(), StorageError> {
-    let db = connection;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    acknowledge_intent_sql(&tx, None, operation)?;
-    tx.commit().map_err(|_| StorageError::CommitUncertain)
-}
-
-#[cfg(test)]
-fn local_discover(
-    connection: &mut Connection,
-    operation: &SourceOperation,
-    paths: &[String],
-    complete: bool,
-) -> Result<SourceMutationReceipt, StorageError> {
-    validate_paths(paths)?;
-    let payload =
-        serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
-    if let Some(receipt) = operation_replay(operation, None, "discover", &payload)? {
-        return Ok(receipt);
-    }
-    crate::native_timing::discovery_count(|counts| counts.statements += 2);
-    let db = connection;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    if let Some(receipt) = stored_receipt(&tx, None, operation)? {
-        return Ok(receipt);
-    }
-    discover(&tx, None, paths, complete).map_err(|error| phase_failed("discover-effect", error))?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    insert_receipt(&tx, None, operation)?;
-    tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-    Ok(SourceMutationReceipt::Applied)
-}
-
-pub(crate) fn local_invalidate(
-    connection: &mut Connection,
-    operation: &SourceOperation,
-    expected: &[(String, Option<i64>)],
-    consume_intent: bool,
-) -> Result<SourceMutationReceipt, StorageError> {
-    let paths = expected
-        .iter()
-        .map(|(path, _)| path.clone())
-        .collect::<Vec<_>>();
-    validate_paths(&paths)?;
-    if paths
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != paths.len()
-    {
-        return Err(StorageError::InvalidArguments);
-    }
-    let payload = serde_json::to_vec(expected).map_err(|_| StorageError::InvalidArguments)?;
-    if let Some(receipt) = operation_replay(operation, None, "invalidate", &payload)? {
-        return Ok(receipt);
-    }
-    let db = connection;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    if let Some(receipt) = stored_receipt(&tx, None, operation)? {
-        return Ok(receipt);
-    }
-    if claims(&tx, None, &paths).map_err(failed)? != expected {
-        insert_terminal_receipt(&tx, None, operation, "conflict")?;
-        if consume_intent {
-            acknowledge_intent_sql(&tx, None, operation)?;
-        }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        return Ok(SourceMutationReceipt::Conflict);
-    }
-    for path in paths {
-        invalidate(&tx, None, &path, "changed").map_err(failed)?;
-    }
-    insert_receipt(&tx, None, operation)?;
-    if consume_intent {
-        acknowledge_intent_sql(&tx, None, operation)?;
-    }
-    tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-    Ok(SourceMutationReceipt::Applied)
-}
-
-pub(crate) fn local_claims(
-    connection: &Connection,
-    paths: &[String],
-) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
-    validate_paths(paths)?;
-    let db = connection;
-    refuse_bound(db, None, &mut JournalWork::default()).map_err(failed)?;
-    claims(db, None, paths).map_err(failed)
-}
-
-pub(crate) fn local_pending(
-    connection: &Connection,
-    limit: usize,
-) -> Result<Vec<String>, StorageError> {
-    if limit == 0 || limit > MAX_PATHS {
-        return Err(StorageError::InvalidArguments);
-    }
-    let db = connection;
-    let tx = db.unchecked_transaction().map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    let selected: Vec<String> = tx.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failed)?
-        .query_map([limit as i64], |row| row.get(0)).map_err(failed)?
-        .collect::<rusqlite::Result<_>>().map_err(failed)?;
-    if !selected.is_empty() {
-        tx.commit().map_err(failed)?;
-        return Ok(selected);
-    }
-    let mut statement = tx.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failed)?;
-    let paths = statement
-        .query_map([limit as i64], |row| row.get(0))
-        .map_err(failed)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(failed)?;
-    drop(statement);
-    tx.commit().map_err(failed)?;
-    Ok(paths)
-}
-
-pub(crate) fn local_backfill_state(
-    connection: &Connection,
-) -> Result<Option<String>, StorageError> {
-    let db = connection;
-    refuse_bound(db, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(db).map_err(failed)?;
-    db.query_row(
-        "SELECT value FROM meta WHERE key='catalog_backfill_state'",
-        [],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(failed)
-}
-
-pub(crate) fn local_finish_backfill(
-    connection: &mut Connection,
-    operation: &SourceOperation,
-    expected_generation: Option<&str>,
-    consume_intent: bool,
-) -> Result<SourceMutationReceipt, StorageError> {
-    let payload =
-        serde_json::to_vec(&expected_generation).map_err(|_| StorageError::InvalidArguments)?;
-    if let Some(receipt) = operation_replay(operation, None, "finish_backfill", &payload)? {
-        return Ok(receipt);
-    }
-    let db = connection;
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    if let Some(receipt) = stored_receipt(&tx, None, operation)? {
-        return Ok(receipt);
-    }
-    if !finish_catalog_backfill_sql(&tx, None, expected_generation)? {
-        insert_terminal_receipt(&tx, None, operation, "conflict")?;
-        if consume_intent {
-            acknowledge_intent_sql(&tx, None, operation)?;
-        }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        return Ok(SourceMutationReceipt::Conflict);
-    }
-    insert_receipt(&tx, None, operation)?;
-    if consume_intent {
-        acknowledge_intent_sql(&tx, None, operation)?;
-    }
-    tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-    Ok(SourceMutationReceipt::Applied)
-}
-
-#[cfg(test)]
-impl SourceObservationStore for LegacySourceJournal {
-    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
-        if matches!(intent, SourceIntent::Recover { .. }) {
-            return Err(StorageError::Unavailable);
-        }
-        local_persist_intent(&mut self.connection()?, intent)
-    }
-
-    fn pending_intents(&self) -> Result<Vec<SourceIntent>, StorageError> {
-        local_pending_intents(&self.connection()?)
-    }
-
-    fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
-        local_acknowledge_intent(&mut self.connection()?, operation)
-    }
-
-    fn discover(
-        &mut self,
-        operation: &SourceOperation,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        local_discover(&mut self.connection()?, operation, paths, complete)
-    }
-
-    fn invalidate(
-        &mut self,
-        operation: &SourceOperation,
-        expected: &[(String, Option<i64>)],
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        local_invalidate(&mut self.connection()?, operation, expected, false)
-    }
-
-    fn claims(
-        &self,
-        paths: &[String],
-    ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
-        local_claims(&self.connection()?, paths)
-    }
-
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        local_pending(&self.connection()?, limit)
-    }
-
-    fn backfill_state(&self) -> Result<Option<String>, StorageError> {
-        local_backfill_state(&self.connection()?)
-    }
-
-    fn finish_backfill(
-        &mut self,
-        operation: &SourceOperation,
-        expected_generation: Option<&str>,
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        local_finish_backfill(
-            &mut self.connection()?,
-            operation,
-            expected_generation,
-            false,
-        )
-    }
-}
-
-pub(crate) fn local_failure(error: rusqlite::Error) -> StorageError {
-    failed(error)
-}
-
 fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error {
     #[cfg(test)]
     eprintln!(
@@ -1310,54 +997,6 @@ pub(crate) fn acknowledge_intent_sql(
     Ok(())
 }
 
-pub(crate) fn finish_catalog_backfill_sql(
-    tx: &Connection,
-    namespace: Option<&str>,
-    expected_generation: Option<&str>,
-) -> Result<bool, StorageError> {
-    let generation_sql = if namespace.is_some() {
-        "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'"
-    } else {
-        "SELECT value FROM meta WHERE key='catalog_generation'"
-    };
-    let generation: Option<String> = tx
-        .query_row(generation_sql, [], |row| row.get(0))
-        .optional()
-        .map_err(failed)?;
-    let pending: bool = if let Some(namespace) = namespace {
-        tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
-            [namespace],
-            |row| row.get(0),
-        ).map_err(failed)?
-    } else {
-        tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
-            [],
-            |row| row.get(0),
-        ).map_err(failed)?
-    };
-    if generation.as_deref() != expected_generation || pending {
-        return Ok(false);
-    }
-    if let Some(namespace) = namespace {
-        let sql = "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';";
-        tx.execute_batch(sql).map_err(failed)?;
-        let updated = tx
-            .execute(
-                "UPDATE storage_source_journal SET backfill_state='complete' WHERE namespace=?1",
-                [namespace],
-            )
-            .map_err(failed)?;
-        if updated != 1 {
-            return Err(StorageError::Unavailable);
-        }
-    } else {
-        tx.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';").map_err(failed)?;
-    }
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,28 +1255,7 @@ mod tests {
             fs::create_dir(&root).unwrap();
             let cache_path = root.join("index.json");
             drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
-            // Exercise the actual unbound producer before admission. Its old
-            // counter must survive even when a newer observation was acked.
-            let seed_paths = vec!["seed".into(), "acknowledged".into()];
-            let mut native = legacy(EventCache::path(&cache_path));
-            native
-                .discover(
-                    &discover_operation("", &seed_paths, true),
-                    &seed_paths,
-                    true,
-                )
-                .unwrap();
-            drop(native);
             let database = EventCache::path(&cache_path);
-            let mut consumer =
-                EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap();
-            assert!(matches!(
-                consumer
-                    .acknowledge_source_for_test("acknowledged")
-                    .unwrap(),
-                crate::events::Outcome::Written
-            ));
-            drop(consumer);
             let db = Connection::open(&database).unwrap();
             let epoch = db
                 .query_row(
@@ -1652,7 +1270,29 @@ mod tests {
                 expected_stream_epoch: Some(epoch),
             };
             config.admit_namespace().unwrap();
-            Self { root, config }
+            let fixture = Self { root, config };
+            fixture.assign();
+            // Seed through the admitted journal and acknowledge one source through
+            // the configured consumer; both counters belong to this namespace.
+            let seed_paths = vec!["seed".into(), "acknowledged".into()];
+            let mut native = fixture.config.source_observations().unwrap();
+            native
+                .discover(
+                    &discover_operation(namespace, &seed_paths, true),
+                    &seed_paths,
+                    true,
+                )
+                .unwrap();
+            drop(native);
+            let mut consumer = EventCache::open_configured(&fixture.config).unwrap();
+            assert!(matches!(
+                consumer
+                    .acknowledge_source_for_test("acknowledged")
+                    .unwrap(),
+                crate::events::Outcome::Written
+            ));
+            drop(consumer);
+            fixture
         }
         fn db(&self) -> Connection {
             let StoreBackend::Sqlite { database } = &self.config.backend;
@@ -1668,36 +1308,6 @@ mod tests {
         }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-
-    struct LegacyFixture {
-        root: PathBuf,
-        cache_path: PathBuf,
-    }
-
-    impl LegacyFixture {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "semon-source-observation-legacy-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&root).unwrap();
-            let cache_path = root.join("index.json");
-            drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
-            Self { root, cache_path }
-        }
-
-        fn open(&self) -> Box<dyn SourceObservationStore> {
-            legacy(EventCache::path(&self.cache_path))
-        }
-    }
-
-    impl Drop for LegacyFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
