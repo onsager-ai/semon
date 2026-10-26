@@ -178,11 +178,23 @@ it does not establish complete backend, migration or rollback readiness.
 An explicitly captured PG publication uses `StoreConfig::call_captured_query_at`.
 Before entering that body lease, a host can call `captured_source_proof_at` with
 the same publication, canonical owner key and exact `SessionSourceRef`. It
-qualifies the admitted immutable recipe and its exact source metadata without
-reading Raw or opening SQLite. Its `retained` freshness describes the
+qualifies the admitted immutable recipe, its persisted Native header and exact
+source metadata without reading Raw bytes or opening SQLite. It opens the
+configured physical path without following links and returns the current
+descriptor's device, inode, size and clocks, requiring the same inode and enough
+bytes to cover the captured prefix. Those current stats qualify the host's copy
+identity; the exact historical reference remains unchanged. Its `retained` freshness describes the
 captured observation, not current runtime or host custody. The body read qualifies
 the persisted Native proof and still requires independent host authorization and
 byte-generation checks. An expired live reader remains expired.
+
+PG namespace enrollment records its exact admission receipt under the host's
+stream epoch in the same transaction as admission or retirement.
+`StoreConfig::observe_namespace_admission` reads that receipt without changing
+admission, including after retirement and re-enrollment with another epoch.
+An unknown receipt returns `None`: callers retain their pending intent rather
+than minting a replacement witness or declaring an uncertain operation complete.
+Exact unenrollment replay is idempotent; stale generations and epochs still fail.
 
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
 
