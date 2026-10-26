@@ -17,7 +17,7 @@ impl History<'_, '_> {
         self.owner_at(self.previous, key)
     }
     fn owner_at(&self, generation: &str, key: &str) -> Result<Option<(String, bool)>, StorageError> {
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query("SELECT session_key=$4,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
@@ -30,7 +30,7 @@ impl History<'_, '_> {
         self.effects.put("semon_pg_native_catalog_history_owners", &["key_digest", "session_key", "owner_generation", "original"], "key_digest", &[&digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original])
     }
     fn metadata(&self, table: &'static str, generation: &str, key: &str) -> Result<Option<String>, StorageError> {
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
@@ -42,7 +42,7 @@ impl History<'_, '_> {
     fn recipe(&self, generation: &str, key: &str, history: bool) -> Result<Option<(OriginalHeader, bool)>, StorageError> {
         let table = if history { "semon_pg_native_catalog_history_headers" } else { "semon_pg_native_catalog_recipe_headers" };
         let incomplete = if history { "incomplete" } else { "false" };
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query(&format!("SELECT session_key=$4,recipe_generation,version,source_generation,total,{incomplete} FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
@@ -97,7 +97,7 @@ impl OriginalHistoryStore for History<'_, '_> {
         Err(StorageError::ScopeChanged)
     }
     fn next_slot(&self, key: &str, last: Option<i64>) -> Result<Option<(i64, i64)>, StorageError> {
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query("SELECT session_key=$4,slot,octet_length(metadata)::bigint FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND slot>$5 ORDER BY slot LIMIT 1", &[&ns, &self.previous.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &last.unwrap_or(-1)]).map_err(sqlstate::error)?;
@@ -110,7 +110,7 @@ impl OriginalHistoryStore for History<'_, '_> {
         // Current PG recipe rows are <=1 MiB. An oversized/corrupt row must
         // refuse before decode, never be truncated into a successful recipe.
         if split || offset != 0 || !(0..=MAX as i64).contains(&take) { return Err(StorageError::Busy); }
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query("SELECT session_key=$4,CASE WHEN octet_length(metadata)=$6 AND octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND slot=$5", &[&ns, &self.previous.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &slot, &take]).map_err(sqlstate::error)?;
@@ -124,7 +124,7 @@ impl OriginalHistoryStore for History<'_, '_> {
     fn more_slots(&self, key: &str, last: Option<i64>) -> Result<bool, StorageError> { Ok(self.next_slot(key, last)?.is_some()) }
     fn checkpoint(&self, key: &str, transfer: &str) -> Result<(), StorageError> {
         if transfer.len() > MAX { return Err(StorageError::Busy); }
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let count = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_progress(namespace,generation,key_digest,session_key,metadata) VALUES($1,$2,$3,$4,$5) ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET metadata=excluded.metadata WHERE semon_pg_native_catalog_history_progress.namespace=excluded.namespace AND semon_pg_native_catalog_history_progress.session_key=excluded.session_key", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &transfer.as_bytes()]).map_err(sqlstate::error)?;
@@ -169,7 +169,7 @@ impl CompositeHistoryStore for History<'_, '_> {
         let owner = self.owner(key)?;
         let generation = if history { owner.as_ref().map(|(generation, _)| generation.as_str()).ok_or(StorageError::ScopeChanged)? } else { self.previous };
         let table = if history { "semon_pg_native_catalog_history_slots" } else { "semon_pg_native_catalog_recipe_rows" };
-        let mut tx = self.effects.tx.borrow_mut();
+        let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END FROM (SELECT session_key,metadata FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;

@@ -77,7 +77,7 @@ impl Effects<'_, '_> {
         key: &'static str,
         values: &[&(dyn ToSql + Sync)],
     ) -> Result<(), StorageError> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let generation = self.generation.as_bytes();
@@ -116,7 +116,7 @@ impl TracePublicationStore for Effects<'_, '_> {
         generation: &str,
         source: &str,
     ) -> Result<bool, StorageError> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let rows = tx.driver.query("SELECT session_key=$4 AND trace_generation=$5 AND source_generation=$6 FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &generation.as_bytes(), &source.as_bytes()]).map_err(sqlstate::error)?;
