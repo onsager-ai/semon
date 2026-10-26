@@ -96,6 +96,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-answer","parentUuid":"related-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
     ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
+    // Positive ClaudeName: the native custom-title record names the session.
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
+        serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
     // Larger indexed history with a fixed small receiver append below.
     let padding=format!("{}\n",serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"one","padding":"x".repeat(8192)}));
     let mut history=fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
@@ -159,6 +162,43 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    // Recent windows (options.all=false): the ordinary SQLite Query refresh
+    // fully publishes a fresh oracle cache; its exact lists are saved before
+    // the PG no-SQLite phase.
+    let recent_windows = [
+        Duration::from_secs(86400),
+        Duration::from_secs(86401),
+        Duration::from_secs(86400 * 365 * 100),
+    ];
+    // One day after the fixtures: the cutoffs fall between fixture times.
+    let recent_now = 1790812802000 + 86_400_000;
+    let recent_machine = "vertical140\0🦀";
+    let mut closed_options = options.clone();
+    closed_options.cache = oracle.root.join("oracle-query177");
+    let oracle_recent = recent_windows
+        .iter()
+        .map(|since| {
+            let mut recent_options = closed_options.clone();
+            recent_options.all = false;
+            recent_options.since = *since;
+            let list = crate::Query::from_sources(std::sync::Arc::new(
+                crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
+            ))
+            .call_at("list_sessions", &serde_json::json!({}), recent_now)
+            .expect("SQLite recent-window list");
+            (*since, list)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let all_total = expected.rows.len() as u64;
+    assert_eq!(oracle_recent[&recent_windows[2]]["total"].as_u64(), Some(all_total));
+    // At least one window has Sessions on both sides of its cutoff.
+    assert!(
+        oracle_recent
+            .values()
+            .any(|list| list["total"].as_u64().is_some_and(|total| total > 0 && total < all_total)),
+        "recent-window fixture lacks a boundary: {:?}",
+        oracle_recent.values().map(|list| &list["total"]).collect::<Vec<_>>()
+    );
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -184,6 +224,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
     assert_eq!(prepared.rows.len(), oracle.rows.len());
     assert_eq!(producer_rows(&prepared.rows), producer_rows(&oracle.rows));
+    assert!(serde_json::to_string(&prepared.rows).unwrap().contains("sanitized name175"));
     assert_eq!(prepared.transcripts.len(), oracle.projections.len());
     for (actual, expected) in prepared.transcripts.iter().zip(&oracle.projections) {
         assert_eq!(
@@ -393,6 +434,36 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         query_list["total"].as_u64(),
         Some(prepared.rows.len() as u64)
     );
+    // Recent window (options.all=false): PG cohort equals the SQLite oracle.
+    for since in recent_windows {
+        let mut recent_options = options.clone();
+        recent_options.all = false;
+        recent_options.since = since;
+        let recent_store = super::super::snapshot::query::QueryCatalog {
+            pool: pool.clone(),
+            namespace: namespace.clone(),
+            control: control.clone(),
+            generation: generation.clone(),
+            options: recent_options.clone(),
+        };
+        let recent = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
+        ))
+        .call_bound_catalog_at("list_sessions", &serde_json::json!({}), recent_now, &recent_store)
+        .unwrap();
+        let expected = &oracle_recent[&since];
+        let ids = |list: &serde_json::Value| {
+            list["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(recent["total"], expected["total"], "recent window {since:?}");
+        assert_eq!(ids(&recent), ids(expected), "recent window ids {since:?}");
+        assert_eq!(recent["sessions"], expected["sessions"], "recent window rows {since:?}");
+    }
     super::super::snapshot::with_admitted_generation(
         &pool,
         &namespace,
