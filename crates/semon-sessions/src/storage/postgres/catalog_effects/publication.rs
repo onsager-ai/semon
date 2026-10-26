@@ -108,21 +108,6 @@ fn publish_operation(
             return Ok((Outcome::Conflict, None));
         }
     }
-    // A partial request cannot silently drop an unmentioned Current owner.
-    // Larger/incomplete closures refuse; the semantic producer must form a
-    // complete bounded cohort rather than publishing a blank success.
-    if let Some(previous) = expected {
-        let rows = tx.driver.query("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns, &previous.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len() > 64 {
-            return Err(StorageError::Busy);
-        }
-        for row in rows {
-            let key: Vec<u8> = row.get(0);
-            if !publication.rows.iter().any(|row| row.key.as_bytes() == key) {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-        }
-    }
     if closed {
         let outstanding: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
         if outstanding
@@ -176,6 +161,22 @@ fn publish_operation(
         .checked_add(1)
         .ok_or(StorageError::ScopeChanged)?;
     let generation = format!("{:x}", Sha256::digest(operation));
+    // A partial request keeps every unmentioned Current owner. Owners connected
+    // to a republished or claimed Source must be republished by the producer.
+    if let Some(previous) = expected {
+        let mentioned = publication
+            .rows
+            .iter()
+            .map(|row| digest(row.key.as_bytes()))
+            .collect::<Vec<_>>();
+        let claimed = paths
+            .iter()
+            .map(String::as_str)
+            .chain(claims.iter().map(|(path, _)| path.as_str()))
+            .map(|path| path.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
+    }
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     if let Some(previous) = expected
         && !history::preserve(tx, &generation, previous, publication)?
