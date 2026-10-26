@@ -329,6 +329,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     (
+        "tree_copied_peers",
+        "tree_copied_identities",
+        "message_id_digest,record_uuid_digest,file_id",
+        false,
+    ),
+    (
         "tree_pending_source",
         "tree_generations",
         "source_id,complete,projection_id",
