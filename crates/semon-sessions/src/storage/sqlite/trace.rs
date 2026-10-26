@@ -108,7 +108,7 @@ pub(crate) fn validate(db: &Connection) -> Result<(), StorageError> {
 
 pub(crate) struct TraceWriter<'a> {
     db: &'a Connection,
-    namespace: Option<&'a str>,
+    namespace: &'a str,
 }
 impl<'a> TraceWriter<'a> {
     pub(crate) fn owned(
@@ -118,14 +118,8 @@ impl<'a> TraceWriter<'a> {
         owner.validate_ready(db)?;
         Ok(Self {
             db,
-            namespace: Some(owner.config().namespace.as_str()),
+            namespace: owner.config().namespace.as_str(),
         })
-    }
-    pub(crate) fn unbound(db: &'a Connection) -> Self {
-        Self {
-            db,
-            namespace: None,
-        }
     }
     pub(super) fn admitted(
         db: &'a Connection,
@@ -135,7 +129,7 @@ impl<'a> TraceWriter<'a> {
         validate(db)?;
         Ok(Self {
             db,
-            namespace: Some(source.namespace()),
+            namespace: source.namespace(),
         })
     }
 }
@@ -145,11 +139,8 @@ impl TracePublicationStore for TraceWriter<'_> {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
     fn matches_header(&self, key: &str, generation: &str, source: &str) -> rusqlite::Result<bool> {
-        let sql = if self.namespace.is_some() {
-            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=?1 AND session_key=?2 AND generation=?3 AND source_generation=?4)"
-        } else {
-            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE session_key=?2 AND generation=?3 AND source_generation=?4)"
-        };
+        let sql =
+            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=?1 AND session_key=?2 AND generation=?3 AND source_generation=?4)";
         self.db
             .query_row(sql, params![self.namespace, key, generation, source], |r| {
                 r.get(0)
@@ -162,11 +153,8 @@ impl TracePublicationStore for TraceWriter<'_> {
         source: &str,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_trace_headers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation"
-        } else {
-            "INSERT INTO main.session_trace_headers VALUES(?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation"
-        };
+        let sql =
+            "INSERT INTO main.session_trace_headers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, generation, source, metadata])
@@ -178,14 +166,9 @@ impl TracePublicationStore for TraceWriter<'_> {
             "session_trace_edges",
             "session_trace_bookmarks",
         ] {
-            let predicate = if self.namespace.is_some() {
-                "namespace=?1 AND "
-            } else {
-                ""
-            };
             self.db
                 .prepare_cached(&format!(
-                    "DELETE FROM main.{table} WHERE {predicate}session_key=?2"
+                    "DELETE FROM main.{table} WHERE namespace=?1 AND session_key=?2"
                 ))?
                 .execute(params![self.namespace, key])?;
         }
@@ -198,33 +181,24 @@ impl TracePublicationStore for TraceWriter<'_> {
         start: Option<&str>,
         metadata: &str,
     ) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_trace_turns VALUES(?1,?2,?3,?4,?5)"
-        } else {
-            "INSERT INTO main.session_trace_turns VALUES(?2,?3,?4,?5)"
-        };
+        let sql =
+            "INSERT INTO main.session_trace_turns VALUES(?1,?2,?3,?4,?5)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, id, start, metadata])?;
         Ok(())
     }
     fn edge(&self, key: &str, id: Option<&str>, metadata: &str) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_trace_edges VALUES(?1,?2,?3,?4)"
-        } else {
-            "INSERT INTO main.session_trace_edges VALUES(?2,?3,?4)"
-        };
+        let sql =
+            "INSERT INTO main.session_trace_edges VALUES(?1,?2,?3,?4)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key, id, metadata])?;
         Ok(())
     }
     fn bookmark(&self, key: &str, target: &str, edge: &str) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_trace_bookmarks VALUES(?1,?2,?3,?4)"
-        } else {
-            "INSERT INTO main.session_trace_bookmarks VALUES(?2,?3,?4)"
-        };
+        let sql =
+            "INSERT INTO main.session_trace_bookmarks VALUES(?1,?2,?3,?4)";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, target, key, edge])?;
@@ -245,7 +219,7 @@ mod tests {
         for namespace in ["a", "b"] {
             let writer = TraceWriter {
                 db: &tx,
-                namespace: Some(namespace),
+                namespace,
             };
             assert!(writer.header("same", namespace, "source", "{}").unwrap());
             writer
@@ -260,7 +234,7 @@ mod tests {
         let tx = db.transaction().unwrap();
         let writer = TraceWriter {
             db: &tx,
-            namespace: Some("a"),
+            namespace: "a",
         };
         writer.header("same", "next", "source", "{}").unwrap();
         writer.clear("same").unwrap();
