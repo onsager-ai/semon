@@ -2500,6 +2500,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         items
     };
     let before = scoped(qualified.as_deref().unwrap(), "");
+    let before_history = scoped(qualified.as_deref().unwrap(), "scope=retained_history&");
     let current = scoped(&caught, "");
     let mut retained = scoped(&caught, "scope=retained_history&");
     let current_keys = current
@@ -2517,11 +2518,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert!(current.iter().chain(&before).all(|(_, retained)| !retained));
     // Membership and lifecycle are exact; removed rows come from custody.
-    let mut expected_retained = current
-        .iter()
-        .map(|(key, _)| (key.clone(), false))
-        .chain(removed.iter().map(|key| (key.clone(), true)))
-        .collect::<Vec<_>>();
+    let mut expected_retained = before_history.into_iter().collect::<std::collections::BTreeMap<_, _>>();
+    for (key, _) in &current {
+        expected_retained.entry(key.clone()).or_insert(false);
+    }
+    for key in &removed {
+        expected_retained.insert(key.clone(), true);
+    }
+    // The parent keeps Current membership while its composite history wins in
+    // retained scope. Check the exact SQLite projection, including that case.
+    for row in &oracle_history_projection {
+        if row["harness"] == "claude" {
+            expected_retained.insert(row["key"].as_str().unwrap().to_owned(), row["lifecycle"] == "retained");
+        }
+    }
+    let mut expected_retained = expected_retained.into_iter().collect::<Vec<_>>();
     expected_retained.sort();
     retained.sort();
     assert_eq!(retained, expected_retained);
@@ -2591,7 +2602,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let withdrawn_rows = |generation: &str| {
         scoped_items(generation, "scope=retained_history&")
             .iter()
-            .filter(|item| item["lifecycle"] == "retained")
+            .filter(|item| removed.contains(item["key"].as_str().unwrap()))
             .map(stable)
             .collect::<Vec<_>>()
     };
@@ -2599,10 +2610,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(
         claude
             .iter()
-            .filter(|(_, retained)| *retained)
+            .filter(|(key, _)| removed.contains(key))
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>(),
         oracle_withdrawn_claude
+    );
+    assert_eq!(
+        scoped_items(&caught, "scope=retained_history&harness=claude&")
+            .iter()
+            .filter(|item| sqlite_before_current.contains(item["key"].as_str().unwrap()))
+            .map(stable)
+            .collect::<Vec<_>>(),
+        oracle_history_projection.iter().filter(|item| item["harness"] == "claude").cloned().collect::<Vec<_>>()
     );
     // P3 search: metadata search over the published PG projection. A key
     // query finds its Current session; a removed key is absent from the
