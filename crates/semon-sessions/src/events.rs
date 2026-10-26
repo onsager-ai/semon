@@ -3190,6 +3190,7 @@ impl EventCache {
             Some(Ok(Outcome::Stale)) => {
                 Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
             }
+            Some(Err(StoreError::Configured(crate::storage::StorageError::Conflict))) => Ok(true),
             Some(Err(error)) => Err(io::Error::other(configured_error(error))),
             None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
         }
@@ -3241,22 +3242,15 @@ pub(crate) fn scan_file(
     // configured writer persists it with the observed ledger and Source claim
     // in prepare_file before any Raw parsing or publication decision. Explicit
     // ingest retains its caller's identity; staged model readers remain reads.
-    if cache.host_source.is_some() && cache.event_operation.is_none() {
-        let operation = crate::storage::source_observations::SourceOperation::capture(
+    let host_operation = if cache.host_source.is_some() && cache.event_operation.is_none() {
+        Some(crate::storage::source_observations::SourceOperation::capture(
             &cache.observation_namespace,
             "native_ingest",
             path.as_os_str().as_encoded_bytes(),
-        );
-        cache.event_operation = Some(
-            crate::storage::source_observations::SourceOperation::digest(
-                "native_ingest_identity",
-                operation.id.as_bytes(),
-            ),
-        );
-        let result = scan_file(path, harness, cache, dirty);
-        cache.event_operation = None;
-        return result;
-    }
+        ))
+    } else {
+        None
+    };
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3275,7 +3269,7 @@ pub(crate) fn scan_file(
     // has no ingestion operation ID and must neither create an intent nor
     // reparse changed Raw behind the staged claim. load_file validates the
     // configured current schema, admission and namespace in its read snapshot.
-    if cache.event_operation.is_none() {
+    if cache.event_operation.is_none() && host_operation.is_none() {
         let (ledger, index) = cache
             .store
             .as_ref()
@@ -3324,19 +3318,31 @@ pub(crate) fn scan_file(
         let last = attempt >= COMMIT_ATTEMPTS;
         let prepared_ledger = {
             let expected = cache.recorded(&key)?;
-            cache
+            // Each bounded host attempt owns a distinct immutable intent.
+            // Explicit ingest keeps its caller's exact replay identity.
+            let operation = host_operation.as_ref().map(|operation| {
+                crate::storage::source_observations::SourceOperation::digest(
+                    "native_ingest_identity",
+                    format!("{}:{attempt}", operation.id).as_bytes(),
+                )
+            });
+            let prepared = cache
                 .store
                 .as_mut()
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
                 .prepare_file(
                     &key,
                     expected.as_ref(),
-                    cache.event_operation.as_deref().ok_or_else(|| {
+                    operation.as_deref().or(cache.event_operation.as_deref()).ok_or_else(|| {
                         io::Error::other(crate::storage::StorageError::InvalidArguments)
                     })?,
                     harness,
-                )
-                .map_err(store_io_error)?;
+                );
+            match prepared {
+                Err(StoreError::Configured(crate::storage::StorageError::Conflict))
+                    if host_operation.is_some() && !last => continue,
+                result => result.map_err(store_io_error)?,
+            }
             expected
         };
         // Stat'ed before reading: a line that lands during the read makes
@@ -3590,7 +3596,10 @@ pub(crate) fn scan_file(
                 recorded.as_ref().expect("trusted ledger exists").prefix,
             ) {
                 Ok(captured) => captured,
-                Err(_) if !last => continue,
+                Err(_) if !last => {
+                    force_replace = true;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
         } else {
