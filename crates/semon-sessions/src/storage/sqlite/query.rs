@@ -33,11 +33,6 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             bytes_left,
             matches!(
                 self.binding,
-                crate::storage::NativeReaderBinding::Admitted(_)
-                    | crate::storage::NativeReaderBinding::Semantic(_)
-            ),
-            matches!(
-                self.binding,
                 crate::storage::NativeReaderBinding::Semantic(_)
             ),
             runtime_binding.as_ref(),
@@ -59,16 +54,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             ));
         }
         let db = self.binding.snapshot(namespace).map_err(storage_error)?;
-        has_search_slots(
-            &db,
-            key,
-            since,
-            matches!(
-                self.binding,
-                crate::storage::NativeReaderBinding::Admitted(_)
-                    | crate::storage::NativeReaderBinding::Semantic(_)
-            ),
-        )
+        has_search_slots(&db, key, since)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
         let db = self
@@ -76,12 +62,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .listing_snapshot(namespace)
             .map_err(storage_error)?;
         let options = &self.options;
-        let scoped = matches!(
-            self.binding,
-            crate::storage::NativeReaderBinding::Admitted(_)
-                | crate::storage::NativeReaderBinding::Semantic(_)
-        );
-        if generation(&db, scoped)? != part.generation
+        if generation(&db)? != part.generation
             || crate::native_evidence::query_runtime_generation(options)
                 .map_err(|error| QueryError::io(&error))?
                 != part.runtime
@@ -89,7 +70,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             return Err(unavailable("Native Catalog changed during the query"));
         }
         for (key, expected) in &part.witnesses {
-            let actual:Option<String>=db.query_row(if scoped { "SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM main.session_catalog c LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1" } else { "SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1" },[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
+            let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM main.session_catalog c LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
             let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
             if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
                 return Err(unavailable("Native Query facts changed during the query"));
@@ -114,9 +95,9 @@ fn storage_error(error: crate::storage::StorageError) -> QueryError {
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
-fn generation(db: &Connection, scoped: bool) -> Result<String, QueryError> {
+fn generation(db: &Connection) -> Result<String, QueryError> {
     db.query_row(
-        if scoped { "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'" } else { "SELECT value FROM meta WHERE key='catalog_generation'" },
+        "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
         [],
         |row| row.get(0),
     )
@@ -127,17 +108,14 @@ fn read(
     options: &Options,
     now: i64,
     bytes_left: &mut usize,
-    scoped: bool,
     private_listing: bool,
     runtime_binding: Option<&crate::storage::QueryRuntimeBinding>,
 ) -> Result<Part, QueryError> {
-    let generation = generation(db, scoped)?;
+    let generation = generation(db)?;
     let ready_sql = if private_listing {
         "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
-    } else if scoped {
-        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
     } else {
-        "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)"
+        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
     };
     let ready: bool = db
         .query_row(
@@ -162,15 +140,9 @@ fn read(
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {
-        if scoped {
-            "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT session_key FROM main.session_history_catalog WHERE namespace=semon_namespace() AND json_extract(metadata,'$.query.last')>=?1"
-        } else {
-            "SELECT session_key FROM session_catalog WHERE last_ms>=?1 UNION SELECT session_key FROM session_catalog WHERE json_extract(metadata,'$.query.last')>=?1 UNION SELECT session_key FROM session_catalog WHERE lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait') UNION SELECT session_key FROM session_history_catalog WHERE json_extract(metadata,'$.query.last')>=?1"
-        }
-    } else if scoped {
-        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"
+        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT session_key FROM main.session_history_catalog WHERE namespace=semon_namespace() AND json_extract(metadata,'$.query.last')>=?1"
     } else {
-        "SELECT session_key FROM session_catalog"
+        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"
     };
     let mut base = db.prepare(base_sql).map_err(unavailable)?;
     let mut keep: BTreeSet<String> = base
@@ -184,18 +156,10 @@ fn read(
     let mut needed = keep.clone();
     let mut edges = BTreeSet::new();
     let mut turns = BTreeSet::new();
-    let edge_select = if scoped {
-        "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()"
-    } else {
-        "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges"
-    };
-    let edge_sql = if scoped && cutoff.is_some() {
+    let edge_select = "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()";
+    let edge_sql = if cutoff.is_some() {
         format!(
             "{edge_select} AND (json_extract(metadata,'$.at')>=?1 OR json_extract(metadata,'$.done')>=?1 OR json_extract(metadata,'$.status') IN ('work','wait','new'))"
-        )
-    } else if cutoff.is_some() {
-        format!(
-            "{edge_select} WHERE json_extract(metadata,'$.at')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.done')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.status') IN ('work','wait','new')"
         )
     } else {
         edge_select.to_owned()
@@ -228,11 +192,7 @@ fn read(
     measured(0, 0, 0, edge.get_status(rusqlite::StatementStatus::VmStep));
     drop(edge);
     let initially_kept = keep.clone();
-    let turn_select = if scoped {
-        "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1"
-    } else {
-        "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM session_trace_turns WHERE session_key=?1"
-    };
+    let turn_select = "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1";
     let turn_sql = if cutoff.is_some() {
         format!(
             "{turn_select} AND json_extract(metadata,'$.last')=1 UNION {turn_select} AND json_extract(metadata,'$.at')>=?2"
@@ -241,7 +201,7 @@ fn read(
         turn_select.to_owned()
     };
     let mut recent = db.prepare(&turn_sql).map_err(unavailable)?;
-    let mut endpoint = db.prepare(if scoped { "SELECT json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2" } else { "SELECT json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2" }).map_err(unavailable)?;
+    let mut endpoint = db.prepare("SELECT json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2").map_err(unavailable)?;
     for owner in &initially_kept {
         let params: Vec<rusqlite::types::Value> = std::iter::once(owner.clone().into())
             .chain(cutoff.map(Into::into))
@@ -295,7 +255,7 @@ fn read(
     let mut owners = BTreeMap::new();
     let mut content = BTreeMap::new();
     let mut witnesses = Vec::new();
-    let mut metadata = db.prepare(if scoped { "SELECT c.lifecycle,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),hc.session_key IS NOT NULL FROM main.session_catalog c LEFT JOIN main.session_history_catalog hc ON hc.namespace=c.namespace AND hc.session_key=c.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1" } else { "SELECT c.lifecycle,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),hc.session_key IS NOT NULL FROM session_catalog c LEFT JOIN session_history_catalog hc USING(session_key) LEFT JOIN session_trace_headers h USING(session_key) WHERE c.session_key=?1" }).map_err(unavailable)?;
+    let mut metadata = db.prepare("SELECT c.lifecycle,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),hc.session_key IS NOT NULL FROM main.session_catalog c LEFT JOIN main.session_history_catalog hc ON hc.namespace=c.namespace AND hc.session_key=c.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1").map_err(unavailable)?;
     for key in needed {
         let record = metadata
             .query_row([&key], |row| {
@@ -412,15 +372,10 @@ fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn has_search_slots(
-    db: &Connection,
-    key: &str,
-    since: Option<i64>,
-    scoped: bool,
-) -> Result<bool, QueryError> {
+fn has_search_slots(db: &Connection, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
     let history: bool = db
         .query_row(
-            if scoped { "SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1)" } else { "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1)" },
+            "SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1)",
             [key],
             |r| r.get(0),
         )
@@ -430,10 +385,5 @@ fn has_search_slots(
     } else {
         "session_slots"
     };
-    let predicate = if scoped {
-        "namespace=semon_namespace() AND "
-    } else {
-        ""
-    };
-    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate}session_key=?1 AND (?2 IS NULL OR json_extract(metadata,'$.t')>=?2))"),rusqlite::params![key,since],|r|r.get(0)).map_err(unavailable)
+    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND (?2 IS NULL OR json_extract(metadata,'$.t')>=?2))"),rusqlite::params![key,since],|r|r.get(0)).map_err(unavailable)
 }

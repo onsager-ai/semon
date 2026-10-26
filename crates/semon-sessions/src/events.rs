@@ -3441,7 +3441,13 @@ pub(crate) fn scan_file(
             {
                 let ledger = ledger.clone();
                 let index = Arc::clone(index);
-                if cache.commit(&key, Some(&ledger), None, &ledger, &index)? {
+                if cache.commit(
+                    &key,
+                    Some(&ledger),
+                    Some(&DirtyRows::default()),
+                    &ledger,
+                    &index,
+                )? {
                     trace("conflict");
                     if last {
                         return Err(io::Error::other(crate::storage::StorageError::Conflict));
