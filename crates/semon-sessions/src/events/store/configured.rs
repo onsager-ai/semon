@@ -834,6 +834,16 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
             ),
             ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
         ] {
+            let predicate = if table == "meta" {
+                match operation {
+                    "INSERT" => "NEW.namespace IS NOT semon_meta_scope(NEW.key)",
+                    "UPDATE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)",
+                    "DELETE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key)",
+                    _ => unreachable!(),
+                }
+            } else {
+                predicate
+            };
             let metadata = if table == "meta" {
                 // The fenced SourceJournal backfill completion owns its two
                 // completion keys; other Catalog keys stay publisher-only.
