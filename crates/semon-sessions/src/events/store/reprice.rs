@@ -1697,19 +1697,12 @@ mod tests {
             .unwrap(),
             "17"
         );
-        let store = SqliteStore {
-            connection: db,
-            path: database.clone(),
-            selected_runs: None,
-            semantic_rejection: None,
-            traversal_observation: None,
-        };
         assert_eq!(
-            store.session_catalog_generation().unwrap().as_deref(),
-            Some("a")
+            db.query_row("SELECT value FROM main.meta WHERE namespace='a' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(),
+            "a"
         );
         assert_eq!(b_state(), before);
-        drop(store);
+        drop(db);
         let db = Connection::open(&database).unwrap();
         db.execute_batch("DROP TABLE meta; CREATE TABLE meta(namespace TEXT NOT NULL,key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;").unwrap();
         assert!(

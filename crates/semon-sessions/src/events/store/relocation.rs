@@ -188,7 +188,9 @@ pub(super) fn reuse(
     measurements: &mut crate::native_timing::Measurements,
     writer: &configured::Writer,
 ) -> Result<Option<String>, StoreError> {
-    writer.validate(&store.connection).map_err(StoreError::Configured)?;
+    writer
+        .validate(&store.connection)
+        .map_err(StoreError::Configured)?;
     let started = measurements.start();
     let (candidates, steps) =
         candidate_paths(&store.connection, native_id, path, started.is_some()).map_err(failure)?;
@@ -224,7 +226,9 @@ pub(super) fn reuse(
     if stat.size < prior.offset {
         return Ok(None);
     }
-    let metadata = writer.tree(old, &prior.stat).map_err(StoreError::Configured)?;
+    let metadata = writer
+        .tree(old, &prior.stat)
+        .map_err(StoreError::Configured)?;
     let Some((_, metadata)) = metadata else {
         return Ok(None);
     };

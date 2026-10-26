@@ -92,7 +92,7 @@ pub(crate) fn rows(
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
-                    &index,
+                &index,
                 &filters,
                 "last_ms < ?",
                 args,
@@ -191,7 +191,10 @@ pub(crate) fn history_identity(
     let tx = db
         .transaction()
         .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
-    if !binding.validate(&tx, &binding.config().namespace).map_err(crate::CatalogIdentityError::from)? {
+    if !binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(crate::CatalogIdentityError::from)?
+    {
         return Err(crate::CatalogIdentityError::Unavailable);
     }
     let selected = crate::catalog::catalog_selection_in_snapshot(

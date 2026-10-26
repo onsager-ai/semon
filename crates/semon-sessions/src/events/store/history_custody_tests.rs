@@ -167,7 +167,7 @@ mod current_history_custody {
     #[test]
     fn custody_preserves_unsupported_original_slot_addresses() {
         let (mut db, old, mut original, source) = fixture(65, 0);
-        db.execute("UPDATE session_slots SET slot=?1 WHERE slot=0", [i64::MIN])
+        db.execute("UPDATE main.session_slots SET slot=?1 WHERE namespace=semon_namespace() AND slot=0", [i64::MIN])
             .unwrap();
         original[0].0 = i64::MIN;
         assert!(!step(&mut db, &old, &source));
@@ -186,7 +186,7 @@ mod current_history_custody {
         assert!(!step(&mut db, &old, &source));
         old.name = "changed original generation".into();
         db.execute(
-            "UPDATE session_slot_projections SET generation='replacement-generation'",
+            "UPDATE main.session_slot_projections SET generation='replacement-generation' WHERE namespace=semon_namespace()",
             [],
         )
         .unwrap();
