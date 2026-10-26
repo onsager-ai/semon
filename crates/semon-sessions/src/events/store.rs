@@ -983,22 +983,15 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     if !path.exists() {
         return Ok(false);
     }
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(io::Error::other)?;
-    connection
-        .busy_timeout(Duration::from_millis(100))
-        .map_err(io::Error::other)?;
-    // Options has no configured Source authority. Refuse an enrolled store
-    // before inspecting any Source-owned recovery work.
-    if crate::storage::sqlite::namespace::is_bound(&connection).map_err(io::Error::other)? {
-        return Err(io::Error::other("namespace writer upgrade is pending"));
-    }
-    let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0)).map_err(io::Error::other)?;
-    let pending: bool = connection.query_row(configured::metadata_sql(&connection, "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')", "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_backfill_state') AND key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_gc') AND key='catalog_semantic_gc' AND value='1')").map_err(io::Error::other)?,[],|row|row.get(0)).map_err(io::Error::other)?;
-    Ok(pending || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let connection = binding.connection().map_err(io::Error::other)?;
+    let tx = connection.unchecked_transaction().map_err(io::Error::other)?;
+    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND ((key='catalog_backfill_state' AND value IN ('discovering','draining')) OR (key='catalog_semantic_gc' AND value='1'))) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace())",
+        [], |row| row.get(0),
+    ).map_err(io::Error::other)?;
+    Ok(pending)
 }
 
 /// Qualify a former Catalog source as a verified relocation of a current one.
@@ -1043,12 +1036,13 @@ pub(crate) fn audit_catalog_sources(
     after: Option<&str>,
     _runtime: &str,
 ) -> io::Result<Option<String>> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let journal = host_journal(options).map_err(io::Error::other)?;
+    let db = journal.connection().map_err(io::Error::other)?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     let mut changed = std::collections::BTreeSet::new();
     for input in discovered {
         if input.root == crate::InputRoot::Codex
@@ -1111,7 +1105,7 @@ pub(crate) fn audit_catalog_sources(
     let mut last = None;
     if let Some(after) = after {
         let paths = {
-            let mut statement = tx.prepare("SELECT s.source_path, CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c USING(session_key) WHERE s.lifecycle='current' AND s.source_path>?1 GROUP BY s.source_path ORDER BY s.source_path LIMIT 64").map_err(io::Error::other)?;
+            let mut statement = tx.prepare("SELECT s.source_path, CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path>?1 GROUP BY s.source_path ORDER BY s.source_path LIMIT 64").map_err(io::Error::other)?;
             statement
                 .query_map([after], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1145,7 +1139,7 @@ pub(crate) fn audit_catalog_sources(
         }
     }
     for path in changed {
-        invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     }
     tx.commit().map_err(io::Error::other)?;
     Ok(last)
@@ -1183,10 +1177,12 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let db = binding.connection().map_err(io::Error::other)?;
+    let tx = db.unchecked_transaction().map_err(io::Error::other)?;
+    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
     let mut found = std::collections::BTreeSet::new();
-    let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
+    let mut statement=tx.prepare("SELECT d.source_path FROM main.catalog_native_dependencies d WHERE d.namespace=semon_namespace() AND harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=d.namespace AND s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
     let expanded = selectors.iter().flat_map(|(harness, id)| {
         [
             (harness.clone(), id.clone()),
@@ -1198,11 +1194,10 @@ pub(crate) fn catalog_dependents(
             // These indexed coordinates are discovery hints. Selected shared
             // native preparation still qualifies source ownership and copies.
             for sql in [
-                "SELECT DISTINCT f.path FROM events e JOIN files f USING(file_id) WHERE e.extra=0 AND e.k='xsm' AND e.id=?1 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
-                "SELECT DISTINCT f.path FROM events e JOIN files f USING(file_id) WHERE e.extra=0 AND e.k='tool' AND e.n='SendMessage' AND e.reply=1 AND e.reply_m=?1 AND (e.reply_f & ?2)=0 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
+                "SELECT DISTINCT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=semon_namespace() AND e.extra=0 AND e.k='xsm' AND e.id=?1 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
+                "SELECT DISTINCT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=semon_namespace() AND e.extra=0 AND e.k='tool' AND e.n='SendMessage' AND e.reply=1 AND e.reply_m=?1 AND (e.reply_f & ?2)=0 AND EXISTS(SELECT 1 FROM main.session_catalog_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
             ] {
-                let mut messages = store
-                    .connection
+                let mut messages = tx
                     .prepare_cached(sql)
                     .map_err(io::Error::other)?;
                 messages
@@ -1256,10 +1251,12 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
+    let db = binding.connection().map_err(io::Error::other)?;
+    let tx = db.unchecked_transaction().map_err(io::Error::other)?;
+    binding.validate(&tx, &binding.config().namespace).map_err(io::Error::other)?;
     if let Some((_, ledger)) =
-        ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
+        ledger_row(&tx, &path.to_string_lossy()).map_err(io::Error::other)?
         && ledger.stat == *stat
         && ledger.offset == length
     {
