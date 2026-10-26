@@ -43,3 +43,39 @@ pub(crate) fn begin(config: &StoreConfig, manifest: &SnapshotManifest) -> Result
 pub(crate) fn stage(config: &StoreConfig, manifest: &SnapshotManifest, page: &TransferPage, bytes: &[u8]) -> Result<TransferCheckpoint, StorageError> {
     transaction(config, |tx| transfer::stage_tx(tx, manifest, page, bytes))
 }
+
+pub(crate) fn page(config: &StoreConfig, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
+    transaction(config, |tx| transfer::page_tx(tx, manifest, sequence))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{LogicalSourceNamespace, StoreBackend};
+
+    #[test]
+    fn current_transfer225_sqlite_current_inventory_and_atomic_checkpoint_failure() {
+        let root = std::env::temp_dir().join(format!("semon-transfer225-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = StoreConfig { backend: StoreBackend::Sqlite { database: root.join("current.sqlite3") }, namespace: LogicalSourceNamespace::new("transfer225").unwrap(), expected_stream_epoch: Some("a".repeat(64)) };
+        config.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let db = Connection::open(config.backend.sqlite_database().unwrap()).unwrap();
+        let tables: Vec<String> = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 257").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(!tables.is_empty() && tables.len() < 257);
+        for table in &tables { transfer::inventory::require(transfer::inventory::sqlite(table), table); }
+        let manifest = transfer::tests::manifest();
+        let inbox = config.transfer_inbox();
+        let initial = inbox.begin(&manifest).unwrap();
+        db.execute_batch("CREATE TRIGGER transfer225_checkpoint_fault BEFORE UPDATE ON meta WHEN NEW.key GLOB 'native_transfer_v1:*:checkpoint' BEGIN SELECT RAISE(ABORT,'injected transfer checkpoint failure'); END;").unwrap();
+        let page = transfer::tests::page(&manifest, 1, [0; 32]);
+        assert!(inbox.stage_page(&manifest, &page).is_err());
+        assert_eq!(inbox.checkpoint(&manifest).unwrap(), initial);
+        assert!(inbox.staged_page(&manifest, 1).is_err());
+        db.execute_batch("DROP TRIGGER transfer225_checkpoint_fault").unwrap();
+        assert_eq!(inbox.stage_page(&manifest, &page).unwrap().sequence, 1);
+        assert_eq!(db.query_row("SELECT count(*) FROM files", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
