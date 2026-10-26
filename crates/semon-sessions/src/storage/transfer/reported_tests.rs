@@ -778,3 +778,133 @@ pub(crate) fn seed_codex_usage(config: &StoreConfig, path: &Path) {
     cache.flush_cold_writes().unwrap();
     drop(cache);
 }
+
+#[cfg(feature = "postgres")]
+pub(crate) mod selected_receipts {
+    use super::*;
+    pub(crate) struct AuthorizedOriginals(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
+
+    impl crate::SessionSourceReader for AuthorizedOriginals {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            let (_, bytes) = self
+                .0
+                .iter()
+                .find(|(saved, _)| saved == source)
+                .ok_or_else(|| std::io::Error::other("original Source authority denied"))?;
+            if expected.is_some_and(|generation| generation != "authorized-transfer-original")
+                || max > crate::SESSION_SOURCE_CHUNK_MAX
+            {
+                return Err(std::io::Error::other("original generation/range denied"));
+            }
+            let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+            let end = bytes.len().min(start.saturating_add(max));
+            Ok(crate::SessionSourceRange {
+                generation: "authorized-transfer-original".into(),
+                length: bytes.len() as u64,
+                offset,
+                bytes: std::sync::Arc::from(
+                    bytes
+                        .get(start..end)
+                        .ok_or_else(|| std::io::Error::other("original range denied"))?,
+                ),
+                cached: false,
+            })
+        }
+    }
+
+    pub(crate) fn selected_receipts(
+        config: &StoreConfig,
+        options: &crate::Options,
+        host: &AuthorizedOriginals,
+    ) -> Vec<(String, serde_json::Value, serde_json::Value)> {
+        use crate::storage::proof_lifetime::{ProofGenerationId, ProofReaderLease};
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore_transfer(config).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+            .connection()
+            .unwrap();
+        let refs = db.prepare("SELECT DISTINCT session_key,id FROM storage_proof_refs WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
+            .query_map([config.namespace.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            refs.len(),
+            2,
+            "fixture must qualify both original and successor receipts"
+        );
+        drop(db);
+        let runtime = crate::storage::NativeReaderBinding::Semantic(owner)
+            .reader_runtime()
+            .unwrap();
+        refs.into_iter()
+            .enumerate()
+            .map(|(index, (key, id))| {
+                let mut lease = runtime
+                    .selected_generation(
+                        &key,
+                        &ProofGenerationId(id.clone()),
+                        &format!("{index:064x}"),
+                        10_000,
+                    )
+                    .unwrap();
+                let page = lease
+                    .transcript_records(
+                        options,
+                        Some((host, crate::SessionSourceReadMode::ProviderOnly)),
+                        0,
+                        1,
+                        &crate::SelectedReadControl::default(),
+                    )
+                    .unwrap();
+                assert_eq!(page.snapshot.proof_generation.0, id);
+                assert_eq!(page.records.len(), 1);
+                let body = page.records[0].1.clone().unwrap();
+                assert_eq!(body["type"], "user");
+                assert_eq!(body["message"]["content"], "sanitized 0");
+                let row = serde_json::to_value(lease.row()).unwrap();
+                lease.release().unwrap();
+                (id, row, body)
+            })
+            .collect()
+    }
+
+    pub(crate) fn originals(source: &StoreConfig, options: &crate::Options) -> AuthorizedOriginals {
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore_transfer(source).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+            .connection()
+            .unwrap();
+        let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
+        assert!(removed > 0);
+        // Host authority is captured from the admitted original Source,
+        // never inferred from copied target metadata or a missing Raw path.
+        let rows = db.prepare("SELECT metadata FROM storage_proof_generations WHERE namespace=?1 ORDER BY id,session_key LIMIT 65").unwrap()
+            .query_map([source.namespace.as_str()], |row| row.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let mut originals = Vec::new();
+        for metadata in rows {
+            let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+            for original in &row.sources {
+                let reference = crate::SessionSourceRef {
+                    root: row.harness.clone(),
+                    path: crate::catalog::source_relative(options, &row.harness, original)
+                        .unwrap(),
+                    native_id: original.native_id.clone(),
+                    offset: original.offset,
+                    prefix_sha256: original.prefix_sha256,
+                    tail_sha256: original.tail_sha256,
+                };
+                originals.push((
+                    reference,
+                    std::sync::Arc::from(std::fs::read(&original.path).unwrap()),
+                ));
+            }
+        }
+        AuthorizedOriginals(originals)
+    }
+}
