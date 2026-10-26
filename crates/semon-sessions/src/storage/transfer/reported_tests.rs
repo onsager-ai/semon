@@ -1,0 +1,125 @@
+    use super::*;
+    use std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+    };
+
+    pub(crate) fn sqlite(root: &Path, name: &str) -> StoreConfig {
+        let config = StoreConfig {
+            backend: StoreBackend::Sqlite {
+                database: root.join(format!("{name}.sqlite3")),
+            },
+            namespace: super::super::super::LogicalSourceNamespace::new("transfer225").unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        config.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        config
+    }
+
+    pub(crate) fn observe(config: &StoreConfig, input: &Path, start: i64, capture: i64) {
+        std::fs::write(
+            input,
+            serde_json::json!({"projects":{"/sanitized":{
+                "lastSessionId":"原生\0id", "lastStartTime":start,
+                "lastDuration":u64::MAX, "lastCost":if start == 200 { None } else { Some(0.25) },
+                "lastModelUsage":{"模型\0":{"inputTokens":u64::MAX,"outputTokens":31}}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let mut cache = cache(config);
+        cache
+            .refresh_reported_runs(input, capture, &mut false)
+            .unwrap();
+    }
+
+    pub(crate) fn read(config: &StoreConfig) -> Vec<ReportedRunSnapshot> {
+        let mut cache = cache(config);
+        cache
+            .select_reported_runs(&BTreeSet::from(["原生\0id".into()]))
+            .unwrap();
+        cache.reported_runs().cloned().collect()
+    }
+
+    fn cache(config: &StoreConfig) -> crate::events::EventCache {
+        match &config.backend {
+            StoreBackend::Sqlite { .. } => crate::events::EventCache::open_semantic(
+                super::super::super::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+            )
+            .unwrap(),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { .. } => {
+                crate::events::EventCache::open_configured(config).unwrap()
+            }
+        }
+    }
+
+    pub(crate) fn stage(
+        source: &StoreConfig,
+        target: &StoreConfig,
+        operation: &[u8; 32],
+    ) -> SnapshotManifest {
+        let source = source.transfer_inbox();
+        // Each call commits at most one bounded page; reconstruct the handle
+        // between calls to exercise durable capture resumption.
+        let manifest = loop {
+            match source.capture(operation).unwrap() {
+                CaptureProgress::Capturing { .. } => continue,
+                CaptureProgress::Ready(manifest) => break manifest,
+            }
+        };
+        let checkpoint = source.checkpoint(&manifest).unwrap();
+        let target = target.transfer_inbox();
+        target.begin(&manifest).unwrap();
+        for sequence in 1..=checkpoint.sequence {
+            let page = source.staged_page(&manifest, sequence).unwrap();
+            assert_eq!(
+                target.stage_page(&manifest, &page).unwrap(),
+                target.stage_page(&manifest, &page).unwrap()
+            );
+        }
+        manifest
+    }
+
+    pub(crate) fn root() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "transfer228-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+
+pub(crate) fn apply(target:&StoreConfig, manifest:&SnapshotManifest) {
+    let pages=target.transfer_inbox().checkpoint(manifest).unwrap().sequence;
+    for sequence in 1..=pages {
+        let first=target.transfer_inbox().apply_page(manifest,sequence).unwrap();
+        assert_eq!(first,target.transfer_inbox().apply_page(manifest,sequence).unwrap());
+    }
+}
+
+#[test]
+fn current_transfer225_reported_more_than_one_page_restart_reverse_and_fences() {
+    let root=root(); let source=sqlite(&root,"source"); let target=sqlite(&root,"target"); let reverse=sqlite(&root,"reverse"); let input=root.join(".claude.json");
+    for start in 1..=200 { observe(&source,&input,start,start+1000); }
+    let expected=read(&source); assert_eq!(expected.len(),200);
+    // Keep an already-open ordinary writer before the durable source freeze.
+    let mut opened=cache(&source);
+    assert!(matches!(source.transfer_inbox().capture(&[1;32]).unwrap(),CaptureProgress::Capturing{..}));
+    assert!(opened.refresh_reported_runs(&input,2000,&mut false).is_err());
+    assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&source).is_err(),"future ordinary opens must not adopt a frozen epoch");
+    let manifest=stage(&source,&target,&[1;32]);
+    let pages=target.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
+    assert!(pages>=5);
+    for sequence in 1..=pages { let page=target.transfer_inbox().staged_page(&manifest,sequence).unwrap(); assert!(page.records.len()<=MAX_PAGE_ROWS); assert!(page.encoded().unwrap().len()<=MAX_PAGE_BYTES); }
+    target.transfer_inbox().apply_page(&manifest,1).unwrap();
+    assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&target).is_err(),"unfinished authority is not readable");
+    apply(&target,&manifest); assert_eq!(read(&target),expected);
+    observe(&target,&input,300,1300); let postwrite=read(&target); assert_eq!(postwrite.len(),201);
+    let reverse_manifest=stage(&target,&reverse,&[2;32]); apply(&reverse,&reverse_manifest); assert_eq!(read(&reverse),postwrite);
+    assert!(input.exists()); std::fs::remove_dir_all(root).unwrap();
+}

@@ -7,6 +7,7 @@ pub(super) enum TxnKind {
     ReadSnapshot,
     Write,
     StoreWrite,
+    Transfer,
 }
 
 /// No driver values escape this adapter; callbacks are synchronous, borrowed,
@@ -79,7 +80,7 @@ impl PgPool {
                 .batch_execute(match kind {
                     TxnKind::ReadSnapshot => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
                     // Future effects require explicit locks/fences/unique keys.
-                    TxnKind::Write | TxnKind::StoreWrite => "BEGIN ISOLATION LEVEL READ COMMITTED",
+                    TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer => "BEGIN ISOLATION LEVEL READ COMMITTED",
                 })
                 .map_err(sqlstate::error)?;
             phase = Phase::InTxn;
@@ -116,8 +117,12 @@ impl PgPool {
                     *schema_binding = Some(binding);
                 }
                 super::store_metadata::lock_state(&mut tx, exclusive_admission)?;
-                if matches!(kind, TxnKind::Write) {
+                if matches!(kind, TxnKind::Write | TxnKind::Transfer) {
                     super::store_metadata::lock_publication(&mut tx)?;
+                }
+                if matches!(kind, TxnKind::Write) {
+                    let blocked:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key IN ('native_transfer_v1:source-freeze','native_transfer_v1:incoming') AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
+                    if blocked { return Err(StorageError::ScopeChanged); }
                 }
             }
             let value = operation(&mut tx)?;
