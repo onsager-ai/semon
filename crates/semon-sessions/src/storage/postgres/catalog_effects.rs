@@ -1,4 +1,5 @@
-//! Private immutable Current/recipe/trace effects. This is NOT Catalog publication:
+//! Private immutable Current/recipe/trace/search and retained-history effects.
+//! This is NOT Catalog publication:
 //! no head, claim ACK, readiness, reader lease or backend qualification is issued.
 //! The complete admitted publisher must own the surrounding PgTxn and CAS.
 #![allow(dead_code)]
@@ -371,7 +372,7 @@ impl SlotPublicationStore for Effects<'_, '_> {
 
 /// Execute real shared Current/source/dependency and recipe algorithms in the
 /// caller's borrowed transaction. Returning () deliberately cannot become a
-/// Catalog receipt: History/search/overview/proofs/admission are missing.
+/// Catalog receipt: full History/overview/proof/admission qualification is missing.
 pub(super) fn stage(
     tx: &mut PgTxn<'_>,
     generation: &str,
