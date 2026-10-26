@@ -869,6 +869,17 @@ pub(crate) fn select<E>(
             || row.lifecycle.as_str() != lifecycle
             || fields != self::fields(&row)
         {
+            #[cfg(test)]
+            eprintln!(
+                "catalog_search_candidate_mismatch key={} last={} posting={} harness={} repo={} lifecycle={} fields={}",
+                row.key == position.key,
+                row.last.unwrap_or(0) == last,
+                last == position.last,
+                row.harness == row_harness,
+                row.repo == row_repo,
+                row.lifecycle.as_str() == lifecycle,
+                fields == self::fields(&row)
+            );
             return Err(invalid());
         }
         candidates += 1;
