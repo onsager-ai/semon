@@ -118,6 +118,17 @@ jobs:
       - name: Native ownership after source replacement
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture
+      - name: Progressive native source capacity refusal
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls configured_semantic_domain61_progressive_index_overflow_is_capacity_not_conflict -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-capacity.log"
+      - name: Retain early native capacity diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-capacity-${{ github.sha }}
+          path: ${{ runner.temp }}/native-capacity.log
+          if-no-files-found: error
       - name: Reported facts exact writer and snapshot qualification
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
