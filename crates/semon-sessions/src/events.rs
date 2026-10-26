@@ -1078,9 +1078,6 @@ pub(crate) trait IndexStore: Send {
         Ok(())
     }
 
-    /// Where the store is, for messages.
-    fn describe(&self) -> String;
-
     /// A compatible metadata-only session description. Dependencies are checked
     /// by the model after a successful source scan, before this lookup.
     fn session_description(
@@ -1877,9 +1874,7 @@ impl EventCache {
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        let path = v1_cache.with_extension("sqlite3");
-        crate::pricing::runtime::register_index(path.clone());
-        path
+        v1_cache.with_extension("sqlite3")
     }
 
     /// Opens the durable index beside `v1_cache`. An unavailable or refused
@@ -1896,7 +1891,6 @@ impl EventCache {
         let path = Self::path(v1_cache);
         let mut cache = match store::open(&path, source) {
             Ok((store, loaded, journal)) => {
-                crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
                 cache.source_observations = Some(Box::new(journal));

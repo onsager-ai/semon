@@ -1049,26 +1049,37 @@ pub fn start_default_refresh() {
 static STARTED: OnceLock<()> = OnceLock::new();
 #[derive(Default)]
 struct IndexRegistry {
-    entries: BTreeMap<PathBuf, Instant>,
+    entries: BTreeMap<(PathBuf, String), (Instant, crate::events::store::configured::NativeOwnership)>,
     wake_epoch: u64,
 }
 impl IndexRegistry {
     fn prune(&mut self, now: Instant) {
-        self.entries.retain(|path, touched| {
+        self.entries.retain(|(path, _), (touched, _)| {
             let age = now.saturating_duration_since(*touched);
             age < INDEX_RETIRE_AFTER && path.is_file()
         });
     }
 
-    fn register(&mut self, path: PathBuf, now: Instant) -> bool {
+    fn register(
+        &mut self,
+        owner: crate::events::store::configured::NativeOwnership,
+        now: Instant,
+    ) -> bool {
+        let path = owner
+            .config()
+            .backend
+            .sqlite_database()
+            .expect("SQLite repricing owner")
+            .clone();
+        let key = (path, owner.config().namespace.as_str().to_owned());
         self.prune(now);
-        let newly_registered = !self.entries.contains_key(&path);
-        self.entries.insert(path, now);
+        let newly_registered = !self.entries.contains_key(&key);
+        self.entries.insert(key, (now, owner));
         if self.entries.len() > MAX_INDEXES
             && let Some(oldest) = self
                 .entries
                 .iter()
-                .min_by_key(|(_, touched)| **touched)
+                .min_by_key(|(_, (touched, _))| *touched)
                 .map(|(path, _)| path.clone())
         {
             self.entries.remove(&oldest);
@@ -1087,12 +1098,12 @@ fn registry() -> &'static (Mutex<IndexRegistry>, Condvar) {
 
 /// A new index wakes the worker; re-registering one only refreshes its LRU age.
 /// The process-local set is capped; persistent SQLite cursors remain authoritative.
-pub(crate) fn register_index(path: PathBuf) {
+pub(crate) fn register_index(owner: crate::events::store::configured::NativeOwnership) {
     let (state, wake) = registry();
     let newly_registered = state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .register(path, Instant::now());
+        .register(owner, Instant::now());
     if newly_registered {
         wake.notify_one();
     }
@@ -1123,13 +1134,17 @@ fn reprice_worker() {
             state.prune(Instant::now());
             observed_epoch = state.wake_epoch;
         }
-        let paths: Vec<_> = state.entries.keys().cloned().collect();
+        let owners: Vec<_> = state
+            .entries
+            .values()
+            .map(|(_, owner)| owner.clone())
+            .collect();
         drop(state);
 
         let table = snapshot();
         let mut progress = false;
-        for path in paths {
-            match crate::events::store::reprice::step(&path, Arc::clone(&table)) {
+        for owner in owners {
+            match crate::events::store::reprice::step(&owner, Arc::clone(&table)) {
                 Ok(changed) => progress |= changed,
                 Err(error) => {
                     // Failure is retried; it must never discard native facts.
@@ -1377,6 +1392,25 @@ mod tests {
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
+    fn registry_owner(path: PathBuf) -> crate::events::store::configured::NativeOwnership {
+        let source = crate::storage::HostSource::new(
+            crate::storage::LogicalSourceNamespace::new("pricing-registry").unwrap(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        drop(
+            crate::events::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap(),
+        );
+        crate::events::store::configured::NativeOwnership::restore(&crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.with_extension("sqlite3"),
+            },
+            namespace: source.namespace().unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        })
+        .unwrap()
+    }
+
     #[test]
     fn index_registry_caps_entries_and_evicts_the_least_recently_used() {
         let root = path().parent().unwrap().join("registry");
@@ -1384,21 +1418,25 @@ mod tests {
         let start = Instant::now();
         let mut registry = IndexRegistry::default();
         for index in 0..MAX_INDEXES {
-            let path = root.join(format!("index-{index}"));
-            fs::write(&path, b"").unwrap();
-            registry.register(path, start + Duration::from_secs(index as u64));
+            let path = root.join(format!("index-{index}.sqlite3"));
+            registry.register(
+                registry_owner(path),
+                start + Duration::from_secs(index as u64),
+            );
         }
-        let recently_used = root.join("index-0");
-        registry.register(recently_used.clone(), start + Duration::from_secs(70));
-        let over_cap = root.join("index-over-cap");
-        fs::write(&over_cap, b"").unwrap();
-        registry.register(over_cap, start + Duration::from_secs(71));
+        let recently_used = root.join("index-0.sqlite3");
+        registry.register(
+            registry_owner(recently_used.clone()),
+            start + Duration::from_secs(70),
+        );
+        let over_cap = root.join("index-over-cap.sqlite3");
+        registry.register(registry_owner(over_cap), start + Duration::from_secs(71));
         assert_eq!(registry.entries.len(), MAX_INDEXES);
-        assert!(registry.entries.contains_key(&recently_used));
-        assert!(!registry.entries.contains_key(&root.join("index-1")));
+        assert!(registry.entries.contains_key(&(recently_used.clone(), "pricing-registry".into())));
+        assert!(!registry.entries.contains_key(&(root.join("index-1.sqlite3"), "pricing-registry".into())));
         fs::remove_file(&recently_used).unwrap();
         registry.prune(start + Duration::from_secs(72));
-        assert!(!registry.entries.contains_key(&recently_used));
+        assert!(!registry.entries.contains_key(&(recently_used.clone(), "pricing-registry".into())));
         registry.prune(start + INDEX_RETIRE_AFTER + Duration::from_secs(72));
         assert!(registry.entries.is_empty());
         fs::remove_dir_all(root).unwrap();
@@ -1408,29 +1446,33 @@ mod tests {
     fn index_registry_repeated_registration_wakes_only_for_new_or_retired_paths() {
         let root = path().parent().unwrap().join("registry-wakes");
         fs::create_dir_all(&root).unwrap();
-        let first = root.join("first");
-        let second = root.join("second");
-        fs::write(&first, b"").unwrap();
-        fs::write(&second, b"").unwrap();
+        let first = root.join("first.sqlite3");
+        let second = root.join("second.sqlite3");
         let start = Instant::now();
         let mut registry = IndexRegistry::default();
         let initial_epoch = registry.wake_epoch;
 
-        assert!(registry.register(first.clone(), start));
+        assert!(registry.register(registry_owner(first.clone()), start));
         assert_eq!(registry.wake_epoch, initial_epoch + 1);
         for touch in 1..8 {
-            assert!(!registry.register(first.clone(), start + Duration::from_secs(touch)));
+            assert!(!registry.register(
+                registry_owner(first.clone()),
+                start + Duration::from_secs(touch)
+            ));
         }
         assert_eq!(registry.wake_epoch, initial_epoch + 1);
 
-        assert!(registry.register(second.clone(), start + Duration::from_secs(8)));
+        assert!(registry.register(
+            registry_owner(second.clone()),
+            start + Duration::from_secs(8)
+        ));
         assert_eq!(registry.wake_epoch, initial_epoch + 2);
 
         let retired_at = start + INDEX_RETIRE_AFTER + Duration::from_secs(9);
         registry.prune(retired_at);
-        assert!(!registry.entries.contains_key(&first));
+        assert!(!registry.entries.contains_key(&(first.clone(), "pricing-registry".into())));
         let before_reregister = registry.wake_epoch;
-        assert!(registry.register(first.clone(), retired_at));
+        assert!(registry.register(registry_owner(first.clone()), retired_at));
         assert_eq!(registry.wake_epoch, before_reregister + 1);
 
         fs::remove_dir_all(root).unwrap();
