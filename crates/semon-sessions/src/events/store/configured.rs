@@ -635,6 +635,16 @@ impl NativeOwnership {
 
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
         self.validate(db)?;
+        // Readers and native writers share the producer's current scoped
+        // profile. A retained capability cannot authorize a replaced recipe.
+        let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![self.config.namespace.as_str(),self.admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
+        if !profile {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND ((key='catalog_version' AND value<>?2) OR (key='search_version' AND value<>?3)))",params![self.config.namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
+        if !publications {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
         if incoming {
             return Err(StorageError::NamespaceUpgradePending);

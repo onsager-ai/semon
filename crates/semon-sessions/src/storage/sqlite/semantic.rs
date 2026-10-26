@@ -102,15 +102,13 @@ impl AdmittedSource {
     }
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
-            owner.validate_ready(db)?;
-        } else {
-            NativeReaderBinding::Admitted(self.config.clone())
-                .validate(db, &self.config.namespace)?;
-            crate::events::store::configured::validate_staging_owner(db, &self.config)?;
-            if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission
-            {
-                return Err(StorageError::ScopeChanged);
-            }
+            return owner.validate_ready(db);
+        }
+        NativeReaderBinding::Admitted(self.config.clone())
+            .validate(db, &self.config.namespace)?;
+        crate::events::store::configured::validate_staging_owner(db, &self.config)?;
+        if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
+            return Err(StorageError::ScopeChanged);
         }
         let admission = i64::try_from(self.admission).map_err(|_| StorageError::ScopeChanged)?;
         let profile: bool = db.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![self.config.namespace.as_str(),admission,crate::events::store::configured::semantic_recipe()], |r|r.get(0)).map_err(failed)?;
