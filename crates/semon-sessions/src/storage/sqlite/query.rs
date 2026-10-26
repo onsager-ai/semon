@@ -25,20 +25,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .binding
             .listing_snapshot(namespace)
             .map_err(storage_error)?;
-        let runtime_binding = match &self.binding {
-            crate::storage::NativeReaderBinding::Semantic(owner) => {
-                Some(crate::storage::QueryRuntimeBinding {
-                    namespace: owner.config().namespace.clone(),
-                    admission: owner.admission(),
-                    stream_epoch: owner
-                        .config()
-                        .expected_stream_epoch
-                        .clone()
-                        .ok_or_else(|| unavailable("Missing source incarnation"))?,
-                })
-            }
-            _ => None,
-        };
+        let runtime_binding = self.binding.runtime_binding().map_err(storage_error)?;
         read(
             &db,
             &self.options,

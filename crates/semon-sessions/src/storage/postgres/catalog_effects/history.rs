@@ -321,6 +321,7 @@ impl CompositeHistoryStore for History<'_, '_> {
                 "path_digest",
                 "source_path",
                 "metadata",
+                "native_digest",
             ],
             "key_digest,path_digest",
             &[
@@ -329,6 +330,7 @@ impl CompositeHistoryStore for History<'_, '_> {
                 &digest(path),
                 &path,
                 &encoded(source)?,
+                &digest(source.native_id.as_bytes()),
             ],
         )
     }

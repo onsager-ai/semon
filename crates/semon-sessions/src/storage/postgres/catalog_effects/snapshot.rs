@@ -64,6 +64,96 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
     String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged)
 }
 
+impl crate::storage::navigation::NativeNavigationStore for Snapshot<'_, '_> {
+    fn catalog_generation(&self) -> Result<String, StorageError> {
+        use crate::storage::catalog::CatalogSnapshot;
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
+        Ok(self.generation.clone())
+    }
+
+    fn bookmarked_target_keys(&self, target: &str) -> Result<Vec<String>, StorageError> {
+        use crate::storage::catalog::CatalogSnapshot;
+        if target.len() > 4096 {
+            return Err(StorageError::InvalidArguments);
+        }
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        tx.check()?;
+        let rows = tx.driver.query(
+            "SELECT DISTINCT session_key FROM semon_pg_native_catalog_trace_bookmarks WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND target_digest=sha256($3::bytea) AND target=$3 ORDER BY session_key LIMIT 3",
+            &[&tx.namespace.as_str().as_bytes(), &self.generation.as_bytes(), &target.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        rows.iter().map(|row| text(row.get(0))).collect()
+    }
+
+    fn native_resolution(
+        &self,
+        harness: &str,
+        native_id: &str,
+        scope: crate::CatalogReadScope,
+        expected_generation: Option<&str>,
+    ) -> Result<crate::storage::navigation::NativeResolutionObservation, StorageError> {
+        use crate::storage::catalog::CatalogSnapshot;
+        if !matches!(harness, "claude" | "codex" | "copilot")
+            || native_id.is_empty()
+            || native_id.len() > 4096
+            || native_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidArguments);
+        }
+        self.require_current()
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if expected_generation.is_some_and(|expected| expected != self.generation) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let mut observation = crate::storage::navigation::NativeResolutionObservation {
+            version: Some(crate::model::summary::CATALOG_VERSION.to_string()),
+            generation: Some(self.generation.clone()),
+            completeness: self
+                .publication_value("catalog_completeness")
+                .map_err(|_| StorageError::Unavailable)?,
+            ..Default::default()
+        };
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let args: &[&(dyn ToSql + Sync)] = &[
+            &ns,
+            &self.generation.as_bytes(),
+            &native_id.as_bytes(),
+            &harness.as_bytes(),
+        ];
+        let current = tx.driver.query(
+            "SELECT DISTINCT s.session_key FROM semon_pg_native_catalog_sources s JOIN semon_pg_native_catalog_rows r USING(namespace_digest,namespace,generation,key_digest) WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.native_digest=sha256($3::bytea) AND r.harness=$4 AND convert_from(s.metadata,'UTF8')::jsonb->>'native_id'=convert_from($3,'UTF8') ORDER BY s.session_key LIMIT 2",
+            args,
+        ).map_err(sqlstate::error)?;
+        let history = current.is_empty() && scope == crate::CatalogReadScope::RetainedHistory;
+        let matches = if history {
+            tx.driver.query(
+                "SELECT DISTINCT s.session_key FROM semon_pg_native_catalog_history_sources s JOIN semon_pg_native_catalog_history_owners o ON o.namespace_digest=s.namespace_digest AND o.namespace=s.namespace AND o.owner_generation=s.generation AND o.key_digest=s.key_digest AND o.session_key=s.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND s.native_digest=sha256($3::bytea) AND o.harness=$4 AND convert_from(s.metadata,'UTF8')::jsonb->>'native_id'=convert_from($3,'UTF8') ORDER BY s.session_key LIMIT 2",
+                args,
+            ).map_err(sqlstate::error)?
+        } else {
+            current
+        };
+        observation.keys = matches
+            .iter()
+            .map(|row| text(row.get(0)))
+            .collect::<Result<_, _>>()?;
+        tx.check()?;
+        drop(tx);
+        if let [key] = observation.keys.as_slice() {
+            observation.metadata = self
+                .catalog(key, history)?
+                .map(|row| serde_json::to_string(&row).map_err(|_| StorageError::Unavailable))
+                .transpose()?;
+        }
+        Ok(observation)
+    }
+}
+
 /// All observations in the callback use ONE repeatable-read transaction. The
 /// callback cannot return a borrowed adapter or a driver value. An immutable
 /// generation is an address, never a replacement for publication admission.
