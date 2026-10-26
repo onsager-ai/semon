@@ -940,14 +940,18 @@ impl NativeEvidence {
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_tree_repair(&self.options).inspect_err(|_| {
+            .advance_tree_repair(&self.options)
+            .inspect_err(|_| {
                 #[cfg(test)]
                 eprintln!("native catalog phase=tree_repair");
             })?;
-        if self.advance_semantic_stage(work, now, &mut before_build).inspect_err(|_| {
-            #[cfg(test)]
-            eprintln!("native catalog phase=stage_resume");
-        })? {
+        if self
+            .advance_semantic_stage(work, now, &mut before_build)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=stage_resume");
+            })?
+        {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
                 if let Some(discovery) = work.cold_catalog.take() {
