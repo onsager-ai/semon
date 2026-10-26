@@ -124,6 +124,7 @@ jobs:
         run: |
           cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys125.log"
           cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys128 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys128.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys132 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys132.log"
       - name: Retain native key measurements
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
