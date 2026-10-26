@@ -1580,7 +1580,7 @@ impl Writer {
             != expected
         {
             #[cfg(test)]
-                eprintln!("begin_ledger_conflict");
+            eprintln!("begin_ledger_conflict");
             return Err(StorageError::Conflict);
         }
         let revision = crate::storage::sqlite::source_journal::claims(
