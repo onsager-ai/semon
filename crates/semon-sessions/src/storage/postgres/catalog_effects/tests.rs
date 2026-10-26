@@ -554,7 +554,8 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                     &crate::slot_projection::Publication {
                         rows: &missing,
                         transcripts: Some(&recipes)
-                    }
+                    },
+                    &[]
                 )?);
                 Ok(())
             },

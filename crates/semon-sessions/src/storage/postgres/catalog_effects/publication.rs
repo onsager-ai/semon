@@ -169,6 +169,7 @@ fn publish_operation(
     let generation = format!("{:x}", Sha256::digest(operation));
     // A partial request keeps every unmentioned Current owner. Owners connected
     // to a republished or claimed Source must be republished by the producer.
+    let mut leaving = Vec::new();
     if let Some(previous) = expected {
         let mut mentioned = publication
             .rows
@@ -197,6 +198,7 @@ fn publish_operation(
                 return Err(StorageError::Busy);
             }
             tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original) SELECT namespace,$3,key_digest,session_key,owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns, &previous.as_bytes(), &generation.as_bytes(), &withdrawn]).map_err(sqlstate::error)?;
+            leaving.clone_from(&withdrawn);
             mentioned.extend(withdrawn);
         }
         let claimed = paths
@@ -209,7 +211,7 @@ fn publish_operation(
     }
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     if let Some(previous) = expected
-        && !history::preserve(tx, &generation, previous, publication)?
+        && !history::preserve(tx, &generation, previous, publication, &leaving)?
     {
         return Err(StorageError::Busy);
     }

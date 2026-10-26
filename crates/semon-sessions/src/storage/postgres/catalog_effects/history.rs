@@ -451,14 +451,31 @@ pub(super) fn preserve(
     generation: &str,
     previous: &str,
     publication: &crate::slot_projection::Publication<'_>,
+    withdrawn: &[Vec<u8>],
 ) -> Result<bool, StorageError> {
     for generation in [generation, previous] {
         if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StorageError::InvalidArguments);
         }
     }
-    if generation == previous || publication.rows.len() > 64 {
+    if generation == previous || publication.rows.len() > 64 || withdrawn.len() > 64 {
         return Err(StorageError::InvalidArguments);
+    }
+    // Rows withdrawn from Current are read from the previous immutable
+    // generation; each digest must name exactly one bounded row.
+    let mut old = Vec::new();
+    for key_digest in withdrawn {
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &previous.as_bytes(), key_digest]).map_err(sqlstate::error)?;
+        let row = rows.first().ok_or(StorageError::ScopeChanged)?;
+        let key: Vec<u8> = row.get(0);
+        let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        let value: CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if digest(&key) != *key_digest || value.key.as_bytes() != key {
+            return Err(StorageError::ScopeChanged);
+        }
+        old.push(value);
     }
     let store = History {
         effects: Effects {
@@ -467,7 +484,7 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !catalog::preserve_replacement_rows(&store, publication.rows)? {
+    if !catalog::preserve_rows(&store, publication.rows, &old)? {
         return Ok(false);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
