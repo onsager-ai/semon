@@ -338,7 +338,6 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
     };
 }
 pub(crate) const SOURCE_OBSERVATION_RECEIPTS_SCHEMA: &str = source_observation_receipts_ddl!();
-const CATALOG_SUPPORT_SCHEMA: &str = catalog_support_ddl!();
 
 const COMPOSITE_CATALOG_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_catalog (
@@ -11528,11 +11527,21 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) = SqliteStore::attempt(&path, &fixture_namespace())
-            .unwrap_or_else(|error| panic!("{error}"));
+        let admitted = current_test_store(&path, &fixture_namespace());
+        let config = admitted.owner.config().clone();
+        drop(admitted);
+        let mut store = crate::storage::sqlite::configured_index::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap();
+        let db = configured::connection(&config).unwrap();
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
-        store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
+        db.execute_batch("CREATE TRIGGER interrupt_summary BEFORE INSERT ON main.session_descriptions WHEN NEW.namespace=semon_namespace() AND NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
+        assert_eq!(
+            store.save_session_descriptions(&rows).unwrap(),
+            Outcome::Written
+        );
         let batch = vec![
             ("first".into(), 1, "inputs".into(), "new".into()),
             ("second".into(), 1, "inputs".into(), "new".into()),
@@ -11550,8 +11559,12 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) = SqliteStore::attempt(&path, &fixture_namespace())
-            .unwrap_or_else(|error| panic!("{error}"));
+        db.execute_batch("DROP TRIGGER interrupt_summary").unwrap();
+        drop(db);
+        let store = crate::storage::sqlite::configured_index::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")
