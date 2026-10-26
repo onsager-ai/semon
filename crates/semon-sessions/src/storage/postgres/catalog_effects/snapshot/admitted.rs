@@ -36,9 +36,13 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         self.require_current()?;
-        if request.limit > 64 || request.scope != crate::CatalogReadScope::Current {
+        if request.limit > 64 {
             return unavailable();
         }
+        // Retained history is the current rows plus every history owner of
+        // this generation without a current row, read from its proof-owned
+        // immutable header. Both sides keyset on the same SQL columns.
+        let history = request.scope == crate::CatalogReadScope::RetainedHistory;
         let tx = self
             .tx
             .lock()
@@ -57,11 +61,25 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let rows = tx
             .driver
             .query(
-                "WITH page AS MATERIALIZED (
-                SELECT session_key,metadata,last_ms,harness,repo,model
+                "WITH visible AS (
+                SELECT session_key,metadata,last_ms,harness,repo,model,false AS retained
                 FROM semon_pg_native_catalog_rows
                 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
-                  AND ($3::bytea IS NULL OR session_key=$3)
+                UNION ALL
+                SELECT o.session_key,h.metadata,h.last_ms,h.harness,h.repo,h.model,true
+                FROM semon_pg_native_catalog_history_owners o
+                JOIN semon_pg_native_catalog_history_headers h
+                  ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
+                 AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
+                 AND h.session_key=o.session_key
+                WHERE $11 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+                  AND NOT EXISTS (SELECT 1 FROM semon_pg_native_catalog_rows r
+                    WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
+                      AND r.generation=$2 AND r.key_digest=o.key_digest)
+             ), page AS MATERIALIZED (
+                SELECT session_key,metadata,last_ms,harness,repo,model,retained
+                FROM visible
+                WHERE ($3::bytea IS NULL OR session_key=$3)
                   AND ($4::bytea IS NULL OR harness=$4)
                   AND ($5::bytea IS NULL OR repo=$5)
                   AND ($6::bytea IS NULL OR model=$6)
@@ -70,7 +88,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 ORDER BY last_ms DESC,session_key LIMIT $10
              ) SELECT session_key,
                  CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
-                 last_ms,harness,repo,model FROM page ORDER BY last_ms DESC,session_key",
+                 last_ms,harness,repo,model,retained FROM page ORDER BY last_ms DESC,session_key",
                 &[
                     &ns,
                     &self.generation.as_bytes(),
@@ -82,6 +100,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                     &cursor_key,
                     &inclusive,
                     &limit,
+                    &history,
                 ],
             )
             .map_err(sqlstate::error)
@@ -93,7 +112,8 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 .get::<_, Option<Vec<u8>>>(1)
                 .ok_or_else(|| failed(StorageError::Busy))?;
             crate::selected_read::charge(64, bytes.len())?;
-            let value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            let mut value: CatalogRow =
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?;
             if value.key.as_bytes() != key
                 || value.sources.len() > 64
                 || value.last.unwrap_or(0) != row.get::<_, i64>(2)
@@ -102,6 +122,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 || value.model.as_bytes() != row.get::<_, Vec<u8>>(5)
             {
                 return Err(failed(StorageError::ScopeChanged));
+            }
+            if row.get::<_, bool>(6) {
+                value.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
             }
             output.push(value);
         }
