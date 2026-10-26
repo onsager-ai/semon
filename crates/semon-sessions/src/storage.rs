@@ -43,16 +43,11 @@ pub(crate) fn source_proof_observation(
 pub(crate) fn local_query_catalog(
     options: &crate::Options,
     _namespace: LogicalSourceNamespace,
-) -> Box<dyn query::QueryCatalogStore> {
-    Box::new(sqlite::query::SqliteQueryCatalog {
+) -> Result<Box<dyn query::QueryCatalogStore>, StorageError> {
+    Ok(Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
-        binding: NativeReaderBinding::Admitted(
-            options
-                .source
-                .config(&options.cache)
-                .expect("invalid host Source binding"),
-        ),
-    })
+        binding: local_reader_binding(options)?,
+    }))
 }
 
 /// The only Options bridge is explicit and cannot enter an enrolled store.

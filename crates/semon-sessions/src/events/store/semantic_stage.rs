@@ -114,7 +114,7 @@ CREATE INDEX catalog_relocation_new ON catalog_relocation_candidates(namespace,n
 CREATE TABLE catalog_native_dependencies(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(namespace,source_path,harness,native_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX catalog_native_dependency ON catalog_native_dependencies(namespace,harness,native_id,source_path);
 CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
-CREATE TABLE session_descriptions(session_key TEXT PRIMARY KEY,version INTEGER NOT NULL,inputs TEXT NOT NULL,description TEXT NOT NULL) STRICT;
+CREATE TABLE session_descriptions(namespace TEXT NOT NULL,session_key TEXT NOT NULL,version INTEGER NOT NULL,inputs TEXT NOT NULL,description TEXT NOT NULL,PRIMARY KEY(namespace,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE reported_runs(namespace TEXT NOT NULL,session_id TEXT NOT NULL,start INTEGER NOT NULL,cost REAL,duration INTEGER,api_duration INTEGER,tool_duration INTEGER,lines_added INTEGER,lines_removed INTEGER,model_usage TEXT NOT NULL,capture_at INTEGER NOT NULL,PRIMARY KEY(namespace,session_id,start)) STRICT, WITHOUT ROWID;
 " };
 }

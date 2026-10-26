@@ -352,6 +352,7 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
 // have composite row keys; the other 22 families remain singleton and fenced.
 // A public second namespace must still be refused before any operation.
 const TABLES: &[&str] = &[
+    "session_descriptions",
     "reported_runs",
     "files",
     "events",
@@ -985,6 +986,19 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn session_description(&self, key: &str, version: u32, inputs: &str) -> Result<Option<String>, StorageError> {
+        let db = self.snapshot()?;
+        super::read_session_description(&db, key, version, inputs).map_err(failed)
+    }
+
+    pub(crate) fn save_session_descriptions(&self, descriptions: &[(String,u32,String,String)]) -> Result<Outcome, StorageError> {
+        let mut db = connection(&self.config)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        self.validate(&tx)?;
+        super::write_session_descriptions(&tx, descriptions).map_err(failed)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Ok(Outcome::Written)
+    }
     pub(crate) fn new(config: &StoreConfig) -> Self {
         Self {
             config: config.clone(),
@@ -3104,6 +3118,26 @@ mod tests {
             }
         }
         panic!("real model did not reach publication")
+    }
+
+    #[test]
+    fn default_current_source_admission_preserves_restart_replay_and_isolation() {
+        use crate::storage::native_events::NativeEventStore;
+        let f = Fixture::current("source-a");
+        let source = crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
+        let cache_path = f.root.join("index.json");
+        let mut cache = EventCache::open_scoped(&cache_path, &source).unwrap();
+        let receipt = cache.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(receipt.consumed_bytes > 0);
+        drop(cache);
+        let mut restarted = EventCache::open_scoped(&cache_path, &source).unwrap();
+        let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
+        let other = crate::storage::HostSource::new(LogicalSourceNamespace::new("source-b").unwrap(), "a".repeat(64)).unwrap();
+        let isolated = EventCache::open_scoped(&cache_path, &other).unwrap();
+        assert!(isolated.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap().is_none());
+        assert!(restarted.store.as_ref().unwrap().ledger(f.raw.to_str().unwrap()).unwrap().is_some());
     }
 
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {

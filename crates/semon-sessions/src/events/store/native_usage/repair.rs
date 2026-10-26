@@ -274,8 +274,8 @@ pub(in crate::events::store) fn advance(
             crate::storage::StorageError::NamespaceUpgradePending,
         ));
     }
-    let binding = crate::storage::local_navigation_binding(options, "")
-        .map_err(io::Error::other)?;
+    let binding =
+        crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
     let selected: Option<PendingSource> = store.connection.query_row(sql(&store.connection, "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1", "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1").map_err(sql_error)?,[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
     let Some((path, receipt, id, cursor, model, tree, projection_id)) = selected else {
         return Ok((pending(&store.connection).map_err(sql_error)?, None));

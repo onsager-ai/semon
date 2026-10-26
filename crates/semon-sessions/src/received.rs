@@ -190,6 +190,8 @@ impl ReceivedMachines {
         // Never created: a home that can't be read reads as empty.
         let nowhere = state.join("none");
         Options {
+            source: crate::storage::HostSource::load_or_create(&state.join("source.json"))
+                .expect("received machine Source configuration is unavailable or invalid"),
             claude_home: if seen.claude {
                 root.join("claude")
             } else {
