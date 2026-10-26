@@ -323,13 +323,33 @@ impl CompositeHistoryStore for History<'_, '_> {
         old: &CatalogSource,
         current: &[CatalogSource],
     ) -> Result<bool, StorageError> {
-        let mut tx=self.effects.tx.borrow_mut();
-        let key=format!("native_catalog_relocation:{}",path(old)?);
-        let Some(bytes)=super::super::native_keys::read_meta(&mut tx,key.as_bytes(),16384)? else {return Ok(false);};
-        let proof:crate::events::native_commit::CatalogRelocation=serde_json::from_slice(&bytes).map_err(|_|StorageError::ScopeChanged)?;
-        if proof.version!=1 || proof.native_id!=old.native_id || (!catalog::source_matches_ledger(old,&proof.prior) && !proof.catalog_before.as_ref().is_some_and(|l|catalog::source_matches_ledger(old,l))) {return Ok(false);}
+        let mut tx = self.effects.tx.borrow_mut();
+        let key = format!("native_catalog_relocation:{}", path(old)?);
+        let Some(bytes) = super::super::native_keys::read_meta(&mut tx, key.as_bytes(), 16384)?
+        else {
+            return Ok(false);
+        };
+        let proof: crate::events::native_commit::CatalogRelocation =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if proof.version != 1
+            || proof.native_id != old.native_id
+            || (!catalog::source_matches_ledger(old, &proof.prior)
+                && !proof
+                    .catalog_before
+                    .as_ref()
+                    .is_some_and(|l| catalog::source_matches_ledger(old, l)))
+        {
+            return Ok(false);
+        }
         for source in current {
-            if source.path.to_str()==Some(proof.new_path.as_str()) && source.native_id==proof.native_id && catalog::source_matches_ledger(source,&proof.after) && super::super::native_reader::ledger(&mut tx,&proof.new_path)?.map(|(_,l)|l)==Some(proof.after.clone()) {return Ok(true);}
+            if source.path.to_str() == Some(proof.new_path.as_str())
+                && source.native_id == proof.native_id
+                && catalog::source_matches_ledger(source, &proof.after)
+                && super::super::native_reader::ledger(&mut tx, &proof.new_path)?.map(|(_, l)| l)
+                    == Some(proof.after.clone())
+            {
+                return Ok(true);
+            }
         }
         Ok(false)
     }
