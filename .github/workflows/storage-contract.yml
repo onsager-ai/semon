@@ -60,22 +60,28 @@ jobs:
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
       - name: Production host API callers compile
+        id: production
         run: cargo check --locked --workspace --all-targets
       - name: Default admitted current Source restart and isolation
         run: cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
       - name: Canonical namespace factory structure and drift refusal
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
       - name: Native Claude name and owned member replay qualification
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: Native frontier physical-work qualification
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
       - name: Current native store admission and nonmutation
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib events::store::tests::unsupported_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::current_reopen_keeps_wal_reader_and_concurrent_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_initialization_holds_its_lock_through_the_first_wal_switch -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_open_rechecks_a_concurrent_version_change_before_writes -- --exact --nocapture
       - name: SQLite adapter and reusable metadata conformance
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture
@@ -139,11 +145,13 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::tests::configured_ -- --nocapture
       - name: Native Catalog and Query fixture contracts through adapter
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
       - name: Reported facts persistence after typed error propagation
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib events::store::tests::scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib facts::tests::reported_runs -- --nocapture

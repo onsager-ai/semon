@@ -986,6 +986,28 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn relocate_codex(
+        &self,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut crate::sealed::LogFile,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Result<Option<String>, StoreError> {
+        if self.owner.is_none() {
+            return Err(StoreError::Configured(StorageError::NamespaceUpgradePending));
+        }
+        let connection = connection(&self.config).map_err(StoreError::Configured)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection, discovery, path: database.clone(), selected_runs: None, semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        super::relocation::reuse(&mut store, path, stat, id, file, measurements, Some(self))
+    }
+
     pub(crate) fn advance_tree_repair(&self, options: &crate::Options) -> std::io::Result<(bool, Option<String>)> {
         let owner = self.owner.as_ref().ok_or_else(|| std::io::Error::other(StorageError::NamespaceUpgradePending))?;
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
@@ -1151,7 +1173,7 @@ impl Writer {
         }
     }
 
-    fn validate(&self, db: &Connection) -> Result<(), StorageError> {
+    pub(super) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
             owner.validate_ready(db)
         } else {
@@ -3375,6 +3397,12 @@ mod tests {
             isolated.catalog_claims(&[key.clone()]).unwrap(),
             foreign_claim
         );
+        let repair_options = crate::Options {
+            source: source.clone(), cache: cache_path.clone(), ..Default::default()
+        };
+        restarted.store.as_mut().unwrap().advance_tree_repair(&repair_options).unwrap();
+        let state: String = db.query_row("SELECT state FROM native_tree_repairs WHERE namespace='source-a' AND source_path=?1", [&key], |r| r.get(0)).unwrap();
+        assert_eq!(state, "done");
         assert_eq!(
             restarted
                 .store

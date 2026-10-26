@@ -242,10 +242,15 @@ struct Checkpoint<'a> {
 
 // Repair retains its existing CAS state machine. The admitted writer validates
 // the exact Source/epoch/admission in every transaction, including failure paths.
-fn repair_current(db: &Connection, owner: Option<&configured::NativeOwnership>) -> rusqlite::Result<bool> {
+fn repair_current(
+    db: &Connection,
+    owner: Option<&configured::NativeOwnership>,
+) -> rusqlite::Result<bool> {
     match owner {
         Some(owner) => {
-            owner.validate_ready(db).map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            owner
+                .validate_ready(db)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
             current_contract(db)
         }
         None => current(db),

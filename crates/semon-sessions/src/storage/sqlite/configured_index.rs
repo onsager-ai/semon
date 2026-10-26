@@ -185,17 +185,13 @@ impl IndexStore for ConfiguredIndex {
     }
     fn relocate_codex(
         &mut self,
-        _path: &str,
-        _stat: &Stat,
-        _id: &str,
-        _file: &mut LogFile,
-        _measurements: &mut crate::native_timing::Measurements,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut LogFile,
+        measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        // Cross-path relocation admission is unported; ordinary parsing still
-        // commits its relocation advance/dependency effects atomically.
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.relocate_codex(path, stat, id, file, measurements)
     }
     fn append_evidence(
         &self,
