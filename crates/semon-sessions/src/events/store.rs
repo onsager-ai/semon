@@ -629,6 +629,12 @@ pub(super) fn open_scoped(
 /// Restart/read interest can resume durable work without opening Event payloads.
 /// An absent store alone does not ask a qualified-read observer to cold-index.
 pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool> {
+    #[cfg(feature = "postgres")]
+    if let Some(config) = options.source.selected_store() {
+        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
+            return crate::storage::postgres::host::catalog_work_pending(config).map_err(io::Error::other);
+        }
+    }
     let path = super::EventCache::path(&options.cache);
     if !path.exists() {
         return Ok(false);
@@ -926,6 +932,12 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
+    #[cfg(feature = "postgres")]
+    if let Some(config) = options.source.selected_store() {
+        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
+            return crate::storage::postgres::host::complete_relocation(config, options, input, evidence).map_err(io::Error::other);
+        }
+    }
     let journal = host_journal(options).map_err(io::Error::other)?;
     let db = journal.connection().map_err(io::Error::other)?;
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
@@ -1159,6 +1171,12 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
+    #[cfg(feature = "postgres")]
+    if let Some(config) = options.source.selected_store() {
+        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
+            return crate::storage::postgres::host::enqueue_sources(config, options, inputs).map_err(io::Error::other);
+        }
+    }
     let (_, _, journal) = open_admitted(&super::EventCache::path(&options.cache), &options.source)
         .map_err(io::Error::other)?;
     let mut db = journal.connection().map_err(io::Error::other)?;
@@ -1529,8 +1547,12 @@ pub(crate) fn source_write_store(options: &crate::Options) -> io::Result<Box<dyn
             crate::storage::postgres::require_configured(config, pool, control)
                 .map_err(io::Error::other)?;
             return crate::storage::postgres::index_store::open(
-                pool.clone(), config.namespace.clone(), control.clone(),
-            ).map(|(store, _)| store).map_err(io::Error::other);
+                pool.clone(),
+                config.namespace.clone(),
+                control.clone(),
+            )
+            .map(|(store, _)| store)
+            .map_err(io::Error::other);
         }
     }
     let (store, _, _) = open_admitted(&super::EventCache::path(&options.cache), &options.source)

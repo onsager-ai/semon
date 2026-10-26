@@ -497,6 +497,15 @@ pub(crate) trait CatalogPublicationHead {
 }
 
 pub(crate) trait CatalogSnapshot {
+    fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
+        crate::native_evidence::query_runtime_generation(options)
+    }
+    fn facts_authority<'a>(
+        &'a self,
+        path: &std::path::Path,
+    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
+        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(path)?))
+    }
     fn presentation_observations(
         &self,
     ) -> Option<&crate::storage::selected::PresentationObservations> {

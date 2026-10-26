@@ -180,6 +180,60 @@ pub(crate) struct CurrentSources {
     head: Head,
     binding: QueryRuntimeBinding,
 }
+
+struct SnapshotSources<'a, 'b, 'tx> {
+    snapshot: &'a super::catalog_effects::snapshot::Snapshot<'b, 'tx>,
+    head: Head,
+}
+pub(in crate::storage::postgres) fn runtime_in_snapshot(
+    snapshot: &super::catalog_effects::snapshot::Snapshot<'_, '_>,
+    options: &crate::Options,
+) -> Result<String, StorageError> {
+    let Some(path) = &options.facts else {
+        return crate::native_evidence::query_runtime_generation(options).map_err(|_| StorageError::Unavailable);
+    };
+    let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+    let head = load(&mut tx)?.ok_or(StorageError::ScopeChanged)?;
+    if head.path != *path || identity(path)? != head.source
+        || crate::native_evidence::recorded_activity_generation(options).map_err(|_| StorageError::Unavailable)? != head.activity
+        || identity(path)? != head.source {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(head.runtime)
+}
+pub(in crate::storage::postgres) fn in_snapshot<'a, 'b, 'tx>(
+    snapshot: &'a super::catalog_effects::snapshot::Snapshot<'b, 'tx>,
+    path: &Path,
+) -> Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>, StorageError> {
+    let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+    let head = load(&mut tx)?.ok_or(StorageError::ScopeChanged)?;
+    if head.path != path || identity(path)? != head.source {
+        return Err(StorageError::ScopeChanged);
+    }
+    drop(tx);
+    Ok(Box::new(SnapshotSources { snapshot, head }))
+}
+impl crate::facts::source_authority::SourceAuthority for SnapshotSources<'_, '_, '_> {
+    fn validate(&self) -> io::Result<()> {
+        let mut tx = self.snapshot.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        tx.check().map_err(io::Error::other)?;
+        if load(&mut tx).map_err(io::Error::other)?.as_ref() != Some(&self.head)
+            || identity(&self.head.path).map_err(io::Error::other)? != self.head.source {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        Ok(())
+    }
+    fn facts_known(&self) -> bool { self.head.facts_version == FACTS_VERSION }
+    fn selection_known(&self) -> bool { self.facts_known() && self.head.selection_known }
+    fn hostname(&self) -> Option<String> {
+        self.facts_known().then(|| self.head.hostname.clone()).flatten()
+    }
+    fn codex_current(&self, relative: &str) -> io::Result<Option<bool>> {
+        self.validate()?;
+        let mut tx = self.snapshot.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        selected(&mut tx, &self.head, relative).map_err(io::Error::other)
+    }
+}
 impl CurrentSources {
     pub(crate) fn open(
         pool: PgPool,

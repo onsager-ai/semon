@@ -5,6 +5,7 @@
 mod cancel;
 mod catalog_effects;
 mod changes;
+pub(crate) mod host;
 pub(crate) mod current_sources;
 pub(crate) mod index_store;
 mod model_cache;
