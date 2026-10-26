@@ -713,6 +713,8 @@ fn read_inner(
         .optional()
         .map_err(unavailable)?;
     if projection_generation.as_deref() != Some(&catalog_generation) {
+        #[cfg(test)]
+        eprintln!("selected transcript {key}: projection generation mismatch");
         return Ok(None);
     }
     let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
@@ -732,6 +734,8 @@ fn read_inner(
         return Ok(None);
     }
     let Some(saved) = &row.query else {
+        #[cfg(test)]
+        eprintln!("selected transcript {key}: query profile missing");
         return Ok(None);
     };
     // Recorded native IDs are global. Machine suffixes belong only to virtual
@@ -759,6 +763,8 @@ fn read_inner(
         return Err(QueryError::unknown_session(key));
     }
     if saved["transcript_observation"].is_null() {
+        #[cfg(test)]
+        eprintln!("selected transcript {key}: transcript observation missing");
         return Ok(None);
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
@@ -773,6 +779,8 @@ fn read_inner(
     )
     .map_err(unavailable)?
     {
+        #[cfg(test)]
+        eprintln!("selected transcript {key}: runtime observation mismatch");
         return Ok(None);
     }
     let observation: QueryObservation =
@@ -786,6 +794,8 @@ fn read_inner(
         "SELECT generation,version,total,source_generation FROM main.{headers} WHERE namespace=semon_namespace() AND session_key=?1"
     ), [key], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(unavailable)?;
     let Some((slot_generation, version, total, source_generation)) = header else {
+        #[cfg(test)]
+        eprintln!("selected transcript {key}: slot header missing");
         return Ok(None);
     };
     let total = usize::try_from(total).map_err(unavailable)?;

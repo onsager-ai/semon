@@ -122,6 +122,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         ]
     })).map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent191.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related191-spawn"}).to_string()).unwrap();
+    // A real SendMessage result and peer receipt exercise the matched-sender
+    // selector, rather than only proving that an absent receipt stays absent.
+    for line in [
+        serde_json::json!({"type":"assistant","sessionId":"one","uuid":"receipt203-send","parentUuid":"related191-agent-result","timestamp":"2026-10-01T00:00:04Z","message":{"id":"receipt203-send","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":"receipt203-call","name":"SendMessage","input":{"to":"related154","message":"sanitized matched receipt203"}}]}}),
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"receipt203-result","parentUuid":"receipt203-send","timestamp":"2026-10-01T00:00:04Z","toolUseResult":{"success":true,"msg_id":"receipt203-message"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"receipt203-call","content":"sent","is_error":false}]}}),
+    ] {
+        writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{line}").unwrap();
+    }
+    writeln!(fs::OpenOptions::new().append(true).open(&claude_agent).unwrap(), "{}",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"receipt203-peer","parentUuid":"related-answer","timestamp":"2026-10-01T00:00:05Z","origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/203.sock","name":"sanitized sender203","msg_id":"receipt203-message","body":"sanitized matched receipt203"},"message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/203.sock\" from-name=\"sanitized sender203\">sanitized matched receipt203</cross-session-message>"}})).unwrap();
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
         serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized name175"})).unwrap();
@@ -521,6 +531,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .any(|id| id == "one")
             );
             assert!(selected.location.is_some());
+            let received = pg
+                .semantic_select(
+                    batch.epoch,
+                    &Selector::ClaudeReceipt { id: "receipt203-message".into() },
+                )
+                .unwrap();
+            assert_eq!(received.count, 1);
+            assert_eq!(
+                received.location.unwrap().source.path,
+                std::path::PathBuf::from("projects/project/one/subagents/agent-related154.jsonl")
+            );
             assert_eq!(
                 pg.semantic_select(
                     batch.epoch,
