@@ -673,11 +673,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         })
         .unwrap();
     config.create_native_store().unwrap();
+    let mut options = options;
+    options.source = options.source.with_store(config.clone()).unwrap();
     assert_eq!(
         config.create_native_store().err(),
         Some(StorageError::Conflict)
     );
-    let mut pg = EventCache::open_configured(&config).unwrap();
+    let mut pg = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     for (at, input) in inputs.iter().enumerate() {
         pg.ingest(
             &format!("{:064x}", at + 1),
@@ -1394,13 +1396,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let io_before = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
     let hash_before = crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
-    let writer = crate::SessionSourceWrite::begin_with_store(
+    let writer = crate::SessionSourceWrite::begin(
         &options,
         &inputs[0],
         Some("0123456789abcdef0123456789abcdef"),
         raw[0].len() as u64,
-        raw_store(),
-        None,
     )
     .unwrap();
     let raw_intent = writer.intent();
@@ -1738,7 +1738,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(
         current["total"].as_u64(),
-        Some(all_total - 1),
+        withdrawal_oracle["total"].as_u64(),
         "PG ids={:?}; SQLite withdrawal total={} ids={:?}; owner keys={:?}",
         current["sessions"]
             .as_array()

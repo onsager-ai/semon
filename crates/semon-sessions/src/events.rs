@@ -1885,6 +1885,9 @@ impl EventCache {
         v1_cache: &Path,
         source: &crate::storage::HostSource,
     ) -> Result<Self, String> {
+        if let Some(config) = source.selected_store() {
+            return Self::open_configured(config).map_err(|error| error.to_string());
+        }
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         let path = Self::path(v1_cache);
@@ -1919,6 +1922,9 @@ impl EventCache {
         v1_cache: &Path,
         source: &crate::storage::HostSource,
     ) -> Result<Self, String> {
+        if let Some(config) = source.selected_store() {
+            return Self::open_configured(config).map_err(|error| error.to_string());
+        }
         let (store, loaded, journal) = store::open_scoped(&Self::path(v1_cache), source)?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);

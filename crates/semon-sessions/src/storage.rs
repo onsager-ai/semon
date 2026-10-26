@@ -44,6 +44,9 @@ pub(crate) fn local_query_catalog(
     options: &crate::Options,
     _namespace: LogicalSourceNamespace,
 ) -> Result<Box<dyn query::QueryCatalogStore>, StorageError> {
+    if let Some(config) = options.source.selected_store() {
+        return configured_query_catalog(options, config.clone());
+    }
     Ok(Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
         binding: local_reader_binding(options)?,
@@ -113,6 +116,9 @@ pub(crate) fn local_navigation_binding(
 }
 
 fn local_reader_binding(options: &crate::Options) -> Result<NativeReaderBinding, StorageError> {
+    if let Some(config) = options.source.selected_store() {
+        return Ok(NativeReaderBinding::Admitted(config.clone()));
+    }
     let config = options.source.config(&options.cache)?;
     Ok(NativeReaderBinding::Semantic(
         crate::events::store::configured::NativeOwnership::restore(&config)?,

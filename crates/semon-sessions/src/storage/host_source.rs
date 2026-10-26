@@ -11,6 +11,10 @@ use std::{
 pub struct HostSource {
     namespace: String,
     stream_epoch: String,
+    /// Physical placement is supplied by the embedding host, never serialized
+    /// with the portable logical Source identity.
+    #[serde(skip)]
+    store: Option<StoreConfig>,
 }
 
 impl HostSource {
@@ -25,6 +29,7 @@ impl HostSource {
         Ok(Self {
             namespace: namespace.as_str().to_owned(),
             stream_epoch,
+            store: None,
         })
     }
 
@@ -101,9 +106,29 @@ impl HostSource {
     }
 
     pub(crate) fn config(&self, cache: &Path) -> Result<StoreConfig, StorageError> {
+        if let Some(config) = &self.store {
+            return Ok(config.clone());
+        }
         self.store_config(StoreBackend::Sqlite {
             database: super::local_database(cache),
         })
+    }
+
+    /// Bind every ordinary Options consumer to the host-selected store. The
+    /// logical Source and epoch must agree; errors never select another backend.
+    pub fn with_store(mut self, config: StoreConfig) -> Result<Self, StorageError> {
+        if self.namespace()? != config.namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
+        if config.expected_stream_epoch.as_deref() != Some(self.stream_epoch.as_str()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        self.store = Some(config);
+        Ok(self)
+    }
+
+    pub(crate) fn selected_store(&self) -> Option<&StoreConfig> {
+        self.store.as_ref()
     }
 
     /// Bind this host identity to independently authorized physical resources.

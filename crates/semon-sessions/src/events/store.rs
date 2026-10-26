@@ -587,10 +587,8 @@ fn open_admitted(
     path: &Path,
     source: &crate::storage::HostSource,
 ) -> Result<Admitted, crate::storage::StorageError> {
-    let mut config = source.config(path)?;
-    config.backend = crate::storage::StoreBackend::Sqlite {
-        database: path.to_owned(),
-    };
+    let config = source.config(path)?;
+    let path = config.backend.sqlite_database()?.as_path();
     if !path
         .try_exists()
         .map_err(|_| crate::storage::StorageError::Unavailable)?
@@ -1525,6 +1523,16 @@ pub(crate) fn resumed_runtime_native(
 }
 
 pub(crate) fn source_write_store(options: &crate::Options) -> io::Result<Box<dyn IndexStore>> {
+    #[cfg(feature = "postgres")]
+    if let Some(config) = options.source.selected_store() {
+        if let crate::storage::StoreBackend::Postgres { pool, control } = &config.backend {
+            crate::storage::postgres::require_configured(config, pool, control)
+                .map_err(io::Error::other)?;
+            return crate::storage::postgres::index_store::open(
+                pool.clone(), config.namespace.clone(), control.clone(),
+            ).map(|(store, _)| store).map_err(io::Error::other);
+        }
+    }
     let (store, _, _) = open_admitted(&super::EventCache::path(&options.cache), &options.source)
         .map_err(io::Error::other)?;
     Ok(store)

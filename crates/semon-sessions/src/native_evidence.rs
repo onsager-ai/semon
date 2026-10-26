@@ -70,7 +70,9 @@ impl SessionSources {
                 if options.source.namespace()? != config.namespace {
                     return Err(crate::storage::StorageError::NamespaceMismatch);
                 }
-                Ok((key, NativeEvidence::with_store(options, Some(config))))
+                let mut options = options;
+                options.source = options.source.with_store(config)?;
+                Ok((key, NativeEvidence::new(options)))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::from_evidence(machines))
@@ -258,7 +260,8 @@ impl SessionSources {
 impl NativeEvidence {
     /// Construction is lazy: no source, cache or refresh worker is opened.
     pub(crate) fn new(options: Options) -> Arc<Self> {
-        Self::with_store(options, None)
+        let config = options.source.selected_store().cloned();
+        Self::with_store(options, config)
     }
 
     fn with_store(
