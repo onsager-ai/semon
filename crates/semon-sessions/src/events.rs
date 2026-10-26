@@ -1824,9 +1824,8 @@ impl EventCache {
         path
     }
 
-    /// Opens the index beside `v1_cache` and reads all of it. When the
-    /// store can't be opened, the index lives in memory for this run, and
-    /// that is said once.
+    /// Opens the durable index beside `v1_cache`. An unavailable or refused
+    /// store is an error; admission failures must never become an empty cache.
     pub(crate) fn open(v1_cache: &Path) -> Result<Self, String> {
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
@@ -1839,14 +1838,7 @@ impl EventCache {
                 cache.observation_path = Some(path.clone());
                 cache
             }
-            Err(store::Unopened::Unsupported(reason)) => return Err(reason),
-            Err(error) => {
-                warn_unavailable(&path.display().to_string(), &error);
-                Self {
-                    reopen_at: Some(Instant::now() + REOPEN_EVERY),
-                    ..Self::default()
-                }
-            }
+            Err(error) => return Err(error.to_string()),
         };
         cache.v1_cache = Some(v1_cache.to_owned());
         cache
