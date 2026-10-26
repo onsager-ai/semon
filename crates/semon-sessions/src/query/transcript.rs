@@ -151,10 +151,14 @@ fn render_edge(
                 .as_str()
                 .ok_or_else(|| unavailable("Handoff source unavailable"))?,
         );
-        if !context
-            .iter()
-            .flat_map(|row| &row.sources)
-            .any(|source| source.path == path)
+        let expected: crate::model::summary::CatalogSource =
+            serde_json::from_value(recipe["source"].clone())
+                .map_err(|_| unavailable("Handoff source generation unavailable"))?;
+        if expected.path != path
+            || !context
+                .iter()
+                .flat_map(|row| &row.sources)
+                .any(|source| *source == expected)
         {
             return Err(unavailable("Handoff source is outside qualified context"));
         }
