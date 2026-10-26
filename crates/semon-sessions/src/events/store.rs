@@ -7455,20 +7455,23 @@ mod tests {
     fn scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history() {
         let root = scratch("scoped-runs");
         let path = root.join("index.sqlite3");
-        let (mut store, _) = SqliteStore::attempt(&path)
-            .map_err(|error| error.to_string())
-            .unwrap();
+        let source = crate::Options::default().source;
+        let (mut store, _) = open_scoped(&path, &source).unwrap();
+        let config = source.config(&path).unwrap();
+        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
         let mut old = run();
         old.last_session_id = "selected".into();
         let mut newer = old.clone();
         newer.last_start_time += 1;
         newer.last_cost = Some(2.5);
         store
-            .write_runs(&[old.clone(), newer.clone()], &stamp())
+            .save_runs(&[old.clone(), newer.clone()], &stamp())
             .unwrap();
         {
-            let transaction = store.connection.transaction().unwrap();
-            let mut statement = transaction.prepare(PUT_RUN).unwrap();
+            let mut db = configured::connection(&config).unwrap();
+            let transaction = db.transaction().unwrap();
+            capability.journal().validate(&transaction).unwrap();
+            let mut statement = transaction.prepare(PUT_RUN_SCOPED).unwrap();
             for n in 0..20000 {
                 let mut unrelated = run();
                 unrelated.last_session_id = format!("unrelated-{n}");
@@ -7478,7 +7481,7 @@ mod tests {
             transaction.commit().unwrap();
         }
         drop(store);
-        let (mut store, loaded) = open_scoped(&path, &crate::Options::default().source).unwrap();
+        let (mut store, loaded) = open_scoped(&path, &source).unwrap();
         assert!(loaded.files.is_empty());
         assert!(loaded.reported_runs.is_empty());
         assert_eq!(loaded.stamp, Some(stamp()));
