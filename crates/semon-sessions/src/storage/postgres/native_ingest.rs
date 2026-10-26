@@ -35,7 +35,6 @@ fn request(
     id: &str,
 ) -> Result<[u8; 32], StorageError> {
     if path.is_empty()
-        || path.len() > 4096
         || id.len() != 64
         || !id.bytes().all(|b| b.is_ascii_hexdigit())
         || !matches!(harness, "claude" | "codex" | "copilot")
@@ -79,8 +78,9 @@ pub(super) fn begin(
         } else {
             let key=format!("native_event_intent:{id}");
             let value=serde_json::to_vec(&intent).map_err(|_|StorageError::Unavailable)?;
-            let changed=tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",&[&namespace.as_str().as_bytes(),&key.as_bytes(),&value]).map_err(sqlstate::error)?;
-            if changed!=1 { return Err(StorageError::Conflict); }
+            // qualify() holds SourceState through COMMIT, so the exact prior
+            // intent check above and this collision-checked write are atomic.
+            super::native_keys::put_meta(tx,key.as_bytes(),&value)?;
         }
         Ok(intent)
     })
@@ -187,15 +187,7 @@ pub(super) fn commit(
         if stored_ledger!=*ledger { return Err(StorageError::ScopeChanged); }
         let pages=super::native_pages::current(tx,path,ledger)?;
         pages.launch(tx)?;
-        // Qualify actual durable auxiliary and Usage rows, including the
-        // writers' size refusals, rather than treating input presence as proof.
-        let (_, restored)=native_reader::file(tx,path)?.ok_or(StorageError::ScopeChanged)?;
-        if (intent.harness!="copilot" && restored.marker_index.is_none())
-            || (intent.harness=="codex" && restored.codex_header.is_none())
-            || (index.claude_sidecar.is_some() && restored.claude_sidecar.is_none())
-            || (index.native_usage_observations.is_some() && restored.native_usage_observations.is_none()) {
-            return Err(StorageError::ScopeChanged);
-        }
+        native_reader::qualify_completion(tx,path,ledger,index)?;
         if index.tree_summary.is_some() {
             let exact:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 AND h.ledger=$3 AND g.receipt=$3 AND g.version=3 AND g.complete AND NOT g.work_pending)",&[&namespace.as_str().as_bytes(),&path.as_bytes(),&header_ledger(ledger).as_bytes()]).map_err(sqlstate::error)?.get(0);
             if !exact { return Err(StorageError::ScopeChanged); }

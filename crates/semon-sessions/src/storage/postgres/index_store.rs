@@ -60,6 +60,18 @@ pub(crate) fn open(
 fn err(e: StorageError) -> StoreError {
     StoreError::Configured(e)
 }
+fn read_error(error: std::io::Error) -> StoreError {
+    let kind = error.kind();
+    let storage = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<StorageError>())
+        .copied()
+        .unwrap_or(match kind {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => StorageError::Busy,
+            _ => StorageError::Unavailable,
+        });
+    err(storage)
+}
 fn pending<T>() -> Result<T, StoreError> {
     Err(err(StorageError::NamespaceUpgradePending))
 }
@@ -77,7 +89,7 @@ impl NativeIndex {
             ledger,
             self.control.clone(),
         )
-        .map_err(|_| err(StorageError::ScopeChanged))
+        .map_err(read_error)
     }
 }
 
@@ -299,7 +311,12 @@ impl IndexStore for NativeIndex {
         .map_err(err)
     }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
-        pending()
+        self.pool.transaction(
+            &self.namespace,
+            TxnKind::ReadSnapshot,
+            &self.control,
+            native_reader::file_ledgers,
+        ).map_err(err)
     }
     fn remove_files(&mut self, _: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
         pending()
@@ -387,5 +404,18 @@ impl IndexStore for NativeIndex {
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
         pending()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_native126_tree_read_preserves_typed_storage_errors() {
+        for expected in [StorageError::Busy, StorageError::Unavailable, StorageError::ScopeChanged] {
+            assert!(matches!(read_error(std::io::Error::other(expected)), StoreError::Configured(actual) if actual == expected));
+        }
+        assert!(matches!(read_error(std::io::ErrorKind::WouldBlock.into()), StoreError::Configured(StorageError::Busy)));
     }
 }

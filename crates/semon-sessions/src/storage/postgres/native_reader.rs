@@ -146,7 +146,7 @@ pub(super) fn ledger(
         tx,
         "files",
         LEDGER,
-        "namespace_digest=sha256($1::bytea) AND namespace=$1 AND path=$2",
+        "namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)",
         &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()],
     )?;
     if found.len() > 1 {
@@ -353,6 +353,81 @@ fn metadata<T: serde::de::DeserializeOwned>(
     super::tree_writer::metadata(tx, key.as_bytes())?
         .map(|s| serde_json::from_str(&s).map_err(|_| StorageError::ScopeChanged))
         .transpose()
+}
+
+/// Qualify the exact small family authorities written by the bundle without
+/// restoring all Event/Usage history just to issue an operation receipt.
+/// Core/Usage/Tree row effects still run in the caller's same transaction.
+pub(super) fn qualify_completion(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &crate::events::FileIndex,
+) -> Result<(), StorageError> {
+    use crate::events::native_aux;
+    let header = native_aux::codex_header(ledger, index.codex_header.as_ref())
+        .map_err(|_| StorageError::Unavailable)?;
+    let sidecar = native_aux::claude_sidecar(ledger, index.claude_sidecar.as_ref())
+        .map_err(|_| StorageError::Unavailable)?;
+    let marker = native_aux::parent_marker(ledger, index.marker_index.as_ref())
+        .map_err(|_| StorageError::Unavailable)?;
+    if (index.codex_header.is_some() && header.is_none())
+        || (index.claude_sidecar.is_some() && sidecar.is_none())
+        || (index.marker_index.is_some() && marker.is_none())
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    for (family, expected, check) in [
+        ("native_codex_header", header, true),
+        ("native_claude_sidecar", sidecar, index.claude_sidecar.is_some()
+            || crate::native_sidecar::agent_path(std::path::Path::new(path))),
+        ("native_parent_marker", marker, true),
+    ] {
+        if !check {
+            continue;
+        }
+        tx.check()?;
+        let key = format!("{family}:{path}");
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT value=$3 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND semon_pg_native_key_matches(key,key_digest,$2)", &[&ns, &key.as_bytes(), &expected.as_ref().map(|s| s.as_bytes())]).map_err(sqlstate::error)?;
+        match (expected, rows.as_slice()) {
+            (None, []) => {}
+            (Some(_), [row]) if row.get::<_, bool>(0) => {}
+            _ => return Err(StorageError::ScopeChanged),
+        }
+    }
+    let ns = tx.namespace.as_str().as_bytes();
+    let receipt = crate::events::store::header_ledger(ledger);
+    let source = tx.driver.query("SELECT s.receipt=$3 AND s.parser_version=$4 AND s.usage_ready=$5 FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND s.namespace=$1 AND c.source_path=$2 AND s.source_path=$2", &[&ns, &path.as_bytes(), &receipt.as_bytes(), &i64::from(crate::events::CACHE_VERSION), &index.native_usage_observations.is_some()]).map_err(sqlstate::error)?;
+    if source.len() != 1 || !source[0].get::<_, bool>(0) {
+        return Err(StorageError::ScopeChanged);
+    }
+    tx.check()
+}
+
+/// Metadata-only recovery enumeration. Each SQL/decode page is at most 64
+/// files; Event, Usage, Tree and proof history never enters this operation.
+pub(super) fn file_ledgers(
+    tx: &mut PgTxn<'_>,
+) -> Result<Vec<(String, Option<Ledger>)>, StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let mut after = 0i64;
+    let mut result = Vec::new();
+    loop {
+        let page = rows(tx, "files", &format!("{LEDGER},path"),
+            "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id IN (SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id>$2 ORDER BY file_id LIMIT 64) ORDER BY file_id", &[&ns, &after])?;
+        if page.is_empty() {
+            return Ok(result);
+        }
+        for row in page {
+            let (id, ledger) = decode::ledger(&row).map_err(bad)?;
+            if id <= after {
+                return Err(StorageError::ScopeChanged);
+            }
+            after = id;
+            result.push((row.get::<String>(9).map_err(bad)?, Some(ledger)));
+        }
+    }
 }
 
 pub(super) fn tree_parts(

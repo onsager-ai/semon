@@ -1968,12 +1968,11 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        let path = self
-            .observation_path
-            .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&path, "recovery");
+        // A database path is an optional SQLite timing coordinate, never the
+        // identity or admission requirement of a logical Source journal.
+        let _probe = self.observation_path.as_deref().map(|path| {
+            crate::native_timing::DiscoveryProbe::new(path, "recovery")
+        });
         // A failed/unknown ACK retains the exact identity before any new capture.
         if self.reconciled_recovery.is_none()
             && (self.pending_source_operation.is_some() || self.deferred_source_operations)
@@ -2019,12 +2018,10 @@ impl EventCache {
         inputs: &[crate::Input],
         complete: bool,
     ) -> io::Result<()> {
-        let observation_path = self
-            .observation_path
-            .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&observation_path, "publication");
+        let observation_path = self.observation_path.clone();
+        let _probe = observation_path.as_deref().map(|path| {
+            crate::native_timing::DiscoveryProbe::new(path, "publication")
+        });
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let paths = inputs
@@ -2056,9 +2053,9 @@ impl EventCache {
             }
         };
         measurements.record("source_journal_inclusive", started, paths.len());
-        if timing {
+        if timing && let Some(observation_path) = observation_path.as_deref() {
             measurements.emit(
-                &crate::native_timing::id(&observation_path),
+                &crate::native_timing::id(observation_path),
                 "discovery_publication_work",
             );
         }
