@@ -6315,7 +6315,8 @@ fn native_query_rewrites_refuse_selected_bodies_and_stale_catalog_publication() 
                 )],
             );
             home.build_query();
-            let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
             let generation = cache.session_catalog_generation();
             let mutation: Box<dyn FnOnce()> = Box::new(move || {
                 let before = fs::metadata(&path).unwrap();
@@ -10067,7 +10068,8 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
             assistant("root", ts(0, 1), vec![text("new answer")]),
         ],
     );
-    let mut root_cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let mut root_cache =
+        EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let prepared = prepare_sources(&home.options, &mut root_cache, &[input("root")], NOW).unwrap();
     let before = read_catalog(&home);
     home.top(
@@ -10077,7 +10079,8 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
             assistant("other", ts(0, 2), vec![text("other answer")]),
         ],
     );
-    let mut other_cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let mut other_cache =
+        EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let other = prepare_sources(&home.options, &mut other_cache, &[input("other")], NOW).unwrap();
     assert_eq!(
         root_cache.publish_closed_catalog(&prepared).unwrap(),

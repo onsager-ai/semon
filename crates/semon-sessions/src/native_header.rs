@@ -274,7 +274,8 @@ mod tests {
         let home = Home::new(&format!("{first}\n{rest}"));
         let original = fs::read(&home.path).unwrap();
         let expected = home.query();
-        let mut cache = crate::events::EventCache::open(&home.options.cache, &home.options.source).unwrap();
+        let mut cache =
+            crate::events::EventCache::open(&home.options.cache, &home.options.source).unwrap();
         let index = crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap();
         let metadata =
             serde_json::to_value(&index.codex_header.as_ref().unwrap().metadata).unwrap();
@@ -307,7 +308,8 @@ mod tests {
             let before = fs::read_to_string(&path).unwrap();
             fs::write(path, before.replace("\"id\":\"run\"", "\"id\":\"new\"")).unwrap();
         });
-        let mut cache = crate::events::EventCache::open(&home.options.cache, &home.options.source).unwrap();
+        let mut cache =
+            crate::events::EventCache::open(&home.options.cache, &home.options.source).unwrap();
         let index = crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap();
         assert_eq!(
             index.codex_header.as_ref().unwrap().id.as_deref(),

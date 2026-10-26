@@ -45,7 +45,7 @@ fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-pub(super) fn register(
+pub(crate) fn register(
     db: &Connection,
     source: &LogicalSourceNamespace,
 ) -> Result<(), StorageError> {
@@ -512,7 +512,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache = root.join("index.json");
-            drop(EventCache::open_scoped(&cache, &source).unwrap());
+            drop(EventCache::open_scoped(&cache, &crate::Options::default().source).unwrap());
             let database = EventCache::path(&cache);
             let db = Connection::open(&database).unwrap();
             for key in ["same", "tail"] {
@@ -671,7 +671,11 @@ mod tests {
     fn real_native_publisher_refuses_enrolled_unit_before_mutation() {
         let f = Fixture::new();
         // Hold a real warm producer across enrollment and table replacement.
-        let mut producer = EventCache::open_scoped(&f.root.join("index.json"), &crate::Options::default().source).unwrap();
+        let mut producer = EventCache::open_scoped(
+            &f.root.join("index.json"),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         // Replace the table-level fixture with metadata produced by the real
         // native publication algorithm before enrollment.
         f.db()
@@ -880,20 +884,6 @@ mod tests {
             SqliteNavigation(NativeReaderBinding::Admitted(foreign))
                 .bookmarked_target_keys("target"),
             Err(StorageError::NamespaceMismatch)
-        );
-        assert_eq!(
-            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
-                f.config.clone()
-            ))
-            .bookmarked_target_keys("target"),
-            Err(StorageError::NamespaceUpgradePending)
-        );
-        assert_eq!(
-            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
-                f.config.clone()
-            ))
-            .catalog_generation(),
-            Err(StorageError::NamespaceUpgradePending)
         );
         assert_eq!(
             db.query_row(

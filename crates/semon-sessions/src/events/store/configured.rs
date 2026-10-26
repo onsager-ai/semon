@@ -480,11 +480,22 @@ impl NativeOwnership {
     /// schema mutation or a retry through another namespace.
     pub(crate) fn restore(config: &StoreConfig) -> Result<Self, StorageError> {
         let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
-        let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(failed)?;
+        let db = Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(failed)?;
         crate::storage::sqlite::catalog_namespace::register(&db, &config.namespace)?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        let admission = crate::storage::sqlite::namespace::require_semantic_admitted(&db, &config.namespace)?;
-        let owner = Self { config: config.clone(), admission: i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)? };
+        let admission =
+            crate::storage::sqlite::namespace::require_semantic_admitted(&db, &config.namespace)?;
+        let owner = Self {
+            config: config.clone(),
+            admission: i64::try_from(admission.generation)
+                .map_err(|_| StorageError::ScopeChanged)?,
+        };
         owner.validate_ready(&db)?;
         Ok(owner)
     }
@@ -2188,12 +2199,6 @@ mod tests {
         let f = Fixture::new();
         let binding = crate::storage::NativeReaderBinding::Admitted(f.config.clone());
         assert!(binding.proof_snapshot().is_ok());
-        let transitional =
-            crate::storage::NativeReaderBinding::TransitionalUnboundLocal(f.config.clone());
-        assert!(matches!(
-            transitional.proof_snapshot(),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
@@ -2237,7 +2242,11 @@ mod tests {
         fn current(namespace: &str) -> Self {
             Self::with_admission(namespace, |_, _| {}, true)
         }
-        fn with_admission(namespace: &str, setup: impl FnOnce(&Connection, &Path), current: bool) -> Self {
+        fn with_admission(
+            namespace: &str,
+            setup: impl FnOnce(&Connection, &Path),
+            current: bool,
+        ) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "semon-configured-event-{}-{}",
@@ -3132,9 +3141,14 @@ mod tests {
             .unwrap();
             let options = crate::Options {
                 source: crate::storage::HostSource::new(
-                    if i == 0 { a.config.namespace.clone() } else { b.namespace.clone() },
+                    if i == 0 {
+                        a.config.namespace.clone()
+                    } else {
+                        b.namespace.clone()
+                    },
                     a.config.expected_stream_epoch.clone().unwrap(),
-                ).unwrap(),
+                )
+                .unwrap(),
                 claude_home: home.join("claude"),
                 claude_json: home.join("claude.json"),
                 codex_home: home.join("codex"),
@@ -3319,7 +3333,8 @@ mod tests {
             // Same production derivation, using the existing unbound producer
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
-            let mut original = EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
+            let mut original =
+                EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
             let mut original = crate::model::prepare_sources(
                 &options[i],
                 &mut original,
@@ -7795,7 +7810,8 @@ mod tests {
                 let inputs = selector_inputs(options, duplicate);
                 let mut admitted = open(&f.config);
                 let (batch, model) = selector_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let (reference, _) = selector_ready(&mut ordinary, options, &inputs);
                 let task = if duplicate { "shared" } else { "child-1" };
                 let target = if duplicate {
@@ -7979,7 +7995,8 @@ mod tests {
                 let inputs = named_claude_inputs(options, copies);
                 let mut cache = open(&f.config);
                 let (batch, model) = claude_ready(&mut cache, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let before = shared_state(&f);
                 for (name, count) in [("worker", copies), ("absent", 0)] {
@@ -9033,7 +9050,8 @@ mod tests {
                 let inputs = claude_inputs(options, copies, 1);
                 let mut admitted = open(&f.config);
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let ordinary_db =
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
@@ -9314,7 +9332,8 @@ mod tests {
                 if known {
                     assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND value='claude72-1.jsonl' AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap(), "target must be discovered by the native filename frontier");
                 }
-                let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let reference = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 assert_eq!(

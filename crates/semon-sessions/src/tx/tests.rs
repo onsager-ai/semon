@@ -3486,7 +3486,7 @@ fn print_sample_tx() {
     let root = PathBuf::from(env::var("SEMON_SAMPLE_HOME").unwrap());
     let now: i64 = env::var("SEMON_SAMPLE_NOW").unwrap().parse().unwrap();
     let options = Options {
-            source: crate::Options::default().source,
+        source: crate::Options::default().source,
         claude_home: root.join("claude"),
         claude_json: root.join(".claude.json"),
         codex_home: root.join("codex"),

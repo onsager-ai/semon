@@ -572,7 +572,9 @@ mod tests {
         )
         .unwrap();
         let parsed = crate::events::PARSED.with(std::cell::Cell::get);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         let error =
             crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);

@@ -74,8 +74,8 @@ pub fn advance_index_only(
     path: &Path,
     harness: &str,
 ) -> std::io::Result<()> {
-    let mut cache =
-        crate::events::EventCache::open_scoped(&options.cache, &options.source).map_err(std::io::Error::other)?;
+    let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source)
+        .map_err(std::io::Error::other)?;
     crate::events::scan_file(path, harness, &mut cache, &mut false)?;
     Ok(())
 }
