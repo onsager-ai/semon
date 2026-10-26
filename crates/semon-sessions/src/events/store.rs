@@ -10027,7 +10027,7 @@ mod tests {
             ),
             (
                 "foreign",
-                "DROP TABLE events; DROP TABLE files",
+                "ALTER TABLE events RENAME TO foreign_events; ALTER TABLE files RENAME TO foreign_files",
                 "malformed schema",
             ),
             (
@@ -10145,7 +10145,10 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            store.connection.execute_batch(change).unwrap();
+            store
+                .connection
+                .execute_batch(change)
+                .unwrap_or_else(|error| panic!("{name} fixture corruption: {error}"));
             let original_state = snapshot(&store.connection);
             // Finish fixture writes before snapshotting the original file.
             let checkpoint: (i64, i64, i64) = store
