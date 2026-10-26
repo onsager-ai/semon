@@ -1698,7 +1698,12 @@ mod tests {
             "17"
         );
         assert_eq!(
-            db.query_row("SELECT value FROM main.meta WHERE namespace='a' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(),
+            db.query_row(
+                "SELECT value FROM main.meta WHERE namespace='a' AND key='catalog_generation'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
             "a"
         );
         assert_eq!(b_state(), before);
