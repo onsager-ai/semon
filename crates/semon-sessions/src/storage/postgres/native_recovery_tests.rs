@@ -65,8 +65,8 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let mut prepared_rows = Vec::new();
     for batch in inputs.chunks(64) {
-        let prepared = crate::model::prepare_sources(&options, &mut sqlite, batch, 1790812802000)
-            .unwrap();
+        let prepared =
+            crate::model::prepare_sources(&options, &mut sqlite, batch, 1790812802000).unwrap();
         let (outcome, generation) = sqlite.publish_partial_catalog_fenced(&prepared).unwrap();
         assert_eq!(outcome, crate::events::Outcome::Written);
         assert!(generation.is_some());

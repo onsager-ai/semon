@@ -67,7 +67,10 @@ fn pg_native_usage_shared_parser_generation_dimensions_replay_restart_and_rollba
     let oracle_cache = std::env::temp_dir().join(format!(
         "pg-usage193-0-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let oracle_source = crate::storage::HostSource::new(ns("usage193-0"), "a".repeat(64)).unwrap();
     drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());
@@ -331,7 +334,10 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
     let oracle_cache = std::env::temp_dir().join(format!(
         "pg-usage193-1-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let oracle_source = crate::storage::HostSource::new(ns("usage193-1"), "a".repeat(64)).unwrap();
     drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());
@@ -486,7 +492,10 @@ fn pg_native_usage_real_parser_unavailable_model_and_unsigned_counters() {
     let oracle_cache = std::env::temp_dir().join(format!(
         "pg-usage193-2-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let oracle_source = crate::storage::HostSource::new(ns("usage193-2"), "a".repeat(64)).unwrap();
     drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());

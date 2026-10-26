@@ -452,8 +452,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let cache_path = root.join("index.json");
-        let source = crate::storage::HostSource::new(ns("reported-facts-oracle"), "f".repeat(64))
-            .unwrap();
+        let source =
+            crate::storage::HostSource::new(ns("reported-facts-oracle"), "f".repeat(64)).unwrap();
         let input = root.join(".claude.json");
         // Three real producer observations: A, a new run B, then C overwrites A.
         // B is absent from C's input and must nevertheless survive with NULL cost.
@@ -481,7 +481,9 @@ mod tests {
         drop(cache);
         let config = source.config(&cache_path).unwrap();
         let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+            .connection()
+            .unwrap();
         let text: String = db
             .query_row(
                 "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='claude_json_stamp'",

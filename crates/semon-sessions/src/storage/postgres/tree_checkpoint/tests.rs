@@ -499,7 +499,9 @@ fn capture_fixture_at(
     oracle.load_shared_usage().unwrap();
     let config = source.config(&cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     // The compact scalar and SQLite's lazy restore omit closed IDs. Capture
     // their persisted dimension oracle before closing SQLite for the PG phase.
@@ -553,7 +555,11 @@ fn capture_fixture_at(
         } else {
             family.into()
         };
-        let mut stmt = sqlite.prepare(&format!("SELECT * FROM {table} WHERE namespace=semon_namespace()")).unwrap();
+        let mut stmt = sqlite
+            .prepare(&format!(
+                "SELECT * FROM {table} WHERE namespace=semon_namespace()"
+            ))
+            .unwrap();
         let names = stmt
             .column_names()
             .into_iter()
@@ -714,9 +720,13 @@ pub(crate) fn install_without_tree(
     install_families(tx, fixture, false)
 }
 pub(crate) fn oracle_witness(data: &Fixture) -> String {
-    let config = fixture_host_source().config(&data.root.join("index.json")).unwrap();
+    let config = fixture_host_source()
+        .config(&data.root.join("index.json"))
+        .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let path = data.path.strip_suffix("\0🦀").unwrap();
     let encoded: String = db
         .query_row(
@@ -1095,7 +1105,9 @@ fn pg_tree_checkpoint_real_copilot_has_no_tree_authority() {
     drop(cache);
     let config = source.config(&cache_path).unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
     drop(sqlite);
     let (pool, _) = fixture(|_| {});
