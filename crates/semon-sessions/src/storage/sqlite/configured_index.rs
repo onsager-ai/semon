@@ -180,7 +180,8 @@ impl IndexStore for ConfiguredIndex {
         native: Option<(&str, &str)>,
         log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        self.native.resolve_catalog_input(path, revision, native, log)
+        self.native
+            .resolve_catalog_input(path, revision, native, log)
     }
     fn relocate_codex(
         &mut self,
@@ -322,21 +323,14 @@ impl IndexStore for ConfiguredIndex {
     }
     fn advance_tree_repair(
         &mut self,
-        _options: &crate::Options,
+        options: &crate::Options,
     ) -> io::Result<(bool, Option<String>)> {
-        Err(io::Error::other(
-            StorageError::NamespaceUpgradePending.to_string(),
-        ))
+        self.native.advance_tree_repair(options)
     }
     fn tree_repair_pending(&self) -> Result<bool, StoreError> {
         self.native.tree_repair_pending()
     }
-    fn queue_tree_repair(
-        &mut self,
-        path: &str,
-        ledger: &Ledger,
-        _harness: &str,
-    ) -> io::Result<()> {
+    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, _harness: &str) -> io::Result<()> {
         self.native.queue_tree_repair(path, ledger)
     }
     fn load_tree(

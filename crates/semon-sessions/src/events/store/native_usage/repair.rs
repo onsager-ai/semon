@@ -240,15 +240,28 @@ struct Checkpoint<'a> {
     projection_id: Option<i64>,
 }
 
+// Repair retains its existing CAS state machine. The admitted writer validates
+// the exact Source/epoch/admission in every transaction, including failure paths.
+fn repair_current(db: &Connection, owner: Option<&configured::NativeOwnership>) -> rusqlite::Result<bool> {
+    match owner {
+        Some(owner) => {
+            owner.validate_ready(db).map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            current_contract(db)
+        }
+        None => current(db),
+    }
+}
+
 // Progress writes are writers too: neither a stale schema nor a superseded
 // repair slice may publish a failure, reset or completion over its successor.
 fn progress(
     connection: &mut Connection,
+    owner: Option<&configured::NativeOwnership>,
     expected: Checkpoint<'_>,
     update: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<()>,
 ) -> rusqlite::Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if !current(&tx)? {
+    if !repair_current(&tx, owner)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let actual: (String, i64, Option<i64>) = tx.query_row(
@@ -267,9 +280,10 @@ fn progress(
 pub(in crate::events::store) fn advance(
     store: &mut SqliteStore,
     options: &crate::Options,
+    owner: Option<&configured::NativeOwnership>,
 ) -> io::Result<(bool, Option<String>)> {
     let sql_error = io::Error::other;
-    if crate::storage::sqlite::namespace::is_bound(&store.connection).map_err(sql_error)? {
+    if !repair_current(&store.connection, owner).map_err(sql_error)? {
         return Err(io::Error::other(
             crate::storage::StorageError::NamespaceUpgradePending,
         ));
@@ -284,6 +298,7 @@ pub(in crate::events::store) fn advance(
     let Some((_, ledger)) = ledger_row(&store.connection, &path).map_err(sql_error)? else {
         progress(
             &mut store.connection,
+            owner,
             Checkpoint {
                 path: &path,
                 receipt: &receipt,
@@ -306,7 +321,7 @@ pub(in crate::events::store) fn advance(
             .map_err(sql_error)?
             .is_some_and(|(current, _)| Some(current) == id)
             && ledger.offset >= cursor;
-        progress(&mut store.connection, Checkpoint {path:&path,receipt:&receipt,cursor,projection_id}, |tx| {
+        progress(&mut store.connection, owner, Checkpoint {path:&path,receipt:&receipt,cursor,projection_id}, |tx| {
             if ledger_row(tx,&path)?.map(|(_,l)|l).as_ref()!=Some(&ledger) {return Err(rusqlite::Error::InvalidQuery);}
             if same_incarnation {
                 tx.execute(sql(tx, "UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE source_path=?1", "UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE namespace=semon_namespace() AND source_path=?1")?,params![path,header_ledger(&ledger)])?;
@@ -320,6 +335,7 @@ pub(in crate::events::store) fn advance(
     if tree_state::ready(&store.connection, &path, &ledger).map_err(sql_error)? {
         progress(
             &mut store.connection,
+            owner,
             Checkpoint {
                 path: &path,
                 receipt: &receipt,
@@ -344,6 +360,7 @@ pub(in crate::events::store) fn advance(
     if input.is_none() {
         progress(
             &mut store.connection,
+            owner,
             Checkpoint {
                 path: &path,
                 receipt: &receipt,
@@ -366,7 +383,7 @@ pub(in crate::events::store) fn advance(
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        if !current(&tx).map_err(sql_error)?
+        if !repair_current(&tx, owner).map_err(sql_error)?
             || ledger_row(&tx, &path)
                 .map_err(sql_error)?
                 .map(|(_, l)| l)
@@ -427,6 +444,7 @@ pub(in crate::events::store) fn advance(
             };
             progress(
                 &mut store.connection,
+                owner,
                 Checkpoint {
                     path: &path,
                     receipt: &receipt,
@@ -449,7 +467,7 @@ pub(in crate::events::store) fn advance(
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
-    if !current(&tx).map_err(sql_error)?
+    if !repair_current(&tx, owner).map_err(sql_error)?
         || ledger_row(&tx, &path)
             .map_err(sql_error)?
             .map(|(_, l)| l)

@@ -1554,14 +1554,22 @@ fn enqueue_native_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite:
     }
     Ok(())
 }
-fn host_journal(options: &crate::Options) -> Result<crate::storage::sqlite::source_journal::SourceJournal, crate::storage::StorageError> {
+fn host_journal(
+    options: &crate::Options,
+) -> Result<crate::storage::sqlite::source_journal::SourceJournal, crate::storage::StorageError> {
     let config = options.source.config(&options.cache)?;
-    Ok(crate::storage::sqlite::source_journal::SourceJournal::owned(
-        configured::NativeOwnership::restore(&config)?,
-    ))
+    Ok(
+        crate::storage::sqlite::source_journal::SourceJournal::owned(
+            configured::NativeOwnership::restore(&config)?,
+        ),
+    )
 }
 
-fn invalidate_bound_catalog_source(tx: &Transaction<'_>, path: &str, reason: &str) -> rusqlite::Result<()> {
+fn invalidate_bound_catalog_source(
+    tx: &Transaction<'_>,
+    path: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
     let namespace: String = tx.query_row("SELECT semon_namespace()", [], |r| r.get(0))?;
     crate::storage::sqlite::source_journal::invalidate(tx, Some(&namespace), path, reason)
 }
@@ -1666,7 +1674,9 @@ pub(crate) fn enqueue_facts(
         if before.repos.get(cwd) != after.repos.get(cwd) {
             let paths = {
                 let mut statement = tx
-                    .prepare("SELECT path FROM main.files WHERE namespace=semon_namespace() AND cwd=?1")
+                    .prepare(
+                        "SELECT path FROM main.files WHERE namespace=semon_namespace() AND cwd=?1",
+                    )
                     .map_err(io::Error::other)?;
                 statement
                     .query_map([cwd], |row| row.get::<_, String>(0))
@@ -2862,7 +2872,7 @@ impl IndexStore for SqliteStore {
         &mut self,
         options: &crate::Options,
     ) -> io::Result<(bool, Option<String>)> {
-        let (pending, changed) = native_usage::advance(self, options)?;
+        let (pending, changed) = native_usage::advance(self, options, None)?;
         let cleanup = tree_state::cleanup_work(&mut self.connection).map_err(io::Error::other)?;
         Ok((pending || cleanup, changed))
     }
@@ -2875,7 +2885,10 @@ impl IndexStore for SqliteStore {
     }
 
     fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, _harness: &str) -> io::Result<()> {
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(io::Error::other)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
         if !current(&tx).map_err(io::Error::other)? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
@@ -3020,31 +3033,36 @@ fn invalidate_catalog_source(
 }
 
 fn queue_tree_repair_tx(tx: &Transaction<'_>, path: &str, ledger: &Ledger) -> io::Result<()> {
-    if ledger_row(tx, path).map_err(io::Error::other)?.map(|(_, l)| l).as_ref() != Some(ledger) {
+    if ledger_row(tx, path)
+        .map_err(io::Error::other)?
+        .map(|(_, l)| l)
+        .as_ref()
+        != Some(ledger)
+    {
         return Err(io::ErrorKind::WouldBlock.into());
     }
     let failed: Option<String> = tx
-            .query_row(
-                configured::metadata_sql(
-                    &tx,
-                    "SELECT value FROM meta WHERE key=?1",
-                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
-                )
-                .map_err(io::Error::other)?,
-                [format!("native_tree_failure:{path}")],
-                |r| r.get(0),
+        .query_row(
+            configured::metadata_sql(
+                &tx,
+                "SELECT value FROM meta WHERE key=?1",
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             )
-            .optional()
-            .map_err(io::Error::other)?;
-        if failed.as_deref() == Some(&header_ledger(ledger))
-            && Stat::of(Path::new(path)).ok().as_ref() == Some(&ledger.stat)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native tree compact metadata exceeds budget",
-            ));
-        }
-        tx.execute(native_usage::repair_sql(&tx,
+            .map_err(io::Error::other)?,
+            [format!("native_tree_failure:{path}")],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(io::Error::other)?;
+    if failed.as_deref() == Some(&header_ledger(ledger))
+        && Stat::of(Path::new(path)).ok().as_ref() == Some(&ledger.stat)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native tree compact metadata exceeds budget",
+        ));
+    }
+    tx.execute(native_usage::repair_sql(&tx,
             "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",
             "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END").map_err(io::Error::other)?,params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
     Ok(())

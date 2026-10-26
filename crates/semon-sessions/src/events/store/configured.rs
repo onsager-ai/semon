@@ -986,6 +986,31 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn advance_tree_repair(&self, options: &crate::Options) -> std::io::Result<(bool, Option<String>)> {
+        let owner = self.owner.as_ref().ok_or_else(|| std::io::Error::other(StorageError::NamespaceUpgradePending))?;
+        if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let connection = connection(&self.config).map_err(std::io::Error::other)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(std::io::Error::other)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        let (pending, changed) = native_usage::advance(&mut store, options, Some(owner))?;
+        let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(std::io::Error::other)?;
+        owner.validate_ready(&tx).map_err(std::io::Error::other)?;
+        let cleanup = tree_state::cleanup_work_tx(&tx).map_err(std::io::Error::other)?;
+        tx.commit().map_err(|_| std::io::Error::other(StorageError::CommitUncertain))?;
+        Ok((pending || cleanup, changed))
+    }
+
     pub(crate) fn resolve_catalog_input(
         &self,
         path: &str,
@@ -994,13 +1019,16 @@ impl Writer {
         log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
         let mut db = connection(&self.config).map_err(StoreError::Configured)?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
         let outcome = super::resolve_catalog_input_tx(&tx, path, revision, native, log)?;
         if outcome != Outcome::Written {
             return Ok(outcome);
         }
-        tx.commit().map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        tx.commit()
+            .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
         Ok(outcome)
     }
 
@@ -1012,10 +1040,13 @@ impl Writer {
 
     pub(crate) fn queue_tree_repair(&self, path: &str, ledger: &Ledger) -> std::io::Result<()> {
         let mut db = connection(&self.config).map_err(std::io::Error::other)?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(std::io::Error::other)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
         self.validate(&tx).map_err(std::io::Error::other)?;
         super::queue_tree_repair_tx(&tx, path, ledger)?;
-        tx.commit().map_err(|_| std::io::Error::other(StorageError::CommitUncertain))
+        tx.commit()
+            .map_err(|_| std::io::Error::other(StorageError::CommitUncertain))
     }
 
     pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
@@ -3289,17 +3320,61 @@ mod tests {
         }
         let key = f.raw.to_string_lossy().into_owned();
         let expected = restarted.store.as_ref().unwrap().ledger(&key).unwrap();
-        restarted.store.as_mut().unwrap().queue_tree_repair(&key, expected.as_ref().unwrap(), "codex").unwrap();
-        assert!(restarted.store.as_ref().unwrap().tree_repair_pending().unwrap());
-        let repair_sources: Vec<String> = db.prepare("SELECT namespace FROM native_tree_repairs WHERE source_path=?1 ORDER BY namespace").unwrap().query_map([&key], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        restarted
+            .store
+            .as_mut()
+            .unwrap()
+            .queue_tree_repair(&key, expected.as_ref().unwrap(), "codex")
+            .unwrap();
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .tree_repair_pending()
+                .unwrap()
+        );
+        let repair_sources: Vec<String> = db
+            .prepare(
+                "SELECT namespace FROM native_tree_repairs WHERE source_path=?1 ORDER BY namespace",
+            )
+            .unwrap()
+            .query_map([&key], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
         assert_eq!(repair_sources, ["source-a"]);
-        let revision = restarted.catalog_claims(&[key.clone()]).unwrap()[0].1.unwrap();
+        let revision = restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+            .1
+            .unwrap();
         let foreign_claim = isolated.catalog_claims(&[key.clone()]).unwrap();
-        assert_eq!(restarted.store.as_mut().unwrap().resolve_catalog_input(&key, revision + 1, None, None).unwrap(), Outcome::Conflict);
-        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, Some(revision));
-        assert_eq!(restarted.store.as_mut().unwrap().resolve_catalog_input(&key, revision, None, None).unwrap(), Outcome::Written);
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .resolve_catalog_input(&key, revision + 1, None, None)
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            Some(revision)
+        );
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .resolve_catalog_input(&key, revision, None, None)
+                .unwrap(),
+            Outcome::Written
+        );
         assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, None);
-        assert_eq!(isolated.catalog_claims(&[key.clone()]).unwrap(), foreign_claim);
+        assert_eq!(
+            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            foreign_claim
+        );
         assert_eq!(
             restarted
                 .store
