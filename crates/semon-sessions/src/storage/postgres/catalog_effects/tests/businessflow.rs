@@ -754,9 +754,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 )
                 .unwrap();
             assert_eq!(received.count, 1);
+            // Native locations retain the physical SourceFile path, just as
+            // Location::local requires when checking the consumed witness.
             assert_eq!(
                 received.location.unwrap().source.path,
-                std::path::PathBuf::from("projects/project/one/subagents/agent-related154.jsonl")
+                claude_agent
             );
             assert_eq!(
                 pg.semantic_select(
