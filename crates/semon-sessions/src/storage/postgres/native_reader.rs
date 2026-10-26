@@ -63,117 +63,133 @@ pub(super) fn rows(
         "usage_dimensions" => &["kind", "dimension"],
         _ => return Err(StorageError::InvalidArguments),
     };
-    let predicate = predicate.rsplit_once(" ORDER BY ").map_or(predicate, |(base, _)| base);
+    let predicate = predicate
+        .rsplit_once(" ORDER BY ")
+        .map_or(predicate, |(base, _)| base);
     let mut cursor: Vec<Box<dyn ToSql + Sync>> = Vec::new();
     let mut decoded = Vec::new();
     loop {
-    let mut binds = params.to_vec();
-    binds.extend(cursor.iter().map(|v| &**v as &(dyn ToSql + Sync)));
-    let after = if cursor.is_empty() {
-        String::new()
-    } else {
-        let slots = (1..=keys.len()).map(|i| format!("${}", params.len() + i)).collect::<Vec<_>>().join(",");
-        format!(" AND ({}) > ({slots})", keys.join(","))
-    };
-    let suffix = format!("WHERE {predicate}{after} ORDER BY {}", keys.join(","));
-    let probe = format!("SELECT {sizes}+128 FROM semon_pg_native_{table} {suffix} LIMIT 64");
-    let sizes = tx.driver.query(&probe, &binds).map_err(sqlstate::error)?;
-    if sizes.is_empty() {
-        return Ok(decoded);
-    }
-    let mut total = 0usize;
-    let mut count = 0usize;
-    for row in &sizes {
-        let next = total
-            .checked_add(
-                usize::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?,
-            )
-            .ok_or(StorageError::Busy)?;
-        if next > 1024 * 1024 {
-            break;
-        }
-        total = next;
-        count += 1;
-    }
-    if count == 0 {
-        return Err(StorageError::Busy);
-    }
-    crate::selected_read::charge(count * 128, total).map_err(|_| StorageError::Busy)?;
-    tx.check()?;
-    let raw = tx
-        .driver
-        .query(
-            &format!("SELECT {select} FROM semon_pg_native_{table} {suffix} LIMIT {count}"),
-            &binds,
-        )
-        .map_err(sqlstate::error)?;
-    if raw.len() != count {
-        return Err(StorageError::ScopeChanged);
-    }
-    let last = raw.last().ok_or(StorageError::ScopeChanged)?;
-    let mut next: Vec<Box<dyn ToSql + Sync>> = Vec::new();
-    for key in keys {
-        let at = names.iter().position(|name| name.split(':').next() == Some(*key)).ok_or(StorageError::ScopeChanged)?;
-        if *last.columns()[at].type_() == Type::BYTEA {
-            next.push(Box::new(last.try_get::<_, Vec<u8>>(at).map_err(|_| StorageError::ScopeChanged)?));
+        let mut binds = params.to_vec();
+        binds.extend(cursor.iter().map(|v| &**v as &(dyn ToSql + Sync)));
+        let after = if cursor.is_empty() {
+            String::new()
         } else {
-            next.push(Box::new(last.try_get::<_, i64>(at).map_err(|_| StorageError::ScopeChanged)?));
+            let slots = (1..=keys.len())
+                .map(|i| format!("${}", params.len() + i))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" AND ({}) > ({slots})", keys.join(","))
+        };
+        let suffix = format!("WHERE {predicate}{after} ORDER BY {}", keys.join(","));
+        let probe = format!("SELECT {sizes}+128 FROM semon_pg_native_{table} {suffix} LIMIT 64");
+        let sizes = tx.driver.query(&probe, &binds).map_err(sqlstate::error)?;
+        if sizes.is_empty() {
+            return Ok(decoded);
         }
-    }
-    let page = raw.into_iter()
-        .map(|r| {
-            let mut values = Vec::with_capacity(names.len());
-            for (i, name) in names.iter().enumerate() {
-                let t = r.columns()[i].type_();
-                let v = if name.ends_with(":u") {
-                    r.try_get::<_, Option<String>>(i)
-                        .map_err(|_| StorageError::Unavailable)?
-                        .map(|s| {
-                            s.parse::<u64>()
-                                .map(|v| Value::from(v as i64))
-                                .map_err(|_| StorageError::ScopeChanged)
-                        })
-                        .transpose()?
-                        .unwrap_or(Value::Null)
-                } else if *t == Type::BYTEA {
-                    r.try_get::<_, Option<Vec<u8>>>(i)
-                        .map_err(|_| StorageError::Unavailable)?
-                        .map(|b| {
-                            if name.ends_with(":x") {
-                                serde_json::to_value(b).map_err(|_| StorageError::Unavailable)
-                            } else {
-                                String::from_utf8(b)
-                                    .map(Value::String)
-                                    .map_err(|_| StorageError::ScopeChanged)
-                            }
-                        })
-                        .transpose()?
-                        .unwrap_or(Value::Null)
-                } else if *t == Type::BOOL {
-                    r.try_get::<_, Option<bool>>(i)
-                        .map_err(|_| StorageError::Unavailable)?
-                        .map(Value::Bool)
-                        .unwrap_or(Value::Null)
-                } else if *t == Type::INT2 {
-                    r.try_get::<_, Option<i16>>(i)
-                        .map_err(|_| StorageError::Unavailable)?
-                        .map(Value::from)
-                        .unwrap_or(Value::Null)
-                } else if *t == Type::INT8 {
-                    r.try_get::<_, Option<i64>>(i)
-                        .map_err(|_| StorageError::Unavailable)?
-                        .map(Value::from)
-                        .unwrap_or(Value::Null)
-                } else {
-                    return Err(StorageError::ScopeChanged);
-                };
-                values.push(v);
+        let mut total = 0usize;
+        let mut count = 0usize;
+        for row in &sizes {
+            let next = total
+                .checked_add(
+                    usize::try_from(row.get::<_, i64>(0))
+                        .map_err(|_| StorageError::ScopeChanged)?,
+                )
+                .ok_or(StorageError::Busy)?;
+            if next > 1024 * 1024 {
+                break;
             }
-            Ok(Values(values))
-        })
-        .collect::<Result<Vec<_>, StorageError>>()?;
-    decoded.extend(page);
-    cursor = next;
+            total = next;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(StorageError::Busy);
+        }
+        crate::selected_read::charge(count * 128, total).map_err(|_| StorageError::Busy)?;
+        tx.check()?;
+        let raw = tx
+            .driver
+            .query(
+                &format!("SELECT {select} FROM semon_pg_native_{table} {suffix} LIMIT {count}"),
+                &binds,
+            )
+            .map_err(sqlstate::error)?;
+        if raw.len() != count {
+            return Err(StorageError::ScopeChanged);
+        }
+        let last = raw.last().ok_or(StorageError::ScopeChanged)?;
+        let mut next: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+        for key in keys {
+            let at = names
+                .iter()
+                .position(|name| name.split(':').next() == Some(*key))
+                .ok_or(StorageError::ScopeChanged)?;
+            if *last.columns()[at].type_() == Type::BYTEA {
+                next.push(Box::new(
+                    last.try_get::<_, Vec<u8>>(at)
+                        .map_err(|_| StorageError::ScopeChanged)?,
+                ));
+            } else {
+                next.push(Box::new(
+                    last.try_get::<_, i64>(at)
+                        .map_err(|_| StorageError::ScopeChanged)?,
+                ));
+            }
+        }
+        let page = raw
+            .into_iter()
+            .map(|r| {
+                let mut values = Vec::with_capacity(names.len());
+                for (i, name) in names.iter().enumerate() {
+                    let t = r.columns()[i].type_();
+                    let v = if name.ends_with(":u") {
+                        r.try_get::<_, Option<String>>(i)
+                            .map_err(|_| StorageError::Unavailable)?
+                            .map(|s| {
+                                s.parse::<u64>()
+                                    .map(|v| Value::from(v as i64))
+                                    .map_err(|_| StorageError::ScopeChanged)
+                            })
+                            .transpose()?
+                            .unwrap_or(Value::Null)
+                    } else if *t == Type::BYTEA {
+                        r.try_get::<_, Option<Vec<u8>>>(i)
+                            .map_err(|_| StorageError::Unavailable)?
+                            .map(|b| {
+                                if name.ends_with(":x") {
+                                    serde_json::to_value(b).map_err(|_| StorageError::Unavailable)
+                                } else {
+                                    String::from_utf8(b)
+                                        .map(Value::String)
+                                        .map_err(|_| StorageError::ScopeChanged)
+                                }
+                            })
+                            .transpose()?
+                            .unwrap_or(Value::Null)
+                    } else if *t == Type::BOOL {
+                        r.try_get::<_, Option<bool>>(i)
+                            .map_err(|_| StorageError::Unavailable)?
+                            .map(Value::Bool)
+                            .unwrap_or(Value::Null)
+                    } else if *t == Type::INT2 {
+                        r.try_get::<_, Option<i16>>(i)
+                            .map_err(|_| StorageError::Unavailable)?
+                            .map(Value::from)
+                            .unwrap_or(Value::Null)
+                    } else if *t == Type::INT8 {
+                        r.try_get::<_, Option<i64>>(i)
+                            .map_err(|_| StorageError::Unavailable)?
+                            .map(Value::from)
+                            .unwrap_or(Value::Null)
+                    } else {
+                        return Err(StorageError::ScopeChanged);
+                    };
+                    values.push(v);
+                }
+                Ok(Values(values))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        decoded.extend(page);
+        cursor = next;
     }
 }
 
@@ -418,8 +434,12 @@ pub(super) fn qualify_completion(
     }
     for (family, expected, check) in [
         ("native_codex_header", header, true),
-        ("native_claude_sidecar", sidecar, index.claude_sidecar.is_some()
-            || crate::native_sidecar::agent_path(std::path::Path::new(path))),
+        (
+            "native_claude_sidecar",
+            sidecar,
+            index.claude_sidecar.is_some()
+                || crate::native_sidecar::agent_path(std::path::Path::new(path)),
+        ),
         ("native_parent_marker", marker, true),
     ] {
         if !check {
@@ -453,8 +473,13 @@ pub(super) fn file_ledgers(
     let mut after = 0i64;
     let mut result = Vec::new();
     loop {
-        let page = rows(tx, "files", &format!("{LEDGER},path"),
-            "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id IN (SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id>$2 ORDER BY file_id LIMIT 64) ORDER BY file_id", &[&ns, &after])?;
+        let page = rows(
+            tx,
+            "files",
+            &format!("{LEDGER},path"),
+            "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id IN (SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id>$2 ORDER BY file_id LIMIT 64) ORDER BY file_id",
+            &[&ns, &after],
+        )?;
         if page.is_empty() {
             return Ok(result);
         }
@@ -511,7 +536,11 @@ pub(super) fn tree_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::postgres::{PgCancellation, tests::{fixture, ns}, txn::TxnKind};
+    use crate::storage::postgres::{
+        PgCancellation,
+        tests::{fixture, ns},
+        txn::TxnKind,
+    };
 
     #[test]
     fn pg_native126_selected_family_keysets_across_one_mib() {
@@ -524,13 +553,21 @@ mod tests {
             Ok(())
         }).unwrap();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            let loaded = rows(tx, "signals", "seq,k", "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 ORDER BY seq", &[&tx.namespace.as_str().as_bytes(), &1i64])?;
+            let ns = tx.namespace.as_str().as_bytes().to_vec();
+            let loaded = rows(
+                tx,
+                "signals",
+                "seq,k",
+                "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 ORDER BY seq",
+                &[&ns, &1i64],
+            )?;
             assert_eq!(loaded.len(), 257);
             for (i, row) in loaded.iter().enumerate() {
                 assert_eq!(row.get::<i64>(0).map_err(bad)?, i as i64);
                 assert_eq!(row.get::<String>(1).map_err(bad)?, "x".repeat(8192));
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }
