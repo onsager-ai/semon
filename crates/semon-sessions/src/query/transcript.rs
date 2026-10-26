@@ -70,26 +70,56 @@ fn edge(
     let mut recipes = Vec::new();
     for owner in context {
         let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1",params![format!("{}{}",crate::query_projection::prefix("edge",&crate::query_projection::identity(owner)),id)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
-        if let Some(encoded) = encoded { recipes.push(serde_json::from_str(&encoded).map_err(unavailable)?); }
+        if let Some(encoded) = encoded {
+            recipes.push(serde_json::from_str(&encoded).map_err(unavailable)?);
+        }
     }
-    render_edge(id,context,records,&recipes,bytes_left)
+    render_edge(id, context, records, &recipes, bytes_left)
 }
 
 pub(crate) trait QueryRecords {
     fn reader(&self) -> &dyn crate::SessionSourceReader;
-    fn source_ref(&self, path:&std::path::Path) -> Option<&crate::SessionSourceRef>;
-    fn record_bytes(&self,path:&std::path::Path,offset:u64,max:u64) -> io::Result<Option<Vec<u8>>>;
-    fn prompt(&self,file:&crate::model::SlotFile,offset:u64)->Option<(Value,u64)>;
-    fn error(&self,error:io::Error)->QueryError { QueryError::io(&error) }
+    fn source_ref(&self, path: &std::path::Path) -> Option<&crate::SessionSourceRef>;
+    fn record_bytes(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        max: u64,
+    ) -> io::Result<Option<Vec<u8>>>;
+    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value, u64)>;
+    fn error(&self, error: io::Error) -> QueryError {
+        QueryError::io(&error)
+    }
 }
 impl QueryRecords for crate::query_source::Records<'_> {
-    fn reader(&self)->&dyn crate::SessionSourceReader { self }
-    fn source_ref(&self,path:&std::path::Path)->Option<&crate::SessionSourceRef> { self.source_ref(path) }
-    fn record_bytes(&self,path:&std::path::Path,offset:u64,max:u64)->io::Result<Option<Vec<u8>>> { self.record_bytes(path,offset,max) }
-    fn prompt(&self,file:&crate::model::SlotFile,offset:u64)->Option<(Value,u64)> { self.prompt(file,offset) }
-    fn error(&self,error:io::Error)->QueryError { self.query_error(error) }
+    fn reader(&self) -> &dyn crate::SessionSourceReader {
+        self
+    }
+    fn source_ref(&self, path: &std::path::Path) -> Option<&crate::SessionSourceRef> {
+        self.source_ref(path)
+    }
+    fn record_bytes(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        max: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        self.record_bytes(path, offset, max)
+    }
+    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value, u64)> {
+        self.prompt(file, offset)
+    }
+    fn error(&self, error: io::Error) -> QueryError {
+        self.query_error(error)
+    }
 }
-fn render_edge(id:&str,context:&[CatalogRow],records:&dyn QueryRecords,recipes:&[Value],bytes_left:&std::cell::RefCell<usize>)->Result<Value,QueryError> {
+fn render_edge(
+    id: &str,
+    context: &[CatalogRow],
+    records: &dyn QueryRecords,
+    recipes: &[Value],
+    bytes_left: &std::cell::RefCell<usize>,
+) -> Result<Value, QueryError> {
     let mut query = None;
     let mut presence = Value::Null;
     let mut brief_constant = None;
@@ -888,19 +918,41 @@ fn read_inner(
     crate::test_hooks::run(options, "query_transcript_before_read");
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     if session {
-        let mut summary = render_session(options,key,&context,&records,now,
+        let mut summary = render_session(
+            options,
+            key,
+            &context,
+            &records,
+            now,
             &|turn| {
                 let encoded:String=db.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"),params![key,turn],|row|row.get(0)).map_err(unavailable)?;
                 serde_json::from_str(&encoded).map_err(unavailable)
             },
-            &|turn| cutoff.map(|cutoff|turn_kept(&db,turn,cutoff)).unwrap_or(Ok(true)),
-            &|id| cutoff.map(|cutoff|edge_kept(&db,id,cutoff)).unwrap_or(Ok(true)),
+            &|turn| {
+                cutoff
+                    .map(|cutoff| turn_kept(&db, turn, cutoff))
+                    .unwrap_or(Ok(true))
+            },
             &|id| {
-                if let Some(cutoff)=cutoff {
-                    let Some(saved)=context.iter().find(|owner|owner.key==id).and_then(|owner|owner.query.as_ref()) else {return Ok(false)};
-                    window_member(&db,id,saved,cutoff)
-                } else {Ok(true)}
-            })?;
+                cutoff
+                    .map(|cutoff| edge_kept(&db, id, cutoff))
+                    .unwrap_or(Ok(true))
+            },
+            &|id| {
+                if let Some(cutoff) = cutoff {
+                    let Some(saved) = context
+                        .iter()
+                        .find(|owner| owner.key == id)
+                        .and_then(|owner| owner.query.as_ref())
+                    else {
+                        return Ok(false);
+                    };
+                    window_member(&db, id, saved, cutoff)
+                } else {
+                    Ok(true)
+                }
+            },
+        )?;
         records
             .finish()
             .map_err(|error| records.query_error(error))?;
@@ -1053,10 +1105,27 @@ fn read_inner(
         }
         return Ok(Some(Value::Null));
     }
-    let answer = render_page(options, key, &row, &observation, total, forward, from, limit, now, &SqlitePage {
-        db: &db, records: &records, key, history: history.is_some(), text: &text,
-        headers, table, slot_generation: &slot_generation,
-    })?;
+    let answer = render_page(
+        options,
+        key,
+        &row,
+        &observation,
+        total,
+        forward,
+        from,
+        limit,
+        now,
+        &SqlitePage {
+            db: &db,
+            records: &records,
+            key,
+            history: history.is_some(),
+            text: &text,
+            headers,
+            table,
+            slot_generation: &slot_generation,
+        },
+    )?;
     records
         .finish()
         .map_err(|error| records.query_error(error))?;
@@ -1078,69 +1147,138 @@ fn read_inner(
     Ok(Some(answer))
 }
 
-
 /// Ordinary selected-session rendering for both physical stores. Recipes
 /// contain no prompt/answer text; all content passes the authorized record port.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_session(
-    options:&Options,key:&str,context:&[CatalogRow],records:&dyn QueryRecords,now:i64,
-    first:&dyn Fn(&str)->Result<SavedSlot,QueryError>,
-    keep_turn:&dyn Fn(&Value)->Result<bool,QueryError>,
-    keep_edge:&dyn Fn(&str)->Result<bool,QueryError>,
-    keep_child:&dyn Fn(&str)->Result<bool,QueryError>,
-)->Result<Value,QueryError> {
-    let row=context.iter().find(|row|row.key==key).ok_or_else(||unavailable("Selected owner unavailable"))?;
-    let saved=row.query.as_ref().ok_or_else(||unavailable("Selected Query unavailable"))?;
-    let selected=&saved["selected"];
-    let mut summary=saved["rows"][key]["summary"].clone();
-    if !summary.is_object() || !selected["session"]["busy"].is_array() {return Err(unavailable("Selected Query recipe unavailable"));}
-    summary["busy"]=selected["session"]["busy"].clone();
+    options: &Options,
+    key: &str,
+    context: &[CatalogRow],
+    records: &dyn QueryRecords,
+    now: i64,
+    first: &dyn Fn(&str) -> Result<SavedSlot, QueryError>,
+    keep_turn: &dyn Fn(&Value) -> Result<bool, QueryError>,
+    keep_edge: &dyn Fn(&str) -> Result<bool, QueryError>,
+    keep_child: &dyn Fn(&str) -> Result<bool, QueryError>,
+) -> Result<Value, QueryError> {
+    let row = context
+        .iter()
+        .find(|row| row.key == key)
+        .ok_or_else(|| unavailable("Selected owner unavailable"))?;
+    let saved = row
+        .query
+        .as_ref()
+        .ok_or_else(|| unavailable("Selected Query unavailable"))?;
+    let selected = &saved["selected"];
+    let mut summary = saved["rows"][key]["summary"].clone();
+    if !summary.is_object() || !selected["session"]["busy"].is_array() {
+        return Err(unavailable("Selected Query recipe unavailable"));
+    }
+    summary["busy"] = selected["session"]["busy"].clone();
     if !options.all && !options.scan_window {
-        let cutoff=now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX));
-        if let Some(intervals)=summary["busy"].as_array_mut() {
-            intervals.retain(|interval|interval[1].as_i64().is_some_and(|end|end>=cutoff));
-            if let Some(first)=intervals.first_mut() { first[0]=json!(first[0].as_i64().unwrap_or(cutoff).max(cutoff)); }
+        let cutoff =
+            now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX));
+        if let Some(intervals) = summary["busy"].as_array_mut() {
+            intervals.retain(|interval| interval[1].as_i64().is_some_and(|end| end >= cutoff));
+            if let Some(first) = intervals.first_mut() {
+                first[0] = json!(first[0].as_i64().unwrap_or(cutoff).max(cutoff));
+            }
         }
     }
-    let bytes_left=std::cell::RefCell::new(64*1024*1024usize);
-    let mut metadata=0usize;
-    let mut turns=Vec::new();
-    for recipe in selected["turns"].as_array().ok_or_else(||unavailable("Query turns unavailable"))? {
-        metadata+=recipe.to_string().len();
-        if metadata>8*1024*1024 {return Err(unavailable("Session result metadata exceeds its request budget"));}
-        let mut turn=recipe["query"].clone();
-        if !keep_turn(&turn)? {continue;}
-        if recipe["query_text"]==true {
-            let slot=first(recipe["id"].as_str().ok_or_else(||unavailable("Turn identity unavailable"))?)?.restore();
-            let file=slot.file.as_ref().ok_or_else(||unavailable("Turn prompt source unavailable"))?;
-            let (record,bytes)=records.prompt(file,slot.offset).ok_or_else(||unavailable("Turn prompt unavailable"))?;
-            let remaining=*bytes_left.borrow();
-            *bytes_left.borrow_mut()=remaining.checked_sub(bytes as usize).ok_or_else(||unavailable("Session native bytes exceed the request budget"))?;
-            let prompt=crate::model::prompt_text(&record).ok_or_else(||unavailable("Turn prompt text unavailable"))?;
-            turn["text"]=json!(crate::model::cap(&crate::model::cap(&prompt,crate::model::TEXT_MAX),crate::model::MSG_MAX));
+    let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
+    let mut metadata = 0usize;
+    let mut turns = Vec::new();
+    for recipe in selected["turns"]
+        .as_array()
+        .ok_or_else(|| unavailable("Query turns unavailable"))?
+    {
+        metadata += recipe.to_string().len();
+        if metadata > 8 * 1024 * 1024 {
+            return Err(unavailable(
+                "Session result metadata exceeds its request budget",
+            ));
+        }
+        let mut turn = recipe["query"].clone();
+        if !keep_turn(&turn)? {
+            continue;
+        }
+        if recipe["query_text"] == true {
+            let slot = first(
+                recipe["id"]
+                    .as_str()
+                    .ok_or_else(|| unavailable("Turn identity unavailable"))?,
+            )?
+            .restore();
+            let file = slot
+                .file
+                .as_ref()
+                .ok_or_else(|| unavailable("Turn prompt source unavailable"))?;
+            let (record, bytes) = records
+                .prompt(file, slot.offset)
+                .ok_or_else(|| unavailable("Turn prompt unavailable"))?;
+            let remaining = *bytes_left.borrow();
+            *bytes_left.borrow_mut() = remaining
+                .checked_sub(bytes as usize)
+                .ok_or_else(|| unavailable("Session native bytes exceed the request budget"))?;
+            let prompt = crate::model::prompt_text(&record)
+                .ok_or_else(|| unavailable("Turn prompt text unavailable"))?;
+            turn["text"] = json!(crate::model::cap(
+                &crate::model::cap(&prompt, crate::model::TEXT_MAX),
+                crate::model::MSG_MAX
+            ));
         }
         turns.push(turn);
     }
-    summary["turns"]=json!(turns);
-    let mut handoffs=Vec::new();
-    for recipe in selected["edges"].as_array().ok_or_else(||unavailable("Query handoffs unavailable"))? {
-        let id=recipe["id"].as_str().ok_or_else(||unavailable("Handoff identity unavailable"))?;
-        if !keep_edge(id)? {continue;}
-        let recipes:Vec<_>=context.iter().filter_map(|owner|owner.query.as_ref()).flat_map(|query|query["selected"]["edges"].as_array().into_iter().flatten()).filter(|edge|edge["id"]==id).cloned().collect();
-        let handoff=render_edge(id,context,records,&recipes,&bytes_left)?;
-        metadata+=handoff.to_string().len();
-        if metadata>8*1024*1024 {return Err(unavailable("Session result metadata exceeds its request budget"));}
-        if summary["open_question"]["handoff"]==id {summary["open_question"]["text"]=handoff["brief"].clone();}
+    summary["turns"] = json!(turns);
+    let mut handoffs = Vec::new();
+    for recipe in selected["edges"]
+        .as_array()
+        .ok_or_else(|| unavailable("Query handoffs unavailable"))?
+    {
+        let id = recipe["id"]
+            .as_str()
+            .ok_or_else(|| unavailable("Handoff identity unavailable"))?;
+        if !keep_edge(id)? {
+            continue;
+        }
+        let recipes: Vec<_> = context
+            .iter()
+            .filter_map(|owner| owner.query.as_ref())
+            .flat_map(|query| query["selected"]["edges"].as_array().into_iter().flatten())
+            .filter(|edge| edge["id"] == id)
+            .cloned()
+            .collect();
+        let handoff = render_edge(id, context, records, &recipes, &bytes_left)?;
+        metadata += handoff.to_string().len();
+        if metadata > 8 * 1024 * 1024 {
+            return Err(unavailable(
+                "Session result metadata exceeds its request budget",
+            ));
+        }
+        if summary["open_question"]["handoff"] == id {
+            summary["open_question"]["text"] = handoff["brief"].clone();
+        }
         handoffs.push(handoff);
     }
-    handoffs.sort_by(|a,b|a["at"].as_i64().cmp(&b["at"].as_i64()).then_with(||a["id"].as_str().cmp(&b["id"].as_str())));
-    summary["handoffs"]=json!(handoffs);
-    if let Some(children)=summary["children"].as_array_mut() {
-        let mut kept=Vec::new();
+    handoffs.sort_by(|a, b| {
+        a["at"]
+            .as_i64()
+            .cmp(&b["at"].as_i64())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    summary["handoffs"] = json!(handoffs);
+    if let Some(children) = summary["children"].as_array_mut() {
+        let mut kept = Vec::new();
         for child in children.iter() {
-            if keep_child(child.as_str().ok_or_else(||unavailable("Child identity unavailable"))?)? {kept.push(child.clone());}
+            if keep_child(
+                child
+                    .as_str()
+                    .ok_or_else(|| unavailable("Child identity unavailable"))?,
+            )? {
+                kept.push(child.clone());
+            }
         }
-        *children=kept;
+        *children = kept;
     }
     Ok(summary)
 }
@@ -1148,7 +1286,9 @@ pub(crate) fn render_session(
 /// The ordinary pager consumes immutable recipes and independently authorized
 /// records. Physical backends own publication/proof qualification and lifetime.
 pub(crate) trait PageSource {
-    fn query_error(&self, error: &io::Error) -> QueryError { QueryError::io(error) }
+    fn query_error(&self, error: &io::Error) -> QueryError {
+        QueryError::io(error)
+    }
 
     fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError>;
     fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)>;
@@ -1157,9 +1297,16 @@ pub(crate) trait PageSource {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page(
-    options: &Options, key: &str, row: &CatalogRow,
-    observation: &QueryObservation, total: usize, forward: bool, from: usize,
-    limit: usize, now: i64, source: &dyn PageSource,
+    options: &Options,
+    key: &str,
+    row: &CatalogRow,
+    observation: &QueryObservation,
+    total: usize,
+    forward: bool,
+    from: usize,
+    limit: usize,
+    now: i64,
+    source: &dyn PageSource,
 ) -> Result<Value, QueryError> {
     // Every requested block verifies its original indexed proof. Finish fences
     // only touched sources; unrelated fragments of this session need no body I/O.
@@ -1218,7 +1365,11 @@ pub(crate) fn render_page(
             limit,
             &mut lines,
         );
-        if lines.failures != 0 {return Err(source.query_error(&io::Error::other("Authorized native transcript read failed")));}
+        if lines.failures != 0 {
+            return Err(source.query_error(&io::Error::other(
+                "Authorized native transcript read failed",
+            )));
+        }
         match page {
             Ok(page) => break page,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {
@@ -1241,29 +1392,50 @@ struct SqlitePage<'a, 'b> {
     slot_generation: &'a str,
 }
 impl PageSource for SqlitePage<'_, '_> {
-    fn query_error(&self, error: &io::Error) -> QueryError { self.records.query_error(error) }
+    fn query_error(&self, error: &io::Error) -> QueryError {
+        self.records.query_error(error)
+    }
 
     fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError> {
         let snapshot = self.db.unchecked_transaction().map_err(unavailable)?;
-        unchanged(&snapshot, self.key, self.history, self.text, self.headers, self.slot_generation)?;
+        unchanged(
+            &snapshot,
+            self.key,
+            self.history,
+            self.text,
+            self.headers,
+            self.slot_generation,
+        )?;
         let mut statement = snapshot.prepare(&format!(
             "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot", self.table
         )).map_err(unavailable)?;
-        let texts = statement.query_map(params![self.key, low as i64, high as i64], |row|row.get::<_,String>(0)).map_err(unavailable)?;
+        let texts = statement
+            .query_map(params![self.key, low as i64, high as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(unavailable)?;
         let mut bytes = 0;
         let mut recipes = Vec::new();
         for text in texts {
             let text = text.map_err(unavailable)?;
             bytes += text.len();
-            if bytes > METADATA_BYTES { return Err(unavailable("Native transcript metadata exceeds its read budget")); }
+            if bytes > METADATA_BYTES {
+                return Err(unavailable(
+                    "Native transcript metadata exceeds its read budget",
+                ));
+            }
             recipes.push(serde_json::from_str(&text).map_err(unavailable)?);
         }
         drop(statement);
         snapshot.commit().map_err(unavailable)?;
         Ok(recipes)
     }
-    fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)> { self.records.read(path, offset) }
-    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value,u64)> { self.records.prompt(file, offset) }
+    fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)> {
+        self.records.read(path, offset)
+    }
+    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value, u64)> {
+        self.records.prompt(file, offset)
+    }
 }
 
 #[cfg(test)]

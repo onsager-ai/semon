@@ -48,8 +48,13 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
-    pub(crate) fn selected_query_recipe(&self, summary: &crate::overview::Summary) -> Option<Value> {
-        self.query.as_ref().map(|query|query.selected_recipe(summary))
+    pub(crate) fn selected_query_recipe(
+        &self,
+        summary: &crate::overview::Summary,
+    ) -> Option<Value> {
+        self.query
+            .as_ref()
+            .map(|query| query.selected_recipe(summary))
     }
     pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> String {
         String::from_utf8(generation_bytes(&publication_session(row, self), self))
@@ -322,8 +327,8 @@ fn publication_session(row: &crate::model::summary::CatalogRow, projection: &Pro
     session
 }
 
-/// The private listing publisher qualifies only the trace context family. The
-/// selected Query recipe reader remains closed; this never writes unported meta.
+/// The publisher qualifies the immutable trace context. Selected Query recipes
+/// travel in the same fenced Catalog row; this never writes backend-local meta.
 pub(crate) fn is_published<P: crate::storage::catalog::TracePublicationStore>(
     store: &P,
     row: &crate::model::summary::CatalogRow,
