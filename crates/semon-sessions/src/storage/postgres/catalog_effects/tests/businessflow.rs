@@ -1310,8 +1310,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         };
         let authorized = retained_host.clone();
         let expected_namespace = namespace.as_str().to_owned();
-        let host = move |source: &str, _key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        let allowed = prepared.rows.iter().map(|row| row.key.clone()).collect::<std::collections::BTreeSet<_>>();
+        let host = move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
             assert_eq!(source, expected_namespace);
+            assert!(allowed.contains(key));
             Ok(Box::new(authorized.clone()))
         };
         prepared.rows.iter().map(|row| {
@@ -1326,6 +1328,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "capture denied"))
     };
     assert!(config.call_captured_query_at(&options, &generation, "read_transcript", &serde_json::json!({"id":prepared.rows[0].key,"limit":100}), 1790812802000, &denied_capture).is_err());
+    let uncalled = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        panic!("invalid capture tool must refuse before host admission")
+    };
+    assert!(config.call_captured_query_at(&options, &generation, "list_sessions", &serde_json::json!({}), 1790812802000, &uncalled).is_err());
     struct DeniedHost;
     impl crate::SessionSourceReader for DeniedHost {
         fn read_range(
