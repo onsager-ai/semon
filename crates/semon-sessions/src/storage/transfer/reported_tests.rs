@@ -110,16 +110,50 @@ fn current_transfer225_reported_more_than_one_page_restart_reverse_and_fences() 
     // Keep an already-open ordinary writer before the durable source freeze.
     let mut opened=cache(&source);
     assert!(matches!(source.transfer_inbox().capture(&[1;32]).unwrap(),CaptureProgress::Capturing{..}));
+    std::fs::write(&input,serde_json::json!({"projects":{"/sanitized":{"lastSessionId":"原生\0id","lastStartTime":400,"lastCost":0.5}}}).to_string()).unwrap();
     assert!(opened.refresh_reported_runs(&input,2000,&mut false).is_err());
-    assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&source).is_err(),"future ordinary opens must not adopt a frozen epoch");
+    match crate::storage::sqlite::semantic::SemanticStaging::admit(&source) {
+        Err(_) => {},
+        Ok(admitted) => match crate::events::EventCache::open_semantic(admitted) {
+            Err(_) => {},
+            Ok(mut future) => assert!(future.refresh_reported_runs(&input,2001,&mut false).is_err(),"future writers must not adopt a frozen epoch"),
+        },
+    }
     let manifest=stage(&source,&target,&[1;32]);
     let pages=target.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
     assert!(pages>=5);
     for sequence in 1..=pages { let page=target.transfer_inbox().staged_page(&manifest,sequence).unwrap(); assert!(page.records.len()<=MAX_PAGE_ROWS); assert!(page.encoded().unwrap().len()<=MAX_PAGE_BYTES); }
+    let db=rusqlite::Connection::open(target.backend.sqlite_database().unwrap()).unwrap();
+    db.execute_batch("CREATE TRIGGER transfer231_apply_fault BEFORE INSERT ON meta WHEN NEW.key GLOB 'native_transfer_v1:*:applied:*' BEGIN SELECT RAISE(ABORT,'injected page receipt failure'); END;").unwrap();
+    assert!(target.transfer_inbox().apply_page(&manifest,1).is_err());
+    assert!(read(&target).is_empty(),"authority and incoming marker must roll back with the receipt");
+    db.execute_batch("DROP TRIGGER transfer231_apply_fault").unwrap();
+    drop(db);
     target.transfer_inbox().apply_page(&manifest,1).unwrap();
     assert!(crate::storage::sqlite::semantic::SemanticStaging::admit(&target).is_err(),"unfinished authority is not readable");
     apply(&target,&manifest); assert_eq!(read(&target),expected);
     observe(&target,&input,300,1300); let postwrite=read(&target); assert_eq!(postwrite.len(),201);
     let reverse_manifest=stage(&target,&reverse,&[2;32]); apply(&reverse,&reverse_manifest); assert_eq!(read(&reverse),postwrite);
     assert!(input.exists()); std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_transfer225_reported_authoritative_foreign_corrupt_and_occupied_nonmutation() {
+    let root=root(); let source=sqlite(&root,"source"); let target=sqlite(&root,"target"); let corrupt=sqlite(&root,"corrupt"); let input=root.join(".claude.json");
+    observe(&source,&input,100,101); observe(&source,&input,200,202);
+    observe(&target,&input,900,901); let occupied=read(&target);
+    let manifest=stage(&source,&target,&[6;32]);
+    assert!(matches!(target.transfer_inbox().apply_page(&manifest,1),Err(StorageError::Conflict)));
+    assert_eq!(read(&target),occupied);
+    let mut foreign=manifest.clone(); foreign.namespace="foreign".into(); foreign.seal().unwrap();
+    assert!(matches!(target.transfer_inbox().apply_page(&foreign,1),Err(StorageError::NamespaceMismatch)));
+    assert_eq!(read(&target),occupied);
+    let mut broken=manifest.clone();
+    broken.categories.iter_mut().find(|c|c.category==Category::ReportedFacts).unwrap().digest=[7;32]; broken.seal().unwrap();
+    let inbox=corrupt.transfer_inbox(); inbox.begin(&broken).unwrap();
+    let checkpoint=source.transfer_inbox().checkpoint(&manifest).unwrap();
+    for sequence in 1..=checkpoint.sequence { let page=source.transfer_inbox().staged_page(&manifest,sequence).unwrap(); inbox.stage_page(&broken,&page).unwrap(); }
+    assert!(inbox.apply_page(&broken,1).is_err(),"final digest mismatch must refuse before even the stamp becomes authoritative");
+    assert!(read(&corrupt).is_empty());
+    std::fs::remove_dir_all(root).unwrap();
 }

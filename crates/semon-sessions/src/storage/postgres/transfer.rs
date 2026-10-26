@@ -106,6 +106,9 @@ pub(crate) fn capture(config: &StoreConfig, pool: &PgPool, control: &PgCancellat
             let binding = model_cache::binding(tx.0)?.admission;
             return transfer::reported::start_capture(tx, config, operation, binding, u64::try_from(revision).map_err(|_|StorageError::ScopeChanged)?, stamp).map(|state|state.progress());
         };
+        let binding=model_cache::binding(tx.0)?.admission;
+        let revision:i64=tx.0.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+        if binding!=state.manifest.binding_epoch || u64::try_from(revision).ok()!=Some(state.manifest.revision) { return Err(StorageError::ScopeChanged); }
         if state.done { return Ok(state.progress()); }
         let cursor = state.cursor.as_ref().map(|(key,_)|key.as_slice());
         let start = state.cursor.as_ref().map_or(0, |(_,start)|*start);
