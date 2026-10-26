@@ -106,7 +106,7 @@ pub(crate) fn apply(target: &StoreConfig, manifest: &SnapshotManifest) {
         let first = target
             .transfer_inbox()
             .apply_page(manifest, sequence)
-            .unwrap();
+            .unwrap_or_else(|error| panic!("apply page {sequence}/{pages} failed: {error:?}"));
         assert_eq!(
             first,
             target
