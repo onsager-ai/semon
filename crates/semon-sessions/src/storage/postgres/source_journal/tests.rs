@@ -512,18 +512,23 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
         operation: operation.clone(),
         cursor: Some(String::new()),
     };
-    assert_eq!(store.recovery_is_current(), Err(StorageError::NamespaceUpgradePending));
-    assert_eq!(store.recovery_cursor(), Err(StorageError::NamespaceUpgradePending));
+    assert_eq!(
+        store.recovery_is_current(),
+        Err(StorageError::NamespaceUpgradePending)
+    );
+    assert_eq!(
+        store.recovery_cursor(),
+        Err(StorageError::NamespaceUpgradePending)
+    );
     assert_eq!(
         store.persist_intent(&intent),
         Err(StorageError::NamespaceUpgradePending)
     );
-    assert_eq!(
-        store.recover(&operation, Some("")),
-        Err(StorageError::NamespaceUpgradePending)
-    );
-    assert_eq!(intent.apply(&mut store), Err(StorageError::NamespaceUpgradePending));
-    assert_eq!(store.apply(&intent), Err(StorageError::NamespaceUpgradePending));
+    // No recovery intent was admitted, so execution must reject that missing
+    // durable authorization before attempting any recovery effects.
+    assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Conflict));
+    assert_eq!(intent.apply(&mut store), Err(StorageError::Conflict));
+    assert_eq!(store.apply(&intent), Err(StorageError::Conflict));
     let counts = factory.client().query_one(
         "SELECT (SELECT count(*) FROM semon_pg_source_state), (SELECT count(*) FROM semon_pg_source_intents), (SELECT count(*) FROM semon_pg_source_receipts)", &[],
     ).unwrap();
