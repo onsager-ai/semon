@@ -223,7 +223,6 @@ SQLite oracles are tracked separately in the writer inventory.
 | `received.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `retention.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `storage/postgres/catalog_effects/tests.rs` | direct | Catalog124 real parser/model and ordinary SQLite Current/recipe producer oracle runs before private PG immutable effects; no complete Catalog or no-SQLite backend qualification. |
 | `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
