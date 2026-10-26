@@ -37,7 +37,7 @@ fn transaction<T>(
     let deadline = Instant::now() + Duration::from_secs(2);
     let owner = crate::events::store::configured::NativeOwnership::restore(config)?;
     let mut db = super::source_journal::SourceJournal::owned(owner.clone()).connection()?;
-    db.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    db.progress_handler(1000, Some(move || Instant::now() >= deadline)).map_err(failed)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;

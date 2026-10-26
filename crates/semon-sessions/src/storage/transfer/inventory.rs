@@ -6,7 +6,6 @@ use super::Category;
 pub(crate) enum Disposition {
     Authoritative(&'static [Category]),
     LocalOnly(&'static str),
-    #[cfg(feature = "postgres")]
     DrainReaders(&'static str),
 }
 
@@ -24,6 +23,15 @@ pub(crate) fn sqlite(name: &str) -> Option<Disposition> {
         | "native_usage_identities"
         | "native_usage_dimensions" => &[Usage],
         "reported_runs" => &[ReportedFacts],
+        "storage_proof_generations" => &[Proofs, Recipes],
+        "storage_proof_presentations" => &[Metadata],
+        "storage_proof_presentation_roots" | "storage_proof_refs" => &[ProofReferences],
+        "storage_proof_sources" => &[Proofs],
+        "storage_proof_leases" | "storage_proof_reader_owners" => {
+            return Some(Disposition::DrainReaders(
+                "Drain process-local readers and pin reachable proofs/floors; do not copy live leases or reader ownership as foreign authority.",
+            ));
+        }
         "meta" => &[
             Metadata,
             NativeHeaders,
@@ -201,7 +209,6 @@ pub(crate) fn require(disposition: Option<Disposition>, name: &str) {
     match disposition.unwrap_or_else(|| panic!("unclassified current transfer table: {name}")) {
         Disposition::Authoritative(categories) => assert!(!categories.is_empty()),
         Disposition::LocalOnly(reason) => assert!(!reason.is_empty()),
-        #[cfg(feature = "postgres")]
         Disposition::DrainReaders(reason) => assert!(!reason.is_empty()),
     }
 }

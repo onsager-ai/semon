@@ -304,18 +304,28 @@ pub(crate) mod tests {
             .to_string(),
         )
         .unwrap();
-        let mut cache = crate::events::EventCache::open_configured(config).unwrap();
+        let mut cache = cache(config);
         cache
             .refresh_reported_runs(input, capture, &mut false)
             .unwrap();
     }
 
     pub(crate) fn read(config: &StoreConfig) -> Vec<ReportedRunSnapshot> {
-        let mut cache = crate::events::EventCache::open_configured(config).unwrap();
+        let mut cache = cache(config);
         cache
             .select_reported_runs(&BTreeSet::from(["原生\0id".into()]))
             .unwrap();
         cache.reported_runs().cloned().collect()
+    }
+
+    fn cache(config: &StoreConfig) -> crate::events::EventCache {
+        match &config.backend {
+            StoreBackend::Sqlite { .. } => crate::events::EventCache::open_semantic(
+                super::super::super::sqlite::semantic::SemanticStaging::admit(config).unwrap()
+            ).unwrap(),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { .. } => crate::events::EventCache::open_configured(config).unwrap(),
+        }
     }
 
     pub(crate) fn stage(
