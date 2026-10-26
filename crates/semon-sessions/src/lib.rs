@@ -224,8 +224,7 @@ impl Options {
         Ok(Self {
             source: storage::HostSource::load_or_create(
                 &default_state_dir(&home).join("source.json"),
-            )
-            ?,
+            )?,
             claude_home,
             claude_json,
             codex_home,
