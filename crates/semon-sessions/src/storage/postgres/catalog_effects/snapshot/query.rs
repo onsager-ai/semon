@@ -188,13 +188,24 @@ impl QueryCatalogStore for QueryCatalog {
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
             let observations = crate::native_evidence::RuntimeObservations::bound(&tx_snapshot, &runtime).map_err(|_| StorageError::ScopeChanged)?;
-            let request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
-            let catalog = snapshot.rows(&request).map_err(|_| StorageError::Unavailable)?;
+            let mut request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
             let mut rows = BTreeMap::new();
             let mut owners = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
-            for row in catalog {
+            loop {
+                let mut catalog = snapshot.rows(&request).map_err(|_| StorageError::Unavailable)?;
+                let more = catalog.len() > request.limit;
+                catalog.truncate(request.limit);
+                let next = catalog.last().map(|row| crate::catalog::Cursor {
+                    inclusive: false,
+                    scope: crate::CatalogReadScope::Current,
+                    version: crate::model::summary::CATALOG_VERSION,
+                    generation: self.generation.clone(),
+                    machine: String::new(), harness: None, repo: None, model: None, q: None,
+                    last: row.last.unwrap_or(0), key: row.key.clone(),
+                });
+                for row in catalog {
                 if snapshot.has_history(&row.key).map_err(|_| StorageError::Unavailable)? { return Err(StorageError::NamespaceUpgradePending); }
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
                 let expected = observations.expected(&row);
@@ -215,23 +226,35 @@ impl QueryCatalogStore for QueryCatalog {
                 let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
                 if let Some((_, Some(version))) = version { content.insert(row.key, version); }
             }
-            if rows.len() > 64 { return Err(StorageError::Busy); }
+                if !more { break; }
+                request.cursor = Some(next.ok_or(StorageError::ScopeChanged)?);
+            }
             // Each saved owner contains its complete relationship summaries.
             // Exact edge/turn sets are loaded below from the immutable effects.
             let (edges, turns) = {
                 let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
                 let mut sets = Vec::new();
                 for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
-                    let values = tx.driver.query(&format!("SELECT CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error)?;
-                    if values.len() > 64 { return Err(StorageError::Busy); }
-                    let values = values.iter().map(|row| text(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)).collect::<Result<BTreeSet<_>, _>>()?;
+                    let digest_column = if column == "edge_id" { "edge_digest" } else { "turn_digest" };
+                    let mut after: Option<(Vec<u8>, Vec<u8>)> = None;
+                    let mut values = BTreeSet::new();
+                    loop {
+                        tx.check()?;
+                        let after_key = after.as_ref().map(|v| v.0.as_slice());
+                        let after_id = after.as_ref().map(|v| v.1.as_slice());
+                        let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                        for row in &page {
+                            let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                            *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
+                            values.insert(value);
+                        }
+                        if page.len() < 64 { break; }
+                        after = page.last().map(|row| (row.get(0), row.get(1)));
+                    }
                     sets.push(values);
                 }
                 (sets.remove(0), sets.remove(0))
             };
-            for id in edges.iter().chain(turns.iter()) {
-                *bytes_left = bytes_left.checked_sub(id.len()).ok_or(StorageError::Busy)?;
-            }
             Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns })
         }).map_err(unavailable)
     }

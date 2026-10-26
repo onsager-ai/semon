@@ -44,46 +44,51 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             .lock()
             .map_err(|_| io::Error::other(StorageError::Unavailable))?;
         let ns = tx.namespace.as_str().as_bytes();
-        let bytes: i64 = tx.driver.query_one("SELECT coalesce(sum(octet_length(metadata)),0)::bigint FROM (SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65) bounded", &[&ns, &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
-        if bytes > MAX as i64 {
-            return Err(failed(StorageError::Busy));
-        }
-        let rows = tx.driver.query("SELECT session_key,metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65", &[&ns, &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
-        if rows.len() > 64 {
-            return Err(failed(StorageError::Busy));
-        }
+        // Filter and keyset BEFORE LIMIT. Metadata stays opaque bytes: native
+        // keys can contain NUL, which PostgreSQL JSON/text cannot represent.
+        let sid = request.sid.as_ref().map(|v| v.as_bytes());
+        let harness = request.harness.as_ref().map(|v| v.as_bytes());
+        let repo = request.repo.as_ref().map(|v| v.as_bytes());
+        let model = request.model.as_ref().map(|v| v.as_bytes());
+        let cursor_last = request.cursor.as_ref().map(|v| v.last);
+        let cursor_key = request.cursor.as_ref().map(|v| v.key.as_bytes());
+        let inclusive = request.cursor.as_ref().is_some_and(|v| v.inclusive);
+        let limit = request.limit as i64 + 1;
+        let rows = tx.driver.query(
+            "WITH page AS MATERIALIZED (
+                SELECT session_key,metadata,last_ms,harness,repo,model
+                FROM semon_pg_native_catalog_rows
+                WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+                  AND ($3::bytea IS NULL OR session_key=$3)
+                  AND ($4::bytea IS NULL OR harness=$4)
+                  AND ($5::bytea IS NULL OR repo=$5)
+                  AND ($6::bytea IS NULL OR model=$6)
+                  AND ($7::bigint IS NULL OR last_ms<$7
+                       OR (last_ms=$7 AND (session_key>$8 OR ($9 AND session_key=$8))))
+                ORDER BY last_ms DESC,session_key LIMIT $10
+             ) SELECT session_key,
+                 CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
+                 last_ms,harness,repo,model FROM page ORDER BY last_ms DESC,session_key",
+            &[&ns, &self.generation.as_bytes(), &sid, &harness, &repo, &model,
+              &cursor_last, &cursor_key, &inclusive, &limit],
+        ).map_err(sqlstate::error).map_err(failed)?;
         let mut output = Vec::new();
         for row in rows {
             let key: Vec<u8> = row.get(0);
-            let bytes: Vec<u8> = row.get(1);
+            let bytes: Vec<u8> = row.get::<_, Option<Vec<u8>>>(1)
+                .ok_or_else(|| failed(StorageError::Busy))?;
             crate::selected_read::charge(64, bytes.len())?;
             let value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if value.key.as_bytes() != key {
-                return Err(failed(StorageError::ScopeChanged));
-            }
-            if request.sid.as_ref().is_some_and(|key| key != &value.key)
-                || request
-                    .harness
-                    .as_ref()
-                    .is_some_and(|h| h != &value.harness)
-                || request.model.as_ref().is_some_and(|m| m != &value.model)
-                || request
-                    .repo
-                    .as_ref()
-                    .is_some_and(|repo| value.repo.as_deref().unwrap_or("") != repo)
-                || request.cursor.as_ref().is_some_and(|cursor| {
-                    value.last.unwrap_or(0) > cursor.last
-                        || (value.last.unwrap_or(0) == cursor.last
-                            && (value.key < cursor.key
-                                || (!cursor.inclusive && value.key == cursor.key)))
-                })
+            if value.key.as_bytes() != key || value.sources.len() > 64
+                || value.last.unwrap_or(0) != row.get::<_, i64>(2)
+                || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3)
+                || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4)
+                || value.model.as_bytes() != row.get::<_, Vec<u8>>(5)
             {
-                continue;
+                return Err(failed(StorageError::ScopeChanged));
             }
             output.push(value);
         }
-        output.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.key.cmp(&b.key)));
-        output.truncate(request.limit.saturating_add(1));
         tx.check().map_err(failed)?;
         Ok(output)
     }

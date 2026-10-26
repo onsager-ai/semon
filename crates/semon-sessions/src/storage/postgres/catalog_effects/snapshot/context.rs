@@ -72,6 +72,9 @@ impl ContextLookup for Snapshot<'_, '_> {
             &crate::catalog::Request::parse("limit=64")
                 .map_err(|_| io::Error::other(StorageError::InvalidArguments))?,
         )?;
+        if rows.len() > 64 {
+            return Err(io::Error::other(StorageError::Busy));
+        }
         let mut known = std::collections::BTreeSet::from([key.to_owned()]);
         loop {
             let before = known.len();
