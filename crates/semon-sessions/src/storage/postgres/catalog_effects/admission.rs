@@ -26,7 +26,10 @@ pub(in crate::storage::postgres) struct Fence {
     claims: BTreeMap<String, Option<i64>>,
 }
 
-pub(in crate::storage::postgres) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, StorageError> {
+pub(in crate::storage::postgres) fn capture(
+    tx: &mut PgTxn<'_>,
+    paths: &[String],
+) -> Result<Fence, StorageError> {
     tx.check()?;
     if paths.len() > 64 || paths.iter().map(String::len).sum::<usize>() > MAX {
         return Err(StorageError::Busy);
