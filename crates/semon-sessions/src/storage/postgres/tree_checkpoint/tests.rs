@@ -449,7 +449,11 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
     let path = root.join("one.jsonl");
     capture_fixture_at(root, harness, path)
 }
-fn capture_fixture_at(root: std::path::PathBuf, harness: &str, path: std::path::PathBuf) -> Fixture {
+fn capture_fixture_at(
+    root: std::path::PathBuf,
+    harness: &str,
+    path: std::path::PathBuf,
+) -> Fixture {
     // Raw may have a valid long native path while the independent SQLite
     // oracle's physical database stays at its ordinary short cache location.
     let cache_path = root.join("index.json");
