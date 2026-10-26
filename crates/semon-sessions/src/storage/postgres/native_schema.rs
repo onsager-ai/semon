@@ -1,7 +1,7 @@
 //! Private current native physical contract, consumed by schema installation
 //! and every transaction admission. This does not expose a native IndexStore.
-use super::*;
 use super::super::native_keys;
+use super::*;
 use sha2::{Digest, Sha256};
 
 struct Table {
@@ -309,7 +309,9 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         }
         for (column, expression, nullable) in native_keys::generated(table.name) {
             let null = if *nullable { "" } else { " NOT NULL" };
-            ddl.push_str(&format!("{column} bytea GENERATED ALWAYS AS ({expression}) STORED{null},"));
+            ddl.push_str(&format!(
+                "{column} bytea GENERATED ALWAYS AS ({expression}) STORED{null},"
+            ));
         }
         ddl.push_str(&format!("PRIMARY KEY(namespace_digest,{})); ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; ALTER TABLE {name} FORCE ROW LEVEL SECURITY; CREATE POLICY native_namespace ON {name} USING ({POLICY}) WITH CHECK ({POLICY});", table.key));
     }
@@ -327,7 +329,8 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         || function[0].get::<_, String>(0) != native_keys::MATCH_BODY
         || function[0].get::<_, bool>(1)
         || !function[0].get::<_, bool>(2)
-        || function[0].get::<_, Option<Vec<String>>>(3) != Some(vec!["search_path=pg_catalog".into()])
+        || function[0].get::<_, Option<Vec<String>>>(3)
+            != Some(vec!["search_path=pg_catalog".into()])
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -375,11 +378,19 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             "namespace_digest bytea".to_owned(),
         ];
         columns.extend(table.columns.split(',').map(str::to_owned));
-        columns.extend(native_keys::generated(table.name).iter().map(|(name, _, nullable)| {
-            format!("{name} bytea{}", if *nullable { "?" } else { "" })
-        }));
+        columns.extend(
+            native_keys::generated(table.name)
+                .iter()
+                .map(|(name, _, nullable)| {
+                    format!("{name} bytea{}", if *nullable { "?" } else { "" })
+                }),
+        );
         let mut generated = vec!["namespace_digest:sha256(namespace)".to_owned()];
-        generated.extend(native_keys::generated(table.name).iter().map(|(name, expression, _)| format!("{name}:{expression}")));
+        generated.extend(
+            native_keys::generated(table.name)
+                .iter()
+                .map(|(name, expression, _)| format!("{name}:{expression}")),
+        );
         generated.sort();
         let keys = if table.key.is_empty() {
             "namespace_digest".to_owned()

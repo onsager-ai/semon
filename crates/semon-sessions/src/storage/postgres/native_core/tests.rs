@@ -226,10 +226,17 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
     let oracle = phase(&cache, &path, "claude");
     let carrier = EventCache::path(&cache);
     let db = rusqlite::Connection::open(&carrier).unwrap();
-    let metadata = db.prepare("SELECT key,value FROM meta WHERE length(key)>2704")
-        .unwrap().query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
-        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert!(!metadata.is_empty(), "real producer emitted long addressed metadata");
+    let metadata = db
+        .prepare("SELECT key,value FROM meta WHERE length(key)>2704")
+        .unwrap()
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        !metadata.is_empty(),
+        "real producer emitted long addressed metadata"
+    );
     drop(db);
     std::fs::rename(&carrier, root.join("oracle-held")).unwrap();
     let (pool, factory) = fixture(|_| {});
@@ -239,41 +246,100 @@ fn pg_native_keys125_long_file_and_metadata_sqlite_producer_oracle() {
         let _scope = crate::selected_read::Scope::ensure();
         write(tx, path_text, None, &oracle.ledger, &oracle.index, None)?;
         assert_rows(tx, &oracle)?;
-        for (key,value) in &metadata {
-            super::super::native_keys::put_meta(tx,key.as_bytes(),value.as_bytes())?;
-            assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(value.as_bytes().to_vec()));
+        for (key, value) in &metadata {
+            super::super::native_keys::put_meta(tx, key.as_bytes(), value.as_bytes())?;
+            assert_eq!(
+                super::super::native_keys::read_meta(tx, key.as_bytes(), 1048576)?,
+                Some(value.as_bytes().to_vec())
+            );
         }
         // A NUL/non-BMP logical metadata address is lossless independently of
         // the filesystem's prohibition on NUL in a physical path component.
         let key = format!("native_probe:{path_text}\0🦀");
-        super::super::native_keys::put_meta(tx,key.as_bytes(),b"local")?;
-        assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(b"local".to_vec()));
+        super::super::native_keys::put_meta(tx, key.as_bytes(), b"local")?;
+        assert_eq!(
+            super::super::native_keys::read_meta(tx, key.as_bytes(), 1048576)?,
+            Some(b"local".to_vec())
+        );
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
+    let mut previous = 0;
+    let mut measurements = Vec::new();
+    for noise in [0, 256, 2048] {
+        for batch in (previous..noise).step_by(64) {
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                for n in batch..(batch + 64).min(noise) {
+                    let key = format!("unrelated-history-{n}");
+                    super::super::native_keys::put_meta(tx,key.as_bytes(),b"retained")?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        let measurement = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let _scope = crate::selected_read::Scope::ensure();
+            let key = metadata[0].0.as_bytes();
+            let value = super::super::native_keys::read_meta(tx,key,1048576)?.unwrap();
+            let row = tx.driver.query_one("EXPLAIN (ANALYZE, FORMAT JSON) SELECT value FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND semon_pg_native_key_matches(key,key_digest,$2)",&[&tx.namespace.as_str().as_bytes(),&key]).map_err(sqlstate::error)?;
+            let plan: serde_json::Value = row.get(0);
+            fn visited(plan: &serde_json::Value) -> u64 {
+                let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                match plan.get("Plans").and_then(serde_json::Value::as_array) {
+                    Some(children) => removed + children.iter().map(visited).sum::<u64>(),
+                    None => removed + plan["Actual Rows"].as_u64().unwrap(),
+                }
+            }
+            Ok((visited(&plan[0]["Plan"]), value.len()))
+        }).unwrap();
+        assert!(measurement.0 <= 32, "selected physical scan must stay bounded: {noise} {measurement:?}");
+        assert_eq!(measurement.1, metadata[0].1.len());
+        measurements.push((noise,measurement));
+        previous = noise;
+    }
+    eprintln!("KEYS125_META_PHYSICAL_ROWS_AND_RETURNED_BYTES {measurements:?}");
     let bounds = pool.inner.limits;
     drop(pool);
-    let pool = crate::storage::postgres::PgPool::open(factory.clone(),bounds).unwrap();
+    let pool = crate::storage::postgres::PgPool::open(factory.clone(), bounds).unwrap();
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let _scope = crate::selected_read::Scope::ensure();
-        assert_rows(tx,&oracle)?;
-        for (key,value) in &metadata {
-            assert_eq!(super::super::native_keys::read_meta(tx,key.as_bytes(),1048576)?,Some(value.as_bytes().to_vec()));
+        assert_rows(tx, &oracle)?;
+        for (key, value) in &metadata {
+            assert_eq!(
+                super::super::native_keys::read_meta(tx, key.as_bytes(), 1048576)?,
+                Some(value.as_bytes().to_vec())
+            );
         }
         Ok(())
-    }).unwrap();
-    pool.transaction(&ns("foreign\0🦀"),TxnKind::Write,&control,|tx| {
+    })
+    .unwrap();
+    pool.transaction(&ns("foreign\0🦀"), TxnKind::Write, &control, |tx| {
         let _scope = crate::selected_read::Scope::ensure();
         let key = metadata[0].0.as_bytes();
-        assert_eq!(super::super::native_keys::read_meta(tx,key,1048576)?,None);
-        super::super::native_keys::put_meta(tx,key,b"foreign")
-    }).unwrap();
+        assert_eq!(
+            super::super::native_keys::read_meta(tx, key, 1048576)?,
+            None
+        );
+        super::super::native_keys::put_meta(tx, key, b"foreign")
+    })
+    .unwrap();
     // Exercise the collision branch with the actual full-key equality function,
     // rather than pretending a cryptographic collision was naturally produced.
-    assert!(pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx| {
-        tx.driver.query_one("SELECT semon_pg_native_key_matches($1,sha256($2::bytea),$2)",&[&b"wrong stored key".as_slice(),&path_text.as_bytes()]).map_err(sqlstate::error)?;
-        Ok(())
-    }).is_err());
-    assert!(!carrier.exists(), "PG did not recreate the removed SQLite carrier");
+    assert!(
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            tx.driver
+                .query_one(
+                    "SELECT semon_pg_native_key_matches($1,sha256($2::bytea),$2)",
+                    &[&b"wrong stored key".as_slice(), &path_text.as_bytes()],
+                )
+                .map_err(sqlstate::error)?;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(
+        !carrier.exists(),
+        "PG did not recreate the removed SQLite carrier"
+    );
     drop(pool);
     drop(factory);
     std::fs::remove_dir_all(root).unwrap();
