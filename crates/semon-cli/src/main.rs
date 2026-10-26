@@ -27,7 +27,6 @@ enum Command {
 
 /// The agent homes, `/proc`, cache and facts `semon sessions` reads, or
 /// several machines' homes.
-#[derive(Default)]
 struct HomeArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' native session homes.
@@ -38,6 +37,14 @@ struct HomeArgs {
 }
 
 impl HomeArgs {
+    fn from_host() -> Result<Self, String> {
+        Ok(Self {
+            options: semon_sessions::Options::from_host().map_err(|error| error.to_string())?,
+            machines: Vec::new(),
+            window: None,
+        })
+    }
+
     /// Takes one of the home options, `semon sessions`' names for them;
     /// `false` when `argument` isn't one.
     fn take(
@@ -230,7 +237,7 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
     let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
         return Err(format!("unknown tool: {tool}\n{}", query_usage()));
     };
-    let mut home = HomeArgs::default();
+    let mut home = HomeArgs::from_host()?;
     let mut json = false;
     let mut values = serde_json::Map::new();
     while let Some(argument) = arguments.next() {
@@ -289,7 +296,7 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
 }
 
 fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArgs, String> {
-    let mut home = HomeArgs::default();
+    let mut home = HomeArgs::from_host()?;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -798,7 +805,7 @@ fn run_control(args: Vec<String>) -> Result<(), String> {
         copilot_home: home.join("absent-copilot"),
         cache: home.join("semon-index.json"),
         all: true,
-        ..Default::default()
+        ..semon_sessions::Options::from_host().map_err(|error| error.to_string())?
     };
     semon_sessions::serve_with_control(
         semon_sessions::ServeOptions {
