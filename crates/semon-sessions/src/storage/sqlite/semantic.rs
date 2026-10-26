@@ -2955,17 +2955,33 @@ impl Stage {
                         Some(_) => "other",
                     };
                     let ledger = crate::events::store::ledger_row(&tx, path).map_err(error)?;
-                    let retained = ledger.as_ref().map(|(_, ledger)| {
-                        crate::events::store::archive_ledger_retained(&tx, path, ledger)
-                    }).transpose().map_err(error)?;
-                    let marker: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2)",
-                        params![ns, format!("archive_event_index:{path}")], |r| r.get(0),
-                    ).map_err(error)?;
-                    let current = super::source_journal::claims(&tx, ns, std::slice::from_ref(path)).map_err(error)?;
-                    eprintln!("semantic_removal_state reason={reason} ledger={} marker={marker} retained={retained:?} claim={:?} prepared_claim={:?}",
-                        ledger.is_some(), current[0].1,
-                        prepared.claims.iter().find(|(p, _)| p == path).map(|(_, claim)| claim));
+                    let retained = ledger
+                        .as_ref()
+                        .map(|(_, ledger)| {
+                            crate::events::store::archive_ledger_retained(&tx, path, ledger)
+                        })
+                        .transpose()
+                        .map_err(error)?;
+                    let marker: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2)",
+                            params![ns, format!("archive_event_index:{path}")],
+                            |r| r.get(0),
+                        )
+                        .map_err(error)?;
+                    let current =
+                        super::source_journal::claims(&tx, ns, std::slice::from_ref(path))
+                            .map_err(error)?;
+                    eprintln!(
+                        "semantic_removal_state reason={reason} ledger={} marker={marker} retained={retained:?} claim={:?} prepared_claim={:?}",
+                        ledger.is_some(),
+                        current[0].1,
+                        prepared
+                            .claims
+                            .iter()
+                            .find(|(p, _)| p == path)
+                            .map(|(_, claim)| claim)
+                    );
                 }
                 return Ok(Outcome::Conflict);
             }

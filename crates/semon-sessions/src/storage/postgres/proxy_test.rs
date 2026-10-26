@@ -421,28 +421,49 @@ fn pg_vertical140_captured_cancel_interrupts_metadata_sql() {
             Instant::now() + Duration::from_secs(20),
             cancelled.clone(),
         );
+        proxy.replies.observed.store(0, Ordering::SeqCst);
         proxy.replies.set(true);
         std::thread::scope(|scope| {
-            let worker = scope.spawn(|| request.scope(|| {
-                match phase {
+            let worker = scope.spawn(|| {
+                request.scope(|| match phase {
                     "identity" => crate::session_catalog_history_identity(
-                        &options, "external-machine-z", "claude:one",
-                    ).map(|_| ()).map_err(std::io::Error::other),
-                    "proof" => config.captured_source_proof_at(
-                        &options, &"b".repeat(64), "claude:one",
-                        &crate::SessionSourceRef {
-                            root: "claude".into(), path: "one.jsonl".into(),
-                            native_id: "one".into(), offset: 0,
-                            prefix_sha256: [0; 32], tail_sha256: [0; 32],
-                        },
-                    ).map(|_| ()).map_err(std::io::Error::other),
-                    _ => config.call_captured_query_at(
-                        &options, "external-machine-z", &"b".repeat(64),
-                        "get_session", &serde_json::json!({"id":"claude:one"}),
-                        0, &request, &host,
-                    ).map(|_| ()).map_err(std::io::Error::other),
-                }
-            }));
+                        &options,
+                        "external-machine-z",
+                        "claude:one",
+                    )
+                    .map(|_| ())
+                    .map_err(std::io::Error::other),
+                    "proof" => config
+                        .captured_source_proof_at(
+                            &options,
+                            &"b".repeat(64),
+                            "claude:one",
+                            &crate::SessionSourceRef {
+                                root: "claude".into(),
+                                path: "one.jsonl".into(),
+                                native_id: "one".into(),
+                                offset: 0,
+                                prefix_sha256: [0; 32],
+                                tail_sha256: [0; 32],
+                            },
+                        )
+                        .map(|_| ())
+                        .map_err(std::io::Error::other),
+                    _ => config
+                        .call_captured_query_at(
+                            &options,
+                            "external-machine-z",
+                            &"b".repeat(64),
+                            "get_session",
+                            &serde_json::json!({"id":"claude:one"}),
+                            0,
+                            &request,
+                            &host,
+                        )
+                        .map(|_| ())
+                        .map_err(std::io::Error::other),
+                })
+            });
             proxy.replies.witness();
             cancelled.store(true, Ordering::Release);
             assert!(worker.join().unwrap().is_err(), "{phase}");

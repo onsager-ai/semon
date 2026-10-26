@@ -748,7 +748,10 @@ pub(crate) fn audit_catalog_sources(
         let path = input.full_path(options);
         let key = path.to_string_lossy().into_owned();
         let observed = super::Stat::of(&path);
-        if observed.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        if observed
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        {
             absent_paths.insert(key.clone());
         }
         let recorded = ledger_row(&tx, &key).map_err(io::Error::other)?;
