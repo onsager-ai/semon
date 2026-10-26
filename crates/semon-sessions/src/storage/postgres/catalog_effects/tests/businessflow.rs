@@ -1216,6 +1216,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
+        assert_eq!(
+            crate::native_evidence::query_runtime_generation(&store.options).unwrap(),
+            stage_runtime,
+            "the selected fixture's runtime changed after its publication"
+        );
         prepared
             .rows
             .iter()

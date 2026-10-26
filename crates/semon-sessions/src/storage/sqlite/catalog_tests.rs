@@ -161,7 +161,7 @@ fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         intent.complete().unwrap();
@@ -202,7 +202,7 @@ fn catalog_runtime_change_revalidates_unpublished_staged_owners() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         intent.complete().unwrap();
@@ -244,7 +244,7 @@ fn catalog_runtime_change_revalidates_unpublished_staged_owners() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         intent.complete().unwrap();
@@ -364,7 +364,7 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
 
@@ -1310,7 +1310,7 @@ fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         fixture.publish_existing();
@@ -2193,7 +2193,7 @@ fn exact_source_proof_work_stays_fixed_as_unrelated_native_manifest_grows() {
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         SQL_STEPS.with(|value| value.set(0));
@@ -6291,7 +6291,7 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         write.complete().unwrap();
@@ -6376,7 +6376,7 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
         crate::write_facts(
             fixture.options.facts.as_ref().unwrap(),
             &facts,
-            &crate::Options::default().source,
+            &fixture.options.source,
         )
         .unwrap();
         write.complete().unwrap();
