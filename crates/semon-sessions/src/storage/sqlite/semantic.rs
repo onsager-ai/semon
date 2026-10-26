@@ -374,13 +374,17 @@ impl ReductionWitness {
 }
 
 fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWitness> {
-    let rows=c.prepare("SELECT s.source_path,s.claim,s.ledger,s.withdrawal IS NOT NULL,EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // Publication atomically consumes the exact dirty claims and marks their
+    // sources acknowledged. Its durable publication now owns that evidence;
+    // final stage cleanup cannot require a removed invalidation it just ACKed.
+    // New dirty claims remain in the journal for the next ordinary stage.
+    let rows=c.prepare("SELECT s.source_path,s.claim,s.ledger,s.withdrawal IS NOT NULL,EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 AND s.ack_done=0 ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // A bounded reducer cannot certify an unbounded component. Native owner
     // closure qualification remains a separate, explicitly limited port.
     if rows.len() > 64 {
         return Ok(ReductionWitness::SourceBudget);
     }
-    let negatives = c.prepare("SELECT withdrawal FROM main.catalog_semantic_sources WHERE namespace=?1 AND withdrawal IS NOT NULL ORDER BY source_path LIMIT 65")?.query_map([ns],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let negatives = c.prepare("SELECT withdrawal FROM main.catalog_semantic_sources WHERE namespace=?1 AND ack_done=0 AND withdrawal IS NOT NULL ORDER BY source_path LIMIT 65")?.query_map([ns],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if negatives.len() > 64 {
         return Ok(ReductionWitness::WithdrawalBudget);
     }
@@ -401,6 +405,10 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             || ledger != recorded
             || (!indexed && !withdrawn && !removed_source(c, ns, &path)?)
         {
+            #[cfg(test)]
+            eprintln!("semantic_reduction_witness claim_changed={} ledger_changed={} negative_missing={}",
+                actual != claim, ledger != recorded,
+                !indexed && !withdrawn && !removed_source(c, ns, &path)?);
             return Ok(ReductionWitness::Changed);
         }
     }
