@@ -2334,7 +2334,10 @@ mod catalog_owner_tests {
                     .to_string()
                     .contains(&crate::storage::StorageError::NamespaceUpgradePending.to_string())
             );
-            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
+            assert_eq!(
+                work.events.as_ref().unwrap().qualified_catalog().unwrap_err().to_string(),
+                crate::storage::StorageError::NamespaceUpgradePending.to_string()
+            );
             assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
             assert!(EventCache::open(&options.cache, &options.source).is_err());
             assert_eq!(
