@@ -1,7 +1,5 @@
-//! Real native publication head port. This explicit transitional writer is
-//! unavailable on enrolled stores: Catalog-only qualification cannot authorize
-//! the publisher's still-unqualified meta, ledger/stage and acknowledgement unit.
-use super::{failed, namespace};
+//! Current publication effects require the admitted namespace owner.
+use super::failed;
 use crate::storage::{StorageError, catalog::CatalogPublicationHead};
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -21,15 +19,9 @@ CREATE INDEX session_slots_turn ON session_slots(namespace,session_key,CASE WHEN
 
 pub(crate) struct CurrentWriter<'a> {
     db: &'a rusqlite::Connection,
-    namespace: Option<&'a str>,
+    namespace: &'a str,
 }
 impl<'a> CurrentWriter<'a> {
-    pub(crate) fn unbound(db: &'a rusqlite::Connection) -> Self {
-        Self {
-            db,
-            namespace: None,
-        }
-    }
     pub(crate) fn admitted(
         db: &'a rusqlite::Connection,
         source: &'a super::semantic::AdmittedSource,
@@ -37,7 +29,7 @@ impl<'a> CurrentWriter<'a> {
         source.validate_publication(db)?;
         Ok(Self {
             db,
-            namespace: Some(source.namespace()),
+            namespace: source.namespace(),
         })
     }
 }
@@ -48,11 +40,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         row: &crate::model::summary::CatalogRow,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key"
-        } else {
-            "INSERT INTO main.session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(session_key) DO UPDATE SET lifecycle=excluded.lifecycle,last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key"
-        };
+        let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
         self.db
             .prepare_cached(sql)?
             .execute(params![
@@ -67,11 +55,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
             .map(|n| n > 0)
     }
     fn retire_sources(&self, key: &str) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2"
-        } else {
-            "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE session_key=?2"
-        };
+        let sql = "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, key])?;
@@ -81,11 +65,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         &self,
         source: &crate::model::summary::CatalogSource,
     ) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "DELETE FROM main.catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'"
-        } else {
-            "DELETE FROM main.catalog_native_dependencies WHERE source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'"
-        };
+        let sql = "DELETE FROM main.catalog_native_dependencies WHERE namespace=?1 AND source_path=?2 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'";
         self.db
             .prepare_cached(sql)?
             .execute(params![self.namespace, source.path.to_string_lossy()])?;
@@ -97,11 +77,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         harness: &str,
         native: &str,
     ) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "INSERT OR IGNORE INTO main.catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(?1,?2,?3,?4)"
-        } else {
-            "INSERT OR IGNORE INTO main.catalog_native_dependencies(source_path,harness,native_id) VALUES(?2,?3,?4)"
-        };
+        let sql = "INSERT OR IGNORE INTO main.catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(?1,?2,?3,?4)";
         self.db.prepare_cached(sql)?.execute(params![
             self.namespace,
             source.path.to_string_lossy(),
@@ -115,11 +91,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         row: &crate::model::summary::CatalogRow,
         source: &crate::model::summary::CatalogSource,
     ) -> rusqlite::Result<()> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'current',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id"
-        } else {
-            "INSERT INTO main.session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?2,?3,?4,?5) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id"
-        };
+        let sql = "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'current',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id";
         self.db.prepare_cached(sql)?.execute(params![
             self.namespace,
             row.key,
@@ -133,15 +105,9 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
 
 pub(crate) struct SlotWriter<'a> {
     db: &'a rusqlite::Connection,
-    namespace: Option<&'a str>,
+    namespace: &'a str,
 }
 impl<'a> SlotWriter<'a> {
-    pub(crate) fn unbound(db: &'a rusqlite::Connection) -> Self {
-        Self {
-            db,
-            namespace: None,
-        }
-    }
     pub(crate) fn admitted(
         db: &'a rusqlite::Connection,
         source: &'a super::semantic::AdmittedSource,
@@ -149,7 +115,7 @@ impl<'a> SlotWriter<'a> {
         source.validate_publication(db)?;
         Ok(Self {
             db,
-            namespace: Some(source.namespace()),
+            namespace: source.namespace(),
         })
     }
 }
@@ -165,11 +131,7 @@ impl crate::storage::catalog::SlotPublicationStore for SlotWriter<'_> {
         &self,
         h: &crate::storage::catalog::SlotPublicationHeader<'_>,
     ) -> Result<bool, Self::Error> {
-        let sql = if self.namespace.is_some() {
-            "INSERT INTO main.session_slot_projections(namespace,session_key,generation,version,total,source_generation) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation"
-        } else {
-            "INSERT INTO main.session_slot_projections(session_key,generation,version,total,source_generation) VALUES(?2,?3,?4,?5,?6) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation"
-        };
+        let sql = "INSERT INTO main.session_slot_projections(namespace,session_key,generation,version,total,source_generation) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation";
         self.db
             .execute(
                 sql,
@@ -186,17 +148,10 @@ impl crate::storage::catalog::SlotPublicationStore for SlotWriter<'_> {
             .map_err(crate::events::store::failure)
     }
     fn replace(&self, key: &str, metadata: &[String]) -> Result<(), Self::Error> {
-        let (remove, put) = if self.namespace.is_some() {
-            (
-                "DELETE FROM main.session_slots WHERE namespace=?1 AND session_key=?2",
-                "INSERT INTO main.session_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)",
-            )
-        } else {
-            (
-                "DELETE FROM main.session_slots WHERE session_key=?2",
-                "INSERT INTO main.session_slots(session_key,slot,metadata) VALUES(?2,?3,?4)",
-            )
-        };
+        let (remove, put) = (
+            "DELETE FROM main.session_slots WHERE namespace=?1 AND session_key=?2",
+            "INSERT INTO main.session_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)",
+        );
         self.db
             .execute(remove, params![self.namespace, key])
             .map_err(crate::events::store::failure)?;
@@ -216,8 +171,6 @@ impl crate::storage::catalog::SlotPublicationStore for SlotWriter<'_> {
         Ok(())
     }
 }
-
-pub(crate) struct UnboundPublicationHead<'a, 'connection>(&'a Transaction<'connection>);
 
 pub(crate) struct BoundPublicationHead<'a, 'connection> {
     tx: &'a Transaction<'connection>,
@@ -248,45 +201,20 @@ impl CatalogPublicationHead for BoundPublicationHead<'_, '_> {
     }
 }
 
-pub(crate) fn transitional_head<'a, 'connection>(
-    transaction: &'a Transaction<'connection>,
-) -> Result<UnboundPublicationHead<'a, 'connection>, StorageError> {
-    if namespace::is_bound(transaction).map_err(failed)? {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
-    Ok(UnboundPublicationHead(transaction))
-}
-
-impl CatalogPublicationHead for UnboundPublicationHead<'_, '_> {
-    fn base_generation(&self) -> Result<Option<String>, StorageError> {
-        self.0
-            .query_row(
-                "SELECT value FROM meta WHERE key='catalog_generation'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(failed)
-    }
-
-    fn publish_generation(&self, generation: &str, version: &str) -> Result<(), StorageError> {
-        self.0.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)", params![generation, version]).map_err(failed)?;
-        Ok(())
-    }
-}
-
-const CATALOG_INSERT: &str = "INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES ";
-const CATALOG_CONFLICT: &str = " ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
+const CATALOG_INSERT: &str = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES ";
+const CATALOG_CONFLICT: &str = " ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
 pub(crate) fn put_catalog_batch(
     transaction: &Transaction<'_>,
     rows: &[crate::model::summary::CatalogRow],
     metadata: &[String],
+    namespace: &str,
 ) -> rusqlite::Result<Vec<bool>> {
     let values = (0..rows.len())
         .map(|position| {
             let first = position * 6 + 1;
             format!(
-                "(?{first},'current',?{},?{},?{},?{},?{})",
+                "(?{},?{first},'current',?{},?{},?{},?{},?{})",
+                rows.len() * 6 + 1,
                 first + 1,
                 first + 2,
                 first + 3,
@@ -307,6 +235,7 @@ pub(crate) fn put_catalog_batch(
         statement.raw_bind_parameter(first + 4, &row.parent)?;
         statement.raw_bind_parameter(first + 5, metadata)?;
     }
+    statement.raw_bind_parameter(rows.len() * 6 + 1, namespace)?;
     let mut changed = vec![false; rows.len()];
     {
         let mut returned = statement.raw_query();

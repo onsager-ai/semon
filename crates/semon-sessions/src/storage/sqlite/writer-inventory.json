@@ -66,6 +66,7 @@
     "events/store/chunk_proofs/published.rs",
     "events/store/configured.rs",
     "events/store/configured_selected60.rs",
+    "events/store/history_custody_tests.rs",
     "events/store/launch_calls.rs",
     "events/store/native_commit.rs",
     "events/store/native_decode.rs",

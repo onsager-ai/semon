@@ -1060,6 +1060,13 @@ impl Writer {
             .map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: self
+                .owner
+                .as_ref()
+                .ok_or(StoreError::Configured(
+                    StorageError::NamespaceUpgradePending,
+                ))?
+                .clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1074,7 +1081,7 @@ impl Writer {
             closed,
             None,
             super::CatalogWriter::Auto,
-            Some(owner),
+            owner,
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {
@@ -1101,6 +1108,13 @@ impl Writer {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: self
+                .owner
+                .as_ref()
+                .ok_or(StoreError::Configured(
+                    StorageError::NamespaceUpgradePending,
+                ))?
+                .clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1108,7 +1122,7 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        super::relocation::reuse(&mut store, path, stat, id, file, measurements, Some(self))
+        super::relocation::reuse(&mut store, path, stat, id, file, measurements, self)
     }
 
     pub(crate) fn advance_tree_repair(
@@ -1125,6 +1139,7 @@ impl Writer {
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
+            owner: owner.clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1866,7 +1881,7 @@ mod tests {
         // public enrollment and the complete native writer remain unqualified.
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(metadata_schema()).unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
         db.execute_batch(semantic_stage::metadata_indexes())
             .unwrap();
@@ -2178,7 +2193,7 @@ mod tests {
         // Deliberately bypass public enrollment in this private family fixture.
         // The rest of the native writer is still unqualified for two sources.
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(copied_usage_schema()).unwrap();
@@ -2506,6 +2521,8 @@ mod tests {
         );
         assert!(!database.exists());
     }
+
+    include!("configured_recovery_tests.rs");
 
     struct Fixture {
         root: PathBuf,
@@ -5472,13 +5489,13 @@ mod tests {
 
     #[test]
     fn configured_semantic_stage_validates_every_authored_shape_and_cookie_rollback() {
-        for composite in [true] {
+        {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
             for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
-            assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+            semantic_stage::stage_layout(&db).unwrap();
             for table in semantic_stage::STAGE_TABLES {
                 let tx = db.transaction().unwrap();
                 tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;"))
@@ -5487,14 +5504,14 @@ mod tests {
                 assert!(semantic_stage::stage_layout(&tx).is_err(), "{table}");
                 assert_eq!(tx.total_changes(), before);
                 tx.rollback().unwrap();
-                assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+                semantic_stage::stage_layout(&db).unwrap();
             }
             let tx = db.transaction().unwrap();
             tx.execute_batch("DROP INDEX catalog_semantic_message;")
                 .unwrap();
             assert!(semantic_stage::stage_layout(&tx).is_err());
             tx.rollback().unwrap();
-            assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
+            semantic_stage::stage_layout(&db).unwrap();
         }
     }
 
