@@ -10046,6 +10046,13 @@ mod tests {
             store
                 .write_one("original", None, None, &ledger(1), &full())
                 .unwrap();
+            // Corrupt the physical current schema through the owned journal,
+            // rather than trying DML/DDL against the reader's scoped views.
+            store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
+                store.owner.clone(),
+            )
+            .connection()
+            .unwrap();
             // Custody is deliberately opaque to version classification.
             store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
@@ -10153,6 +10160,11 @@ mod tests {
         store
             .write_one("retained", None, None, &ledger(1), &full())
             .unwrap();
+        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
+            store.owner.clone(),
+        )
+        .connection()
+        .unwrap();
         store
             .connection
             .execute(
