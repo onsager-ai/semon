@@ -453,9 +453,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .collect::<std::collections::BTreeSet<_>>();
     let oracle_withdrawn = sqlite_retained
         .iter()
-        .filter(|item| item["lifecycle"] == "retained")
+        .filter(|item| !sqlite_current.contains(item["key"].as_str().unwrap()))
         .map(stable)
         .collect::<Vec<_>>();
+    // Retained-history can select an original composite projection for a key
+    // that also remains Current (the connected parent). Keep that full oracle
+    // separately from the exact keys whose Current membership disappeared.
+    let oracle_history_projection = sqlite_retained.iter().map(stable).collect::<Vec<_>>();
+    assert!(oracle_withdrawn.iter().all(|item| item["lifecycle"] == "retained"));
     // Query totals also count virtual relationship stubs, whose membership can
     // change when a sender disappears. Native Catalog custody is the exact
     // difference of the native Current key sets, not that Query total delta.
@@ -477,7 +482,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let oracle_withdrawn_claude = sqlite_scoped("scope=retained_history&harness=claude&", 50)
         .iter()
-        .filter(|item| item["lifecycle"] == "retained")
+        .filter(|item| !sqlite_current.contains(item["key"].as_str().unwrap()))
         .map(|item| item["key"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(
