@@ -339,7 +339,8 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
             algorithm::write(&mut usage, &path, &end, &index)?;
             assert_eq!(rows(tx)?, expected);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
     drop(pool);
     let pool = PgPool::open(factory, limits()).unwrap();
@@ -347,18 +348,31 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
         assert_eq!(rows(tx)?, expected);
         assert!(Usage::new(tx)?.current(&path)?.is_some());
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     // Force an actual wrong heap witness at the selected physical address.
     // Returning Err rolls back both the test-only DDL and the corrupt row.
     assert!(pool.transaction(&own, TxnKind::Write, &control, |tx| {
         tx.driver.batch_execute("ALTER TABLE semon_pg_native_usage_current ALTER COLUMN source_path_digest DROP EXPRESSION; UPDATE semon_pg_native_usage_current SET source_path=decode('00','hex')").map_err(sqlstate::error)?;
         Usage::new(tx)?.current(&path)
     }).is_err());
+    assert!(pool.transaction(&own, TxnKind::Write, &control, |tx| {
+        tx.driver.batch_execute("ALTER TABLE semon_pg_native_usage_dimensions ALTER COLUMN dimension_digest DROP EXPRESSION; UPDATE semon_pg_native_usage_dimensions SET dimension=decode('00','hex') WHERE kind=convert_to('model','UTF8')").map_err(sqlstate::error)?;
+        Usage::new(tx)?.dimension(1, "model", &model, "must-not-replace")
+    }).is_err());
+    {
+        let request = crate::selected_read::SelectedReadControl::default().with_limits(64, 1);
+        let _scope = crate::selected_read::Scope::enter(&request);
+        assert_eq!(pool.transaction(&own, TxnKind::Write, &control, |tx| {
+            Usage::new(tx)?.current(&path)
+        }), Err(StorageError::Busy));
+    }
     for namespace in [&own, &foreign] {
         pool.transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
             assert_eq!(rows(tx)?, expected);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }
 
@@ -370,7 +384,8 @@ fn pg_native_keys128_usage_current_sql_rows_and_bytes_with_history_noise() {
     let path = "selected\0🦀";
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         Usage::new(tx)?.create(path, "qualified-family-receipt")
-    }).unwrap();
+    })
+    .unwrap();
     let mut previous = 0;
     for noise in [0, 256, 2048] {
         for batch in (previous..noise).step_by(64) {
@@ -380,11 +395,12 @@ fn pg_native_keys128_usage_current_sql_rows_and_bytes_with_history_noise() {
                     usage.create(&format!("unrelated-{n}"), "unrelated-family-receipt")?;
                 }
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
         let measurement = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
             let selected = Usage::new(tx)?.current(path)?.unwrap();
-            let row = tx.driver.query_one("EXPLAIN (ANALYZE, FORMAT JSON) SELECT s.receipt FROM semon_pg_native_usage_current c JOIN semon_pg_native_usage_sources s USING(namespace_digest,namespace,source_id) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=semon_pg_native_digest($1,$2,'usage.path') AND semon_pg_native_key_matches(c.source_path,sha256($2::bytea),$2)", &[&namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.driver.query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {CURRENT_SQL}"), &[&namespace.as_str().as_bytes(),&path.as_bytes(),&i64::from(CACHE_VERSION)]).map_err(sqlstate::error)?;
             let plan: serde_json::Value = row.get(0);
             fn visited(plan: &serde_json::Value) -> u64 {
                 let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -395,9 +411,15 @@ fn pg_native_keys128_usage_current_sql_rows_and_bytes_with_history_noise() {
             }
             Ok((visited(&plan[0]["Plan"]), selected.1.len()))
         }).unwrap();
-        assert!(measurement.0 <= 32, "noise={noise}, physical rows/bytes={measurement:?}");
+        assert!(
+            measurement.0 <= 32,
+            "noise={noise}, physical rows/bytes={measurement:?}"
+        );
         assert_eq!(measurement.1, "qualified-family-receipt".len());
-        eprintln!("keys128_usage_current noise={noise} sql_rows={} returned_bytes={}", measurement.0, measurement.1);
+        eprintln!(
+            "keys128_usage_current noise={noise} sql_rows={} returned_bytes={}",
+            measurement.0, measurement.1
+        );
         previous = noise;
     }
 }

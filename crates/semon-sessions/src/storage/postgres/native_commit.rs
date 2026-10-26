@@ -75,7 +75,9 @@ impl Relationships for Dependencies<'_, '_> {
     fn put(&mut self, path: &str, harness: &str, id: &str) -> Result<(), StorageError> {
         self.tx.check()?;
         let changed = self.tx.driver.execute("INSERT INTO semon_pg_native_native_dependencies(namespace,source_path,harness,native_id) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,source_path_digest,harness_digest,native_id_digest) DO UPDATE SET native_id=excluded.native_id WHERE semon_pg_native_native_dependencies.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.source_path,sha256(excluded.source_path),excluded.source_path) AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.harness,sha256(excluded.harness),excluded.harness) AND semon_pg_native_key_matches(semon_pg_native_native_dependencies.native_id,sha256(excluded.native_id),excluded.native_id)", &[&self.tx.namespace.as_str().as_bytes(), &path.as_bytes(), &harness.as_bytes(), &id.as_bytes()]).map_err(sqlstate::error)?;
-        if changed != 1 { return Err(StorageError::ScopeChanged); }
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
         self.after_effect()
     }
     fn finished(&mut self, _: RelationshipGroup) -> Result<(), StorageError> {
