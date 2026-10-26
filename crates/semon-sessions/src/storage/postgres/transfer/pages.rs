@@ -148,8 +148,9 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     match record {
         TransferRecord::NativeSource(source) => {
-            let (_,ledger) = super::super::native_reader::ledger(tx.0,&source.path)?.ok_or(StorageError::ScopeChanged)?;
-            native_pages::validate_source_ledger(source,&ledger)?;
+            let (_, ledger) = super::super::native_reader::ledger(tx.0, &source.path)?
+                .ok_or(StorageError::ScopeChanged)?;
+            native_pages::validate_source_ledger(source, &ledger)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES($1,$2,$3,$4,$5::text::numeric,$6,$7)",&[&ns,&(source.generation as i64),&source.path.as_bytes(),&source.receipt.as_bytes(),&source.checkpoint.to_string(),&i64::from(source.parser_version),&source.usage_ready]).map_err(sqlstate::error)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_usage_current(namespace,source_path,source_id) VALUES($1,$2,$3)",&[&ns,&source.path.as_bytes(),&(source.generation as i64)]).map_err(sqlstate::error)?;
             let id = source.id(tx.0.namespace.as_str())?;
