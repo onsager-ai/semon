@@ -62,7 +62,10 @@ pub(crate) fn capture_state(tx: &mut impl InboxTransaction, config: &StoreConfig
     tx.get(&key(operation, "capture"), MAX_MANIFEST_BYTES)?.map(|bytes| {
         let state: CaptureState = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         state.manifest.bind(config)?;
-        if state.manifest.snapshot_id != *operation || state.checkpoint.snapshot != state.manifest.identity() { return Err(StorageError::ScopeChanged); }
+        if state.manifest.snapshot_id != *operation || state.checkpoint.snapshot != state.manifest.identity()
+            || state.checkpoint.rows.len()!=Category::ALL.len() || state.checkpoint.digests.len()!=Category::ALL.len()
+            || state.checkpoint.rows.iter().zip(&state.checkpoint.digests).zip(&state.manifest.categories).any(|((rows,digest),category)|*rows!=category.rows || *digest!=category.digest)
+        { return Err(StorageError::ScopeChanged); }
         Ok(state)
     }).transpose()
 }

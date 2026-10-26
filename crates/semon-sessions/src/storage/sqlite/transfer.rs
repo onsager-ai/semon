@@ -120,6 +120,8 @@ pub(crate) fn capture(config: &StoreConfig, operation: &[u8;32]) -> Result<trans
             let state = transfer::reported::start_capture(tx, config, operation, u64::try_from(binding).map_err(|_|StorageError::ScopeChanged)?, u64::try_from(revision).map_err(|_|StorageError::ScopeChanged)?, stamp)?;
             return Ok(state.progress());
         };
+        let (binding, revision):(i64,i64)=tx.0.query_row("SELECT n.admission_generation,j.revision FROM storage_namespaces n JOIN storage_source_journal j USING(namespace) WHERE n.namespace=?1", [tx.1], |r|Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
+        if u64::try_from(binding).ok()!=Some(state.manifest.binding_epoch) || u64::try_from(revision).ok()!=Some(state.manifest.revision) { return Err(StorageError::ScopeChanged); }
         if state.done { return Ok(state.progress()); }
         let cursor = state.cursor.as_ref().map(|(key,_)| std::str::from_utf8(key).map(str::to_owned).map_err(|_|StorageError::ScopeChanged)).transpose()?;
         let start = state.cursor.as_ref().map_or(0, |(_,start)|*start);

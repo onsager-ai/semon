@@ -1,4 +1,4 @@
-//! Current-format transfer inbox and bounded reported-Facts materialization.
+//! Current-format transfer inbox and resumable authoritative page application.
 //! Neither is an ownership flip or a claim that all native state is qualified.
 //! Adapters keep the inbox in the namespace-owned metadata region; they never
 //! interpret a page as SQL or replay Raw bodies.
@@ -336,7 +336,7 @@ impl TransferCheckpoint {
 /// Durable transport inbox. No `finish_import` exists until exhaustive
 /// native materialization, proof qualification and ownership fencing exist.
 /// Staging alone never changes Catalog or native read state. The explicit
-/// reported-Facts operation materializes only that complete bounded family.
+/// capture/apply operations materialize reported Facts through bounded pages.
 pub struct TransferInbox(StoreConfig);
 
 impl StoreConfig {
