@@ -50,7 +50,12 @@ impl PgPool {
         expected_epoch: Option<&str>,
         control: &PgCancellation,
     ) -> Result<Self, super::StorageError> {
-        let binding = self.transaction(namespace, txn::TxnKind::ReadSnapshot, control, model_cache::binding)?;
+        let binding = self.transaction(
+            namespace,
+            txn::TxnKind::ReadSnapshot,
+            control,
+            model_cache::binding,
+        )?;
         if expected_epoch.is_some_and(|epoch| epoch != binding.stream_epoch) {
             return Err(super::StorageError::ScopeChanged);
         }
@@ -89,7 +94,11 @@ pub(crate) fn configured_query_catalog(
     pool: PgPool,
     control: PgCancellation,
 ) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
-    let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), &control)?;
+    let pool = pool.bind_source(
+        &config.namespace,
+        config.expected_stream_epoch.as_deref(),
+        &control,
+    )?;
     let generation = configured_generation(config, &pool, &control)?;
     Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
         pool,
