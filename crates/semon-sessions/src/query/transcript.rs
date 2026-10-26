@@ -343,7 +343,8 @@ fn virtual_read(
     if requested != served {
         return Err(QueryError::unknown_session(requested));
     }
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
@@ -354,6 +355,11 @@ fn virtual_read(
         Err(error) => return Err(unavailable(error)),
     };
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
+    let runtime_observations = match binding.runtime_binding().map_err(unavailable)? {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+            .map_err(unavailable)?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     let catalog_generation = generation(&tx)?;
     let cutoff = (!options.all && !options.scan_window)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
@@ -364,7 +370,7 @@ fn virtual_read(
         let Some(query) = &row.query else {
             return Ok(None);
         };
-        let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(row);
+        let row_runtime = runtime_observations.expected(row);
         if !crate::model::summary::query_observation_matches(
             query,
             &row.sources,
@@ -450,7 +456,8 @@ fn virtual_read(
         db,
     )
     .map_err(|error| proof_unavailable(&error))?;
-    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(unavailable)?;
+    let mut db = binding.connection().map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
@@ -768,7 +775,12 @@ fn read_inner(
         return Ok(None);
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
-    let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(&row);
+    let row_runtime = match binding.runtime_binding().map_err(unavailable)? {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+            .map_err(unavailable)?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    }
+    .expected(&row);
     // Retention preserves byte custody, not a live process observation. Its
     // pending tools and backgrounds need the same runtime qualification.
     if !crate::model::summary::query_observation_matches(

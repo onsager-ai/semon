@@ -60,6 +60,21 @@ pub(crate) enum NativeReaderBinding {
 }
 
 impl NativeReaderBinding {
+    pub(crate) fn runtime_binding(&self) -> Result<Option<QueryRuntimeBinding>, StorageError> {
+        match self {
+            Self::Semantic(owner) => Ok(Some(QueryRuntimeBinding {
+                namespace: owner.config().namespace.clone(),
+                admission: owner.admission(),
+                stream_epoch: owner
+                    .config()
+                    .expected_stream_epoch
+                    .clone()
+                    .ok_or(StorageError::ScopeChanged)?,
+            })),
+            Self::Admitted(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn config(&self) -> &StoreConfig {
         match self {
             Self::Admitted(config) => config,
