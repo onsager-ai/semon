@@ -1,6 +1,6 @@
 //! Resumable current snapshot capture and authoritative page application.
-//! Capture currently exports reported Facts and its stamp. Other native families
-//! remain unqualified; neither capture nor application grants ownership.
+//! Capture currently exports reported Facts/stamp and fixed core files/events.
+//! Other native families remain unqualified; neither operation grants ownership.
 use super::*;
 use crate::events::ReportedFileStamp;
 
@@ -17,6 +17,7 @@ impl TransferInbox {
     /// Freeze ordinary source writers and advance one bounded capture page.
     /// Retry the same identity after restart or an uncertain commit. Every page
     /// retains the 64-row/1-MiB limit; total history has no row/byte cap.
+    /// This partial inventory is not a full-source completeness witness.
     pub fn capture(&self, operation: &[u8; 32]) -> Result<CaptureProgress, StorageError> {
         match &self.0.backend {
             StoreBackend::Sqlite { .. } => {
@@ -32,15 +33,13 @@ impl TransferInbox {
     /// Apply an already staged page to authoritative native rows. Each page's
     /// rows, exact receipt and applied cursor commit together. Ordinary readers
     /// and writers refuse an unfinished destination; final application opens it.
+    /// Sequence zero finalizes an entirely empty manifest; it never skips rows.
     pub fn apply_page(
         &self,
         manifest: &SnapshotManifest,
         sequence: u64,
     ) -> Result<TransferCheckpoint, StorageError> {
         manifest.bind(&self.0)?;
-        if sequence == 0 {
-            return Err(StorageError::InvalidArguments);
-        }
         match &self.0.backend {
             StoreBackend::Sqlite { .. } => {
                 super::super::sqlite::transfer::apply(&self.0, manifest, sequence)
@@ -60,6 +59,9 @@ pub(crate) struct CaptureState {
     /// Private adapter keyset: SQLite UTF-8 ID or PG digest, plus exact start.
     pub(crate) cursor: Option<(Vec<u8>, i64)>,
     pub(crate) done: bool,
+    pub(crate) native: bool,
+    pub(crate) native_path: Option<String>,
+    pub(crate) native_family: u8,
 }
 impl CaptureState {
     pub(crate) fn progress(&self) -> CaptureProgress {
@@ -151,6 +153,9 @@ pub(crate) fn start_capture(
         checkpoint,
         cursor: None,
         done: false,
+        native: false,
+        native_path: None,
+        native_family: 0,
     };
     tx.put(FREEZE, &encode_bounded(operation, MAX_MANIFEST_BYTES)?)?;
     if let Some(stamp) = stamp {
@@ -260,14 +265,48 @@ pub(crate) fn prepare_apply(
                 || (category.rows != 0
                     && !matches!(
                         category.category,
-                        Category::ReportedFacts | Category::Metadata
+                        Category::ReportedFacts
+                            | Category::Metadata
+                            | Category::Ledgers
+                            | Category::Events
                     ))
         })
     {
         return Err(StorageError::Conflict);
     }
-    let page = page_tx(tx, manifest, sequence)?;
     let id = manifest.identity();
+    if tx
+        .get(FREEZE, MAX_MANIFEST_BYTES)?
+        .is_some_and(|bytes| !bytes.is_empty())
+    {
+        return Err(StorageError::Conflict);
+    }
+    if sequence == 0 {
+        if staged != TransferCheckpoint::initial(manifest) {
+            return Err(StorageError::Conflict);
+        }
+        let expected = encode_bounded(&id, MAX_MANIFEST_BYTES)?;
+        if tx
+            .get(INCOMING, MAX_MANIFEST_BYTES)?
+            .is_some_and(|bytes| !bytes.is_empty() && bytes != expected)
+        {
+            return Err(StorageError::Conflict);
+        }
+        let receipt = tx.get(&key(&id, "applied:0"), MAX_MANIFEST_BYTES)?;
+        if let Some(bytes) = &receipt {
+            if decode_checkpoint(bytes, manifest)? != staged {
+                return Err(StorageError::Conflict);
+            }
+        }
+        return Ok(ApplyPage {
+            checkpoint: staged,
+            records: Vec::new(),
+            replayed: receipt.is_some(),
+            first: true,
+            complete: true,
+        });
+    }
+    let page = page_tx(tx, manifest, sequence)?;
     let receipt = key(&id, &format!("applied:{sequence}"));
     if let Some(bytes) = tx.get(&receipt, MAX_MANIFEST_BYTES)? {
         let checkpoint = decode_checkpoint(&bytes, manifest)?;
@@ -316,6 +355,9 @@ pub(crate) fn prepare_apply(
             TransferRecord::Metadata { key, value } if key == "claude_json_stamp" => {
                 crate::events::reported_rows::decode_stamp(value.as_bytes())
                     .map_err(|_| StorageError::ScopeChanged)?;
+            }
+            TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
+                record.validate_native()?
             }
             _ => return Err(StorageError::Conflict),
         }
