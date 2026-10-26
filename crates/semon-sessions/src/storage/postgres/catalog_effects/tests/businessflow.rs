@@ -307,12 +307,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .rows
                 .iter()
                 .map(|row| {
-                    let fields = query
-                        .call_at(
-                            "get_session",
-                            &serde_json::json!({"id":row.key}),
-                            recent_now,
-                        );
+                    let fields = query.call_at(
+                        "get_session",
+                        &serde_json::json!({"id":row.key}),
+                        recent_now,
+                    );
                     (row.key.clone(), fields)
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
@@ -1100,14 +1099,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
         ));
         for (key, expected) in &oracle_recent_fields[&since] {
-            let fields = query
-                .call_bound_selected_at(
-                    "get_session",
-                    &serde_json::json!({"id":key}),
-                    recent_now,
-                    &store,
-                    &retained_host,
-                );
+            let fields = query.call_bound_selected_at(
+                "get_session",
+                &serde_json::json!({"id":key}),
+                recent_now,
+                &store,
+                &retained_host,
+            );
             assert_eq!(
                 &fields, expected,
                 "recent-window selected fields {since:?} {key}"
