@@ -1418,6 +1418,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // committed head, every older committed generation's cohort (retained
     // history merged as in SQLite) and the old selected bodies.
     drop(reopened);
+    let started = std::time::Instant::now();
     let cold = crate::storage::postgres::PgPool::new(
         factory.clone(),
         crate::storage::postgres::tests::limits(),
@@ -1438,7 +1439,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             options: options.clone(),
         }
     };
-    let started = std::time::Instant::now();
     let first = facts_query
         .call_bound_catalog_at(
             "list_sessions",
