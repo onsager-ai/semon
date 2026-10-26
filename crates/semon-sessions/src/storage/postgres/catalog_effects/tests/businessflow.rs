@@ -318,6 +318,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             (*since, fields)
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let included_key = &expected.rows.first().expect("ordinary owner fixture").key;
+    let included_fields = oracle_recent_fields[&recent_windows[2]][included_key]
+        .as_ref()
+        .expect("all-history recent window includes the ordinary owner");
+    assert!(included_fields["session"].is_object());
+    assert_eq!(included_fields["session"]["id"], *included_key);
     let all_total = expected
         .rows
         .iter()
