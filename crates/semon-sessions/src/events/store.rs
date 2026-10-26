@@ -6739,8 +6739,14 @@ fn validate_prior_reported(
     if let Some(stamp) = stamp {
         from_json::<ReportedFileStamp>(0, &stamp)?;
     } else {
-        let exists = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE {scope}1=1 LIMIT 1)"), [], |row| row.get::<_, bool>(0))?;
-        if exists { return Err(rusqlite::Error::InvalidQuery); }
+        let exists = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE {scope}1=1 LIMIT 1)"),
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
     Ok(())
 }

@@ -75,7 +75,17 @@ pub(super) fn save(
     stamp: &ReportedFileStamp,
     control: &PgCancellation,
 ) -> Result<(), StorageError> {
-    save_selected(pool, namespace, expected_revision, operation_id, runs, stamp, Some(&BTreeSet::new()), control).map(|_| ())
+    save_selected(
+        pool,
+        namespace,
+        expected_revision,
+        operation_id,
+        runs,
+        stamp,
+        Some(&BTreeSet::new()),
+        control,
+    )
+    .map(|_| ())
 }
 
 /// IndexStore-compatible result: a coherent selected retained history and stamp.
@@ -165,15 +175,23 @@ fn validate_prior(tx: &mut PgTxn<'_>, rows: &[ReportedRow]) -> Result<(), Storag
     }
     for batch in rows.chunks(64) {
         tx.check()?;
-        let ids = batch.iter().map(|row| row.run.last_session_id.as_bytes().to_vec()).collect::<Vec<_>>();
-        let starts = batch.iter().map(|row| row.run.last_start_time).collect::<Vec<_>>();
+        let ids = batch
+            .iter()
+            .map(|row| row.run.last_session_id.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let starts = batch
+            .iter()
+            .map(|row| row.run.last_start_time)
+            .collect::<Vec<_>>();
         let sizes = tx.driver.query("SELECT x.ordinality,octet_length(r.session_id)::bigint+octet_length(r.record)::bigint FROM unnest($2::bytea[],$3::bigint[]) WITH ORDINALITY AS x(id,start,ordinality) JOIN semon_pg_native_reported_runs r ON r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.session_digest=sha256(x.id) AND r.start=x.start ORDER BY x.ordinality", &[&ns,&ids,&starts]).map_err(sqlstate::error)?;
         for size in &sizes {
             budget.charge(size.get(1))?;
         }
         tx.check()?;
         let prior = tx.driver.query("SELECT x.ordinality,r.session_id,r.record FROM unnest($2::bytea[],$3::bigint[]) WITH ORDINALITY AS x(id,start,ordinality) JOIN semon_pg_native_reported_runs r ON r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.session_digest=sha256(x.id) AND r.start=x.start ORDER BY x.ordinality", &[&ns,&ids,&starts]).map_err(sqlstate::error)?;
-        if sizes.len() != prior.len() { return Err(StorageError::ScopeChanged); }
+        if sizes.len() != prior.len() {
+            return Err(StorageError::ScopeChanged);
+        }
         for row in prior {
             tx.check()?;
             let ordinal: i64 = row.get(0);
@@ -195,7 +213,6 @@ fn validate_prior(tx: &mut PgTxn<'_>, rows: &[ReportedRow]) -> Result<(), Storag
     }
     Ok(())
 }
-
 
 struct Budget {
     rows: usize,
@@ -227,7 +244,10 @@ fn read_rows(
     budget: &mut Budget,
     out: &mut Vec<ReportedRunSnapshot>,
 ) -> Result<(), StorageError> {
-    visit_rows(tx, selected, budget, true, &mut |run| { out.push(run); Ok(()) })
+    visit_rows(tx, selected, budget, true, &mut |run| {
+        out.push(run);
+        Ok(())
+    })
 }
 
 fn visit_rows(
@@ -249,7 +269,9 @@ fn visit_rows(
         let Some(row) = rows.first() else {
             break;
         };
-        if !cumulative { *budget = Budget { rows: 0, bytes: 0 }; }
+        if !cumulative {
+            *budget = Budget { rows: 0, bytes: 0 };
+        }
         budget.charge(row.get(2))?;
         #[cfg(test)]
         READ_WORK.with(|work| work.set(work.get() + 1));
@@ -304,33 +326,54 @@ pub(super) fn load(
     ids: Option<&BTreeSet<String>>,
     control: &PgCancellation,
 ) -> Result<Loaded, StorageError> {
-    pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| load_tx(tx, ids))
+    pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
+        load_tx(tx, ids)
+    })
 }
 
 fn load_tx(tx: &mut PgTxn<'_>, ids: Option<&BTreeSet<String>>) -> Result<Loaded, StorageError> {
-        let revision = revision(tx, false)?;
-        let ns = namespace.as_str().as_bytes();
-        let sizes = tx.driver.query("SELECT singleton,octet_length(stamp)::bigint FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 2", &[&ns]).map_err(sqlstate::error)?;
-        let mut budget = Budget { rows: 0, bytes: 0 };
-        if sizes.len() > 1 || sizes.first().is_some_and(|row| !row.get::<_,bool>(0)) { return Err(StorageError::Unavailable); }
-        let stamp = if let Some(size) = sizes.first() {
-            budget.charge(size.get(1))?;
-            tx.check()?;
-            let row = tx.driver.query_one("SELECT stamp FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton=true", &[&ns]).map_err(sqlstate::error)?;
-            Some(reported_rows::decode_stamp(&row.get::<_,Vec<u8>>(0)).map_err(|_| StorageError::Unavailable)?)
-        } else { None };
-        let mut runs = Vec::new();
-        if let Some(ids) = ids {
-            for id in ids { read_rows(tx, Some(id), &mut budget, &mut runs)?; }
-        } else { read_rows(tx, None, &mut budget, &mut runs)?; }
-        // A missing stamp cannot disguise corrupt non-rebuildable records.
-        if stamp.is_none() {
-            let found = tx.driver.query("SELECT 1 FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 1", &[&ns]).map_err(sqlstate::error)?;
-            if !found.is_empty() { return Err(StorageError::Unavailable); }
-        }
-        runs.sort_by(|a,b| (&a.last_session_id,a.last_start_time).cmp(&(&b.last_session_id,b.last_start_time)));
+    let revision = revision(tx, false)?;
+    let ns = tx.namespace.as_str().as_bytes();
+    let sizes = tx.driver.query("SELECT singleton,octet_length(stamp)::bigint FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 2", &[&ns]).map_err(sqlstate::error)?;
+    let mut budget = Budget { rows: 0, bytes: 0 };
+    if sizes.len() > 1 || sizes.first().is_some_and(|row| !row.get::<_, bool>(0)) {
+        return Err(StorageError::Unavailable);
+    }
+    let stamp = if let Some(size) = sizes.first() {
+        budget.charge(size.get(1))?;
         tx.check()?;
-        Ok(Loaded { runs, stamp, revision })
+        let row = tx.driver.query_one("SELECT stamp FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton=true", &[&ns]).map_err(sqlstate::error)?;
+        Some(
+            reported_rows::decode_stamp(&row.get::<_, Vec<u8>>(0))
+                .map_err(|_| StorageError::Unavailable)?,
+        )
+    } else {
+        None
+    };
+    let mut runs = Vec::new();
+    if let Some(ids) = ids {
+        for id in ids {
+            read_rows(tx, Some(id), &mut budget, &mut runs)?;
+        }
+    } else {
+        read_rows(tx, None, &mut budget, &mut runs)?;
+    }
+    // A missing stamp cannot disguise corrupt non-rebuildable records.
+    if stamp.is_none() {
+        let found = tx.driver.query("SELECT 1 FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 LIMIT 1", &[&ns]).map_err(sqlstate::error)?;
+        if !found.is_empty() {
+            return Err(StorageError::Unavailable);
+        }
+    }
+    runs.sort_by(|a, b| {
+        (&a.last_session_id, a.last_start_time).cmp(&(&b.last_session_id, b.last_start_time))
+    });
+    tx.check()?;
+    Ok(Loaded {
+        runs,
+        stamp,
+        revision,
+    })
 }
 
 #[cfg(test)]
@@ -338,6 +381,32 @@ mod tests {
     use super::super::tests::{fixture, limits, ns};
     use super::*;
     use crate::events::EventCache;
+
+    #[cfg(target_os = "linux")]
+    struct SqliteWitness(std::fs::File);
+
+    #[cfg(target_os = "linux")]
+    impl SqliteWitness {
+        fn new(root: &std::path::Path) -> Self {
+            use std::os::{fd::FromRawFd, unix::ffi::OsStrExt};
+            let path = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+            // SAFETY: both calls use a live NUL-terminated path; ownership of
+            // the new descriptor is transferred exactly once into File.
+            let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+            assert!(fd >= 0);
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let watch = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN | libc::IN_ACCESS | libc::IN_CREATE) };
+            assert!(watch >= 0);
+            Self(file)
+        }
+
+        fn assert_no_access(mut self) {
+            use std::io::Read;
+            let mut events = [0u8; 4096];
+            let error = self.0.read(&mut events).expect_err("PG accessed or created a file in the SQLite fixture directory");
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        }
+    }
 
     fn stamp() -> ReportedFileStamp {
         serde_json::from_str(r#"{"dev":18446744073709551615,"ino":18446744073709551615,"size":18446744073709551615,"modified_ns":340282366920938463463374607431768211455}"#).unwrap()
@@ -377,7 +446,11 @@ mod tests {
         let input = root.join(".claude.json");
         // Three real producer observations: A, a new run B, then C overwrites A.
         // B is absent from C's input and must nevertheless survive with NULL cost.
-        for (start, capture, cost) in [(100, 101, Some(0.125)), (200, 202, None), (100, 303, Some(0.25))] {
+        for (start, capture, cost) in [
+            (100, 101, Some(0.125)),
+            (200, 202, None),
+            (100, 303, Some(0.25)),
+        ] {
             std::fs::write(&input,serde_json::json!({"projects":{"/sanitized":{"lastSessionId":"原生\0id","lastStartTime":start,"lastDuration":u64::MAX,"lastCost":cost,"lastModelUsage":{"模型\0":{"inputTokens":u64::MAX}}}}}).to_string()).unwrap();
             let mut cache = EventCache::open(&cache_path).unwrap();
             cache
@@ -412,6 +485,8 @@ mod tests {
     #[test]
     fn pg_reported_facts_actual_sqlite_producer_retained_selection_restart_namespace_ack() {
         let (runs, stamp, root) = oracle();
+        #[cfg(target_os = "linux")]
+        let witness = SqliteWitness::new(&root);
         let (pool, factory) = fixture(|_| {});
         let source = ns("事实\0A");
         let foreign = ns("事实\0B");
@@ -489,6 +564,8 @@ mod tests {
         assert_eq!(again.revision, 0);
         crate::events::CACHE_READS
             .with(|reads| assert_eq!(reads.get(), 0, "PG phase opened SQLite"));
+        #[cfg(target_os = "linux")]
+        witness.assert_no_access();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -637,44 +714,152 @@ mod tests {
     }
 
     #[test]
+    fn pg_reported_facts_indexstore_return_and_coherent_export() {
+        let (runs, stamp, root) = oracle();
+        let (pool, _) = fixture(|_| {});
+        let source = ns("snapshot-facts");
+        seed(&pool, &source);
+        let control = PgCancellation::default();
+        save(&pool, &source, 0, &"a".repeat(64), &runs[..1], &stamp, &control).unwrap();
+        let named = BTreeSet::from([runs[0].last_session_id.clone()]);
+        let returned = save_selected(&pool, &source, 0, &"b".repeat(64), &runs[1..], &stamp, Some(&named), &control).unwrap();
+        assert_eq!(returned.runs, runs);
+        assert_eq!(returned.stamp, Some(stamp.clone()));
+        assert_eq!(returned.revision, 0);
+        let mut replacement = runs[0].clone();
+        replacement.capture_at += 1000;
+        let changed_stamp = ReportedFileStamp { size: stamp.size.wrapping_add(1), ..stamp.clone() };
+        let mut exported = Vec::new();
+        let mut header = None;
+        export_snapshot(&pool, &source, &control, |revision, observed| {
+            header = Some((revision, observed.cloned()));
+            // Advance the same Source after the export has pinned its snapshot.
+            save(&pool, &source, 0, &"c".repeat(64), std::slice::from_ref(&replacement), &changed_stamp, &control)
+        }, |run| { exported.push(run); Ok(()) }).unwrap();
+        assert_eq!(header, Some((0, Some(stamp))));
+        assert_eq!(exported, runs);
+        let current = load(&pool, &source, Some(&named), &control).unwrap();
+        assert_eq!(current.runs, [replacement, runs[1].clone()]);
+        assert_eq!(current.stamp, Some(changed_stamp));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pg_reported_facts_export_cancellation_retains_slot_until_callback_exits() {
+        use std::sync::mpsc;
+        let (pool, _) = fixture(|bounds| bounds.max_connections = 1);
+        let source = ns("snapshot-lease");
+        seed(&pool, &source);
+        let control = PgCancellation::default();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = {
+            let (pool, source, control) = (pool.clone(), source.clone(), control.clone());
+            std::thread::spawn(move || export_snapshot(&pool, &source, &control, |_, _| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            }, |_| panic!("empty snapshot produced a row")))
+        };
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        control.cancel();
+        assert!(matches!(load(&pool, &source, None, &PgCancellation::default()), Err(StorageError::Busy)));
+        assert_eq!(pool.accounted(), 1);
+        release_tx.send(()).unwrap();
+        assert!(matches!(worker.join().unwrap(), Err(StorageError::Busy)));
+        let loaded = load(&pool, &source, None, &PgCancellation::default()).unwrap();
+        assert!(loaded.runs.is_empty());
+        assert_eq!(loaded.stamp, None);
+    }
+
+    #[test]
     fn pg_reported_facts_competing_exact_requests_and_writers() {
         use std::sync::{Arc, Barrier};
         let (pool, factory) = fixture(|_| {});
         let source = ns("competing-facts");
         seed(&pool, &source);
-        let first = ReportedRunSnapshot { last_session_id: "same\0原生".into(), last_duration: Some(u64::MAX), ..Default::default() };
+        let first = ReportedRunSnapshot {
+            last_session_id: "same\0原生".into(),
+            last_duration: Some(u64::MAX),
+            ..Default::default()
+        };
         for (round, different) in [(0, false), (1, true)] {
             let barrier = Arc::new(Barrier::new(3));
-            let workers = (0..2).map(|n| {
-                let (pool, source, barrier, mut run) = (pool.clone(), source.clone(), barrier.clone(), first.clone());
-                run.last_start_time = round;
-                if different && n == 1 { run.last_duration = None; }
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    save(&pool, &source, 0, &format!("{:064x}", round + 10), &[run], &stamp(), &PgCancellation::default())
+            let workers = (0..2)
+                .map(|n| {
+                    let (pool, source, barrier, mut run) =
+                        (pool.clone(), source.clone(), barrier.clone(), first.clone());
+                    run.last_start_time = round;
+                    if different && n == 1 {
+                        run.last_duration = None;
+                    }
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        save(
+                            &pool,
+                            &source,
+                            0,
+                            &format!("{:064x}", round + 10),
+                            &[run],
+                            &stamp(),
+                            &PgCancellation::default(),
+                        )
+                    })
                 })
-            }).collect::<Vec<_>>();
+                .collect::<Vec<_>>();
             barrier.wait();
-            let results = workers.into_iter().map(|w| w.join().unwrap()).collect::<Vec<_>>();
-            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), if different { 1 } else { 2 });
-            assert_eq!(results.iter().filter(|r| matches!(r, Err(StorageError::InvalidArguments))).count(), usize::from(different));
+            let results = workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                results.iter().filter(|r| r.is_ok()).count(),
+                if different { 1 } else { 2 }
+            );
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| matches!(r, Err(StorageError::InvalidArguments)))
+                    .count(),
+                usize::from(different)
+            );
         }
         let barrier = Arc::new(Barrier::new(3));
-        let workers = (0..2).map(|n| {
-            let (pool, source, barrier, mut run) = (pool.clone(), source.clone(), barrier.clone(), first.clone());
-            run.last_start_time = n + 20;
-            std::thread::spawn(move || {
-                barrier.wait();
-                save(&pool, &source, 0, &format!("{:064x}", n + 20), &[run], &stamp(), &PgCancellation::default())
+        let workers = (0..2)
+            .map(|n| {
+                let (pool, source, barrier, mut run) =
+                    (pool.clone(), source.clone(), barrier.clone(), first.clone());
+                run.last_start_time = n + 20;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    save(
+                        &pool,
+                        &source,
+                        0,
+                        &format!("{:064x}", n + 20),
+                        &[run],
+                        &stamp(),
+                        &PgCancellation::default(),
+                    )
+                })
             })
-        }).collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         barrier.wait();
-        for worker in workers { worker.join().unwrap().unwrap(); }
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
         drop(pool);
         let pool = PgPool::new(factory, limits()).unwrap();
         let loaded = load(&pool, &source, None, &PgCancellation::default()).unwrap();
         assert_eq!(loaded.runs.len(), 4);
-        assert_eq!(loaded.runs.iter().map(|r| r.last_start_time).collect::<Vec<_>>(), [0,1,20,21]);
+        assert_eq!(
+            loaded
+                .runs
+                .iter()
+                .map(|r| r.last_start_time)
+                .collect::<Vec<_>>(),
+            [0, 1, 20, 21]
+        );
         assert_eq!(loaded.stamp, Some(stamp()));
     }
 
@@ -689,31 +874,79 @@ mod tests {
             let source = ns("blocked-facts");
             seed(&pool, &source);
             let mut blocker = factory.client();
-            blocker.query_one("SELECT set_config('semon.namespace',$1,false)", &[&super::super::namespace_context(&source)]).unwrap();
+            blocker
+                .query_one(
+                    "SELECT set_config('semon.namespace',$1,false)",
+                    &[&super::super::namespace_context(&source)],
+                )
+                .unwrap();
             blocker.batch_execute("BEGIN").unwrap();
-            blocker.query_one("SELECT revision FROM semon_pg_source_state FOR UPDATE", &[]).unwrap();
-            let pid: i32 = blocker.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+            blocker
+                .query_one("SELECT revision FROM semon_pg_source_state FOR UPDATE", &[])
+                .unwrap();
+            let pid: i32 = blocker
+                .query_one("SELECT pg_backend_pid()", &[])
+                .unwrap()
+                .get(0);
             let control = PgCancellation::default();
             let worker = {
                 let (pool, source, control) = (pool.clone(), source.clone(), control.clone());
-                std::thread::spawn(move || save(&pool, &source, 0, &"a".repeat(64), &[ReportedRunSnapshot { last_session_id: "blocked".into(), ..Default::default() }], &stamp(), &control))
+                std::thread::spawn(move || {
+                    save(
+                        &pool,
+                        &source,
+                        0,
+                        &"a".repeat(64),
+                        &[ReportedRunSnapshot {
+                            last_session_id: "blocked".into(),
+                            ..Default::default()
+                        }],
+                        &stamp(),
+                        &control,
+                    )
+                })
             };
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 let waiting: bool = blocker.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))", &[&pid]).unwrap().get(0);
-                if waiting { break; }
-                assert!(Instant::now() < deadline, "writer never reached real in-flight lock wait");
+                if waiting {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "writer never reached real in-flight lock wait"
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert_eq!(pool.accounted(), 1);
-            if cancel { control.cancel(); }
+            if cancel {
+                control.cancel();
+            }
             assert!(matches!(worker.join().unwrap(), Err(StorageError::Busy)));
             blocker.batch_execute("ROLLBACK").unwrap();
             let loaded = load(&pool, &source, None, &PgCancellation::default()).unwrap();
             assert!(loaded.runs.is_empty());
             assert_eq!(loaded.stamp, None);
-            save(&pool, &source, 0, &"a".repeat(64), &[ReportedRunSnapshot { last_session_id: "blocked".into(), ..Default::default() }], &stamp(), &PgCancellation::default()).unwrap();
-            assert_eq!(load(&pool, &source, None, &PgCancellation::default()).unwrap().runs.len(), 1);
+            save(
+                &pool,
+                &source,
+                0,
+                &"a".repeat(64),
+                &[ReportedRunSnapshot {
+                    last_session_id: "blocked".into(),
+                    ..Default::default()
+                }],
+                &stamp(),
+                &PgCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                load(&pool, &source, None, &PgCancellation::default())
+                    .unwrap()
+                    .runs
+                    .len(),
+                1
+            );
         }
     }
 
@@ -742,4 +975,3 @@ mod tests {
         ));
     }
 }
-
