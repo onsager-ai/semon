@@ -14,9 +14,9 @@ unsafe extern "C" fn deny_sqlite(
     SQLITE_OPENS.fetch_add(1, Ordering::SeqCst);
     rusqlite::ffi::SQLITE_AUTH
 }
-struct Guard;
+pub(super) struct Guard;
 impl Guard {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         assert_eq!(
             unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(deny_sqlite)) },
             rusqlite::ffi::SQLITE_OK
@@ -407,7 +407,7 @@ fn lose_batch_ack_after_parses(remaining: usize) {
     });
 }
 
-fn batch_snapshot(
+pub(super) fn batch_snapshot(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
     control: &PgCancellation,
