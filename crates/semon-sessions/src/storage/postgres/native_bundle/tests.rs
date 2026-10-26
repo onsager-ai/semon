@@ -44,8 +44,10 @@ fn bundle_fixture(harness: &str) -> Fixture {
     let index = crate::events::scan_file(&physical, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
-    let ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE namespace=semon_namespace() AND path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
     let path = format!("{}\0🦀", physical.to_str().unwrap());
     assert!(index.tree_summary.is_none());
     assert!(index.copilot.is_some(), "production Copilot identity");
@@ -141,10 +143,14 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageErr
 }
 
 fn oracle_metadata(data: &Fixture) -> Vec<(String, String)> {
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(
-        &data.root.join("index.json"),
-    ))
-    .unwrap();
+    let source = if data.oracle.line_count == 0 {
+        fixture_host_source()
+    } else {
+        crate::storage::postgres::tree_checkpoint::tests::fixture_host_source()
+    };
+    let config = source.config(&data.root.join("index.json")).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let path = data.root.join("one.jsonl").to_str().unwrap().to_owned();
     let mut result = Vec::new();
     for prefix in [
@@ -152,7 +158,7 @@ fn oracle_metadata(data: &Fixture) -> Vec<(String, String)> {
         "native_claude_sidecar:",
         "native_parent_marker:",
     ] {
-        let mut query = db.prepare("SELECT value FROM meta WHERE key=?1").unwrap();
+        let mut query = db.prepare("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1").unwrap();
         let rows = query
             .query_map([format!("{prefix}{path}")], |r| r.get::<_, String>(0))
             .unwrap();
@@ -449,7 +455,7 @@ fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, Str
     );
     let header = db
         .query_row(
-            "SELECT value FROM meta WHERE key=?1",
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("{prefix}header")],
             |r| r.get(0),
         )
@@ -457,7 +463,7 @@ fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, Str
     use rusqlite::OptionalExtension;
     let launch_header = db
         .query_row(
-            "SELECT value FROM meta WHERE key=?1",
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("{launch}header")],
             |r| r.get(0),
         )
@@ -470,7 +476,7 @@ fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, Str
         (2, format!("native_proof_tree:{prefix}:")),
     ] {
         let mut statement = db
-            .prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+            .prepare("SELECT key,value FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")
             .unwrap();
         let rows = statement
             .query_map(rusqlite::params![&prefix, format!("{prefix}~")], |row| {
@@ -716,15 +722,17 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     let scanned = crate::events::scan_file(&physical, "claude", &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
-    let ledger: Ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let ledger: Ledger = db.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE namespace=semon_namespace() AND path=?1", [physical.to_str().unwrap()], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()})).unwrap();
     use sha2::{Digest, Sha256};
     let prefix = format!(
         "native_launch_calls:{:x}:",
         Sha256::digest(physical.to_str().unwrap().as_bytes())
     );
     let mut statement = db
-        .prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+        .prepare("SELECT key,value FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")
         .unwrap();
     let oracle = statement
         .query_map(rusqlite::params![&prefix, format!("{prefix}~")], |r| {
@@ -792,20 +800,23 @@ fn pg_native_bundle_relocation_advance_matches_sqlite_and_rolls_back() {
         after: ledger.clone(),
     })
     .unwrap();
-    let db_path = crate::events::EventCache::path(&data.root.join("index.json"));
+    let config = crate::storage::postgres::tree_checkpoint::tests::fixture_host_source()
+        .config(&data.root.join("index.json")).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     {
-        let db = rusqlite::Connection::open(&db_path).unwrap();
-        db.execute("INSERT INTO catalog_relocation_candidates(old_path,new_path,native_id) VALUES(?1,?2,?3)", rusqlite::params![old, physical, "qualified-native"]).unwrap();
+        let db = journal.connection().unwrap();
+        db.execute("INSERT INTO catalog_relocation_candidates(namespace,old_path,new_path,native_id) VALUES(semon_namespace(),?1,?2,?3)", rusqlite::params![old, physical, "qualified-native"]).unwrap();
         db.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",
             rusqlite::params![key, evidence],
         )
         .unwrap();
     }
     let next = complete_fixture(append_fixture(&data, "codex"), "codex");
     let oracle: String = {
-        let db = rusqlite::Connection::open(&db_path).unwrap();
-        db.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+        let db = journal.connection().unwrap();
+        db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [&key], |r| r.get(0))
             .unwrap()
     };
     assert!(

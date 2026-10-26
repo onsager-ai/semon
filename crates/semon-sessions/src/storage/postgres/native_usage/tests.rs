@@ -64,10 +64,18 @@ fn pg_native_usage_shared_parser_generation_dimensions_replay_restart_and_rollba
     std::fs::write(&path, &body).unwrap();
     let index = shared::parser_fixture(&path, "codex");
     assert_eq!(index.native_usage_observations.as_ref().unwrap().len(), 3);
-    let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema() {
-        oracle.execute_batch(ddl).unwrap();
-    }
+    let oracle_cache = std::env::temp_dir().join(format!(
+        "pg-usage193-0-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let oracle_source = crate::storage::HostSource::new(ns("usage193-0"), "a".repeat(64)).unwrap();
+    drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());
+    let config = oracle_source.config(&oracle_cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let mut oracle = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let source_path = "same/path\0🦀";
     let first = ledger(body.len() as u64);
     assert_eq!(
@@ -284,10 +292,10 @@ fn pg_native_usage_shared_parser_generation_dimensions_replay_restart_and_rollba
 fn sqlite_rows(db: &rusqlite::Connection) -> Vec<Vec<String>> {
     let mut result = Vec::new();
     for query in [
-        "SELECT cast(source_id AS TEXT),lower(hex(source_path)),receipt,cast(checkpoint AS TEXT),cast(parser_version AS TEXT),cast(usage_ready AS TEXT) FROM native_usage_sources ORDER BY source_id",
-        "SELECT cast(source_id AS TEXT),cast(native_offset AS TEXT),lower(hex(identity)),lower(hex(payload)),lower(hex(record)),lower(hex(outcome)),lower(hex(model_outcome)) FROM native_usage_facts ORDER BY source_id,native_offset",
-        "SELECT cast(source_id AS TEXT),lower(hex(scope)),lower(hex(identity)),cast(native_offset AS TEXT) FROM native_usage_identities ORDER BY source_id,scope,identity",
-        "SELECT cast(source_id AS TEXT),lower(hex(kind)),lower(hex(dimension)),lower(hex(value)) FROM native_usage_dimensions ORDER BY source_id,kind,dimension",
+        "SELECT cast(source_id AS TEXT),lower(hex(source_path)),receipt,cast(checkpoint AS TEXT),cast(parser_version AS TEXT),cast(usage_ready AS TEXT) FROM native_usage_sources WHERE namespace=semon_namespace() ORDER BY source_id",
+        "SELECT cast(source_id AS TEXT),cast(native_offset AS TEXT),lower(hex(identity)),lower(hex(payload)),lower(hex(record)),lower(hex(outcome)),lower(hex(model_outcome)) FROM native_usage_facts WHERE namespace=semon_namespace() ORDER BY source_id,native_offset",
+        "SELECT cast(source_id AS TEXT),lower(hex(scope)),lower(hex(identity)),cast(native_offset AS TEXT) FROM native_usage_identities WHERE namespace=semon_namespace() ORDER BY source_id,scope,identity",
+        "SELECT cast(source_id AS TEXT),lower(hex(kind)),lower(hex(dimension)),lower(hex(value)) FROM native_usage_dimensions WHERE namespace=semon_namespace() ORDER BY source_id,kind,dimension",
     ] {
         let mut statement = db.prepare(query).unwrap();
         let columns = statement.column_count();
@@ -320,10 +328,18 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
     );
     let index = parsed("codex", &body);
     let end = ledger(body.len() as u64);
-    let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema() {
-        oracle.execute_batch(ddl).unwrap();
-    }
+    let oracle_cache = std::env::temp_dir().join(format!(
+        "pg-usage193-1-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let oracle_source = crate::storage::HostSource::new(ns("usage193-1"), "a".repeat(64)).unwrap();
+    drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());
+    let config = oracle_source.config(&oracle_cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let mut oracle = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     shared::sqlite_fixture(&mut oracle, &path, None, &end, false, &index);
     let expected = sqlite_rows(&oracle);
     assert!(expected.iter().flatten().any(|v| v.len() > 5408));
@@ -467,10 +483,18 @@ fn pg_native_usage_real_parser_unavailable_model_and_unsigned_counters() {
     let body = format!("{usage}\n{context}\n{usage}\n{usage}\n");
     let index = parsed("codex", &body);
     let end = ledger(body.len() as u64);
-    let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema() {
-        oracle.execute_batch(ddl).unwrap();
-    }
+    let oracle_cache = std::env::temp_dir().join(format!(
+        "pg-usage193-2-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let oracle_source = crate::storage::HostSource::new(ns("usage193-2"), "a".repeat(64)).unwrap();
+    drop(crate::events::EventCache::open_scoped(&oracle_cache, &oracle_source).unwrap());
+    let config = oracle_source.config(&oracle_cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let mut oracle = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     shared::sqlite_fixture(&mut oracle, "path\0🦀", None, &end, false, &index);
     let expected = sqlite_rows(&oracle);
     drop(oracle);

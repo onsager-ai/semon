@@ -24,7 +24,7 @@ fn copied(tx: &mut PgTxn<'_>) -> Result<Vec<IdentityRow>, StorageError> {
 }
 
 fn sqlite_copied(c: &rusqlite::Connection) -> Vec<IdentityRow> {
-    c.prepare("SELECT file_id,message_id,record_uuid FROM native_tree_copied_identities ORDER BY file_id,message_id,record_uuid").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    c.prepare("SELECT file_id,message_id,record_uuid FROM native_tree_copied_identities WHERE namespace=semon_namespace() ORDER BY file_id,message_id,record_uuid").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
 #[test]
@@ -52,8 +52,10 @@ fn pg_native_copied_identity_real_parser_sqlite_oracle_restart_rollback_and_ack(
     }
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
-    let rows = sqlite.prepare("SELECT file_id,message_id,record_uuid FROM usage_identity ORDER BY file_id,message_id,record_uuid").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<Vec<IdentityRow>>>().unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+    let rows = sqlite.prepare("SELECT file_id,message_id,record_uuid FROM usage_identity WHERE namespace=semon_namespace() ORDER BY file_id,message_id,record_uuid").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<Vec<IdentityRow>>>().unwrap();
     assert_eq!(
         rows.len(),
         3,
@@ -129,7 +131,7 @@ fn pg_native_copied_identity_real_parser_sqlite_oracle_restart_rollback_and_ack(
     .unwrap();
     for row in rows.iter().take(2) {
         sqlite
-            .execute("DELETE FROM usage_identity WHERE file_id=?1", [row.0])
+            .execute("DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1", [row.0])
             .unwrap();
         let expected = sqlite_copied(&sqlite);
         pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -247,10 +249,12 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     scan_file(&path, "claude", &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
-    let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+    let config = source.config(&cache_path).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let sqlite = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
     let projection: i64 = sqlite
         .query_row(
-            "SELECT projection_id FROM native_tree_labels ORDER BY projection_id LIMIT 1",
+            "SELECT projection_id FROM native_tree_labels WHERE namespace=semon_namespace() ORDER BY projection_id LIMIT 1",
             [],
             |r| r.get(0),
         )
@@ -268,15 +272,15 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
             .unwrap()
     };
     let labels = strings(
-        "SELECT label,value FROM native_tree_labels WHERE projection_id=?1",
+        "SELECT label,value FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1",
         2,
     );
     let models = strings(
-        "SELECT model FROM native_tree_models WHERE projection_id=?1",
+        "SELECT model FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1",
         1,
     );
     let tools: Vec<(String, Option<String>, bool)> = sqlite
-        .prepare("SELECT tool_id,name,closed FROM native_tree_tools WHERE projection_id=?1")
+        .prepare("SELECT tool_id,name,closed FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1")
         .unwrap()
         .query_map([projection], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
@@ -293,15 +297,15 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     for (marker, sql) in [
         (
             "semon.tree.witness.4.labels",
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
         ),
         (
             "semon.tree.witness.4.models",
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
         ),
         (
             "semon.tree.witness.4.tools",
-            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
         ),
     ] {
         oracle.update(marker.as_bytes());
