@@ -105,7 +105,21 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         return Ok(admission);
     }
     // Check the supported current contract before any DDL, binding or data write.
-    crate::events::store::require_current(&tx).map_err(|_| StorageError::Unavailable)?;
+    let mode: String = tx
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(failed)?;
+    let application: i64 = tx
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(failed)?;
+    if !mode.eq_ignore_ascii_case("wal") || application != 0 {
+        return Err(StorageError::Unavailable);
+    }
+    if !crate::events::store::current_contract(&tx).map_err(failed)?
+        || !crate::events::store::current_objects_present(&tx).map_err(failed)?
+    {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    crate::events::store::configured::NativeOwnership::validate_physical(&tx)?;
     let tables: Vec<String> = tx.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'storage_namespace_sequence' ORDER BY name LIMIT 129").map_err(failed)?
         .query_map([], |row| row.get(0)).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
     if tables.len() > TABLE_LIMIT

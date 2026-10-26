@@ -647,6 +647,8 @@ fn open_admitted(
         configured::create(&config)?;
     }
     let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    make_existing_private(path, &crate::state_dir())
+        .map_err(|_| crate::storage::StorageError::Unavailable)?;
     let journal = capability.journal();
     let (store, stamp) =
         crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
@@ -1210,16 +1212,13 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
-    let namespace = options
-        .source
-        .config(&options.cache)
-        .map_err(io::Error::other)?
-        .namespace;
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true, &namespace)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+    let (_, _, journal) = open_admitted(&super::EventCache::path(&options.cache), &options.source)
         .map_err(io::Error::other)?;
+    let mut db = journal.connection().map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
     for input in inputs {
         if !crate::inputs::is_input_path(input.root.as_str(), &input.path)
             || !input.path.ends_with(".jsonl")
@@ -1577,11 +1576,9 @@ pub(crate) fn resumed_runtime_native(
 }
 
 pub(crate) fn source_write_store(options: &crate::Options) -> io::Result<Box<dyn IndexStore>> {
-    let namespace = options.source.namespace().map_err(io::Error::other)?;
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true, &namespace)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    Ok(Box::new(store))
+    let (store, _, _) = open_admitted(&super::EventCache::path(&options.cache), &options.source)
+        .map_err(io::Error::other)?;
+    Ok(store)
 }
 
 pub(crate) fn begin_source_write(
@@ -4481,7 +4478,7 @@ fn storage_ddl() -> [&'static str; 22] {
 /// Reference databases contain only schema and seed metadata, never user data.
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
-fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
+pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
     static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<String>>>> = OnceLock::new();
     let mut inventory = INVENTORY
         .get_or_init(Mutex::default)
@@ -11912,7 +11909,7 @@ fn current_test_store(
         expected_stream_epoch: Some("a".repeat(64)),
     };
     let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
-    drop(EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
+    drop(super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
     let owner = configured::NativeOwnership::restore(&config).unwrap();
     let connection = configured::connection(&config).unwrap();
     crate::storage::NativeReaderBinding::Semantic(owner.clone())

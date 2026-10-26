@@ -278,9 +278,11 @@ fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
     if database.as_os_str().is_empty() || database == Path::new(":memory:") {
         return Err(StorageError::InvalidArguments);
     }
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
         .open(database)
         .map_err(|_| StorageError::Unavailable)?;
     let mut db = Connection::open_with_flags(
@@ -546,7 +548,7 @@ impl NativeOwnership {
         self.admission as u64
     }
 
-    fn validate_physical(db: &Connection) -> Result<(), StorageError> {
+    pub(crate) fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
         validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;

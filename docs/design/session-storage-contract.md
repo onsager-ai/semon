@@ -32,6 +32,14 @@ must obtain real current admission and use namespace-qualified current DML.
 The SourceJournal has one mandatory-namespace path for claims, discovery,
 recovery intents, receipts, cursor advancement and exact operation replay.
 
+Ordinary source-write and enqueue entry points now open the admitted backend and
+its SourceJournal directly. Empty Current publication initializes both search
+coverage scopes through the owned publisher. Retained proof references require
+the namespace-leading Catalog and History families before payload reads or GC.
+The remaining old test initializers (`attempt*`, `qualify_contract`, `init`) still
+need caller ports and removal; the current branch does not yet establish the
+complete fixture and compatibility cleanup gate.
+
 Current SQLite remains a supported alternative backend. External Claude/Codex Raw
 formats and their existing event parsers remain supported independently of the
 removed database schema/runtime compatibility.
