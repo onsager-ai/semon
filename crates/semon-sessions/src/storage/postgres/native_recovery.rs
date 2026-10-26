@@ -24,7 +24,7 @@ pub(super) fn head(tx: &mut PgTxn<'_>) -> Result<String, StorageError> {
     // The locked Source head selects the immutable current generation. An
     // unbound head cannot stand in for a successfully recovered empty Catalog.
     let generation: Option<String> = tx.driver.query_one(
-        "SELECT catalog_generation FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+        "SELECT (SELECT catalog_generation FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)",
         &[&ns],
     ).map_err(sqlstate::error)?.try_get(0).map_err(|_| StorageError::ScopeChanged)?;
     let generation = generation.ok_or(StorageError::NamespaceUpgradePending)?;
