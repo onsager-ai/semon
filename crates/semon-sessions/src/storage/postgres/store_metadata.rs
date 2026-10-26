@@ -270,7 +270,7 @@ fn mutation_boundary(_point: u8) -> Result<(), StorageError> {
     }
     Ok(())
 }
-fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
+pub(super) fn authorize(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let allowed:bool=tx.driver.query_one("SELECT owner=CURRENT_USER AND has_table_privilege('semon_pg_store_state','UPDATE') AND has_table_privilege('semon_pg_store_operations','INSERT') FROM semon_pg_store_owner WHERE singleton", &[]).map_err(sqlstate::error)?.get(0);
     if !allowed {
         return Err(StorageError::ScopeChanged);

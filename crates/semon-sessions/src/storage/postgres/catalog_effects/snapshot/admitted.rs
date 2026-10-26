@@ -54,9 +54,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         if request.limit > 64 {
             return unavailable();
         }
-        // Retained history is the current rows plus every history owner of
-        // this generation without a current row, read from its proof-owned
-        // immutable header. Both sides filter and keyset on their own indexed
+        // In retained scope a proof-owned composite history replaces the
+        // current header for the same key, including a still-current parent
+        // with withdrawn children. Both sides filter and keyset on indexed
         // columns (owners carry the header's), and the decode re-checks them.
         let history = request.scope == crate::CatalogReadScope::RetainedHistory;
         let tx = self
@@ -79,8 +79,13 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             .query(
                 "WITH visible AS (
                 SELECT session_key,metadata,last_ms,harness,repo,model,false AS retained
-                FROM semon_pg_native_catalog_rows
-                WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+                FROM semon_pg_native_catalog_rows r
+                WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
+                  AND (NOT $11 OR NOT EXISTS (
+                    SELECT 1 FROM semon_pg_native_catalog_history_owners o
+                    WHERE o.namespace_digest=r.namespace_digest AND o.namespace=r.namespace
+                      AND o.generation=r.generation AND o.key_digest=r.key_digest
+                      AND o.session_key=r.session_key))
                 UNION ALL
                 SELECT o.session_key,h.metadata,o.last_ms,o.harness,o.repo,o.model,true
                 FROM semon_pg_native_catalog_history_owners o
@@ -89,9 +94,6 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                  AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
                  AND h.session_key=o.session_key
                 WHERE $11 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
-                  AND NOT EXISTS (SELECT 1 FROM semon_pg_native_catalog_rows r
-                    WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
-                      AND r.generation=$2 AND r.key_digest=o.key_digest)
              ), page AS MATERIALIZED (
                 SELECT session_key,metadata,last_ms,harness,repo,model,retained
                 FROM visible

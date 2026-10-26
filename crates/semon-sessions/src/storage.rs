@@ -349,7 +349,11 @@ impl StoreConfig {
             StoreBackend::Postgres { pool, control } => {
                 postgres::require_configured(self, pool, control)?;
                 Ok(Box::new(postgres::PgSourceJournal::configured(
-                    pool.clone(),
+                    pool.bind_source(
+                        &self.namespace,
+                        self.expected_stream_epoch.as_deref(),
+                        control,
+                    )?,
                     self.namespace.clone(),
                     control.clone(),
                 )))
@@ -383,18 +387,29 @@ impl StoreConfig {
         Ok(Box::new(sqlite::SqliteMetadataStore::new(self)))
     }
 
-    /// Explicitly bind a supported current single-source store. This stages
-    /// admission and fences native writes until their namespace port completes;
-    /// it is not a finished row migration or permission to admit another source.
+    /// Explicitly bind a supported current source. PostgreSQL revocation fences
+    /// source capabilities; re-admission requires a new host-chosen epoch and
+    /// advances the admission. This never copies or discards native rows.
     pub fn admit_namespace(&self) -> Result<NamespaceAdmission, StorageError> {
-        sqlite::namespace::admit(self)
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => sqlite::namespace::admit(self),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => {
+                postgres::namespace::admit(self, pool, control)
+            }
+        }
     }
 
-    /// Undo the read-only admission stage for its exact first-source witness.
-    /// Refuses once a qualified row migration has started; this is not general
-    /// migration rollback and never discards native rows or accepted writes.
+    /// Revoke the exact admission witness. Refuses an active qualified transfer;
+    /// this is not migration rollback and never discards native rows or writes.
     pub fn unenroll_namespace(&self, admission: &NamespaceAdmission) -> Result<(), StorageError> {
-        sqlite::namespace::unenroll(self, admission)
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => sqlite::namespace::unenroll(self, admission),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => {
+                postgres::namespace::unenroll(self, pool, control, admission)
+            }
+        }
     }
 
     /// Read a native Catalog through durable namespace and epoch admission.
