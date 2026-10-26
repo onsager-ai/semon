@@ -3354,7 +3354,8 @@ pub(crate) fn scan_file(
         let stat = Stat::from_metadata(&file.metadata()?)?;
         cache.scan_measurements.record("open_stat", started, 1);
         let mut recorded = cache.recorded(&key)?;
-        if recorded.is_none() && harness == "codex"
+        if recorded.is_none()
+            && harness == "codex"
             && let Some(id) = crate_id_for_relocation(path)
         {
             let started = cache.scan_measurements.start();
@@ -3368,7 +3369,9 @@ pub(crate) fn scan_file(
                 cache.files.remove(&old);
                 recorded = cache.recorded(&key)?;
             }
-            cache.scan_measurements.record("relocation_lookup", started, 1);
+            cache
+                .scan_measurements
+                .record("relocation_lookup", started, 1);
         }
         // Resolve a known deferred representation before journaling ingestion.
         // The projection worker repairs this same committed Ledger; it does
@@ -10539,9 +10542,13 @@ mod tests {
                                 // All other errors remain failures, and the final
                                 // durable oracle below must still match exactly.
                                 assert_eq!(
-                                    error.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()),
+                                    error
+                                        .get_ref()
+                                        .and_then(|error| error
+                                            .downcast_ref::<crate::storage::StorageError>()),
                                     Some(&crate::storage::StorageError::Busy),
-                                    "{error:?}: {:?}", ledger_trace()
+                                    "{error:?}: {:?}",
+                                    ledger_trace()
                                 );
                             }
                         }
