@@ -281,18 +281,27 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     assert!(tools.iter().any(|t| t.0 == "toolu\0🦀"));
     // Independent oracle: the original SQLite json_array witness bytes.
     let mut oracle = Sha256::new();
-    for sql in [
-        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+    for (marker, sql) in [
+        (
+            "semon.tree.witness.4.labels",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+        ),
+        (
+            "semon.tree.witness.4.models",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+        ),
+        (
+            "semon.tree.witness.4.tools",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
+        ),
     ] {
-        oracle.update(sql.as_bytes());
+        oracle.update(marker.as_bytes());
         for row in strings(sql, 1) {
             oracle.update((row[0].len() as u64).to_be_bytes());
             oracle.update(row[0].as_bytes());
         }
     }
-    let oracle = format!("{:x}", oracle.finalize());
+    let oracle = format!("tree4:{:x}", oracle.finalize());
     let (pool, _factory) = fixture(|bounds| bounds.max_connections = 1);
     let control = PgCancellation::default();
     let namespace = ns("witness\0🦀");
@@ -326,19 +335,13 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
                 }
                 families.push(rows);
             }
-            let mut tools = Vec::new();
-            for row in tx.driver.query("SELECT tool_id,name,closed FROM semon_pg_native_tree_tools WHERE projection_id=$1 ORDER BY tool_id_digest", &[&projection]).map_err(sqlstate::error)? {
-                tx.check()?;
-                tools.push((
-                    text(row.get(0))?,
-                    row.get::<_, Option<Vec<u8>>>(1).map(text).transpose()?,
-                    row.get::<_, bool>(2),
-                ));
-            }
+            let tools = tx.driver.query("SELECT tool_id,name,closed FROM semon_pg_native_tree_tools WHERE projection_id=$1 ORDER BY tool_id_digest", &[&projection]).map_err(sqlstate::error)?
+                .iter().map(|row| Ok((text(row.get(0))?,row.get::<_,Option<Vec<u8>>>(1).map(text).transpose()?,row.get::<_,bool>(2))))
+                .collect::<Result<Vec<_>, StorageError>>()?;
             Ok(witness::digest(
                 families[0].iter().map(|(k, v)| (k.as_str(), v.as_str())),
                 families[1].iter().map(|(m, _)| m.as_str()),
-                tools.iter().map(|(id, name, closed)| (id.as_str(), name.as_deref(), *closed)),
+                tools.iter().map(|(k, v, closed)| (k.as_str(), v.as_deref(), *closed)),
             ))
         })
     };

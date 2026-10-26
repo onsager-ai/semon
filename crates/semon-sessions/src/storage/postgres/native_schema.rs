@@ -14,6 +14,16 @@ struct Table {
 
 const TABLES: &[Table] = &[
     Table {
+        name: "semantic_runtime",
+        columns: "singleton boolean,admission bigint,stream_epoch bytea",
+        key: "singleton",
+    },
+    Table {
+        name: "descriptions",
+        columns: "key_digest bytea,session_key bytea,version bigint,inputs bytea,metadata bytea",
+        key: "key_digest",
+    },
+    Table {
         name: "catalog_history_owners",
         columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean",
         key: "generation,key_digest",
