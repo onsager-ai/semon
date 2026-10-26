@@ -472,10 +472,16 @@ impl SourceObservationStore for SourceJournal {
             return Ok((receipt, false));
         }
         let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         self.validate(&tx)?;
         if let Some((receipt, done)) = recovery_receipt(&tx, namespace, operation)? {
-            if receipt == SourceMutationReceipt::AlreadyApplied {
+            let terminal: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3 AND recovery_done IS NOT NULL)",
+                params![self.namespace(), operation.id, operation.payload_digest], |row| row.get(0),
+            ).map_err(failed)?;
+            if terminal {
                 acknowledge_intent_sql(&tx, namespace, operation)?;
             }
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -486,12 +492,19 @@ impl SourceObservationStore for SourceJournal {
             [], |row| row.get(0),
         ).optional().map_err(failed)?;
         let applied = current.as_deref() == cursor;
-        let done = applied && crate::events::store::recovery_page(&tx)
-            .map_err(|_| StorageError::Unavailable)?;
+        let done = applied
+            && crate::events::store::recovery_page(&tx).map_err(|_| StorageError::Unavailable)?;
         insert_recovery_receipt(&tx, namespace, operation, applied, done)?;
         acknowledge_intent_sql(&tx, namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        Ok((if applied { SourceMutationReceipt::Applied } else { SourceMutationReceipt::Conflict }, done))
+        Ok((
+            if applied {
+                SourceMutationReceipt::Applied
+            } else {
+                SourceMutationReceipt::Conflict
+            },
+            done,
+        ))
     }
 
     fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
@@ -674,7 +687,7 @@ impl SourceObservationStore for SourceJournal {
             .map_err(failed)?;
         let pending: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1)",
                 [self.config.namespace.as_str()],
                 |row| row.get(0),
             )

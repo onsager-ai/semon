@@ -85,7 +85,9 @@ jobs:
           name: native-tree-diagnostic
           path: ${{ runner.temp }}/native-tree-diagnostic.txt
       - name: Default admitted current Source restart and isolation
-        run: cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
+        run: |
+          cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
+          cargo test --locked -p semon-sessions --lib current_source_recovery_replays_terminal_done_and_keeps_other_sources -- --nocapture
       - name: Canonical namespace factory structure and drift refusal
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
