@@ -133,6 +133,11 @@ pub struct SessionSourceWrite {
 }
 
 impl SessionSourceWrite {
+    #[cfg(test)]
+    pub(crate) fn intent(&self) -> WriteIntent {
+        self.intent.clone()
+    }
+
     pub fn begin(
         options: &Options,
         input: &Input,
@@ -411,6 +416,11 @@ pub struct SessionFactsWrite {
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
+    #[cfg(test)]
+    pub(crate) fn intent(&self) -> FactsIntent {
+        self.intent.clone()
+    }
+
     pub fn begin(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
         Self::begin_with_source_journal(options, wanted, true)
     }
