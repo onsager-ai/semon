@@ -555,10 +555,10 @@ const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache
 const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
-const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
+pub(crate) const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
      lines_added, lines_removed, model_usage, capture_at";
 
-const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
+pub(crate) const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
 
 /// The SQLite [`IndexStore`]: one connection, used by one
 /// [`super::EventCache`].
@@ -5010,7 +5010,7 @@ fn validate_prior_reported(
     Ok(())
 }
 
-fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
+pub(crate) fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
     let model_usage: String = row.get(8)?;
     let run = ReportedRunSnapshot {
         last_session_id: row.get(0)?,
@@ -5734,7 +5734,10 @@ fn put_usage(
     Ok(())
 }
 
-fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite::Result<()> {
+pub(crate) fn put_run(
+    statement: &mut Statement<'_>,
+    run: &ReportedRunSnapshot,
+) -> rusqlite::Result<()> {
     let row = super::reported_rows::ReportedRow::new(run)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let ReportedRunSnapshot {
