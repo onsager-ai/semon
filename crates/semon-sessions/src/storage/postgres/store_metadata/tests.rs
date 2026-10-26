@@ -263,10 +263,32 @@ fn pg_store_metadata_warm_corruption_matrix_refuses_without_mutation() {
         let (pool, factory) = fixture(|b| b.max_connections = 1);
         let control = PgCancellation::default();
         let host = PgStoreMetadata::open(pool.clone(), &control).unwrap();
-        admin_factory(&factory)
-            .client()
-            .batch_execute(corrupt)
+        let controlled = matches!(
+            corrupt,
+            "ALTER TABLE semon_pg_store_owner NO FORCE ROW LEVEL SECURITY"
+                | "ALTER TABLE semon_pg_store_state DISABLE ROW LEVEL SECURITY"
+                | "DROP POLICY read_store ON semon_pg_store_owner"
+                | "ALTER POLICY read_store ON semon_pg_store_state USING(false)"
+                | "ALTER TABLE semon_pg_store_state ADD COLUMN extra boolean"
+                | "ALTER TABLE semon_pg_store_state ALTER COLUMN revision SET DEFAULT 0"
+                | "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_contract_check"
+                | "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_epoch_check"
+                | "ALTER TABLE semon_pg_store_state DROP CONSTRAINT semon_pg_store_state_pricing_target_check"
+                | "ALTER TABLE semon_pg_store_operations DROP CONSTRAINT semon_pg_store_operations_request_digest_check"
+                | "ALTER TABLE semon_pg_store_operations DROP CONSTRAINT semon_pg_store_operations_pkey"
+                | "ALTER TABLE semon_pg_store_owner DROP CONSTRAINT semon_pg_store_owner_contract_check; ALTER TABLE semon_pg_store_owner ADD CHECK(contract>0)"
+        );
+        if controlled {
+            pool.controlled_schema_change(&control, |tx| {
+                tx.driver.batch_execute(corrupt).map_err(sqlstate::error)
+            })
             .unwrap();
+        } else {
+            admin_factory(&factory)
+                .client()
+                .batch_execute(corrupt)
+                .unwrap();
+        }
         let before = full_snapshot(&factory);
         assert!(
             host.set_pricing_target(&[40; 32], 0, Some("refused"), &control)
