@@ -843,22 +843,23 @@ impl DiscoveryState {
     }
 }
 
+/// The admitted namespace Source journal is the only recovery/discovery port;
+/// the store's physical database never supplies an unscoped journal.
+pub(super) type Admitted = (Box<dyn IndexStore>, Loaded, source_journal::SourceJournal);
+
 /// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Operational failures
 /// (a read-only directory or a lock held past the timeout) permit an in-memory
 /// cache. Unsupported contracts and malformed persistent values never do.
-pub(super) fn open(
-    path: &Path,
-    source: &crate::storage::HostSource,
-) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
+pub(super) fn open(path: &Path, source: &crate::storage::HostSource) -> Result<Admitted, Unopened> {
     open_admitted(path, source).map_err(|error| Unopened::Other(error.to_string()))
 }
 
 fn open_admitted(
     path: &Path,
     source: &crate::storage::HostSource,
-) -> Result<(Box<dyn IndexStore>, Loaded), crate::storage::StorageError> {
+) -> Result<Admitted, crate::storage::StorageError> {
     let mut config = source.config(path)?;
     config.backend = crate::storage::StoreBackend::Sqlite {
         database: path.to_owned(),
@@ -870,6 +871,7 @@ fn open_admitted(
         configured::create(&config)?;
     }
     let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    let journal = capability.journal();
     let (store, stamp) =
         crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
     Ok((
@@ -879,6 +881,7 @@ fn open_admitted(
             reported_runs: Vec::new(),
             stamp,
         },
+        journal,
     ))
 }
 
@@ -888,7 +891,7 @@ fn open_admitted(
 pub(super) fn open_scoped(
     path: &Path,
     source: &crate::storage::HostSource,
-) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+) -> Result<Admitted, String> {
     open_admitted(path, source).map_err(|error| error.to_string())
 }
 
@@ -7464,7 +7467,7 @@ mod tests {
         let root = scratch("scoped-runs");
         let path = root.join("index.sqlite3");
         let source = crate::Options::default().source;
-        let (mut store, _) = open_scoped(&path, &source).unwrap();
+        let (mut store, _, _) = open_scoped(&path, &source).unwrap();
         let config = source.config(&path).unwrap();
         let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
         let mut old = run();
@@ -7489,7 +7492,7 @@ mod tests {
             transaction.commit().unwrap();
         }
         drop(store);
-        let (mut store, loaded) = open_scoped(&path, &source).unwrap();
+        let (mut store, loaded, _) = open_scoped(&path, &source).unwrap();
         assert!(loaded.files.is_empty());
         assert!(loaded.reported_runs.is_empty());
         assert_eq!(loaded.stamp, Some(stamp()));

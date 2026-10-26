@@ -1835,10 +1835,11 @@ impl EventCache {
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         let path = Self::path(v1_cache);
         let mut cache = match store::open(&path, source) {
-            Ok((store, loaded)) => {
+            Ok((store, loaded, journal)) => {
                 crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
+                cache.source_observations = Some(Box::new(journal));
                 cache.observation_path = Some(path.clone());
                 cache
             }
@@ -1865,9 +1866,12 @@ impl EventCache {
         v1_cache: &Path,
         source: &crate::storage::HostSource,
     ) -> Result<Self, String> {
-        let (store, loaded) = store::open_scoped(&Self::path(v1_cache), source)?;
+        let (store, loaded, journal) = store::open_scoped(&Self::path(v1_cache), source)?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
+        // Recovery/discovery use the admitted namespace journal, never the
+        // store's unscoped physical one.
+        cache.source_observations = Some(Box::new(journal));
         cache.observation_path = Some(Self::path(v1_cache));
         cache.scoped = true;
         cache.explicit_store = true;
@@ -2663,11 +2667,13 @@ impl EventCache {
             .clone()
             .ok_or_else(|| io::Error::other("host Source admission unavailable"))?;
         match store::open(&Self::path(&v1_cache), &source) {
-            Ok((store, loaded)) => {
+            Ok((store, loaded, journal)) => {
                 let runs: Vec<_> = self.reported_runs().cloned().collect();
                 let stamp = self.claude_json_stamp.take();
                 *self = Self::from_loaded(loaded);
                 self.store = Some(store);
+                self.observation_namespace = journal.namespace().to_owned();
+                self.source_observations = Some(Box::new(journal));
                 self.observation_path = Some(Self::path(&v1_cache));
                 self.v1_cache = Some(v1_cache);
                 self.host_source = Some(source);
