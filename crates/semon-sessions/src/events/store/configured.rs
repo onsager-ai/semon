@@ -3300,7 +3300,8 @@ mod tests {
             .refresh_reported_runs(&input, 999, &mut false)
             .unwrap();
         assert_eq!(cache.reported_runs().cloned().collect::<Vec<_>>(), expected);
-        let other = Writer::owned(NativeOwnership::admit(&b).unwrap()).unwrap()
+        let other = Writer::owned(NativeOwnership::admit(&b).unwrap())
+            .unwrap()
             .reported_runs(&selected)
             .unwrap();
         assert_eq!(other.len(), 1);
@@ -5770,7 +5771,9 @@ mod tests {
         assert!(writer.ledger(&path).is_err());
         writer.connection.execute("UPDATE storage_event_tables SET qualification=0 WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
         assert!(writer.ledger(&path).unwrap().is_none());
-        f.db().execute_batch("DROP INDEX session_trace_starts").unwrap();
+        f.db()
+            .execute_batch("DROP INDEX session_trace_starts")
+            .unwrap();
         assert!(writer.ledger(&path).is_err());
     }
 
