@@ -238,7 +238,11 @@ impl StoreConfig {
     /// Requires a host-chosen epoch. Existing stores are never reset or copied;
     /// admission and Catalog namespace assignment are separate operations.
     pub fn create_native_store(&self) -> Result<(), StorageError> {
-        crate::events::store::configured::create(self)
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => crate::events::store::configured::create(self),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => postgres::create_native_store(self, pool, control),
+        }
     }
 
     /// Explicit single-source Event/ledger ingestion. Hosts authorize the Raw
@@ -312,6 +316,10 @@ impl StoreConfig {
     ) -> Result<crate::ViewerReply, StorageError> {
         let request =
             crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
+        #[cfg(feature = "postgres")]
+        if let StoreBackend::Postgres { pool, control } = &self.backend {
+            return postgres::catalog_page(self, pool, control, options, &request);
+        }
         let binding = NativeReaderBinding::Admitted(self.clone());
         sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(
             |error| {

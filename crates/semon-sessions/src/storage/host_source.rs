@@ -101,10 +101,15 @@ impl HostSource {
     }
 
     pub(crate) fn config(&self, cache: &Path) -> Result<StoreConfig, StorageError> {
+        self.store_config(StoreBackend::Sqlite {
+            database: super::local_database(cache),
+        })
+    }
+
+    /// Bind this host identity to independently authorized physical resources.
+    pub fn store_config(&self, backend: StoreBackend) -> Result<StoreConfig, StorageError> {
         Ok(StoreConfig {
-            backend: StoreBackend::Sqlite {
-                database: super::local_database(cache),
-            },
+            backend,
             namespace: self.namespace()?,
             expected_stream_epoch: Some(self.stream_epoch.clone()),
         })

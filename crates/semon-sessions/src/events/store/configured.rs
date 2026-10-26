@@ -254,7 +254,7 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
                 .map(str::to_owned)
                 .map_err(|error| {
                     #[cfg(test)]
-                    eprintln!("native tree metadata_scope=unclassified_key");
+                    eprintln!("native tree metadata_scope=unclassified_key family={}", key.split(':').next().filter(|family| family.len() <= 64).unwrap_or("oversized"));
                     rusqlite::Error::UserFunctionError(Box::new(error))
                 })
         },

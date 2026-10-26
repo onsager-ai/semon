@@ -317,7 +317,7 @@ impl Sources {
         }
         owner.validate_ready(&db).map_err(io::Error::other)?;
         let config = owner.config();
-        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let database = config.backend.sqlite_database().map_err(io::Error::other)?;
         let db = crate::events::store::chunk_proofs::Snapshot::new(
             db,
             crate::storage::NativeReaderBinding::Semantic(owner.clone()),

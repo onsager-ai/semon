@@ -21,7 +21,7 @@ pub(crate) mod semantic;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
-    StorageError, StoreBackend, StoreConfig,
+    StorageError, StoreConfig,
 };
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
