@@ -61,14 +61,20 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     }
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut sqlite = EventCache::open_scoped(&options.cache).unwrap();
-    let prepared =
-        crate::model::prepare_sources(&options, &mut sqlite, &inputs, 1790812802000).unwrap();
+    let mut prepared_rows = Vec::new();
+    for batch in inputs.chunks(64) {
+        prepared_rows.extend(
+            crate::model::prepare_sources(&options, &mut sqlite, batch, 1790812802000)
+                .unwrap()
+                .rows,
+        );
+    }
     drop(sqlite);
     let mut db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
     let tx = db.transaction().unwrap();
     let writer = crate::storage::sqlite::publication::CurrentWriter::unbound(&tx);
     use crate::storage::catalog::CurrentPublicationStore;
-    for row in &prepared.rows {
+    for row in &prepared_rows {
         writer
             .current(row, &serde_json::to_string(row).unwrap())
             .unwrap();
@@ -102,7 +108,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
         // Physical current-generation fixture only; this is not a Catalog
         // admission/publication test. The rows came from the real parser above.
-        for rows in prepared.rows.chunks(64) {
+        for rows in prepared_rows.chunks(64) {
             catalog_effects::stage(tx, &generation, &crate::slot_projection::Publication { rows, transcripts: None })?;
         }
         tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&namespace.as_str().as_bytes(), &generation]).map_err(sqlstate::error)?;
