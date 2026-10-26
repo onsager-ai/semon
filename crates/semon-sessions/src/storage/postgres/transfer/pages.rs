@@ -201,6 +201,14 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             payload,
         } => {
             let id:Vec<u8>=tx.0.driver.query_one("SELECT g.generation FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND (($3::text IS NULL AND EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace=g.namespace AND p.namespace_digest=g.namespace_digest AND p.source_path=g.source_path AND p.generation=g.generation)) OR ($3::text IS NOT NULL AND encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')=$3))",&[&ns,&path.as_bytes(),backing]).map_err(sqlstate::error)?.get(0);
+            if *page_kind == NativePageKind::Tree {
+                let header: Option<Vec<u8>> = tx.0.driver.query_one("SELECT CASE WHEN octet_length(chunks_header)<=1048576 THEN chunks_header END FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns,&id]).map_err(sqlstate::error)?.get(0);
+                let header = String::from_utf8(header.ok_or(StorageError::Busy)?).map_err(|_|StorageError::ScopeChanged)?;
+                native_pages::verify_tree_node(&header,key,payload,|page_kind,key| {
+                    let bytes: Option<Vec<u8>> = tx.0.driver.query_one("SELECT CASE WHEN octet_length(b.payload)<=1048576 THEN b.payload END FROM semon_pg_native_page_refs r JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND r.kind=$3 AND r.page_key=$4", &[&ns,&id,&kind(page_kind),&key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+                    String::from_utf8(bytes.ok_or(StorageError::Busy)?).map_err(|_|StorageError::ScopeChanged)
+                })?;
+            }
             let digest = Sha256::digest(payload.as_bytes()).to_vec();
             tx.0.driver.execute("INSERT INTO semon_pg_native_page_blobs(namespace,digest,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",&[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?;
             let same:bool=tx.0.driver.query_one("SELECT payload=$3 FROM semon_pg_native_page_blobs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND digest=$2",&[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?.get(0);

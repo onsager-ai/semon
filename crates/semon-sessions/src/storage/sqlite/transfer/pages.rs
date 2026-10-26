@@ -203,13 +203,34 @@ pub(super) fn capture(
         );
         let next: Option<String> = tx.0.query_row("SELECT j.value FROM meta m,json_each(m.value) j WHERE m.namespace=?1 AND m.key=?2 AND (?3 IS NULL OR j.value>?3) ORDER BY j.value LIMIT 1", params![tx.1,manifest_key,state.native_backing], |r|r.get(0)).optional().map_err(failed)?;
         if let Some(next) = next {
-            let current_header = metadata(tx, &format!("{}header", prefix(&path, NativePageKind::Chunks)))?.ok_or(StorageError::ScopeChanged)?;
-            let header: crate::events::native_pages::chunks::Header = serde_json::from_str(&current_header).map_err(|_|StorageError::ScopeChanged)?;
+            let current_header = metadata(
+                tx,
+                &format!("{}header", prefix(&path, NativePageKind::Chunks)),
+            )?
+            .ok_or(StorageError::ScopeChanged)?;
+            let header: crate::events::native_pages::chunks::Header =
+                serde_json::from_str(&current_header).map_err(|_| StorageError::ScopeChanged)?;
             if crate::source_carrier::ledger_digest_value(&header.ledger) == next {
-                let retained = metadata(tx, &format!("{}header", backing_prefix(&path, NativePageKind::Chunks, Some(&next))))?.ok_or(StorageError::ScopeChanged)?;
-                let original = metadata(tx, &format!("{}source", backing_prefix(&path, NativePageKind::Chunks, Some(&next))))?.ok_or(StorageError::ScopeChanged)?;
+                let retained = metadata(
+                    tx,
+                    &format!(
+                        "{}header",
+                        backing_prefix(&path, NativePageKind::Chunks, Some(&next))
+                    ),
+                )?
+                .ok_or(StorageError::ScopeChanged)?;
+                let original = metadata(
+                    tx,
+                    &format!(
+                        "{}source",
+                        backing_prefix(&path, NativePageKind::Chunks, Some(&next))
+                    ),
+                )?
+                .ok_or(StorageError::ScopeChanged)?;
                 let current: i64 = tx.0.query_row("SELECT source_id FROM native_usage_current WHERE namespace=?1 AND source_path=?2",params![tx.1,path],|r|r.get(0)).map_err(failed)?;
-                if retained != current_header || original != current.to_string() {return Err(StorageError::ScopeChanged);}
+                if retained != current_header || original != current.to_string() {
+                    return Err(StorageError::ScopeChanged);
+                }
                 state.native_backing = Some(next);
                 state.native_key = None;
                 transfer::reported::save_capture(tx, state)?;
@@ -329,10 +350,15 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             kind,
             key,
             payload,
-        } => tx.put(
-            &format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())),
-            payload.as_bytes(),
-        )?,
+        } => {
+            if *kind == NativePageKind::Tree {
+                let header = metadata(tx,&format!("{}header",backing_prefix(path,NativePageKind::Chunks,backing.as_deref())))?.ok_or(StorageError::ScopeChanged)?;
+                native_pages::verify_tree_node(&header,key,payload,|kind,key| {
+                    metadata(tx,&format!("{}{key}",backing_prefix(path,kind,backing.as_deref())))?.ok_or(StorageError::ScopeChanged)
+                })?;
+            }
+            tx.put(&format!("{}{key}", backing_prefix(path, *kind, backing.as_deref())),payload.as_bytes())?;
+        },
         TransferRecord::NativeMetadata { key, value, .. } => tx.put(key, value.as_bytes())?,
         _ => return Err(StorageError::InvalidArguments),
     }
