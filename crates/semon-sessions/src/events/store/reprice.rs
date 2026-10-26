@@ -1669,7 +1669,6 @@ mod tests {
             "17"
         );
         let store = SqliteStore {
-            discovery: super::super::DiscoveryState::new(&db).unwrap(),
             connection: db,
             path: database.clone(),
             selected_runs: None,

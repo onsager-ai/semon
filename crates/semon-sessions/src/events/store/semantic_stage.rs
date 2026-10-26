@@ -3584,7 +3584,6 @@ mod tests {
         assert!(native_keys_page(&connection).unwrap());
         assert_eq!(NATIVE_OCCUPANCY_PROBES.with(|count| count.get()), 18);
         let mut store = SqliteStore {
-            discovery: super::super::DiscoveryState::new(&connection).unwrap(),
             connection,
             path,
             selected_runs: None,

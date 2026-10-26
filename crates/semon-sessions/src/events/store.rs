@@ -733,80 +733,11 @@ const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,se
 /// [`super::EventCache`].
 struct SqliteStore {
     connection: Connection,
-    discovery: DiscoveryState,
     path: PathBuf,
     selected_runs: Option<std::collections::BTreeSet<String>>,
     semantic_rejection: Option<&'static str>,
     #[cfg(test)]
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DiscoveryWitness {
-    data: i64,
-    main_schema: i64,
-    temp_schema: i64,
-    changes: u64,
-    rollback: u64,
-    contract: [u8; 32],
-}
-impl DiscoveryWitness {
-    fn read(c: &Connection, state: &DiscoveryState) -> rusqlite::Result<Self> {
-        crate::native_timing::discovery_count(|counts| {
-            counts.statements += 1;
-            counts.schema_probes += 1;
-        });
-        if crate::storage::sqlite::namespace::is_bound(c)? {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "namespace writer upgrade is pending".into(),
-            ));
-        }
-        crate::native_timing::discovery_count(|counts| {
-            counts.statements += 4;
-            counts.schema_probes += 2;
-        });
-        let mut digest = sha2::Sha256::new();
-        let mut statement=c.prepare_cached("SELECT key,CASE WHEN octet_length(value)<=2048 THEN value END FROM main.meta WHERE key IN('cache_version','catalog_version','search_version','catalog_semantic_recipe') ORDER BY key LIMIT 5")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            let value: Option<String> = row.get(1)?;
-            digest.update((key.len() as u64).to_be_bytes());
-            digest.update(key.as_bytes());
-            digest.update([u8::from(value.is_some())]);
-            if let Some(value) = value {
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-        }
-        Ok(Self {
-            data: c.pragma_query_value(None, "data_version", |r| r.get(0))?,
-            main_schema: c.pragma_query_value(Some("main"), "schema_version", |r| r.get(0))?,
-            temp_schema: c.pragma_query_value(Some("temp"), "schema_version", |r| r.get(0))?,
-            changes: c.total_changes(),
-            rollback: state.rollback.load(std::sync::atomic::Ordering::Relaxed),
-            contract: digest.finalize().into(),
-        })
-    }
-}
-struct DiscoveryState {
-    rollback: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    recovery: Option<DiscoveryWitness>,
-    publication: Option<(DiscoveryWitness, Vec<String>, bool)>,
-}
-impl DiscoveryState {
-    fn new(c: &Connection) -> rusqlite::Result<Self> {
-        let rollback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let clock = rollback.clone();
-        c.rollback_hook(Some(move || {
-            clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }))?;
-        Ok(Self {
-            rollback,
-            recovery: None,
-            publication: None,
-        })
-    }
 }
 
 /// The admitted namespace Source journal is the only recovery/discovery port;
@@ -2211,321 +2142,6 @@ pub(crate) fn failure(error: rusqlite::Error) -> StoreError {
     }
 }
 
-impl SourceObservationStore for SqliteStore {
-    fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
-        let cached = self.discovery.recovery.take();
-        if !self.connection.is_autocommit() {
-            #[cfg(test)]
-            eprintln!("source recovery refusal=recovery_is_current_open_transaction");
-            self.discovery.publication = None;
-            return Err(StorageError::Unavailable);
-        }
-        crate::native_timing::discovery_count(|counts| counts.statements += 2);
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(source_journal::local_failure)?;
-        let witness =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        let current = cached == Some(witness);
-        if !current {
-            require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        }
-        tx.commit().map_err(source_journal::local_failure)?;
-        if current {
-            self.discovery.recovery = Some(witness);
-            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
-        }
-        Ok(current)
-    }
-
-    fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
-        require_current_sql(&self.connection).map_err(source_journal::local_failure)?;
-        self.connection
-            .query_row(
-                "SELECT value FROM main.meta WHERE key='catalog_recovery_after'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(source_journal::local_failure)
-    }
-
-    fn recover(
-        &mut self,
-        operation: &SourceOperation,
-        cursor: Option<&str>,
-    ) -> Result<(SourceMutationReceipt, bool), StorageError> {
-        if cursor.is_some_and(|value| value.len() > 4096) {
-            return Err(StorageError::InvalidArguments);
-        }
-        let payload = serde_json::to_vec(&cursor).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, None, "recover", &payload)? {
-            return Ok((receipt, false));
-        }
-        self.discovery.recovery = None;
-        if !self.connection.is_autocommit() {
-            #[cfg(test)]
-            eprintln!("source recovery refusal=recover_open_transaction");
-            self.discovery.publication = None;
-            return Err(StorageError::Unavailable);
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(source_journal::local_failure)?;
-        let witness =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        if let Some((receipt, done)) = source_journal::recovery_receipt(&tx, None, operation)? {
-            // Only a matching terminal receipt can consume this intent.
-            let terminal: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace='' AND operation_id=?1 AND payload_digest=?2 AND recovery_done IS NOT NULL)",
-                params![operation.id, operation.payload_digest], |row| row.get(0),
-            ).map_err(source_journal::local_failure)?;
-            if terminal {
-                source_journal::acknowledge_intent_sql(&tx, None, operation)?;
-            }
-            tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-            return Ok((receipt, done));
-        }
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT value FROM main.meta WHERE key='catalog_recovery_after'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(source_journal::local_failure)?;
-        let applied = current.as_deref() == cursor;
-        let before = tx.total_changes();
-        let done = if applied {
-            recovery_page(&tx).map_err(|_error| {
-                #[cfg(test)]
-                eprintln!("source recovery refusal=recovery_page");
-                StorageError::Unavailable
-            })?
-        } else {
-            false
-        };
-        source_journal::insert_recovery_receipt(&tx, None, operation, applied, done)?;
-        source_journal::acknowledge_intent_sql(&tx, None, operation)?;
-        let complete = applied
-            && done
-            && tx
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE key='catalog_recovery_after')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(source_journal::local_failure)?;
-        // Read total_changes only after the receipt and ACK have been written.
-        let committed =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        if committed.contract != witness.contract
-            || committed.main_schema != witness.main_schema
-            || committed.temp_schema != witness.temp_schema
-        {
-            require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        #[cfg(test)]
-        if LOSE_RECOVERY_ACK.with(|flag| flag.replace(false)) {
-            return Err(StorageError::CommitUncertain);
-        }
-        if complete {
-            self.discovery.recovery = Some(committed);
-        }
-        crate::native_timing::discovery_count(|counts| {
-            counts.committed_changes += committed.changes - before
-        });
-        Ok((
-            if applied {
-                SourceMutationReceipt::Applied
-            } else {
-                SourceMutationReceipt::Conflict
-            },
-            done,
-        ))
-    }
-
-    fn discovery_is_current(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<bool, StorageError> {
-        validate_paths(paths)?;
-        let cached = self.discovery.publication.take();
-        if !self.connection.is_autocommit() {
-            self.discovery.recovery = None;
-            return Err(StorageError::Unavailable);
-        }
-        crate::native_timing::discovery_count(|counts| counts.statements += 2);
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(source_journal::local_failure)?;
-        let witness =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        let current = cached.as_ref().is_some_and(|(old, inputs, done)| {
-            *old == witness && inputs == paths && *done == complete
-        });
-        if !current {
-            require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        }
-        tx.commit().map_err(source_journal::local_failure)?;
-        if current {
-            self.discovery.publication = cached;
-            crate::native_timing::discovery_count(|counts| counts.skipped += 1);
-        }
-        Ok(current)
-    }
-
-    fn persist_intent(&mut self, intent: &SourceIntent) -> Result<(), StorageError> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(source_journal::local_failure)?;
-        let witness =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        source_journal::persist_intent_sql(&tx, None, intent)?;
-        let recovery_complete = self.discovery.recovery == Some(witness)
-            && tx
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )
-                .map_err(source_journal::local_failure)?;
-        let committed =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        // Intent triggers cannot smuggle a changed physical contract into a
-        // committed witness. The admission qualification remains mandatory;
-        // this same-TX delta avoids re-probing an unchanged layout.
-        if committed.contract != witness.contract
-            || committed.main_schema != witness.main_schema
-            || committed.temp_schema != witness.temp_schema
-        {
-            require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        if recovery_complete {
-            self.discovery.recovery = Some(committed);
-        }
-        Ok(())
-    }
-
-    fn pending_intents(&self) -> Result<Vec<SourceIntent>, StorageError> {
-        source_journal::local_pending_intents(&self.connection)
-    }
-
-    fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
-        source_journal::local_acknowledge_intent(&mut self.connection, operation)
-    }
-
-    fn discover(
-        &mut self,
-        operation: &SourceOperation,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        validate_paths(paths)?;
-        let payload =
-            serde_json::to_vec(&(paths, complete)).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, None, "discover", &payload)? {
-            return Ok(receipt);
-        }
-        self.discovery.publication = None;
-        if !self.connection.is_autocommit() {
-            self.discovery.recovery = None;
-            return Err(StorageError::Unavailable);
-        }
-        crate::native_timing::discovery_count(|counts| counts.statements += 2);
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(source_journal::local_failure)?;
-        let witness =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        if let Some(receipt) = source_journal::stored_receipt(&tx, None, operation)? {
-            // Only a matching terminal receipt may consume a captured intent.
-            if receipt == SourceMutationReceipt::AlreadyApplied {
-                source_journal::acknowledge_intent_sql(&tx, None, operation)?;
-            }
-            tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-            return Ok(receipt);
-        }
-        let before = tx.total_changes();
-        source_journal::discover(&tx, None, paths, complete)
-            .map_err(source_journal::local_failure)?;
-        // Receipt, effect and removal of the intent share this owner TX.
-        source_journal::insert_receipt(&tx, None, operation)?;
-        source_journal::acknowledge_intent_sql(&tx, None, operation)?;
-        let recovery_complete = self.discovery.recovery == Some(witness)
-            && tx
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_recovery_after')",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )
-                .map_err(source_journal::local_failure)?;
-        let committed =
-            DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        if committed.contract != witness.contract
-            || committed.main_schema != witness.main_schema
-            || committed.temp_schema != witness.temp_schema
-        {
-            require_current_sql(&tx).map_err(source_journal::local_failure)?;
-        }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-        if recovery_complete {
-            self.discovery.recovery = Some(committed);
-        }
-        if paths.iter().map(String::len).sum::<usize>() <= 1024 * 1024 {
-            self.discovery.publication = Some((committed, paths.to_vec(), complete));
-        }
-        crate::native_timing::discovery_count(|counts| {
-            counts.committed_changes += committed.changes - before
-        });
-        Ok(SourceMutationReceipt::Applied)
-    }
-
-    fn invalidate(
-        &mut self,
-        operation: &SourceOperation,
-        expected: &[(String, Option<i64>)],
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        source_journal::local_invalidate(&mut self.connection, operation, expected, true)
-    }
-
-    fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
-        source_journal::local_claims(&self.connection, paths)
-    }
-
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        source_journal::local_pending(&self.connection, limit)
-    }
-
-    fn backfill_state(&self) -> Result<Option<String>, StorageError> {
-        source_journal::local_backfill_state(&self.connection)
-    }
-
-    fn finish_backfill(
-        &mut self,
-        operation: &SourceOperation,
-        expected_generation: Option<&str>,
-    ) -> Result<SourceMutationReceipt, StorageError> {
-        source_journal::local_finish_backfill(
-            &mut self.connection,
-            operation,
-            expected_generation,
-            true,
-        )
-    }
-}
-
 pub(crate) fn read_session_description(
     db: &Connection,
     key: &str,
@@ -2547,14 +2163,6 @@ pub(crate) fn write_session_descriptions(
 }
 
 impl IndexStore for SqliteStore {
-    fn source_observations(&self) -> Option<&dyn SourceObservationStore> {
-        Some(self)
-    }
-
-    fn source_observations_mut(&mut self) -> Option<&mut dyn SourceObservationStore> {
-        Some(self)
-    }
-
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -4384,10 +3992,8 @@ impl SqliteStore {
         // transient DDL whose schema cookie can be reused after rollback.
         validate_copied_usage(&connection).map_err(classify)?;
         semantic_stage::validate_support(&connection).map_err(classify)?;
-        let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
-            discovery,
             path: path.to_owned(),
             selected_runs: scoped.then(std::collections::BTreeSet::new),
             semantic_rejection: None,
@@ -4476,10 +4082,8 @@ impl SqliteStore {
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
         validate_copied_usage(&connection).map_err(classify)?;
         semantic_stage::validate_support(&connection).map_err(classify)?;
-        let discovery = DiscoveryState::new(&connection).map_err(classify)?;
         let store = Self {
             connection,
-            discovery,
             path: path.to_owned(),
             selected_runs: Some(std::collections::BTreeSet::new()),
             semantic_rejection: None,
@@ -7110,8 +6714,8 @@ mod tests {
         SourceMutationReceipt, SourceObservationStore, SourceOperation,
     };
 
-    // Exercise the production owner's typed port, including its committed
-    // witness preflight. No connection is opened by this test convenience API.
+    // Exercise the admitted SourceJournal for this store's database and the
+    // fixture namespace; the unbound connection is never an observation port.
     trait TestSourceObservations {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError>;
         fn discover_catalog_sources(
@@ -7121,21 +6725,38 @@ mod tests {
         ) -> Result<(), StoreError>;
     }
 
+    fn source_journal(path: &Path) -> Result<Box<dyn SourceObservationStore>, StoreError> {
+        crate::storage::sqlite::source_journal::open(&crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.to_owned(),
+            },
+            namespace: fixture_namespace(),
+            expected_stream_epoch: None,
+        })
+        .map_err(StoreError::Configured)
+    }
+
     impl TestSourceObservations for SqliteStore {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
-            if self.recovery_is_current().map_err(StoreError::Configured)? {
+            let mut journal = source_journal(&self.path)?;
+            if journal.recovery_is_current().map_err(StoreError::Configured)? {
                 return Ok(true);
             }
-            let cursor = self.recovery_cursor().map_err(StoreError::Configured)?;
-            let operation =
-                SourceOperation::capture("", "recover", &serde_json::to_vec(&cursor).unwrap());
-            self.persist_intent(&SourceIntent::Recover {
-                operation: operation.clone(),
-                cursor: cursor.clone(),
-            })
-            .map_err(StoreError::Configured)?;
-            self.recover(&operation, cursor.as_deref())
+            let cursor = journal.recovery_cursor().map_err(StoreError::Configured)?;
+            let operation = SourceOperation::capture(
+                fixture_namespace().as_str(),
+                "recover",
+                &serde_json::to_vec(&cursor).unwrap(),
+            );
+            journal
+                .persist_intent(&SourceIntent::Recover {
+                    operation: operation.clone(),
+                    cursor: cursor.clone(),
+                })
+                .map_err(StoreError::Configured)?;
+            journal
+                .recover(&operation, cursor.as_deref())
                 .map(|(_, done)| done)
                 .map_err(StoreError::Configured)
         }
@@ -7146,14 +6767,18 @@ mod tests {
             complete: bool,
         ) -> Result<(), StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
-            if SourceObservationStore::discovery_is_current(self, paths, complete)
+            let mut journal = source_journal(&self.path)?;
+            if journal
+                .discovery_is_current(paths, complete)
                 .map_err(StoreError::Configured)?
             {
                 return Ok(());
             }
             let payload = serde_json::to_vec(&(paths, complete)).unwrap();
-            let operation = SourceOperation::capture("", "discover", &payload);
-            match SourceObservationStore::discover(self, &operation, paths, complete)
+            let operation =
+                SourceOperation::capture(fixture_namespace().as_str(), "discover", &payload);
+            match journal
+                .discover(&operation, paths, complete)
                 .map_err(StoreError::Configured)?
             {
                 SourceMutationReceipt::Applied | SourceMutationReceipt::AlreadyApplied => Ok(()),
