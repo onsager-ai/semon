@@ -291,73 +291,41 @@ impl SourceJournal {
         Ok(())
     }
 
-    /// Prepare the admitted current namespace. Counter seeding keeps
-    /// the old high watermark even when an earlier claim was acknowledged.
+    /// Validate the enrolled current journal in a read snapshot. Reopen never
+    /// creates tables, repairs profiles or adopts metadata counters.
     pub(crate) fn prepare(&self) -> Result<(), StorageError> {
         let mut db = self.connection()?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failed)?;
-        #[cfg(test)]
-        let reserved = std::time::Instant::now();
+        let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
-        tx.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
-            .map_err(failed)?;
-        qualify_operation_tables(&tx)?;
-        qualify_backfill_metadata(&tx)?;
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_source_revision'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failed)?;
-        let old = old
-            .map(|s| s.parse::<i64>())
-            .transpose()
-            .map_err(|_| StorageError::Unavailable)?
-            .unwrap_or(0);
-        if old < 0 {
-            return Err(StorageError::Unavailable);
+        let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name='storage_source_journal'", [], |r|r.get(0)).optional().map_err(failed)?;
+        let expected = JOURNAL_SCHEMA.replace(" IF NOT EXISTS", "");
+        if actual.as_deref() != Some(expected.trim_end_matches(';')) {
+            return Err(StorageError::NamespaceUpgradePending);
         }
-        let head: i64 = tx.query_row("SELECT coalesce(max(revision),0) FROM main.session_catalog_invalidations WHERE namespace=?1", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        if head < 0 {
-            return Err(StorageError::Unavailable);
+        let valid: bool = tx.query_row("SELECT qualification=?2 AND revision>=coalesce((SELECT max(revision) FROM main.session_catalog_invalidations WHERE namespace=?1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1", params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
+        if !valid {
+            return Err(StorageError::NamespaceUpgradePending);
         }
-        let state: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failed)?;
-        if state
-            .as_deref()
-            .is_some_and(|s| !matches!(s, "discovering" | "draining" | "complete"))
-        {
-            return Err(StorageError::Unavailable);
+        for table in ["source_observation_receipts", "source_observation_intents"] {
+            for (action, predicate) in [
+                ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
+                (
+                    "UPDATE",
+                    "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
+                ),
+                ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
+            ] {
+                let name = format!("storage_source_guard_{table}_{action}");
+                let expected = format!(
+                    "CREATE TRIGGER {name} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END"
+                );
+                let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", params![name,table], |r|r.get(0)).optional().map_err(failed)?;
+                if actual.as_deref() != Some(expected.as_str()) {
+                    return Err(StorageError::NamespaceUpgradePending);
+                }
+            }
         }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>=0),backfill_state TEXT CHECK(backfill_state IN ('discovering','draining','complete')),qualification INTEGER NOT NULL CHECK(qualification=1)) STRICT;").map_err(failed)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO storage_source_journal VALUES(?1,?2,?3,?4)",
-            params![
-                self.config.namespace.as_str(),
-                old.max(head),
-                state,
-                SOURCE_JOURNAL_QUALIFICATION_VERSION
-            ],
-        )
-        .map_err(failed)?;
-        catalog_namespace::guard(&tx, "storage_source_journal")?;
-        #[cfg(test)]
-        if reserved.elapsed() >= Duration::from_millis(50) {
-            eprintln!(
-                "configured_reservation stage=journal_prepare total_us={}",
-                reserved.elapsed().as_micros()
-            );
-        }
+        catalog_namespace::validate_guard(&tx, "storage_source_journal")?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 
@@ -678,6 +646,20 @@ impl SourceObservationStore for SourceJournal {
     }
 }
 
+const JOURNAL_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>=0),backfill_state TEXT CHECK(backfill_state IN ('discovering','draining','complete')),qualification INTEGER NOT NULL CHECK(qualification=1)) STRICT;";
+
+/// Install the current journal once, inside namespace enrollment's transaction.
+pub(crate) fn enroll(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
+    db.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
+        .map_err(failed)?;
+    qualify_operation_tables(db)?;
+    qualify_backfill_metadata(db)?;
+    db.execute_batch(JOURNAL_SCHEMA).map_err(failed)?;
+    catalog_namespace::guard(db, "storage_source_journal")?;
+    db.execute("INSERT INTO storage_source_journal SELECT ?1,coalesce(max(revision),0),NULL,?2 FROM main.session_catalog_invalidations WHERE namespace=?1", params![config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION]).map_err(failed)?;
+    Ok(())
+}
+
 fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error {
     #[cfg(test)]
     eprintln!(
@@ -704,7 +686,7 @@ pub(crate) fn register_backfill_writer(db: &Connection, enabled: bool) -> Result
     .map_err(failed)
 }
 
-/// The current admitted singleton metadata profile has no Catalog consumer
+/// The admitted metadata profile has no Catalog consumer
 /// yet. Qualify only the four backfill completion keys for this typed producer;
 /// all other metadata writes retain the admission fence. Native ownership's
 /// independently installed metadata guards are never removed or rewritten.
@@ -1173,6 +1155,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(revision, i64::MAX);
+    }
+
+    #[test]
+    fn current_reopen_needs_no_writer_and_refuses_missing_profile_without_repair() {
+        let fixture = Fixture::new();
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap();
+        let journal = SourceJournal::owned(owner);
+        let blocker = fixture.db();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        journal.prepare().unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
+        drop(crate::storage::sqlite::semantic::Stage::open(capability).unwrap());
+        blocker
+            .execute_batch("ROLLBACK; DROP TABLE storage_semantic_profiles")
+            .unwrap();
+        let cookie: i64 = blocker
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
+        assert!(crate::storage::sqlite::semantic::Stage::open(capability).is_err());
+        let after: i64 = blocker
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cookie, after);
+        let absent: bool = blocker.query_row("SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_semantic_profiles')", [], |r|r.get(0)).unwrap();
+        assert!(absent);
     }
 
     struct Fixture {
