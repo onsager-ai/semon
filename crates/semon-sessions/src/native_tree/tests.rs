@@ -469,8 +469,11 @@ fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_gr
             .unwrap();
         assert_eq!(rows, (count + 1) as i64);
         // A tree must not decode transcript rows, even an unsupported row tag.
-        db.execute("UPDATE events SET k='unsupported' WHERE namespace=semon_namespace() AND seq=0", [])
-            .unwrap();
+        db.execute(
+            "UPDATE events SET k='unsupported' WHERE namespace=semon_namespace() AND seq=0",
+            [],
+        )
+        .unwrap();
         let reads = events::FILE_READS.with(std::cell::Cell::get);
         let parsed = events::PARSED.with(std::cell::Cell::get);
         for _ in 0..3 {
@@ -677,7 +680,10 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
     }
     connection
-        .execute("DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1", [&key])
+        .execute(
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1",
+            [&key],
+        )
         .unwrap();
     fs::OpenOptions::new()
         .append(true)
