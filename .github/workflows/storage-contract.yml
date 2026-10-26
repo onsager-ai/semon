@@ -67,6 +67,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib reported_rows -- --nocapture
           cargo test --locked -p semon-sessions --lib reported_runs -- --nocapture
           cargo test --locked -p semon-sessions --lib recovery_scalar119_sqlite_current_record_refusal_preserves_bytes -- --nocapture
+          cargo test --locked -p semon-sessions --lib configured_reported_runs_corruption_and_ownership_refuse_before_effect -- --nocapture
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::recovery_ -- --nocapture
