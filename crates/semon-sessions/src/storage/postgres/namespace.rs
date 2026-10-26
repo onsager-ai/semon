@@ -102,7 +102,12 @@ mod tests {
             .unwrap();
         let journal = config.source_observations().unwrap();
         let mut writer = config.native_events().unwrap();
-        journal.recovery_cursor().expect("initialized current source cursor");
+        // A fresh source has no admitted Catalog to recover. This is distinct
+        // from the capability revocation checked below.
+        assert_eq!(
+            journal.recovery_cursor().unwrap_err(),
+            StorageError::NamespaceUpgradePending
+        );
         pinned
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
