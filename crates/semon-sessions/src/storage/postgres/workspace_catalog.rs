@@ -59,8 +59,9 @@ pub(crate) fn read(
             let namespace: Vec<u8> = row.get(0);
             let index = names.iter().position(|name| name == &namespace).ok_or(StorageError::NamespaceMismatch)?;
             let bytes = row.get::<_, Option<Vec<u8>>>(6).ok_or(StorageError::Busy)?;
+            crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
             let value: CatalogRow = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-            if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) || value.last.unwrap_or(0) != row.get::<_, i64>(2) || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3) || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4) || value.model.as_bytes() != row.get::<_, Vec<u8>>(5) { return Err(StorageError::ScopeChanged); }
+            if value.sources.len() > 64 || value.key.as_bytes() != row.get::<_, Vec<u8>>(1) || value.last.unwrap_or(0) != row.get::<_, i64>(2) || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3) || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4) || value.model.as_bytes() != row.get::<_, Vec<u8>>(5) { return Err(StorageError::ScopeChanged); }
             Ok((index,value))
         }).collect::<Result<Vec<_>, _>>()
     })?;
