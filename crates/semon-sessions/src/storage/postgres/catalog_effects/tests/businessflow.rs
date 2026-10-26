@@ -1768,7 +1768,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "claude",
         )
         .unwrap();
-    let (partial_generation, partial_batch, partial_model) =
+    let (partial_generation, partial_batch, partial_model, _) =
         stage_publish(&mut moved_cache, &bulk[5..6], 1790812807000);
     assert_ne!(partial_generation, bulk_generation);
     // Unrelated means every owner and proof not reading `path`.
