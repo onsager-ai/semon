@@ -52,9 +52,16 @@ Root must reconcile those formatting-only overlaps with A/C.
 - `40264221008`, code `f65cf1b94db7dca70a858321d638296023addbf2`:
   superseded formatting/diagnostics revision, cancellation requested.
 - `40264313371`, code `44ead665c98dc39e7f6ecaaadb013f72ef1f0a7e`:
+  ordinary scenario FAILED at `businessflow.rs:69` in the initial SQLite
+  three-harness oracle `prepare_sources`, reporting InvalidData. PG business
+  phase was therefore NOT reached. Fixture/model failure is unresolved; do not
+  remove the parity requirement or treat this as a PG pass. The job remains
   IN PROGRESS at handover, includes immutable-prefix correction. Must inspect
   focused scenario, existing PG focused/full, fmt, strict Clippy and default
   driver gates. No green claim.
+- Exact audit revision `e3ae5f6ad948946e11b6ff2bd42e7750c99fc338` has run
+  `40264421172`, still in progress at the last observation. Its code matches
+  the failed-prefix code above; no green exact-head evidence exists.
 
 ## Blocking remaining work
 
