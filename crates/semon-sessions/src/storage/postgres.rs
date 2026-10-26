@@ -12,6 +12,7 @@ mod native_ingest;
 mod native_keys;
 mod native_pages;
 mod native_reader;
+mod native_recovery;
 mod native_usage;
 mod native_usage_identity;
 mod operations;
@@ -47,6 +48,9 @@ mod tests;
 
 #[cfg(test)]
 mod native_ingest_tests;
+
+#[cfg(test)]
+mod native_recovery_tests;
 
 #[cfg(test)]
 mod proxy_test;
