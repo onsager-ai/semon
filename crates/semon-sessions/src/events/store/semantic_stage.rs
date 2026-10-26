@@ -446,9 +446,7 @@ pub(super) fn generation(c: &Connection) -> rusqlite::Result<Option<String>> {
     .optional()
 }
 pub(super) fn revision(c: &Connection) -> rusqlite::Result<i64> {
-    c.query_row(configured::metadata_sql(c,
-        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0)",
-        "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()")?,[],|r|r.get(0))
+    c.query_row("SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",[],|r|r.get(0))
 }
 fn queue(c: &Connection, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> {
     c.execute(
@@ -573,9 +571,7 @@ impl NativeFrontierPort for OrdinaryNativeFrontier<'_> {
             "id"
         };
         if !qualified {
-            return c.query_row(configured::metadata_sql(c,
-        "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))",
-        "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))")?,[id],|r|r.get(0));
+            return c.query_row("SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)))",[id],|r|r.get(0));
         }
         let dependency = if !parent { "native" } else { "parent" };
         let legacy = format!(
@@ -584,7 +580,7 @@ impl NativeFrontierPort for OrdinaryNativeFrontier<'_> {
         let scoped = format!(
             "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
         );
-        c.query_row(configured::metadata_sql(c, &legacy, &scoped)?, [id], |r| {
+        c.query_row(&scoped, [id], |r| {
             r.get(0)
         })
     }
@@ -744,19 +740,11 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
                 false,
             ),
             "headerid" => (
-                configured::metadata_sql(
-                    c,
-                    "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                )?,
+                "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
                 false,
             ),
             "headerparent" => (
-                configured::metadata_sql(
-                    c,
-                    "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                )?,
+                "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
                 false,
             ),
             "claudechildren" => (
@@ -1222,9 +1210,7 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
 
 fn reset(c: &Connection, runtime: &str) -> rusqlite::Result<()> {
     c.execute(metadata_increment(c)?, ["semantic_epoch"])?;
-    c.execute(configured::metadata_sql(c,
-        "UPDATE catalog_semantic_stage SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE key='semantic_epoch'),phase='indexing',generation=?1,runtime=?2,revision=?3,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL",
-        "UPDATE catalog_semantic_stage SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'),phase='indexing',generation=?1,runtime=?2,revision=?3,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL")?,params![generation(c)?,runtime,revision(c)?])?;
+    c.execute("UPDATE catalog_semantic_stage SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'),phase='indexing',generation=?1,runtime=?2,revision=?3,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL",params![generation(c)?,runtime,revision(c)?])?;
     Ok(())
 }
 /// Unreachable staging records carry no authority without the singleton epoch.
@@ -1254,9 +1240,7 @@ fn gc_page(c: &Connection) -> rusqlite::Result<Option<usize>> {
 }
 fn gc_pending(c: &Connection) -> rusqlite::Result<bool> {
     c.query_row(
-        configured::metadata_sql(c,
-            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",
-            "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_semantic_gc' AND value='1')")?,
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_semantic_gc' AND value='1')",
         [],
         |r| r.get(0),
     )
@@ -1936,9 +1920,7 @@ impl SqliteStore {
                     r.get(0)
                 })
                 .map_err(failure)?;
-            let journaled: bool = journaled_runtime && tx.query_row(configured::metadata_sql(&tx,
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_push_driven' AND value='1')",
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_push_driven' AND value='1')").map_err(failure)?, [], |r| r.get(0)).map_err(failure)?;
+            let journaled: bool = journaled_runtime && tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_push_driven' AND value='1')", [], |r| r.get(0)).map_err(failure)?;
             // Journaled Facts/Raw writes invalidate the actual staged native
             // and PID dependencies, including owners not yet published. The
             // next batch still checks every consumed source witness. Unrelated
@@ -1965,9 +1947,7 @@ impl SqliteStore {
                 ["semantic_epoch"],
             )
             .map_err(failure)?;
-            tx.execute(configured::metadata_sql(&tx,
-                "INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE key='semantic_epoch'",
-                "INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'").map_err(failure)?,params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
+            tx.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'",params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
         }
         record_recipe(&tx).map_err(failure)?;
         for path in paths {
@@ -2885,15 +2865,11 @@ impl SqliteStore {
             )
             .map_err(failure)?;
             tx.execute(
-                configured::metadata_sql(&tx,
-                    "INSERT OR IGNORE INTO meta(key,value) VALUES('catalog_backfill_state','complete')",
-                    "INSERT OR IGNORE INTO meta(namespace,key,value) VALUES(semon_namespace(),'catalog_backfill_state','complete')").map_err(failure)?,
+                "INSERT OR IGNORE INTO meta(namespace,key,value) VALUES(semon_namespace(),'catalog_backfill_state','complete')",
                 [],
             )
             .map_err(failure)?;
-            tx.execute(configured::metadata_sql(&tx,
-                "UPDATE meta SET value='complete' WHERE key='catalog_completeness' AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value='discovering')",
-                "UPDATE meta SET value='complete' WHERE namespace=semon_namespace() AND key='catalog_completeness' AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state' AND value='discovering')").map_err(failure)?,[]).map_err(failure)?;
+            tx.execute("UPDATE meta SET value='complete' WHERE namespace=semon_namespace() AND key='catalog_completeness' AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state' AND value='discovering')",[]).map_err(failure)?;
         }
         tx.commit().map_err(failure)?;
         Ok(Outcome::Written)
@@ -3123,8 +3099,11 @@ mod tests {
             prefix: sha2::Sha256::digest(b"").into(),
             tail: sha2::Sha256::digest(b"").into(),
         };
-        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"))
-            .unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(
+            &root.join("index.sqlite3"),
+            &crate::events::store::fixture_namespace(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .write_one(&path, None, None, &captured, &FileIndex::default())

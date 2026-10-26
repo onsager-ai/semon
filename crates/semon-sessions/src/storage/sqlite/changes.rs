@@ -161,12 +161,7 @@ pub(crate) fn initialize_source_floors(
     ] {
         let value: Option<String> = tx
             .query_row(
-                crate::events::store::configured::metadata_sql(
-                    tx,
-                    "SELECT value FROM meta WHERE key=?1",
-                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
-                )
-                .map_err(failed)?,
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
                 [key],
                 |r| r.get(0),
             )
@@ -185,12 +180,7 @@ pub(crate) fn initialize_source_floors(
     }
     for key in missing {
         tx.execute(
-            crate::events::store::configured::metadata_sql(
-                tx,
-                "INSERT INTO meta(key,value) VALUES(?1,'0')",
-                "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')",
-            )
-            .map_err(failed)?,
+            "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')",
             [key],
         )
         .map_err(failed)?;
@@ -213,12 +203,7 @@ pub(super) fn compact(
     }
     let version: String = tx
         .query_row(
-            crate::events::store::configured::metadata_sql(
-                &tx,
-                "SELECT value FROM meta WHERE key='catalog_version'",
-                "SELECT value FROM meta WHERE namespace='' AND key='catalog_version'",
-            )
-            .map_err(failed)?,
+            "SELECT value FROM meta WHERE namespace='' AND key='catalog_version'",
             [],
             |r| r.get(0),
         )
@@ -228,12 +213,7 @@ pub(super) fn compact(
     }
     let current: String = tx
         .query_row(
-            crate::events::store::configured::metadata_sql(
-                &tx,
-                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
-            )
-            .map_err(failed)?,
+            "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
             [],
             |r| r.get(0),
         )
@@ -245,12 +225,7 @@ pub(super) fn compact(
     let floor_key = format!("catalog_changes_floor_{key}");
     let floor: u64 = tx
         .query_row(
-            crate::events::store::configured::metadata_sql(
-                &tx,
-                "SELECT value FROM meta WHERE key=?1",
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
-            )
-            .map_err(failed)?,
+            "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [&floor_key],
             |r| r.get::<_, String>(0),
         )
@@ -287,12 +262,7 @@ pub(super) fn compact(
         )
         .map_err(failed)?;
         tx.execute(
-            crate::events::store::configured::metadata_sql(
-                &tx,
-                "UPDATE meta SET value=?2 WHERE key=?1",
-                "UPDATE meta SET value=?2 WHERE namespace=semon_namespace() AND key=?1",
-            )
-            .map_err(failed)?,
+            "UPDATE meta SET value=?2 WHERE namespace=semon_namespace() AND key=?1",
             (&floor_key, through.to_string()),
         )
         .map_err(failed)?;
@@ -320,12 +290,7 @@ pub(super) fn read_snapshot(
     let meta = |key: &str| {
         connection
             .query_row(
-                crate::events::store::configured::metadata_sql(
-                    connection,
-                    "SELECT value FROM meta WHERE key=?1",
-                    "SELECT value FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
-                )
-                .map_err(failed)?,
+                "SELECT value FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
                 [key],
                 |r| r.get::<_, String>(0),
             )

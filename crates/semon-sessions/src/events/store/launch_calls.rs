@@ -27,11 +27,7 @@ pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Op
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let prefix = prefix(path);
     transaction.execute(
-        configured::metadata_sql(
-            transaction,
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?,
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
     Ok(())
@@ -68,7 +64,7 @@ pub(super) fn read(
     {
         return Ok(None);
     }
-    let mut statement = connection.prepare(configured::metadata_sql(connection, "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key", "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")?)?;
+    let mut statement = connection.prepare("SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")?;
     let mut rows = statement.query(params![
         &prefix,
         format!("{prefix}~"),
@@ -144,7 +140,7 @@ pub(super) fn write_measured(
     let prefix = prefix(path);
     measurements.record("launch_prefix", started, 1);
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::metadata_sql(transaction, "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value", "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?)?;
+    let mut put = transaction.prepare_cached("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("launch_prepare", started, 1);
     let started = measurements.start();
     let Some(plan) = crate::events::native_pages::launch::plan(ledger, index)
@@ -188,7 +184,7 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name)) {
+        match SqliteStore::attempt(&root.join(name), &crate::events::store::fixture_namespace()) {
             Ok((store, _)) => store,
             Err(error) => panic!("real Index schema: {error}"),
         }

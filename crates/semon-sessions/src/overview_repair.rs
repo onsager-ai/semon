@@ -15,7 +15,7 @@ use std::{
 
 const SOURCES_MAX: usize = 64;
 const BYTES_MAX: u64 = 64 * 1024 * 1024;
-const CANDIDATES: &str = "SELECT substr(key,17) FROM meta WHERE key>'overview_needed:'||?2 AND key<'overview_needed;' ORDER BY key LIMIT ?1";
+const CANDIDATES: &str = "SELECT substr(key,17) FROM main.meta WHERE namespace=semon_namespace() AND key>'overview_needed:'||?2 AND key<'overview_needed;' ORDER BY key LIMIT ?1";
 type EvidenceRead<'a> =
     Box<dyn Fn(&Path, &crate::native_record::Record) -> io::Result<Vec<u8>> + 'a>;
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
@@ -339,7 +339,7 @@ fn validate_writer(
 }
 
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
-    let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
+    let text = crate::history_projection::admitted_catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
     text.map(|text| {
         crate::selected_read::charge(512, text.len())?;
         serde_json::from_str(&text).map_err(failure)
@@ -347,10 +347,6 @@ fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     .transpose()
 }
 fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
-    let has_tables = db.query_row("SELECT count(*)=2 FROM sqlite_schema WHERE name IN ('session_overview','session_trace_headers')",[],|row|row.get::<_,bool>(0)).map_err(failure)?;
-    if !has_tables {
-        return Ok(false);
-    }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     if !projection_ready(db, row)? {
         return Ok(false);
@@ -362,28 +358,18 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
     {
         return Ok(false);
     }
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_overview o JOIN session_trace_headers t USING(session_key) WHERE o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_overview o JOIN main.session_trace_headers t USING(namespace,session_key) WHERE o.namespace=semon_namespace() AND o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
 }
 
 fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
-    let exists = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_slot_projections')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(failure)?;
-    if !exists {
-        return Ok(false);
-    }
-    if crate::history_projection::catalog(db, &row.key)
+    if crate::history_projection::admitted_catalog(db, &row.key)
         .map_err(failure)?
         .is_some()
     {
-        return crate::history_projection::qualified(db, row, false).map_err(failure);
+        return crate::history_projection::qualified(db, row, true).map_err(failure);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
 }
 
 /// Demand an ordinary producer upgrade for an exact selected owner. This only
@@ -450,7 +436,7 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
     {
         add(row);
     }
-    let mut related=db.prepare("SELECT session_key FROM session_catalog WHERE parent_key=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related=db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
     let mut count = 0;
     for sid in related
         .query_map([key], |row| row.get::<_, String>(0))
@@ -473,7 +459,7 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
     } else {
         // Far-end and unsent sessions have no native transcript. Resolve their
         // owner through indexed handoff endpoints, never a workspace scan.
-        let mut statement = db.prepare("SELECT session_key FROM (SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1 UNION SELECT session_key FROM session_trace_bookmarks WHERE target=?2) ORDER BY session_key LIMIT 65").map_err(failure)?;
+        let mut statement = db.prepare("SELECT session_key FROM (SELECT session_key FROM main.session_trace_edges WHERE namespace=semon_namespace() AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM main.session_trace_edges WHERE namespace=semon_namespace() AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1 UNION SELECT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?2) ORDER BY session_key LIMIT 65").map_err(failure)?;
         let owners = statement
             .query_map(rusqlite::params![key, key.strip_prefix("unsent:")], |row| {
                 row.get::<_, String>(0)
@@ -519,8 +505,8 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
     let mut pending: std::collections::BTreeSet<_> =
         selected.rows.iter().map(|row| row.key.clone()).collect();
     let mut visited = std::collections::BTreeSet::new();
-    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 UNION SELECT session_key AS endpoint FROM session_catalog WHERE parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
-    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT session_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
     while let Some(owner) = pending.pop_first() {
         if !visited.insert(owner.clone()) {
             continue;
@@ -637,7 +623,7 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
     // A provisional discovery cannot prove a global native identity. In
     // particular, an unobserved harness may introduce a canonical-ID collision.
     if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness' AND value='complete')",
         [],
         |row| row.get::<_, bool>(0),
     ).map_err(failure)? {
@@ -649,7 +635,7 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
             // A complete Catalog's namespace can differ from the CLI's file
             // window. Resolve original native IDs through the existing index;
             // query_selection then includes every identity collision owner.
-            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
             let owners = aliases
                 .query_map([key], |row| row.get::<_, String>(0))
                 .map_err(failure)?
@@ -697,7 +683,7 @@ pub(crate) fn query_window_context_current(
     now: i64,
 ) -> io::Result<bool> {
     if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness' AND value='complete')",
         [],
         |row| row.get::<_, bool>(0),
     ).map_err(failure)? {
@@ -856,16 +842,6 @@ pub(crate) fn candidates_after(
     let mut connection = connection(options)?;
     let db = transaction(&mut connection, options)?;
     // Current-format selected candidates share this admitted read snapshot.
-    if !db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_catalog')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(failure)?
-    {
-        return Ok(Vec::new());
-    }
     let mut statement = db.prepare(CANDIDATES).map_err(failure)?;
     statement
         .query_map(rusqlite::params![limit as i64, after], |row| {
@@ -943,7 +919,7 @@ pub fn repair_session_overview_with_control(
     let upgrade = !projection_ready(&tx, &rows[0])?;
     let generation: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -1020,7 +996,7 @@ pub fn repair_session_overview_with_control(
     validate_writer(&tx, &owner)?;
     let current: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -1046,7 +1022,7 @@ pub fn repair_session_overview_with_control(
             crate::causal_trace::publish_owned(&tx, &owner, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
-            let table = if crate::history_projection::catalog(&tx, &row.key)
+            let table = if crate::history_projection::admitted_catalog(&tx, &row.key)
                 .map_err(failure)?
                 .is_some()
             {
@@ -1093,7 +1069,7 @@ fn publish_projection(
         .map_err(failure)?;
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     let generation = crate::slot_projection::generation(&texts, &row.sources).map_err(failure)?;
-    let history = crate::history_projection::catalog(tx, &row.key)
+    let history = crate::history_projection::admitted_catalog(tx, &row.key)
         .map_err(failure)?
         .is_some();
     let slots = if history {
@@ -1199,8 +1175,8 @@ fn with_records<T>(
         for row in rows {
             let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
             let projection_version = crate::slot_projection::VERSION;
-            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
-            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
             if !history && !current {
                 continue;
             }
@@ -1209,7 +1185,7 @@ fn with_records<T>(
             } else {
                 "session_slots"
             };
-            let mut statement=tx.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.field') IS NOT NULL ORDER BY slot LIMIT 4096")).map_err(failure)?;
+            let mut statement=tx.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND json_extract(metadata,'$.field') IS NOT NULL ORDER BY slot LIMIT 4096")).map_err(failure)?;
             for text in statement
                 .query_map([&row.key], |r| {
                     crate::selected_read::row(r, 512)?;
