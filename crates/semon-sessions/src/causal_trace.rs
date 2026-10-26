@@ -1104,9 +1104,10 @@ mod generation_tests {
         };
         config.create_native_store().unwrap();
         let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-        let mut connection = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
-            .connection()
-            .unwrap();
+        let mut connection =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+                .connection()
+                .unwrap();
         let tx = connection.transaction().unwrap();
         publish_owned(&tx, &owner, &row, &projection).unwrap();
         tx.commit().unwrap();
