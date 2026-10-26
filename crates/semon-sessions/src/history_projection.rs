@@ -44,6 +44,18 @@ pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Op
     }
 }
 
+/// Selected history metadata of the bound namespace for admitted readers.
+pub(crate) fn admitted_catalog(
+    connection: &Connection,
+    key: &str,
+) -> rusqlite::Result<Option<String>> {
+    match connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row| row.get::<_, Option<String>>(0)).optional()? {
+        Some(None) => Err(rusqlite::Error::InvalidQuery),
+        Some(Some(metadata)) => Ok(Some(metadata)),
+        None => Ok(None),
+    }
+}
+
 /// An explicit older harness observation must carry its own complete recipe
 /// header and consumed-source cohort, independently of the Current owner.
 pub(crate) fn qualified(
