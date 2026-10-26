@@ -5,6 +5,8 @@
 use super::{StorageError, StoreBackend, StoreConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+pub(crate) mod inventory;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_PAGE_ROWS: usize = 64;
@@ -273,6 +275,16 @@ impl TransferInbox {
     pub fn checkpoint(&self, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
         self.begin(manifest)
     }
+
+    pub fn staged_page(&self, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
+        manifest.bind(&self.0)?;
+        if sequence == 0 || sequence > i64::MAX as u64 { return Err(StorageError::InvalidArguments); }
+        match &self.0.backend {
+            StoreBackend::Sqlite { .. } => super::sqlite::transfer::page(&self.0, manifest, sequence),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => super::postgres::transfer::page(&self.0, pool, control, manifest, sequence),
+        }
+    }
 }
 
 pub(crate) fn key(snapshot: &[u8; 32], suffix: &str) -> String {
@@ -328,6 +340,15 @@ pub(crate) fn stage_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManife
     Ok(next)
 }
 
+pub(crate) fn page_tx(tx: &mut impl InboxTransaction, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
+    let manifest_bytes = tx.get(&key(&manifest.digest, "manifest"), MAX_MANIFEST_BYTES)?.ok_or(StorageError::ScopeChanged)?;
+    if manifest_bytes != encode_bounded(manifest, MAX_MANIFEST_BYTES)? { return Err(StorageError::Conflict); }
+    let bytes = tx.get(&key(&manifest.digest, &format!("page:{sequence}")), MAX_PAGE_BYTES)?.ok_or(StorageError::ScopeChanged)?;
+    let page: TransferPage = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if page.sequence != sequence || page.snapshot != manifest.digest || page.encoded()? != bytes { return Err(StorageError::ScopeChanged); }
+    Ok(page)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -365,6 +386,7 @@ pub(crate) mod tests {
         // receipt remains exact even after a later page has been committed.
         let restarted = config.transfer_inbox();
         assert_eq!(restarted.checkpoint(&manifest).unwrap(), after_first);
+        assert_eq!(restarted.staged_page(&manifest, 1).unwrap().encoded().unwrap(), first.encoded().unwrap());
         let second = page(&manifest, 2, first.digest);
         let after_second = restarted.stage_page(&manifest, &second).unwrap();
         assert_eq!(after_second.sequence, 2);

@@ -37,6 +37,10 @@ pub(crate) fn stage(config: &StoreConfig, pool: &PgPool, control: &PgCancellatio
     transaction(config, pool, control, |tx| transfer::stage_tx(tx, manifest, page, bytes))
 }
 
+pub(crate) fn page(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, manifest: &SnapshotManifest, sequence: u64) -> Result<TransferPage, StorageError> {
+    transaction(config, pool, control, |tx| transfer::page_tx(tx, manifest, sequence))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,11 +48,17 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_inbox_restart_exact_replay_rls_and_unknown_commit() {
-        let (pool, _factory) = super::super::tests::fixture(|_| {});
+        let (pool, factory) = super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig { backend: StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
             namespace: LogicalSourceNamespace::new("transfer225").unwrap(), expected_stream_epoch: Some("a".repeat(64)) };
         config.create_native_store().unwrap();
+        let tables = factory.client().query("SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r' AND relname LIKE 'semon_pg_%' ORDER BY relname LIMIT 257", &[]).unwrap();
+        assert!(!tables.is_empty() && tables.len() < 257);
+        for table in tables {
+            let name: String = table.get(0);
+            crate::storage::transfer::inventory::require(crate::storage::transfer::inventory::postgres(&name), &name);
+        }
         crate::storage::transfer::tests::exercise(&config);
         let mut manifest = crate::storage::transfer::tests::manifest();
         manifest.revision += 1;
