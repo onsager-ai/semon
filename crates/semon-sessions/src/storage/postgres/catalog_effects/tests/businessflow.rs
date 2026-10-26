@@ -96,9 +96,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related-answer","parentUuid":"related-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
     ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related-spawn"}).to_string()).unwrap();
-    let inputs = crate::inputs::inputs(&options).unwrap().into_iter().filter(|input| {
-        crate::native_evidence::catalog_input(&input.full_path(&options),&options).is_some()
-    }).collect::<Vec<_>>();
+    let inputs = crate::inputs::inputs(&options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| {
+            crate::native_evidence::catalog_input(&input.full_path(&options), &options).is_some()
+        })
+        .collect::<Vec<_>>();
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");
     let mut sqlite = EventCache::open_scoped(&sqlite_options.cache).unwrap();
@@ -231,12 +235,47 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Relations {
             use crate::model::relation_stage::Selector;
-            let selected=pg.semantic_select(batch.epoch,&Selector::ClaudeCall {id:"claude-related-spawn".into()}).unwrap();
-            assert_eq!(selected.count,1);
-            assert!(selected.endpoint.unwrap().row.native_ids.iter().any(|id|id=="one"));
+            let selected = pg
+                .semantic_select(
+                    batch.epoch,
+                    &Selector::ClaudeCall {
+                        id: "claude-related-spawn".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(selected.count, 1);
+            assert!(
+                selected
+                    .endpoint
+                    .unwrap()
+                    .row
+                    .native_ids
+                    .iter()
+                    .any(|id| id == "one")
+            );
             assert!(selected.location.is_some());
-            assert_eq!(pg.semantic_select(batch.epoch,&Selector::ClaudeReceipt {id:"absent-receipt".into()}).unwrap().count,0);
-            assert_eq!(pg.semantic_select(batch.epoch,&Selector::ClaudeName {name:"absent-native-name".into()}).unwrap().count,0);
+            assert_eq!(
+                pg.semantic_select(
+                    batch.epoch,
+                    &Selector::ClaudeReceipt {
+                        id: "absent-receipt".into()
+                    }
+                )
+                .unwrap()
+                .count,
+                0
+            );
+            assert_eq!(
+                pg.semantic_select(
+                    batch.epoch,
+                    &Selector::ClaudeName {
+                        name: "absent-native-name".into()
+                    }
+                )
+                .unwrap()
+                .count,
+                0
+            );
         }
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let mut mismatched = batch.clone();
@@ -729,9 +768,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .join("projects/p/source.meta.json")
         .to_string_lossy()
         .into_owned();
-    let mut facts_options=options.clone();
-    facts_options.facts=Some(oracle.root.join("facts-dispatch-only"));
-    cache.resume_runtime_input(&facts_options,&input_path).unwrap();
+    let mut facts_options = options.clone();
+    facts_options.facts = Some(oracle.root.join("facts-dispatch-only"));
+    cache
+        .resume_runtime_input(&facts_options, &input_path)
+        .unwrap();
     assert!(!options.cache.exists());
     let input_revision = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         super::super::super::source_journal::invalidate(tx,&input_path)?;
