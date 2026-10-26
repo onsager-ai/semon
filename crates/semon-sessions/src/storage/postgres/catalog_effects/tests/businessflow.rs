@@ -1240,7 +1240,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                        host: &BodyHost| {
         let pass = body_read_pass.get() + 1;
         body_read_pass.set(pass);
-        eprintln!("pg_body_read_pass={pass}");
+        let read_binding = store
+            .pool
+            .transaction(
+                &store.namespace,
+                TxnKind::ReadSnapshot,
+                &store.control,
+                super::super::super::model_cache::binding,
+            )
+            .unwrap();
+        let read_runtime = crate::native_evidence::query_runtime_generation(&store.options).unwrap();
+        eprintln!(
+            "pg_body_read_pass={pass} namespace_same={} admission_same={} epoch_same={} raw_runtime_same={}",
+            read_binding.namespace == binding.namespace,
+            read_binding.admission == binding.admission,
+            read_binding.stream_epoch == binding.stream_epoch,
+            read_runtime == stage_runtime
+        );
         prepared
             .rows
             .iter()
