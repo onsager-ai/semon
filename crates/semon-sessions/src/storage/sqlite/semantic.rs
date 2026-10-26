@@ -1269,7 +1269,9 @@ impl Stage {
         }
         if prepared.rows.len() > 64
             || prepared.claims.len() > 64
-            || (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
+            || (prepared.rows.is_empty()
+                && prepared.withdrawals.is_empty()
+                && prepared.relationships.retired_owners.is_empty())
         {
             return Err(refuse("semantic_publication_component_budget"));
         }
@@ -1649,8 +1651,12 @@ impl Stage {
         publication_phase("original_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
-        if !crate::storage::catalog::preserve_replacement_rows(&history, &prepared.rows)
-            .map_err(error)?
+        if !crate::storage::catalog::preserve_rows(
+            &history,
+            &prepared.rows,
+            &prepared.relationships.retired_owners,
+        )
+        .map_err(error)?
         {
             // Only private custody checkpoints commit; Current and its claims
             // remain owned by the original generation until custody completes.
