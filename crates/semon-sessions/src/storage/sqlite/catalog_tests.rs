@@ -3507,7 +3507,11 @@ fn unsupported_storage_is_observable_at_product_read_entrypoints() {
 fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
     let fixture = Fixture::new();
     fixture.publish(1);
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let connection = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
     )
