@@ -9,8 +9,7 @@ use std::sync::{Arc, Barrier};
 type IdentityRow = (i64, String, String);
 
 fn fixture_host_source() -> crate::storage::HostSource {
-    crate::storage::HostSource::new(ns("native-usage-identity-fixtures"), "e".repeat(64))
-        .unwrap()
+    crate::storage::HostSource::new(ns("native-usage-identity-fixtures"), "e".repeat(64)).unwrap()
 }
 
 fn insert(tx: &mut PgTxn<'_>, row: &IdentityRow) -> Result<(), StorageError> {

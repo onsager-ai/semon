@@ -125,7 +125,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .collect::<Vec<_>>();
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");
-    let mut sqlite = EventCache::open_scoped(&sqlite_options.cache, &sqlite_options.source).unwrap();
+    let mut sqlite =
+        EventCache::open_scoped(&sqlite_options.cache, &sqlite_options.source).unwrap();
     let expected =
         crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
             .unwrap();
