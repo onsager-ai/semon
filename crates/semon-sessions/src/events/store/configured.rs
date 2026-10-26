@@ -583,10 +583,14 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_physical(db: &Connection) -> Result<(), StorageError> {
-        let version: i64 = db.pragma_query_value(None, "schema_version", |r| r.get(0)).map_err(failed)?;
+        let version: i64 = db
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .map_err(failed)?;
         let cached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)", [], |r| r.get(0)).map_err(failed)?;
         if cached {
-            let layout: Option<bool> = db.query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0)).map_err(failed)?;
+            let layout: Option<bool> = db
+                .query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0))
+                .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
             }
