@@ -105,7 +105,7 @@ impl SessionSourceWrite {
         if !crate::is_input_path(input.root.as_str(),&input.path) {return Err(io::Error::other("write intent outside native allowlist"));}
         let source_lock=SourceLock::acquire(options,&lock_key(options,input),true)?;
         let intent=if let Some(intent)=resume {intent} else {
-            let before=Stat::of(&input.full_path(options)).ok();
+            let before=match Stat::of(&input.full_path(options)) {Ok(stat)=>Some(stat),Err(e) if e.kind()==io::ErrorKind::NotFound=>None,Err(e)=>return Err(e)};
             let before_hash=if store.source_write_proofs() {before.as_ref().map(|s|bytes_hash(&input.full_path(options),s.size)).transpose()?} else {None};
             WriteIntent {
                 operation:crate::storage::source_observations::SourceOperation::capture("source-write","raw",input.path.as_bytes()).id,

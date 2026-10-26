@@ -686,7 +686,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let writer=crate::SessionSourceWrite::begin_with_store(&options,&inputs[0],None,raw[0].len() as u64,raw_store(),None).unwrap();
     let raw_intent=writer.intent();
     pool.transaction(&namespace,TxnKind::ReadSnapshot,&control,|tx| {
-        assert!(crate::storage::postgres::native_keys::read_meta(tx,format!("raw-write-intent:{}",raw_intent.operation).as_bytes(),32768)?.is_some());
+        assert!(crate::storage::postgres::native_keys::read_meta(tx,format!("raw-write-intent:{}",raw_intent.operation).as_bytes(),131072)?.is_some());
         Ok(())
     }).unwrap();
     drop(writer); // Fault: durable SQL intent, no Raw bytes yet.
