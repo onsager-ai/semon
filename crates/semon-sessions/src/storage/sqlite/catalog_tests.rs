@@ -5129,6 +5129,7 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
     crate::write_facts(
         facts,
         &serde_json::from_value::<crate::Facts>(changed).unwrap(),
+        &crate::Options::default().source,
     )
     .unwrap();
     let (_, pending) = fixture.body("");

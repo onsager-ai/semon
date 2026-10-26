@@ -3315,7 +3315,7 @@ mod tests {
             codex_rollouts: Some(BTreeSet::new()),
             ..Default::default()
         };
-        crate::write_facts(&facts_path, &facts).unwrap();
+        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
         let authority = Withdrawal {
             path: path.clone(),
             relative: "sessions/rollout-synthetic.jsonl".into(),
@@ -3337,7 +3337,7 @@ mod tests {
             )
             .unwrap();
         facts.hostname = "synthetic-new-hostname".into();
-        crate::write_facts(&facts_path, &facts).unwrap();
+        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
         assert_eq!(
             store.semantic_record(&b, &empty_preparation(&b)).unwrap(),
             Outcome::Conflict
