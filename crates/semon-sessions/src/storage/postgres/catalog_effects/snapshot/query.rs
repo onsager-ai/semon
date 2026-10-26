@@ -18,6 +18,42 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
 impl QueryCatalogStore for QueryCatalog {
+    fn selected_body(&self, key: &str, args: &serde_json::Value, now: i64, host: &dyn crate::SessionSourceReader) -> Result<serde_json::Value, QueryError> {
+        if !self.options.all { return Err(unavailable(StorageError::NamespaceUpgradePending)); }
+        with_admitted_generation(&self.pool, &self.namespace, &self.control, &self.generation, |_| {
+            with_generation(&self.pool, &self.namespace, &self.control, &self.generation, |snapshot| {
+                let (row, header, _) = snapshot.selected(key, false, 0, 1)?.ok_or(StorageError::ScopeChanged)?;
+                let total = usize::try_from(header.3).map_err(|_|StorageError::ScopeChanged)?;
+                let observation: crate::slot_projection::QueryObservation = serde_json::from_value(row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"].clone()).map_err(|_|StorageError::ScopeChanged)?;
+                if !observation.valid(total) { return Err(StorageError::ScopeChanged); }
+                let mut sources = Vec::new();
+                if row.sources.is_empty() || row.sources.len()>64 { return Err(StorageError::Busy); }
+                for source in &row.sources {
+                    let path = crate::catalog::source_relative(&self.options, &row.harness, source).ok_or(StorageError::ScopeChanged)?;
+                    sources.push((source, crate::SessionSourceRef { root:row.harness.clone(), path, native_id:source.native_id.clone(), offset:source.offset, prefix_sha256:source.prefix_sha256, tail_sha256:source.tail_sha256 }));
+                }
+                let records = super::super::selected_reader::SelectedRecords {
+                    pool:&self.pool, namespace:&self.namespace, control:&self.control, generation:&self.generation, host, sources,
+                    pins:std::cell::RefCell::new(BTreeMap::new()), bytes_left:std::cell::Cell::new(64*1024*1024),
+                };
+                let anchor = crate::tx::Anchor::of(args["before"].as_u64().map(|v|v as usize), args["after"].as_u64().map(|v|v as usize), args["turn"].as_str()).ok_or(StorageError::InvalidArguments)?;
+                let (forward, from) = match anchor {
+                    crate::tx::Anchor::Last => (false,total),
+                    crate::tx::Anchor::Before(at) => (false,at.min(total)),
+                    crate::tx::Anchor::After(at) => (true,at.min(total)),
+                    crate::tx::Anchor::Turn(turn) => {
+                        let tx = snapshot.tx.borrow_mut();
+                        let first = tx.driver.query_opt("SELECT slot FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1", &[&self.namespace.as_str().as_bytes(), &self.generation.as_bytes(), &key.as_bytes(), &turn]).map_err(sqlstate::error)?.ok_or(StorageError::ScopeChanged)?;
+                        (true, usize::try_from(first.get::<_,i64>(0)).map_err(|_|StorageError::ScopeChanged)?)
+                    }
+                };
+                let page = PgPage { snapshot, key, records:&records };
+                let answer = crate::query::transcript::render_page(&self.options,key,&row,&observation,total,forward,from,args["limit"].as_u64().map_or(crate::tx::PAGE_ENTRIES,|v|v as usize),now,&page).map_err(|_|StorageError::Unavailable)?;
+                records.finish().map_err(|_|StorageError::ScopeChanged)?;
+                Ok(answer)
+            })
+        }).map_err(unavailable)
+    }
     fn read_cohort(
         &self,
         namespace: &LogicalSourceNamespace,
@@ -133,4 +169,26 @@ impl QueryCatalogStore for QueryCatalog {
         )
         .map_err(unavailable)
     }
+}
+
+struct PgPage<'a, 'b, 'tx, 'r> {
+    snapshot: &'a Snapshot<'b, 'tx>, key: &'a str,
+    records: &'a super::super::selected_reader::SelectedRecords<'r>,
+}
+impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
+    fn slots(&self, low:usize, high:usize) -> Result<Vec<crate::slot_projection::SavedSlot>,QueryError> {
+        let mut result = Vec::new();
+        let mut bytes = 0;
+        for start in (low..high).step_by(64) {
+            let (_, slots) = self.snapshot.recipe(self.key,false,start as i64,(high-start).min(64) as i64).map_err(unavailable)?.ok_or_else(||unavailable(StorageError::ScopeChanged))?;
+            for slot in slots {
+                bytes += slot.len();
+                if bytes > 4*1024*1024 { return Err(unavailable(StorageError::Busy)); }
+                result.push(serde_json::from_str(&slot).map_err(unavailable)?);
+            }
+        }
+        Ok(result)
+    }
+    fn read(&self,path:&std::path::Path,offset:u64)->std::io::Result<(Option<serde_json::Value>,u64)> { self.records.read(path,offset) }
+    fn prompt(&self,file:&crate::model::SlotFile,offset:u64)->Option<(serde_json::Value,u64)> { self.records.prompt(file,offset) }
 }

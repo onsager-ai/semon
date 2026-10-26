@@ -1223,6 +1223,46 @@ fn read_inner(
         }
         return Ok(Some(Value::Null));
     }
+    let answer = render_page(options, key, &row, &observation, total, forward, from, limit, now, &SqlitePage {
+        db: &db, records: &records, key, history: history.is_some(), text: &text,
+        headers, table, slot_generation: &slot_generation,
+    })?;
+    records
+        .finish()
+        .map_err(|error| records.query_error(error))?;
+    let snapshot = db.transaction().map_err(unavailable)?;
+    unchanged(
+        &snapshot,
+        key,
+        history.is_some(),
+        &text,
+        headers,
+        &slot_generation,
+    )?;
+    snapshot.commit().map_err(unavailable)?;
+    if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != runtime {
+        return Err(unavailable(
+            "Native transcript observation changed during this read",
+        ));
+    }
+    Ok(Some(answer))
+}
+
+
+/// The ordinary pager consumes immutable recipes and independently authorized
+/// records. Physical backends own publication/proof qualification and lifetime.
+pub(crate) trait PageSource {
+    fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError>;
+    fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)>;
+    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value, u64)>;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_page(
+    options: &Options, key: &str, row: &CatalogRow,
+    observation: &QueryObservation, total: usize, forward: bool, from: usize,
+    limit: usize, now: i64, source: &dyn PageSource,
+) -> Result<Value, QueryError> {
     // Every requested block verifies its original indexed proof. Finish fences
     // only touched sources; unrelated fragments of this session need no body I/O.
     let mut count = limit.saturating_add(1).clamp(2, MAX_SLOTS);
@@ -1241,42 +1281,7 @@ fn read_inner(
         } else {
             (from.saturating_sub(count).saturating_sub(1), from)
         };
-        let snapshot = db.transaction().map_err(unavailable)?;
-        unchanged(
-            &snapshot,
-            key,
-            history.is_some(),
-            &text,
-            headers,
-            &slot_generation,
-        )?;
-        let mut statement = snapshot.prepare(&format!(
-            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"
-        )).map_err(unavailable)?;
-        let mut bytes = 0;
-        let mut recipes = Vec::new();
-        for text in statement
-            .query_map(
-                params![
-                    key,
-                    i64::try_from(low).map_err(unavailable)?,
-                    i64::try_from(high).map_err(unavailable)?
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(unavailable)?
-        {
-            let text = text.map_err(unavailable)?;
-            bytes += text.len();
-            if bytes > METADATA_BYTES {
-                return Err(unavailable(
-                    "Native transcript metadata exceeds its read budget",
-                ));
-            }
-            recipes.push(serde_json::from_str::<SavedSlot>(&text).map_err(unavailable)?);
-        }
-        drop(statement);
-        snapshot.commit().map_err(unavailable)?;
+        let recipes = source.slots(low, high)?;
         if recipes.len() != high - low {
             return Err(unavailable("Native transcript slots are incomplete"));
         }
@@ -1291,8 +1296,8 @@ fn read_inner(
                 slot
             })
             .collect();
-        let mut read = |path: &std::path::Path, offset| records.read(path, offset);
-        let mut prompts = |file: &crate::model::SlotFile, offset| records.prompt(file, offset);
+        let mut read = |path: &std::path::Path, offset| source.read(path, offset);
+        let mut prompts = |file: &crate::model::SlotFile, offset| source.prompt(file, offset);
         let page = tx::page_from_window(
             &tx::RenderContext {
                 home: home.as_deref(),
@@ -1319,28 +1324,44 @@ fn read_inner(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {
                 count = (count * 2).min(MAX_SLOTS)
             }
-            Err(error) => return Err(records.query_error(error)),
+            Err(error) => return Err(QueryError::io(&error)),
         }
     };
-    records
-        .finish()
-        .map_err(|error| records.query_error(error))?;
-    let snapshot = db.transaction().map_err(unavailable)?;
-    unchanged(
-        &snapshot,
-        key,
-        history.is_some(),
-        &text,
-        headers,
-        &slot_generation,
-    )?;
-    snapshot.commit().map_err(unavailable)?;
-    if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != runtime {
-        return Err(unavailable(
-            "Native transcript observation changed during this read",
-        ));
+    Ok(answer)
+}
+
+struct SqlitePage<'a, 'b> {
+    db: &'a Connection,
+    records: &'a crate::query_source::Records<'b>,
+    key: &'a str,
+    history: bool,
+    text: &'a str,
+    headers: &'a str,
+    table: &'a str,
+    slot_generation: &'a str,
+}
+impl PageSource for SqlitePage<'_, '_> {
+    fn slots(&self, low: usize, high: usize) -> Result<Vec<SavedSlot>, QueryError> {
+        let snapshot = self.db.unchecked_transaction().map_err(unavailable)?;
+        unchanged(&snapshot, self.key, self.history, self.text, self.headers, self.slot_generation)?;
+        let mut statement = snapshot.prepare(&format!(
+            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot", self.table
+        )).map_err(unavailable)?;
+        let texts = statement.query_map(params![self.key, low as i64, high as i64], |row|row.get::<_,String>(0)).map_err(unavailable)?;
+        let mut bytes = 0;
+        let mut recipes = Vec::new();
+        for text in texts {
+            let text = text.map_err(unavailable)?;
+            bytes += text.len();
+            if bytes > METADATA_BYTES { return Err(unavailable("Native transcript metadata exceeds its read budget")); }
+            recipes.push(serde_json::from_str(&text).map_err(unavailable)?);
+        }
+        drop(statement);
+        snapshot.commit().map_err(unavailable)?;
+        Ok(recipes)
     }
-    Ok(Some(answer))
+    fn read(&self, path: &std::path::Path, offset: u64) -> io::Result<(Option<Value>, u64)> { self.records.read(path, offset) }
+    fn prompt(&self, file: &crate::model::SlotFile, offset: u64) -> Option<(Value,u64)> { self.records.prompt(file, offset) }
 }
 
 #[cfg(test)]

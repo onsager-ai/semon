@@ -850,7 +850,7 @@ pub struct Query {
 
 mod catalog;
 mod search;
-mod transcript;
+pub(crate) mod transcript;
 
 impl Query {
     /// The tools over the agent homes, `/proc` and cache `options` name.
