@@ -11069,7 +11069,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
     crate::write_facts(
         home.options.facts.as_ref().unwrap(),
         &facts,
-        &crate::Options::default().source,
+        &home.options.source,
     )
     .unwrap();
     intent.complete().unwrap();
@@ -11197,7 +11197,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     crate::write_facts(
         home.options.facts.as_ref().unwrap(),
         &facts,
-        &crate::Options::default().source,
+        &home.options.source,
     )
     .unwrap();
     intent.complete().unwrap();
