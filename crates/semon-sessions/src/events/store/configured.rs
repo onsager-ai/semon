@@ -457,6 +457,16 @@ fn failed(error: rusqlite::Error) -> StorageError {
             "missing_function"
         } else if message.contains("has no column named") {
             "insert_column"
+        } else if message.contains("ambiguous column") {
+            "ambiguous_column"
+        } else if message.contains("syntax error") {
+            "syntax_error"
+        } else if message.contains("unsafe use") {
+            "unsafe_function"
+        } else if message.contains("no such savepoint") {
+            "savepoint"
+        } else if message.contains("cannot ") {
+            "invalid_effect"
         } else if message.contains("constraint failed") {
             "constraint"
         } else {
@@ -1655,7 +1665,7 @@ impl Writer {
                 &mut crate::native_timing::Measurements::default(),
                 Some(self.config.namespace.as_str()),
             )
-            .map_err(failed)?;
+            .map_err(|error| failed(error))?;
             let intent = &self.intents[*path];
             tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }
