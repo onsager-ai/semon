@@ -294,6 +294,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             (*since, list)
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let oracle_recent_fields = recent_windows.iter().map(|since| {
+        let mut recent_options = closed_options.clone();
+        recent_options.all = false;
+        recent_options.since = *since;
+        let mut query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
+        ));
+        let fields = expected.rows.iter().filter(|row| {
+            oracle_recent[since]["sessions"].as_array().unwrap().iter().any(|session| session["id"] == row.key)
+        }).map(|row| {
+            let fields = query.call_at("get_session", &serde_json::json!({"id":row.key}), recent_now)
+                .expect("SQLite recent-window selected fields");
+            (row.key.clone(), fields)
+        }).collect::<std::collections::BTreeMap<_, _>>();
+        (*since, fields)
+    }).collect::<std::collections::BTreeMap<_, _>>();
     let all_total = expected
         .rows
         .iter()
@@ -1060,6 +1076,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
     }
     let retained_host = body_host(&options, &prepared.rows);
+    for since in recent_windows {
+        let mut recent_options = options.clone();
+        recent_options.all = false;
+        recent_options.since = since;
+        let store = super::super::snapshot::query::QueryCatalog {
+            pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
+            generation: generation.clone(), options: recent_options.clone(),
+        };
+        let mut query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), recent_options)]),
+        ));
+        for (key, expected) in &oracle_recent_fields[&since] {
+            let fields = query.call_bound_selected_at("get_session", &serde_json::json!({"id":key}), recent_now, &store, &retained_host)
+                .expect("PG recent-window selected fields");
+            assert_eq!(&fields, expected, "recent-window selected fields {since:?} {key}");
+        }
+    }
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
