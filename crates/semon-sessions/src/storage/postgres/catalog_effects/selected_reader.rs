@@ -194,14 +194,20 @@ impl SessionSourceReader for SelectedRecords<'_> {
             reference: saved,
             host: self.host,
         };
-        let part = reader.read_range(reference, pin.or(expected), offset, max)?;
         let mut left = self
             .bytes_left
             .lock()
             .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        let size = crate::source_chunks::SIZE as u64;
+        let start = offset / size * size;
+        let physical = source.offset.saturating_sub(start).min(size) as usize;
         *left = left
-            .checked_sub(part.bytes.len())
+            .checked_sub(physical)
             .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        let part = reader.read_range(reference, pin.or(expected), offset, max)?;
+        if part.generation.is_empty() || part.generation.len() > 4096 {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
         pins.entry(key).or_insert_with(|| part.generation.clone());
         Ok(part)
     }
