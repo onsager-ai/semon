@@ -94,6 +94,144 @@ pub(super) fn fixture(mut configure: impl FnMut(&mut PoolLimits)) -> (PgPool, Ar
     (pool, factory)
 }
 
+#[test]
+fn pg_binding_reuses_full_verification_and_controlled_ddl_invalidates_epoch() {
+    let (pool, _) = fixture(|bounds| bounds.max_connections = 1);
+    let control = PgCancellation::default();
+    schema::reset_verify_count();
+
+    for namespace in [ns("binding-a"), ns("binding-b")] {
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
+            .unwrap();
+    }
+    assert_eq!(schema::verify_count(), 1, "namespace changes reuse schema proof");
+
+    pool.controlled_schema_change(&control, |tx| {
+        tx.driver
+            .batch_execute("CREATE TABLE binding_epoch_probe(id integer PRIMARY KEY)")
+            .map_err(sqlstate::error)?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(schema::verify_count(), 1);
+
+    pool.transaction(&ns("binding-a"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 2, "epoch change triggers full verification");
+    pool.transaction(&ns("binding-a"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 2, "revalidated binding is reused");
+}
+
+#[test]
+fn pg_controlled_ddl_waits_for_reader_without_lock_order_deadlock() {
+    let (pool, _) = fixture(|bounds| bounds.max_connections = 2);
+    let control = PgCancellation::default();
+    let (reader_held_tx, reader_held_rx) = mpsc::channel();
+    let (release_reader_tx, release_reader_rx) = mpsc::channel();
+    let (ddl_started_tx, ddl_started_rx) = mpsc::channel();
+    let (ddl_done_tx, ddl_done_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let reader_pool = pool.clone();
+        scope.spawn(move || {
+            reader_pool
+                .transaction(&ns("lock-order-reader"), TxnKind::ReadSnapshot, &control, |_| {
+                    reader_held_tx.send(()).unwrap();
+                    release_reader_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        reader_held_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let ddl_pool = pool.clone();
+        let ddl_control = PgCancellation::default();
+        scope.spawn(move || {
+            ddl_started_tx.send(()).unwrap();
+            let result = ddl_pool.controlled_schema_change(&ddl_control, |tx| {
+                tx.driver
+                    .batch_execute("CREATE TABLE lock_order_probe(id integer PRIMARY KEY)")
+                    .map_err(sqlstate::error)?;
+                Ok(())
+            });
+            ddl_done_tx.send(result).unwrap();
+        });
+        ddl_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            ddl_done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_reader_tx.send(()).unwrap();
+        assert!(ddl_done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .is_ok());
+    });
+}
+
+#[test]
+fn pg_role_binding_validates_once_per_connection_and_role() {
+    let (host_pool, factory) = fixture(|bounds| bounds.max_connections = 1);
+    let source = source_factory(&factory);
+    let mut source_limits = limits();
+    source_limits.max_connections = 1;
+    let source_pool = PgPool::new(source, source_limits).unwrap();
+    let control = PgCancellation::default();
+    schema::reset_verify_count();
+    host_pool
+        .transaction(&ns("host-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 1);
+    host_pool
+        .transaction(&ns("host-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 1, "host binding is reused");
+    source_pool
+        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 2, "restricted Source role gets its own proof");
+    source_pool
+        .transaction(&ns("source-role"), TxnKind::ReadSnapshot, &control, |_| Ok(()))
+        .unwrap();
+    assert_eq!(schema::verify_count(), 2, "Source binding is reused");
+}
+
+#[test]
+fn pg_source_role_is_denied_create_alter_and_drop() {
+    let (_, factory) = fixture(|_| {});
+    let source = source_factory(&factory);
+    let create_privilege: bool = source
+        .client()
+        .query_one(
+            "SELECT has_schema_privilege(current_user, current_schema(), 'CREATE')",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(!create_privilege);
+    let pool = PgPool::new(source, limits()).unwrap();
+    let control = PgCancellation::default();
+    for statement in [
+        "CREATE TABLE semon_binding_unauthorized(id integer)",
+        "ALTER TABLE semon_pg_schema ADD COLUMN semon_binding_unauthorized integer",
+        "DROP TABLE semon_pg_schema",
+    ] {
+        assert!(pool
+            .transaction(&ns("restricted-source"), TxnKind::Write, &control, |tx| {
+                tx.driver.batch_execute(statement).map_err(sqlstate::error)?;
+                Ok(())
+            })
+            .is_err());
+    }
+}
+
 /// A separate LOGIN principal, provisioned only in the ephemeral CI service.
 /// Credentials remain inside this test factory and never enter library APIs.
 pub(super) fn admin_factory(host: &Factory) -> Arc<Factory> {
