@@ -112,7 +112,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     fs::write(&claude_agent191,[
         serde_json::json!({"type":"user","sessionId":"one","uuid":"related191-user","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized agent prompt"}}),
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related191-answer","parentUuid":"related191-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related191-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
-    ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
+    ].into_iter().chain((0..75).flat_map(|turn| {
+        // A long subagent: its withdrawn retained recipe spans more than two
+        // 64-slot custody pages, so the catch-up below resumes several times.
+        let parent = if turn == 0 { "related191-answer".to_owned() } else { format!("related191-answer{}", turn - 1) };
+        [
+            serde_json::json!({"type":"user","sessionId":"one","uuid":format!("related191-user{turn}"),"parentUuid":parent,"timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":format!("sanitized agent follow-up {turn}")}}),
+            serde_json::json!({"type":"assistant","sessionId":"one","uuid":format!("related191-answer{turn}"),"parentUuid":format!("related191-user{turn}"),"timestamp":"2026-10-01T00:00:02Z","message":{"id":format!("related191-answer{turn}"),"role":"assistant","model":"claude-test","content":[{"type":"text","text":format!("sanitized agent answer {turn}")}]}}),
+        ]
+    })).map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent191.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related191-spawn"}).to_string()).unwrap();
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
@@ -2139,6 +2147,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert!(deferred < 64, "custody makes bounded progress");
     };
     assert_eq!(ack.0, crate::events::Outcome::Written);
+    // The long withdrawn recipe (>150 slots) cannot fit one 64-slot page.
+    assert!(deferred >= 2, "long recipe resumed by pages: {deferred}");
     // A lost Written ACK replays the exact operation and its generation.
     assert_eq!(
         catchup
@@ -2301,6 +2311,42 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{gone} retained search"
     );
     assert!(search(&caught, "scope=retained_history&", kept).contains(kept));
+    // Retained-only selected body: on the successor a withdrawn key has no
+    // Current row, so its body is read through the proof-owned retained
+    // recipe from Raw bytes and equals the SQLite ordinary body exactly.
+    let caught_store = super::super::snapshot::query::QueryCatalog {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: options.clone(),
+    };
+    for key in &removed {
+        let body = query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":key,"limit":100}),
+                1790812802000,
+                &caught_store,
+                &retained_host,
+            )
+            .unwrap();
+        assert_eq!(body, expected_bodies[key]["body"], "retained body {key}");
+        assert!(body.to_string().contains("sanitized agent answer"));
+        let fields = query
+            .call_bound_selected_at(
+                "get_session",
+                &serde_json::json!({"id":key}),
+                1790812802000,
+                &caught_store,
+                &retained_host,
+            )
+            .unwrap();
+        assert!(
+            fields.is_object() && fields.to_string().contains(key.as_str()),
+            "retained fields {key}: {fields}"
+        );
+    }
     // Exact old OpID after its successor replays without moving the head.
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
@@ -2313,7 +2359,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Restart continues from the successor; the readers' retained proofs
     // still serve the old selected bodies exactly.
     drop(catchup);
-    let reopened =
+    let mut reopened =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     assert_eq!(
         reopened.session_catalog_generation().as_deref(),
@@ -2323,5 +2369,51 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies,
         "old selected bodies after a connected withdrawal and restart"
+    );
+    // Zero-row publication: Facts no longer list the archived rollout, so
+    // its catch-up batch prepares no row. The recorded batch runtime is the
+    // lifecycle authority that retires the owner into retained history.
+    let mut emptied = renamed.clone();
+    emptied.codex_rollouts = Some(std::collections::BTreeSet::new());
+    let emptied_write = crate::SessionFactsWrite::begin_with_store(
+        &facts_options,
+        &emptied,
+        true,
+        raw_store(),
+        None,
+    )
+    .unwrap();
+    crate::save_json_file(&facts_path, &emptied).unwrap();
+    emptied_write.complete().unwrap();
+    let rollout = [crate::Input {
+        root: crate::InputRoot::Codex,
+        path: format!("archived_sessions/rollout-{codex_id}.jsonl"),
+    }];
+    let (retired, retired_batch, retired_model, _) =
+        stage_publish(&mut reopened, &rollout, 1790812810000);
+    assert!(retired_model.prepared().rows.is_empty(), "zero-row batch");
+    assert_eq!(retired_batch.runtime, runtime);
+    assert_ne!(retired, caught);
+    let codex_keys = prepared
+        .rows
+        .iter()
+        .filter(|row| row.harness == "codex")
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    assert!(!codex_keys.is_empty());
+    let after = scoped(&retired, "");
+    let kept_after = scoped(&retired, "scope=retained_history&");
+    for key in &codex_keys {
+        assert!(after.iter().all(|(other, _)| other != key), "{key} retired");
+        assert!(
+            kept_after.contains(&(key.clone(), true)),
+            "{key} retained after zero-row publication"
+        );
+    }
+    // Every other Current session is unchanged by the zero-row publication.
+    assert_eq!(
+        after.len() + codex_keys.len(),
+        current.len(),
+        "zero-row publication retires only the rollout owner"
     );
 }
