@@ -227,9 +227,22 @@ fn qualify_intent(
     if stored(tx, &intent.id)?.as_ref() != Some(intent) || claim(tx, path)? != intent.revision {
         return Err(StorageError::Conflict);
     }
-    let relocation: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace=$1 AND (old_path=$2 OR new_path=$2))", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-    if relocation {
-        return Err(StorageError::NamespaceUpgradePending);
+    let ns=tx.namespace.as_str().as_bytes().to_vec();
+    let relocations=tx.driver.query("SELECT old_path,new_path FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND (old_path=$2 OR new_path=$2) LIMIT 65", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    if relocations.len()>64 {return Err(StorageError::Busy);}
+    for row in relocations {
+        let old=String::from_utf8(row.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+        let new:Vec<u8>=row.get(1);
+        if new!=path.as_bytes() {return Err(StorageError::Conflict);}
+        let encoded=super::native_keys::read_meta(tx,format!("native_catalog_relocation:{old}").as_bytes(),16384)?.ok_or(StorageError::ScopeChanged)?;
+        let proof:crate::events::native_commit::CatalogRelocation=serde_json::from_slice(&encoded).map_err(|_|StorageError::ScopeChanged)?;
+        if proof.version!=1 || proof.new_path!=path || expected!=Some(&proof.after)
+            || super::native_reader::ledger(tx,&old)?.map(|(_,l)|l)!=Some(proof.prior.clone()) {
+            return Err(StorageError::Conflict);
+        }
+        let retired=super::native_keys::read_meta(tx,format!("source-retired:{old}").as_bytes(),16384)?.ok_or(StorageError::ScopeChanged)?;
+        let retired:Option<Ledger>=serde_json::from_slice(&retired).map_err(|_|StorageError::ScopeChanged)?;
+        if retired.as_ref()!=Some(&proof.prior) {return Err(StorageError::Conflict);}
     }
     Ok(())
 }
