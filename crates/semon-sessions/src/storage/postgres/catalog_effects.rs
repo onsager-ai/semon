@@ -20,6 +20,7 @@ use tokio_postgres::types::ToSql;
 
 pub(super) mod admission;
 pub(super) mod snapshot;
+pub(super) mod publication;
 
 const MAX: usize = 1024 * 1024;
 
