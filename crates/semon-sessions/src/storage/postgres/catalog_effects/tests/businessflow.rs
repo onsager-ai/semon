@@ -1249,7 +1249,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 super::super::super::model_cache::binding,
             )
             .unwrap();
-        let read_runtime = crate::native_evidence::query_runtime_generation(&store.options).unwrap();
+        let read_runtime =
+            crate::native_evidence::query_runtime_generation(&store.options).unwrap();
         eprintln!(
             "pg_body_read_pass={pass} namespace_same={} admission_same={} epoch_same={} raw_runtime_same={}",
             read_binding.namespace == binding.namespace,
