@@ -16,6 +16,10 @@ use std::{
 
 type OracleRows = Vec<(&'static str, Vec<Vec<(String, Value)>>)>;
 
+fn fixture_host_source() -> crate::storage::HostSource {
+    crate::storage::HostSource::new(ns("tree-checkpoint-fixtures"), "2".repeat(64)).unwrap()
+}
+
 fn cancellation_fixture() -> (Fixture, PgPool, Arc<super::super::tests::Factory>) {
     let data = parser_fixture("claude");
     let (pool, factory) = fixture(|b| {
@@ -462,7 +466,8 @@ pub(crate) fn parser_fixture_keys(harness: &str, long_path: bool, long_keys: boo
         _ => unreachable!(),
     };
     std::fs::write(&path, &body).unwrap();
-    let mut cache = EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(&cache_path, &source).unwrap();
     scan_file(&path, harness, &mut cache, &mut false).unwrap();
     // An independently parsed copy gives Claude copied-usage identities.
     if harness == "claude" {
@@ -486,7 +491,8 @@ fn capture_fixture_at(
     // Raw may have a valid long native path while the independent SQLite
     // oracle's physical database stays at its ordinary short cache location.
     let cache_path = root.join("index.json");
-    let mut cache = EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(&cache_path, &source).unwrap();
     let index = scan_file(&path, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     let mut oracle = index.tree_summary.clone().unwrap();
@@ -1074,7 +1080,8 @@ fn pg_tree_checkpoint_real_copilot_has_no_tree_authority() {
     let line = serde_json::json!({"type":"session.start","data":{"sessionId":"s\0🦀"}});
     std::fs::write(&path, format!("{line}\n")).unwrap();
     let cache_path = root.join("index.json");
-    let mut cache = EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(&cache_path, &source).unwrap();
     let index = scan_file(&path, "copilot", &mut cache, &mut false).unwrap();
     assert!(
         index.tree_summary.is_none(),

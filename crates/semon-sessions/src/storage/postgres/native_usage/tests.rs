@@ -65,7 +65,7 @@ fn pg_native_usage_shared_parser_generation_dimensions_replay_restart_and_rollba
     let index = shared::parser_fixture(&path, "codex");
     assert_eq!(index.native_usage_observations.as_ref().unwrap().len(), 3);
     let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema(false) {
+    for ddl in shared::schema() {
         oracle.execute_batch(ddl).unwrap();
     }
     let source_path = "same/path\0🦀";
@@ -321,7 +321,7 @@ fn pg_native_keys128_usage_long_current_producer_restart_namespace_and_collision
     let index = parsed("codex", &body);
     let end = ledger(body.len() as u64);
     let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema(false) {
+    for ddl in shared::schema() {
         oracle.execute_batch(ddl).unwrap();
     }
     shared::sqlite_fixture(&mut oracle, &path, None, &end, false, &index);
@@ -468,7 +468,7 @@ fn pg_native_usage_real_parser_unavailable_model_and_unsigned_counters() {
     let index = parsed("codex", &body);
     let end = ledger(body.len() as u64);
     let mut oracle = rusqlite::Connection::open_in_memory().unwrap();
-    for ddl in shared::schema(false) {
+    for ddl in shared::schema() {
         oracle.execute_batch(ddl).unwrap();
     }
     shared::sqlite_fixture(&mut oracle, "path\0🦀", None, &end, false, &index);

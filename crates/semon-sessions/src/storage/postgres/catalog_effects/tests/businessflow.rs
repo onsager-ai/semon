@@ -35,7 +35,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Producer parity precedes the process-wide rejection phase. No model
     // output from the oracle is supplied to the PG producer.
     let mut oracle = build_oracle(true);
+    let namespace = ns("vertical140\0🦀");
+    let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
     let options = Options {
+        source,
         claude_home: oracle.root.join("claude"),
         claude_json: oracle.root.join("claude.json"),
         codex_home: oracle.root.join("codex"),
@@ -122,7 +125,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .collect::<Vec<_>>();
     let mut sqlite_options = options.clone();
     sqlite_options.cache = oracle.root.join("oracle-all140");
-    let mut sqlite = EventCache::open_scoped(&sqlite_options.cache).unwrap();
+    let mut sqlite = EventCache::open_scoped(&sqlite_options.cache, &sqlite_options.source).unwrap();
     let expected =
         crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
             .unwrap();
@@ -224,7 +227,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .collect::<Vec<_>>();
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
-    let namespace = ns("vertical140\0🦀");
     let control = PgCancellation::default();
     let mut pg =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();

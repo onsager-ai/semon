@@ -8,6 +8,11 @@ use std::sync::{Arc, Barrier};
 
 type IdentityRow = (i64, String, String);
 
+fn fixture_host_source() -> crate::storage::HostSource {
+    crate::storage::HostSource::new(ns("native-usage-identity-fixtures"), "e".repeat(64))
+        .unwrap()
+}
+
 fn insert(tx: &mut PgTxn<'_>, row: &IdentityRow) -> Result<(), StorageError> {
     tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) VALUES($1,$2,$3,$4)", &[&tx.namespace.as_str().as_bytes(), &row.0, &row.1.as_bytes(), &row.2.as_bytes()]).map_err(sqlstate::error)?;
     Ok(())
@@ -36,7 +41,8 @@ fn pg_native_copied_identity_real_parser_sqlite_oracle_restart_rollback_and_ack(
     ));
     std::fs::create_dir(&root).unwrap();
     let cache_path = root.join("index.json");
-    let mut cache = EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(&cache_path, &source).unwrap();
     // The actual shared Claude parser supplies both identity keys. No prepared
     // source, artificial membership, complete FileIndex JSON or Raw body in PG.
     let line = serde_json::json!({"type":"assistant","uuid":"record\0🦀","timestamp":"2026-09-29T00:00:01Z","message":{"id":"message\0🦀","role":"assistant","model":"claude-test","content":[{"type":"text","text":"Raw-only fixture body"}],"usage":{"input_tokens":3,"output_tokens":2}}});
@@ -230,7 +236,8 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     ));
     std::fs::create_dir(&root).unwrap();
     let cache_path = root.join("index.json");
-    let mut cache = EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(&cache_path, &source).unwrap();
     // Actual shared Claude parser rows; PG receives only typed Tree dimensions.
     let lines = [
         serde_json::json!({"type":"user","uuid":"u\0🦀","sessionId":"s🦀","cwd":"/w\0🦀","gitBranch":"b🦀","timestamp":"2026-09-29T00:00:00Z","message":{"role":"user","content":"first\0🦀"}}),

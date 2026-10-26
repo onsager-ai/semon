@@ -20,6 +20,10 @@ const FAMILIES: &[&str] = &[
     "codex_usage",
     "tree_copied_identities",
 ];
+fn fixture_host_source() -> crate::storage::HostSource {
+    crate::storage::HostSource::new(ns("native-core-fixtures"), "d".repeat(64)).unwrap()
+}
+
 fn root() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "pg107-{}-{}",
@@ -72,7 +76,8 @@ struct Phase {
     rows: Vec<(String, Vec<Cells>)>,
 }
 fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) -> Phase {
-    let mut cache = EventCache::open(cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = EventCache::open(cache_path, &source).unwrap();
     let index = scan_file(path, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);

@@ -12,6 +12,10 @@ use crate::{
     },
 };
 
+fn fixture_host_source() -> crate::storage::HostSource {
+    crate::storage::HostSource::new(ns("native-bundle-fixtures"), "b".repeat(64)).unwrap()
+}
+
 // Tree's fixture reparses only the dimensions needed by its family tests.
 // A connected file commit needs the complete production scan, including the
 // auxiliary headers captured outside parse(). Finish all SQLite work before PG.
@@ -35,7 +39,8 @@ fn bundle_fixture(harness: &str) -> Fixture {
         serde_json::json!({"id":"start🦀","type":"session.start","data":{"sessionId":"s🦀"}});
     std::fs::write(&physical, format!("{value}\n")).unwrap();
     let cache_path = root.join("index.json");
-    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = crate::events::EventCache::open(&cache_path, &source).unwrap();
     let index = crate::events::scan_file(&physical, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
@@ -64,7 +69,8 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
             .unwrap()
             .as_nanos()
     ));
-    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = crate::events::EventCache::open(&cache_path, &source).unwrap();
     for (path, _, index) in &mut data.sources {
         let physical = path.strip_suffix("\0🦀").unwrap();
         let scanned = crate::events::scan_file(
@@ -705,7 +711,8 @@ fn pg_native_pages_launch_257_and_eof_match_production_sqlite() {
     }
     std::fs::write(&physical, body.as_bytes()).unwrap();
     let cache_path = data.root.join("launch-index.json");
-    let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+    let source = fixture_host_source();
+    let mut cache = crate::events::EventCache::open(&cache_path, &source).unwrap();
     let scanned = crate::events::scan_file(&physical, "claude", &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);

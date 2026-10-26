@@ -341,7 +341,9 @@ fn pg_source_finish_generation_fixture_is_real_but_native_pg_publisher_remains_u
         crate::model::now_ms()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut publisher = EventCache::open_scoped(&root.join("index.json")).unwrap();
+    let namespace = "finish\0head";
+    let source = crate::storage::HostSource::new(ns(namespace), "1".repeat(64)).unwrap();
+    let mut publisher = EventCache::open_scoped(&root.join("index.json"), &source).unwrap();
     let generation = publisher
         .publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
@@ -353,7 +355,6 @@ fn pg_source_finish_generation_fixture_is_real_but_native_pg_publisher_remains_u
         .unwrap()
         .expect("actual current publisher generation");
     drop(publisher);
-    let namespace = "finish\0head";
     let mut store = journal(&pool, namespace);
     discover(namespace, &[], true).apply(&mut store).unwrap();
     // This is contract-input fixture setup, NOT a PG Catalog/publisher adapter.

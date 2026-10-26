@@ -33,7 +33,9 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         return;
     }
     let root = std::env::temp_dir().join(format!("native-recovery136-{}", std::process::id()));
+    let namespace = tests::ns("recovery136\0logical");
     let options = crate::Options {
+        source: crate::storage::HostSource::new(namespace.clone(), "3".repeat(64)).unwrap(),
         claude_home: root.join("claude"),
         claude_json: root.join("claude.json"),
         codex_home: root.join("codex"),
@@ -60,7 +62,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         .unwrap();
     }
     let inputs = crate::inputs::inputs(&options).unwrap();
-    let mut sqlite = EventCache::open_scoped(&options.cache).unwrap();
+    let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let mut prepared_rows = Vec::new();
     for batch in inputs.chunks(64) {
         prepared_rows.extend(
@@ -82,7 +84,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     }
     tx.commit().unwrap();
     crate::events::store::begin_catalog_recovery(&options, "recovery136 fixture").unwrap();
-    let mut sqlite = EventCache::open_scoped(&options.cache).unwrap();
+    let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let mut outcomes = Vec::new();
     for _ in 0..3 {
         outcomes.push(sqlite.discover_recovery_sources().unwrap());
@@ -100,7 +102,6 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
     drop(db);
     let _guard = super::native_ingest_tests::Guard::new();
     let (pool, _) = tests::fixture(|_| {});
-    let namespace = tests::ns("recovery136\0logical");
     let control = PgCancellation::default();
     let generation = "6".repeat(64);
     let mut pg =
