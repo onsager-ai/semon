@@ -61,10 +61,23 @@ pub(crate) fn captured_source_proof(
         super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)?;
         tx.check()?;
         let ledger = crate::source_carrier::ledger(source);
-        let relocation = super::native_keys::read_meta(&mut tx, format!("native_catalog_relocation:{absolute}").as_bytes(), 1024 * 1024)?;
-        let relocated = relocation.as_deref().map(|bytes| serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes).map_err(|_| StorageError::ScopeChanged)).transpose()?;
+        let relocation = super::native_keys::read_meta(
+            &mut tx,
+            format!("native_catalog_relocation:{absolute}").as_bytes(),
+            1024 * 1024,
+        )?;
+        let relocated = relocation
+            .as_deref()
+            .map(|bytes| {
+                serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes)
+                    .map_err(|_| StorageError::ScopeChanged)
+            })
+            .transpose()?;
         let (physical_path, physical_owner) = if let Some(proof) = &relocated {
-            if proof.version != 1 || proof.native_id != reference.native_id || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger)) {
+            if proof.version != 1
+                || proof.native_id != reference.native_id
+                || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger))
+            {
                 return Err(StorageError::ScopeChanged);
             }
             let path = std::path::Path::new(&proof.new_path);
@@ -78,12 +91,22 @@ pub(crate) fn captured_source_proof(
             (source.path.as_path(), ledger.stat)
         };
         let file = crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)?;
-        let stat = crate::events::Stat::from_metadata(&file.metadata().map_err(|_| StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)?;
-        if stat.dev != physical_owner.dev || stat.ino != physical_owner.ino || stat.size < source.offset {
+        let stat = crate::events::Stat::from_metadata(
+            &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
+        if stat.dev != physical_owner.dev
+            || stat.ino != physical_owner.ino
+            || stat.size < source.offset
+        {
             return Err(StorageError::ScopeChanged);
         }
-        let named = std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
-        if !named.is_file() || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)? != stat {
+        let named =
+            std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+        if !named.is_file()
+            || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)?
+                != stat
+        {
             return Err(StorageError::ScopeChanged);
         }
         tx.check()?;
