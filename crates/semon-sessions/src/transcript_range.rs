@@ -1296,7 +1296,7 @@ impl SessionSourceReader for Local<'_> {
                         &ledger,
                     )
                 } else {
-                    crate::storage::local_navigation_binding(&self.options, "")
+                    crate::storage::local_navigation_binding(self.options, "")
                         .map_err(|error| {
                             crate::source_carrier::FailureStage::ProofOpenDb
                                 .wrap(io::Error::other(error))
