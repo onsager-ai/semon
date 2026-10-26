@@ -99,6 +99,26 @@ fn transfer_writer(db: &Connection) -> Result<(), StorageError> {
             | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
         |_| Ok(1_i64),
     )
+    .map_err(failed)?;
+    // This connection already carries the restored NativeOwnership and each
+    // transaction validates it. Existing Catalog guards also require the
+    // publisher capability for content rows. This private adapter imports
+    // fixed records only; it does not publish a head, ACK or reader lease.
+    db.create_scalar_function(
+        "semon_semantic_writer",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
+    .map_err(failed)?;
+    db.create_scalar_function(
+        "semon_semantic_publisher",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
     .map_err(failed)
 }
 

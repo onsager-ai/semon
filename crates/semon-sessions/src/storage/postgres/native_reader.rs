@@ -104,7 +104,14 @@ fn read_rows(
                 .join(",");
             format!(" AND ({}) > ({slots})", keys.join(","))
         };
-        let suffix = format!("WHERE {predicate}{after} ORDER BY {}", keys.join(","));
+        // Cast unsigned values to text only for transport. Qualify the input
+        // columns so ORDER BY cannot resolve the text output alias instead.
+        let order = keys
+            .iter()
+            .map(|key| format!("semon_pg_native_{table}.{key}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let suffix = format!("WHERE {predicate}{after} ORDER BY {order}");
         let probe = format!("SELECT {sizes}+128 FROM semon_pg_native_{table} {suffix} LIMIT 64");
         let sizes = tx.driver.query(&probe, &binds).map_err(sqlstate::error)?;
         if sizes.is_empty() {

@@ -67,7 +67,9 @@ pub(crate) fn stage(
     // Each call commits at most one bounded page; reconstruct the handle
     // between calls to exercise durable capture resumption.
     let manifest = loop {
-        match source.capture(operation).unwrap() {
+        match source.capture(operation).unwrap_or_else(|error| {
+            panic!("capture fixture {} failed: {error:?}", operation[0])
+        }) {
             CaptureProgress::Capturing { .. } => continue,
             CaptureProgress::Ready(manifest) => break manifest,
         }
@@ -522,7 +524,7 @@ fn current_transfer225_unavailable_usage_zero_checkpoint_keeps_exact_chunk_ledge
 }
 
 #[test]
-fn current_transfer246_occupied_description_refused_before_native_pages_commit() {
+fn current_transfer225_occupied_description_refused_before_native_pages_commit() {
     let root = root();
     let source = sqlite(&root, "occupied-source");
     let target = sqlite(&root, "occupied-target");
