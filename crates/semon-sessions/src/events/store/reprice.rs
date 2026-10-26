@@ -1829,11 +1829,11 @@ mod tests {
             db.execute_batch(configured::CORE_SCHEMA).unwrap();
             db.execute_batch(crate::events::store::SCHEMA).unwrap();
             db.execute_batch(metadata_schema()).unwrap();
-            for ddl in native_usage::schema(true) {
+            for ddl in native_usage::schema() {
                 db.execute_batch(ddl).unwrap();
             }
             db.execute_batch(copied_usage_schema()).unwrap();
-            db.execute_batch(tree_state::schema(true)).unwrap();
+            db.execute_batch(tree_state::schema()).unwrap();
             bind_fixture(&db, "a");
             assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
             {
@@ -2346,7 +2346,7 @@ mod tests {
             codex_native_usage TEXT,codex_pricing_fingerprint TEXT,
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));
             CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint) WHERE codex_native_usage IS NOT NULL;").unwrap();
-        for ddl in native_usage::schema(true) {
+        for ddl in native_usage::schema() {
             db.execute_batch(ddl).unwrap();
         }
         let bind = |db: &Connection, namespace: &str| {

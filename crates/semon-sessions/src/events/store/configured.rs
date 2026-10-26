@@ -2221,7 +2221,7 @@ mod tests {
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(copied_usage_schema()).unwrap();
-        db.execute_batch(tree_state::SCHEMA).unwrap();
+        db.execute_batch(tree_state::schema()).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
         )
