@@ -2127,7 +2127,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let claude = scoped(&caught, "scope=retained_history&harness=claude&");
     let codex = scoped(&caught, "scope=retained_history&harness=codex&");
     for key in &removed {
-        assert!(claude.contains(&(key.clone(), true)), "{key} under harness=claude");
+        assert!(
+            claude.contains(&(key.clone(), true)),
+            "{key} under harness=claude"
+        );
         assert!(codex.iter().all(|(other, _)| other != key));
     }
     assert!(claude.len() + codex.len() <= retained.len());
