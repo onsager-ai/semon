@@ -1711,6 +1711,7 @@ impl Writer {
             tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
         }
         let id = operation_id.to_owned();
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if reserved.elapsed() >= Duration::from_millis(50) {
             eprintln!(
@@ -1719,7 +1720,6 @@ impl Writer {
                 reserved.elapsed().as_micros()
             );
         }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         self.intents
             .insert(path.to_owned(), Intent { id, base, revision });
         Ok(())
@@ -1834,6 +1834,7 @@ impl Writer {
         }
         #[cfg(test)]
         effect("completion").map_err(failed)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if reserved.elapsed() >= Duration::from_millis(50) {
             eprintln!(
@@ -1842,7 +1843,6 @@ impl Writer {
                 reserved.elapsed().as_micros()
             );
         }
-        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         #[cfg(test)]
         if effect("commit_reply").is_err() {
             return Err(StorageError::CommitUncertain);
