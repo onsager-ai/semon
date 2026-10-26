@@ -1193,7 +1193,10 @@ mod tests {
             // Seed through the admitted journal and acknowledge one source through
             // the configured consumer; both counters belong to this namespace.
             let seed_paths = vec!["seed".into(), "acknowledged".into()];
-            let mut native = SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap());
+            let mut native = SourceJournal::owned(
+                crate::events::store::configured::NativeOwnership::restore(&fixture.config)
+                    .unwrap(),
+            );
             native
                 .discover(
                     &discover_operation(namespace, &seed_paths, true),
@@ -1202,8 +1205,11 @@ mod tests {
                 )
                 .unwrap();
             drop(native);
-            let source = crate::storage::HostSource::new(fixture.config.namespace.clone(), "a".repeat(64)).unwrap();
-            let mut consumer = EventCache::open_scoped(&fixture.root.join("index.json"), &source).unwrap();
+            let source =
+                crate::storage::HostSource::new(fixture.config.namespace.clone(), "a".repeat(64))
+                    .unwrap();
+            let mut consumer =
+                EventCache::open_scoped(&fixture.root.join("index.json"), &source).unwrap();
             assert!(matches!(
                 consumer
                     .acknowledge_source_for_test("acknowledged")
@@ -1464,8 +1470,25 @@ mod tests {
             let configured = Fixture::new_with_namespace("configured\0source");
             let StoreBackend::Sqlite { database } = &configured.config.backend;
             producer_restart_conformance(
-                || EventCache::open_scoped(&configured.root.join("index.json"), &crate::storage::HostSource::new(configured.config.namespace.clone(), "a".repeat(64)).unwrap()).unwrap(),
-                || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&configured.config).unwrap())) as Box<dyn SourceObservationStore>,
+                || {
+                    EventCache::open_scoped(
+                        &configured.root.join("index.json"),
+                        &crate::storage::HostSource::new(
+                            configured.config.namespace.clone(),
+                            "a".repeat(64),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                },
+                || {
+                    Box::new(SourceJournal::owned(
+                        crate::events::store::configured::NativeOwnership::restore(
+                            &configured.config,
+                        )
+                        .unwrap(),
+                    )) as Box<dyn SourceObservationStore>
+                },
                 database,
                 &configured.root,
                 "configured\0source",
@@ -1511,7 +1534,11 @@ mod tests {
             crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
             config
         };
-        let open = || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&config).unwrap())) as Box<dyn SourceObservationStore>;
+        let open = || {
+            Box::new(SourceJournal::owned(
+                crate::events::store::configured::NativeOwnership::restore(&config).unwrap(),
+            )) as Box<dyn SourceObservationStore>
+        };
         let namespace = config.namespace.as_str();
         let mut store = open();
         let discovery = discover_operation(namespace, &[], true);
@@ -1566,7 +1593,9 @@ mod tests {
     #[test]
     fn durable_source_queue_enforces_the_256_intent_admission_bound() {
         let fixture = Fixture::new();
-        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut store = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         for index in 0..256 {
             let paths = vec![format!("source-{index}")];
             let operation = discover_operation("A", &paths, false);
@@ -1600,7 +1629,9 @@ mod tests {
     #[test]
     fn durable_intent_capture_refuses_rebinding_and_premature_ack() {
         let fixture = Fixture::new();
-        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut store = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&fixture.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         let paths = vec!["first".into()];
         let operation = discover_operation("A", &paths, true);
         let intent = SourceIntent::Discover {
@@ -1647,7 +1678,12 @@ mod tests {
     fn shared_observation_conformance_runs_on_configured_sqlite() {
         let configured = Fixture::new_with_namespace("configured\0source");
         crate::storage::source_observations::conformance::shared_source_observation_conformance(
-            || Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&configured.config).unwrap())) as Box<dyn SourceObservationStore>,
+            || {
+                Box::new(SourceJournal::owned(
+                    crate::events::store::configured::NativeOwnership::restore(&configured.config)
+                        .unwrap(),
+                )) as Box<dyn SourceObservationStore>
+            },
             "configured\0source",
         );
     }
@@ -1655,7 +1691,9 @@ mod tests {
     #[test]
     fn configured_discovery_claim_cas_restart_and_originals() {
         let f = Fixture::new();
-        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut store = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         let paths = vec!["seed".into(), "new".into()];
         assert_eq!(
             store.claims(&paths).unwrap(),
@@ -1692,7 +1730,9 @@ mod tests {
         );
         assert_eq!(store.claims(&paths).unwrap(), captured);
         assert_eq!(store.pending(1).unwrap(), vec!["seed".to_owned()]);
-        let mut concurrent = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut concurrent = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         let concurrent_cas = invalidate_operation("A", &captured[1..]);
         assert_eq!(
             concurrent
@@ -1708,7 +1748,9 @@ mod tests {
         );
         assert_eq!(store.claims(&paths).unwrap(), before_conflict);
         drop(store);
-        let restarted = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let restarted = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         assert_eq!(restarted.claims(&paths).unwrap(), before_conflict);
         let db = f.db();
         assert_eq!(db.query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace='A' AND source_path='seed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -1798,7 +1840,9 @@ mod tests {
             Err(StorageError::Unavailable)
         ));
         assert!(!missing.exists());
-        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut store = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         let overlong = vec!["x".repeat(4097)];
         assert_eq!(
             store.discover(&discover_operation("A", &overlong, true), &overlong, true),
@@ -1915,7 +1959,9 @@ mod tests {
     #[test]
     fn configured_source_writer_revalidates_live_epoch_and_reports_busy() {
         let f = Fixture::new();
-        let mut store = Box::new(SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap())) as Box<dyn SourceObservationStore>;
+        let mut store = Box::new(SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
+        )) as Box<dyn SourceObservationStore>;
         let db = f.db();
         db.execute_batch("BEGIN IMMEDIATE").unwrap();
         let locked = vec!["locked".into()];
