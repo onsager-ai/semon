@@ -274,7 +274,11 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
             let key = context.get::<String>(0)?;
             metadata_namespace(&namespace, &key)
                 .map(str::to_owned)
-                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                .map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("native tree metadata_scope=unclassified_key");
+                    rusqlite::Error::UserFunctionError(Box::new(error))
+                })
         },
     )
 }

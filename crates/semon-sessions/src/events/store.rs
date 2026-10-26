@@ -5824,9 +5824,9 @@ fn write_tree_summary(
             json(&TreeSummaryRecord::new(
                 header_ledger(ledger),
                 tree_state::witness(transaction, path, ledger)
-                .map_err(|error| tree_state::diagnose("witness", error))?,
+                    .map_err(|error| tree_state::diagnose("witness", error))?,
                 tree_interpretation(transaction, path)
-                .map_err(|error| tree_state::diagnose("interpretation", error))?,
+                    .map_err(|error| tree_state::diagnose("interpretation", error))?,
                 summary,
                 normalized_usage,
             ))

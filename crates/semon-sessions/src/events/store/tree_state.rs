@@ -140,7 +140,13 @@ pub(super) fn diagnose(statement: &'static str, error: rusqlite::Error) -> rusql
     #[cfg(test)]
     if let rusqlite::Error::SqliteFailure(code, message) = &error {
         let message = message.as_deref().unwrap_or("");
-        let reason = if message.contains("ON CONFLICT clause does not match") {
+        let reason = if message.contains("unable to delete/modify user-function") {
+            "function_rebind_active"
+        } else if message.contains("user-defined function raised exception") {
+            "function_callback"
+        } else if message.contains("unsafe use") {
+            "function_unsafe"
+        } else if message.contains("ON CONFLICT clause does not match") {
             "conflict_target"
         } else if message.contains("view") {
             "view_effect"
@@ -165,7 +171,10 @@ pub(super) fn diagnose(statement: &'static str, error: rusqlite::Error) -> rusql
         } else {
             "other_sql_contract"
         };
-        eprintln!("native tree statement={statement} code={} reason={reason}", code.extended_code);
+        eprintln!(
+            "native tree statement={statement} code={} reason={reason}",
+            code.extended_code
+        );
     }
     #[cfg(not(test))]
     let _ = statement;
@@ -371,8 +380,7 @@ pub(super) fn write(
         None => new_generation(tx, source_id, ledger)?,
     };
     tx.execute(sql(tx, "INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", "INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?,params![path,id,projection_id,header_ledger(ledger)])?;
-    write_values(tx, projection_id, summary)
-        .map_err(|error| diagnose("write_values", error))?;
+    write_values(tx, projection_id, summary).map_err(|error| diagnose("write_values", error))?;
     tx.execute(
         sql(tx, "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?,
         params![projection_id, header_ledger(ledger)],
