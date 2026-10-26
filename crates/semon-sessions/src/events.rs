@@ -9832,21 +9832,25 @@ mod tests {
         format!("{snapshot:?}")
     }
 
-    /// What a cold, in-memory read of `path` indexes: the oracle every
+    /// What a fresh admitted read of `path` indexes: the oracle every
     /// persisted index must equal.
     fn cold(path: &Path) -> String {
-        let mut cache = EventCache::default();
+        let root = scratch("cold-current-oracle");
+        let mut cache = EventCache::open(&root.join("index.json"), &crate::Options::default().source).unwrap();
         let index = scan_file(path, "claude", &mut cache, &mut false).unwrap();
-        index_snapshot(&index)
+        let snapshot = index_snapshot(&index);
+        drop(index);
+        drop(cache);
+        fs::remove_dir_all(root).unwrap();
+        snapshot
     }
 
     /// What the store beside `v1` holds for `path`, as a new process reads it.
     fn stored(v1: &Path, path: &Path) -> String {
         let cache = EventCache::open(v1, &crate::Options::default().source).unwrap();
         assert!(cache.store.is_some(), "the store opens");
-        let key = path.to_string_lossy();
-        let entry = cache.files.get(key.as_ref()).expect("the file is stored");
-        index_snapshot(entry.index.as_ref().unwrap())
+        let (_, index) = cache.store.as_ref().unwrap().load_file(&path.to_string_lossy()).unwrap().expect("the file is stored");
+        index_snapshot(&index)
     }
 
     /// The store's bytes and its WAL's, as text: a value stored in any row
@@ -10433,24 +10437,16 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_store_is_set_aside_and_rebuilt() {
+    fn a_damaged_store_is_refused_without_replacement() {
         let root = scratch("damaged");
         let v1 = root.join("index.json");
         let garbage = vec![b'x'; 8192];
         fs::write(EventCache::path(&v1), &garbage).unwrap();
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"])]);
-        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        assert!(
-            cache.store.is_some(),
-            "a new store replaces the damaged one"
-        );
-        assert_eq!(
-            fs::read(root.join("index.sqlite3.corrupt")).unwrap(),
-            garbage
-        );
-        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(stored(&v1, &log), cold(&log));
+        assert!(EventCache::open(&v1, &crate::Options::default().source).is_err());
+        assert_eq!(fs::read(EventCache::path(&v1)).unwrap(), garbage);
+        assert!(!root.join("index.sqlite3.corrupt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10520,15 +10516,14 @@ mod tests {
         let target = root.join("elsewhere.sqlite3");
         fs::write(&target, b"").unwrap();
         std::os::unix::fs::symlink(&target, EventCache::path(&v1)).unwrap();
-        let cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        assert!(cache.store.is_none(), "never opened through a symlink");
+        assert!(EventCache::open(&v1, &crate::Options::default().source).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"", "the target is untouched");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_read_only_directory_falls_back_to_memory() {
+    fn a_read_only_directory_refuses_without_memory_fallback() {
         use std::os::unix::fs::PermissionsExt;
         let root = scratch("read-only");
         let state = root.join("state");
@@ -10544,15 +10539,7 @@ mod tests {
         let v1 = state.join("index.json");
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
-        let mut cache = EventCache::open(&v1, &crate::Options::default().source).unwrap();
-        assert!(cache.store.is_none(), "no store in a read-only directory");
-        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(index_snapshot(&index), cold(&log));
-        append_lines(&log, &[claude_result("t1")]);
-        ledger_trace();
-        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(ledger_trace(), ["append"], "in memory, it still resumes");
-        assert_eq!(index_snapshot(&index), cold(&log));
+        assert!(EventCache::open(&v1, &crate::Options::default().source).is_err());
         assert!(!EventCache::path(&v1).exists());
         restore();
         fs::remove_dir_all(root).unwrap();
