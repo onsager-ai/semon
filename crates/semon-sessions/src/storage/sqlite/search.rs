@@ -37,7 +37,7 @@ impl<'a> SearchWriter<'a> {
             namespace: None,
         }
     }
-    pub(super) fn admitted(
+    pub(crate) fn admitted(
         db: &'a Connection,
         source: &'a super::semantic::AdmittedSource,
     ) -> Result<Self, StorageError> {

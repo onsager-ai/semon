@@ -111,6 +111,16 @@ pub(crate) struct TraceWriter<'a> {
     namespace: Option<&'a str>,
 }
 impl<'a> TraceWriter<'a> {
+    pub(crate) fn owned(
+        db: &'a Connection,
+        owner: &'a crate::events::store::configured::NativeOwnership,
+    ) -> Result<Self, StorageError> {
+        owner.validate_ready(db)?;
+        Ok(Self {
+            db,
+            namespace: Some(owner.config().namespace.as_str()),
+        })
+    }
     pub(crate) fn unbound(db: &'a Connection) -> Self {
         Self {
             db,

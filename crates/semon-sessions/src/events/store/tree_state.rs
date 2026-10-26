@@ -3,66 +3,7 @@
 use super::*;
 use crate::native_tree::Summary;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS native_tree_generations (
- projection_id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL,
- version INTEGER NOT NULL,receipt TEXT NOT NULL,complete INTEGER NOT NULL,work_pending INTEGER NOT NULL DEFAULT 0
-) STRICT;
-CREATE INDEX IF NOT EXISTS native_tree_cleanup_queue ON native_tree_generations(complete,work_pending,projection_id);
-CREATE TABLE IF NOT EXISTS native_tree_usage_work (
- projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,tokens TEXT NOT NULL,
- PRIMARY KEY(projection_id,message_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_tree_codex_work (
- projection_id INTEGER NOT NULL,identity TEXT NOT NULL,
- PRIMARY KEY(projection_id,identity)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_tree_headers (
- source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_tree_models (
- projection_id INTEGER NOT NULL,model TEXT NOT NULL,
- model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
- PRIMARY KEY(projection_id,model)
-) STRICT, WITHOUT ROWID;
-CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(projection_id,model_digest);
-CREATE TABLE IF NOT EXISTS native_tree_labels (
- projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
- PRIMARY KEY(projection_id,label)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_tree_tools (
- projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
- tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
- PRIMARY KEY(projection_id,tool_id)
-) STRICT, WITHOUT ROWID;
-CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(projection_id,tool_id_digest);
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
-CREATE TABLE IF NOT EXISTS native_tree_usage_models (
- projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
- PRIMARY KEY(projection_id,message_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_tree_copied_identities (
- file_id INTEGER NOT NULL,message_id TEXT NOT NULL,record_uuid TEXT NOT NULL,
- PRIMARY KEY(file_id,message_id,record_uuid)
-) STRICT, WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS native_tree_copy_insert AFTER INSERT ON usage_identity BEGIN
- INSERT INTO native_tree_copied_identities
- SELECT file_id,message_id,record_uuid FROM usage_identity
- WHERE message_id=NEW.message_id AND record_uuid=NEW.record_uuid
- AND EXISTS(SELECT 1 FROM usage_identity p WHERE p.message_id=NEW.message_id AND p.record_uuid=NEW.record_uuid AND p.file_id<>NEW.file_id)
- ON CONFLICT DO NOTHING;
-END;
-CREATE TRIGGER IF NOT EXISTS native_tree_copy_delete AFTER DELETE ON usage_identity BEGIN
- DELETE FROM native_tree_copied_identities WHERE file_id=OLD.file_id AND message_id=OLD.message_id AND record_uuid=OLD.record_uuid;
- DELETE FROM native_tree_copied_identities WHERE (file_id,message_id,record_uuid) IN
- (SELECT i.file_id,i.message_id,i.record_uuid FROM usage_identity i WHERE i.message_id=OLD.message_id AND i.record_uuid=OLD.record_uuid
- AND NOT EXISTS(SELECT 1 FROM usage_identity p WHERE p.message_id=i.message_id AND p.record_uuid=i.record_uuid AND p.file_id<>i.file_id));
-END;
-";
-
-// Composite Tree and copied-usage families share physical namespace ownership.
-// Public creation still selects the singleton family until full qualification.
-const COMPOSITE_SCHEMA: &str = "
+const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_tree_generations (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,source_id INTEGER NOT NULL,
  version INTEGER NOT NULL,receipt TEXT NOT NULL,complete INTEGER NOT NULL,work_pending INTEGER NOT NULL DEFAULT 0,
@@ -131,8 +72,56 @@ CREATE TRIGGER IF NOT EXISTS native_tree_copy_delete AFTER DELETE ON usage_ident
 END;
 ";
 
-pub(super) fn schema(composite: bool) -> &'static str {
-    if composite { COMPOSITE_SCHEMA } else { SCHEMA }
+pub(super) fn schema() -> &'static str {
+    SCHEMA
+}
+
+// Static test diagnostics at the native-tree boundary; never include SQL values.
+pub(super) fn diagnose(statement: &'static str, error: rusqlite::Error) -> rusqlite::Error {
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(code, message) = &error {
+        let message = message.as_deref().unwrap_or("");
+        let reason = if message.starts_with("Invalid function parameter type Null") {
+            "function_argument_null"
+        } else if message.contains("unable to delete/modify user-function") {
+            "function_rebind_active"
+        } else if message.contains("user-defined function raised exception") {
+            "function_callback"
+        } else if message.contains("unsafe use") {
+            "function_unsafe"
+        } else if message.contains("ON CONFLICT clause does not match") {
+            "conflict_target"
+        } else if message.contains("view") {
+            "view_effect"
+        } else if message.starts_with("no such column:") {
+            "missing_column"
+        } else if message.starts_with("no such table:") {
+            "missing_table"
+        } else if message.contains("values were supplied") {
+            "column_count"
+        } else if message.contains("readonly") || message.contains("read-only") {
+            "readonly"
+        } else if message.contains("FOREIGN KEY") || message.contains("foreign key") {
+            "foreign_key"
+        } else if message.contains("constraint") {
+            "constraint"
+        } else if message.contains("datatype") {
+            "datatype"
+        } else if message.contains("arguments on") {
+            "function_arity"
+        } else if message.contains("malformed") {
+            "malformed"
+        } else {
+            "other_sql_contract"
+        };
+        eprintln!(
+            "native tree statement={statement} code={} reason={reason}",
+            code.extended_code
+        );
+    }
+    #[cfg(not(test))]
+    let _ = statement;
+    error
 }
 
 pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
@@ -156,14 +145,11 @@ pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
 }
 
 pub(super) fn sql<'a>(
-    c: &Connection,
-    legacy: &'a str,
+    _db: &Connection,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    Ok(if composite(c)? { scoped } else { legacy })
-}
-fn composite(c: &Connection) -> rusqlite::Result<bool> {
-    c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_tree_headers') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))
+    Ok(scoped)
 }
 
 #[derive(Clone)]
@@ -338,7 +324,7 @@ pub(super) fn write(
         None => new_generation(tx, source_id, ledger)?,
     };
     tx.execute(sql(tx, "INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", "INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?,params![path,id,projection_id,header_ledger(ledger)])?;
-    write_values(tx, projection_id, summary)?;
+    write_values(tx, projection_id, summary).map_err(|error| diagnose("write_values", error))?;
     tx.execute(
         sql(tx, "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?,
         params![projection_id, header_ledger(ledger)],
@@ -351,14 +337,7 @@ pub(super) fn new_generation(
     source_id: i64,
     ledger: &Ledger,
 ) -> rusqlite::Result<i64> {
-    if composite(tx)? {
-        return tx.query_row("INSERT INTO native_tree_generations(namespace,projection_id,source_id,version,receipt,complete) VALUES(semon_namespace(),(SELECT coalesce(max(projection_id),0)+1 FROM native_tree_generations WHERE namespace=semon_namespace()),?1,3,?2,0) RETURNING projection_id", params![source_id, header_ledger(ledger)], |r| r.get(0));
-    }
-    tx.execute(
-        "INSERT INTO native_tree_generations(source_id,version,receipt,complete) VALUES(?1,3,?2,0)",
-        params![source_id, header_ledger(ledger)],
-    )?;
-    Ok(tx.last_insert_rowid())
+    tx.query_row("INSERT INTO native_tree_generations(namespace,projection_id,source_id,version,receipt,complete) VALUES(semon_namespace(),(SELECT coalesce(max(projection_id),0)+1 FROM native_tree_generations WHERE namespace=semon_namespace()),?1,3,?2,0) RETURNING projection_id", params![source_id, header_ledger(ledger)], |r| r.get(0))
 }
 
 pub(super) fn bind_generation(
@@ -402,13 +381,14 @@ pub(super) fn write_values(
             "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING",
             "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
         )?)?
-        .execute(params![id, model])?;
+        .execute(params![id, model])
+        .map_err(|error| diagnose("model_insert", error))?;
     }
     for (tool, name) in rows.tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name])?;
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name]).map_err(|error| diagnose("tool_open_upsert", error))?;
     }
     for tool in rows.closed_tools {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool])?;
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,NULL,1) ON CONFLICT(projection_id,tool_id) DO UPDATE SET closed=1", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,NULL,1) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET closed=1")?)?.execute(params![id,tool]).map_err(|error| diagnose("tool_closed_upsert", error))?;
     }
     for (message, model) in rows.usage_models {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_usage_models VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET model=excluded.model", "INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?)?.execute(params![id,message,model])?;
@@ -578,24 +558,25 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
     if !current(&tx)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    let pending = cleanup_work_tx(&tx)?;
+    tx.commit()?;
+    Ok(pending)
+}
+
+// The caller validates its writer authority in this same transaction.
+pub(super) fn cleanup_work_tx(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
     let selected:Option<i64>=tx.query_row(sql(&tx, "SELECT projection_id FROM native_tree_generations WHERE complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1", "SELECT projection_id FROM native_tree_generations WHERE namespace=semon_namespace() AND complete=1 AND work_pending=1 ORDER BY projection_id LIMIT 1")?,[],|r|r.get(0)).optional()?;
     if let Some(id) = selected {
         for (table, key) in [
             ("native_tree_usage_work", "message_id"),
             ("native_tree_codex_work", "identity"),
         ] {
-            let predicate = if composite(&tx)? {
-                "namespace=semon_namespace() AND "
-            } else {
-                ""
-            };
+            let predicate = "namespace=semon_namespace() AND ";
             tx.execute(&format!("DELETE FROM {table} WHERE {predicate}projection_id=?1 AND {key} IN (SELECT {key} FROM {table} WHERE {predicate}projection_id=?1 ORDER BY {key} LIMIT 512)"),[id])?;
         }
         tx.execute(sql(&tx, "UPDATE native_tree_generations SET work_pending=0 WHERE projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE projection_id=?1)", "UPDATE native_tree_generations SET work_pending=0 WHERE namespace=semon_namespace() AND projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1)")?,[id])?;
     }
-    let pending = work_pending(&tx)?;
-    tx.commit()?;
-    Ok(pending)
+    work_pending(tx)
 }
 
 #[cfg(test)]
@@ -629,12 +610,12 @@ mod namespace_tests {
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
         )
         .unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
-        for ddl in native_usage::schema(true) {
+        db.execute_batch(metadata_schema()).unwrap();
+        for ddl in native_usage::schema() {
             db.execute_batch(ddl).unwrap();
         }
-        db.execute_batch(copied_usage_schema(true)).unwrap();
-        db.execute_batch(schema(true)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
+        db.execute_batch(schema()).unwrap();
         let ledger = Ledger {
             stat: Stat {
                 dev: 1,
@@ -802,12 +783,12 @@ mod namespace_tests {
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
         )
         .unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
-        for ddl in native_usage::schema(true) {
+        db.execute_batch(metadata_schema()).unwrap();
+        for ddl in native_usage::schema() {
             db.execute_batch(ddl).unwrap();
         }
-        db.execute_batch(copied_usage_schema(true)).unwrap();
-        db.execute_batch(schema(true)).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
+        db.execute_batch(schema()).unwrap();
         bind(&db, "witness");
         let ledger = Ledger {
             stat: Stat {

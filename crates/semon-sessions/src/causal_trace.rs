@@ -6,7 +6,7 @@ use crate::{
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -297,6 +297,23 @@ pub(crate) fn publish_measured(
     Ok(())
 }
 
+pub(crate) fn publish_owned(
+    tx: &Transaction<'_>,
+    owner: &crate::events::store::configured::NativeOwnership,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<()> {
+    let store = crate::storage::sqlite::trace::TraceWriter::owned(tx, owner)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let mut measurements = crate::native_timing::Measurements::default();
+    let record = publication_record(row, projection, &mut measurements)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
+        query.publish(tx, row, summary, &record.0)?;
+    }
+    publish_record(&store, row, projection, record, &mut measurements)
+}
+
 fn publication_record(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
@@ -433,7 +450,7 @@ pub(crate) fn update_current_observation(
             Sha256::digest(json!([version, metadata]).to_string().as_bytes())
         );
         tx.execute(
-            "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE session_key=?1",
+            "UPDATE main.session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
             params![key, text, generation],
         )?;
     }
@@ -629,11 +646,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             .facts
             .as_ref()
             .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|_| 503u16)?;
+        let mut db = crate::events::store::local_reader(options).map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
         let tx = db.transaction().map_err(|_| 503u16)?;

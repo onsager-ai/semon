@@ -28,7 +28,7 @@ pub(crate) fn prefix(kind: &str, key: &str) -> String {
     format!("native_query_{kind}:{}:{key}:", key.len())
 }
 pub(crate) fn header(db: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1", [prefix("header",key)], |r|r.get(0)).optional().map(Option::flatten)
+    db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key=?1", [prefix("header",key)], |r|r.get(0)).optional().map(Option::flatten)
 }
 impl Projection {
     pub(crate) fn capture(session: &Session, turns: &[&Turn], edges: &[&Handoff]) -> Self {
@@ -149,9 +149,11 @@ impl Projection {
         }
         for kind in ["turn", "edge", "virtual", "virtual-slot"] {
             let prefix = prefix(kind, &identity);
-            tx.execute("DELETE FROM meta WHERE key>=?1 AND key<?1||'~'", [prefix])?;
+            tx.execute("DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?1||'~'", [prefix])?;
         }
-        let mut put = tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)")?;
+        let mut put = tx.prepare_cached(
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",
+        )?;
         if complete {
             put.execute(params![prefix("session", &identity), session])?;
             for (order, text) in turns.iter().enumerate() {

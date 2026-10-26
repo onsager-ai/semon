@@ -4,7 +4,7 @@ use crate::{
     Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
     model::summary::CatalogRow,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -284,17 +284,60 @@ pub fn session_overview_observe(
     }
 }
 fn connection(options: &Options) -> io::Result<Connection> {
-    let db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(failure)?;
-    crate::events::store::require_current(&db)?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    let db = binding.connection().map_err(failure)?;
     crate::selected_read::install(&db)?;
     Ok(db)
 }
+
+fn transaction<'a>(
+    db: &'a mut Connection,
+    options: &Options,
+) -> io::Result<rusqlite::Transaction<'a>> {
+    let tx = db.transaction().map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(failure)?;
+    Ok(tx)
+}
+
+fn writer_connection(
+    options: &Options,
+) -> io::Result<(
+    crate::events::store::configured::NativeOwnership,
+    Connection,
+)> {
+    let config = options.source.config(&options.cache).map_err(failure)?;
+    let owner =
+        crate::events::store::configured::NativeOwnership::restore(&config).map_err(failure)?;
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+        .connection()
+        .map_err(failure)?;
+    db.create_scalar_function(
+        "semon_semantic_publisher",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
+    .map_err(failure)?;
+    crate::selected_read::install(&db)?;
+    db.busy_timeout(Duration::ZERO).map_err(failure)?;
+    Ok((owner, db))
+}
+
+fn validate_writer(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &crate::events::store::configured::NativeOwnership,
+) -> io::Result<()> {
+    let binding = crate::storage::NativeReaderBinding::Semantic(owner.clone());
+    binding
+        .validate(tx, &owner.config().namespace)
+        .map_err(failure)?;
+    Ok(())
+}
+
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
     text.map(|text| {
@@ -337,7 +380,7 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         .map_err(failure)?
         .is_some()
     {
-        return crate::history_projection::qualified(db, row).map_err(failure);
+        return crate::history_projection::qualified(db, row, false).map_err(failure);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
@@ -346,14 +389,16 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
 /// Demand an ordinary producer upgrade for an exact selected owner. This only
 /// schedules work; publication still requires the producer's source proofs.
 pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
-    let db = connection(options)?;
-    let Some(row) = catalog(&db, key)? else {
+    let mut db = connection(options)?;
+    let tx = transaction(&mut db, options)?;
+    let Some(row) = catalog(&tx, key)? else {
         return Ok(false);
     };
-    if projection_ready(&db, &row)? {
+    if projection_ready(&tx, &row)? {
         return Ok(false);
     }
     source_refs(options, std::slice::from_ref(&row))?;
+    tx.commit().map_err(failure)?;
     crate::events::store::prioritize_projection_sources(options, &row.sources)?;
     Ok(true)
 }
@@ -562,7 +607,7 @@ pub fn overview_repair_sources(
     key: &str,
 ) -> io::Result<Option<Vec<crate::SessionSourceRef>>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let rows = selection(&tx, key)?.rows;
     if ready(&tx, &rows[0])? {
         return Ok(None);
@@ -577,7 +622,7 @@ pub fn session_query_sources(
     key: &str,
 ) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selected = query_selection(&tx, key)?;
     if selected.incomplete {
         return Err(io::Error::new(
@@ -691,7 +736,7 @@ pub(crate) fn local_query_inputs(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((_, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -725,7 +770,7 @@ pub(crate) fn local_query_target(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((key, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -808,8 +853,9 @@ pub(crate) fn candidates_after(
             "Invalid overview migration batch",
         ));
     }
-    let db = connection(options)?;
-    // Older schemas migrate through their owning producer, never raw SQL here.
+    let mut connection = connection(options)?;
+    let db = transaction(&mut connection, options)?;
+    // Current-format selected candidates share this admitted read snapshot.
     if !db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_catalog')",
@@ -869,18 +915,16 @@ pub fn repair_session_overview_with_control(
         ));
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = selection(&tx, key)?;
     let rows = selection.rows;
     if ready(&tx, &rows[0])? {
         tx.commit().map_err(failure)?;
-        let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
-        crate::selected_read::install(&writable)?;
-        writable.busy_timeout(Duration::ZERO).map_err(failure)?;
+        let (owner, mut writable) = writer_connection(options)?;
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
-        crate::events::store::require_current(&tx)?;
+        validate_writer(&tx, &owner)?;
         let Some(current) = catalog(&tx, key)? else {
             return Err(publication_changed());
         };
@@ -888,7 +932,7 @@ pub fn repair_session_overview_with_control(
             return Err(publication_changed());
         }
         tx.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("overview_needed:{key}")],
         )
         .map_err(failure)?;
@@ -964,21 +1008,16 @@ pub fn repair_session_overview_with_control(
             "Native migration owner unavailable",
         ));
     }
-    // Qualify through the current schema owner. It preserves independent
-    // current/history membership; the publication below does not touch either.
-    crate::events::store::open_selected(&EventCache::path(&options.cache)).map_err(failure)?;
     crate::selected_read::check()?;
     #[cfg(test)]
     if let Some(hook) = BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
-    crate::selected_read::install(&writable)?;
-    writable.busy_timeout(Duration::ZERO).map_err(failure)?;
+    let (owner, mut writable) = writer_connection(options)?;
     let tx = writable
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failure)?;
-    crate::events::store::require_current(&tx)?;
+    validate_writer(&tx, &owner)?;
     let current: String = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -1004,7 +1043,7 @@ pub fn repair_session_overview_with_control(
                 .map_err(failure)?;
         }
         if let Some(trace) = &row.trace {
-            crate::causal_trace::publish(&tx, row, trace).map_err(failure)?;
+            crate::causal_trace::publish_owned(&tx, &owner, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
             let table = if crate::history_projection::catalog(&tx, &row.key)
@@ -1015,7 +1054,7 @@ pub fn repair_session_overview_with_control(
             } else {
                 "session_catalog"
             };
-            tx.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
+            tx.execute(&format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE namespace=semon_namespace() AND session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
         }
         if upgrade {
             let projection = transcripts
@@ -1028,7 +1067,7 @@ pub fn repair_session_overview_with_control(
             publish_projection(&tx, row, projection)?;
         }
         tx.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("overview_needed:{}", row.key)],
         )
         .map_err(failure)?;
@@ -1063,18 +1102,18 @@ fn publish_projection(
         "session_slots"
     };
     if history {
-        tx.execute("INSERT OR REPLACE INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+        tx.execute("INSERT OR REPLACE INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(semon_namespace(),?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
     } else {
-        tx.execute("INSERT OR REPLACE INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+        tx.execute("INSERT OR REPLACE INTO main.session_slot_projections(namespace,session_key,generation,source_generation,version,total) VALUES(semon_namespace(),?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
     }
     tx.execute(
-        &format!("DELETE FROM {slots} WHERE session_key=?1"),
+        &format!("DELETE FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1"),
         [&row.key],
     )
     .map_err(failure)?;
     let mut put = tx
         .prepare(&format!(
-            "INSERT INTO {slots}(session_key,slot,metadata) VALUES(?1,?2,?3)"
+            "INSERT INTO main.{slots}(namespace,session_key,slot,metadata) VALUES(semon_namespace(),?1,?2,?3)"
         ))
         .map_err(failure)?;
     for (slot, text) in texts.iter().enumerate() {
@@ -1376,7 +1415,7 @@ pub(crate) fn with_query<T>(
     let _scope = crate::selected_read::Scope::ensure();
     crate::selected_read::check()?;
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = query_selection(&tx, key)?;
     if selection.incomplete {
         return Err(io::Error::new(
@@ -1406,7 +1445,7 @@ pub(crate) fn with_query<T>(
         crate::model::query_history(options, &rows, native, now)
     })?;
     let result = read(data);
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let current = query_selection(&tx, key)?;
     let footprint = |rows: &[CatalogRow]| -> BTreeMap<_, _> {
         rows.iter()

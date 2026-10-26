@@ -1,7 +1,7 @@
 //! Query observation fences for a row's runtime dependencies. This is a
 //! fingerprint, never runtime or control authority, and reads no transcripts.
 use super::*;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "scoped-v1:";
@@ -114,11 +114,7 @@ impl RuntimeObservations {
         }
         measurements.record("runtime_ctor_indices", started, 1);
         let started = measurements.start();
-        let connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok();
+        let connection = crate::events::store::local_reader(options).ok();
         measurements.record("runtime_ctor_connection", started, 1);
         Self {
             facts,

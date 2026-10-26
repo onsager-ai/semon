@@ -6,7 +6,7 @@ use crate::{
     model::summary::CatalogRow,
     slot_projection::{QueryObservation, SavedSlot, VERSION},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Digest;
 
 const MAX_SLOTS: usize = 512;
@@ -344,11 +344,7 @@ fn virtual_read(
     if requested != served {
         return Err(QueryError::unknown_session(requested));
     }
-    let mut db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(unavailable)?;
+    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
@@ -455,11 +451,7 @@ fn virtual_read(
         db,
     )
     .map_err(|error| proof_unavailable(&error))?;
-    let mut db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(unavailable)?;
+    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
@@ -707,11 +699,7 @@ fn read_inner(
     if requested != key && !suffixed {
         return Ok(None);
     }
-    let mut db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(unavailable)?;
+    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
@@ -906,11 +894,7 @@ fn read_inner(
     let sources =
         crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
             .map_err(|error| proof_unavailable(&error))?;
-    let mut db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(unavailable)?;
+    let mut db = crate::events::store::local_reader(options).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);

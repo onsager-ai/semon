@@ -116,7 +116,7 @@ fn selected75_native(
     let id = runtime.current_generation(key).unwrap();
     let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
-    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let prepared = crate::model::prepare_sources(options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
     ordinary.publish_catalog_projection(&crate::slot_projection::Publication {
         rows: &prepared.rows,
@@ -333,7 +333,7 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     // Its explicitly separate store cannot become an owned-reader fallback.
     let mut oracle_options = options.clone();
     oracle_options.cache = f.root.join("selected60-ordinary-oracle");
-    let mut ordinary = EventCache::open_scoped(&oracle_options.cache).unwrap();
+    let mut ordinary = EventCache::open_scoped(&oracle_options.cache, &oracle_options.source).unwrap();
     let prepared = crate::model::prepare_sources(&oracle_options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
     ordinary.publish_catalog_projection(&crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) }, prepared.base_generation.as_deref()).unwrap();
     let before = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
@@ -407,7 +407,7 @@ fn configured_semantic_selected70_real_native_multi_window_range_oracle() {
     let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
 
-    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         options,
         &mut ordinary,
@@ -506,7 +506,7 @@ fn configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_be
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
     let query = format!("sid={key}&after=0&limit=8");
 
-    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         options,
         &mut ordinary,

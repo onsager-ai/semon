@@ -23,6 +23,7 @@ pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "session_trace_edges",
     "session_trace_bookmarks",
     "session_overview",
+    "session_descriptions",
     "session_search_coverage",
     "session_search_documents",
     "session_search_memberships",
@@ -45,7 +46,7 @@ fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-pub(super) fn register(
+pub(crate) fn register(
     db: &Connection,
     source: &LogicalSourceNamespace,
 ) -> Result<(), StorageError> {
@@ -83,14 +84,18 @@ pub(super) fn ready(db: &Connection) -> Result<bool, StorageError> {
 /// Every unqualified native SELECT resolves a connection-local view with an
 /// explicit namespace predicate. Indexed Catalog ranges use main plus the same
 /// predicate, retaining namespace-leading covering indexes.
-pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
-    if !started(db).map_err(failed)? {
-        return Ok(false);
-    }
-    if !ready(db)? {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
+pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
     for table in QUALIFIED_CATALOG_TABLES {
+        let current: bool = if *table == "session_catalog_changes" {
+            // Revisions order the shared stream globally; namespace owns each
+            // row and leads the delivery index, rather than the revision PK.
+            db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND type='TEXT' AND [notnull]=1) AND EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='revision' AND type='INTEGER' AND pk=1) AND EXISTS(SELECT 1 FROM pragma_index_info('session_catalog_change_order','main') WHERE seqno=0 AND name='namespace')", [table], |row|row.get(0)).map_err(failed)?
+        } else {
+            db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |row| row.get(0)).map_err(failed)?
+        };
+        if !current {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         // Preserve the native positional row layout. Namespace is an adapter
         // qualifier, not a new native payload column.
         let mut statement = db
@@ -112,6 +117,7 @@ pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
         }
         db.execute_batch(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT {columns} FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table))).map_err(failed)?;
     }
+    db.execute_batch("CREATE TEMP VIEW IF NOT EXISTS meta AS SELECT namespace,key,value FROM main.meta WHERE namespace=semon_meta_scope(key);").map_err(failed)?;
     Ok(true)
 }
 
@@ -512,7 +518,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache = root.join("index.json");
-            drop(EventCache::open_scoped(&cache).unwrap());
+            drop(EventCache::open_scoped(&cache, &crate::Options::default().source).unwrap());
             let database = EventCache::path(&cache);
             let db = Connection::open(&database).unwrap();
             for key in ["same", "tail"] {
@@ -671,7 +677,11 @@ mod tests {
     fn real_native_publisher_refuses_enrolled_unit_before_mutation() {
         let f = Fixture::new();
         // Hold a real warm producer across enrollment and table replacement.
-        let mut producer = EventCache::open_scoped(&f.root.join("index.json")).unwrap();
+        let mut producer = EventCache::open_scoped(
+            &f.root.join("index.json"),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         // Replace the table-level fixture with metadata produced by the real
         // native publication algorithm before enrollment.
         f.db()
@@ -880,20 +890,6 @@ mod tests {
             SqliteNavigation(NativeReaderBinding::Admitted(foreign))
                 .bookmarked_target_keys("target"),
             Err(StorageError::NamespaceMismatch)
-        );
-        assert_eq!(
-            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
-                f.config.clone()
-            ))
-            .bookmarked_target_keys("target"),
-            Err(StorageError::NamespaceUpgradePending)
-        );
-        assert_eq!(
-            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
-                f.config.clone()
-            ))
-            .catalog_generation(),
-            Err(StorageError::NamespaceUpgradePending)
         );
         assert_eq!(
             db.query_row(

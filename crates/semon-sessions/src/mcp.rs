@@ -163,6 +163,7 @@ mod tests {
         fs::create_dir_all(root.join("proc")).unwrap();
         fs::write(root.join("proc/locks"), "").unwrap();
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

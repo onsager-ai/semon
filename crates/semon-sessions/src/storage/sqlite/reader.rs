@@ -6,17 +6,15 @@ use rusqlite::{Connection, OpenFlags};
 use std::{ops::Deref, time::Duration};
 
 impl NativeReaderBinding {
-    pub(super) fn connection(&self) -> Result<Connection, StorageError> {
+    pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         let config = self.config();
         let StoreBackend::Sqlite { database } = &config.backend;
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
             return Err(StorageError::InvalidArguments);
         }
-        if !matches!(self, Self::TransitionalUnboundLocal(_))
-            && config.expected_stream_epoch.as_ref().is_none_or(|epoch| {
-                epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        {
+        if config.expected_stream_epoch.as_ref().is_none_or(|epoch| {
+            epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
             return Err(StorageError::InvalidArguments);
         }
         let db = Connection::open_with_flags(
@@ -30,14 +28,11 @@ impl NativeReaderBinding {
         Ok(db)
     }
 
-    pub(super) fn validate(
+    pub(crate) fn validate(
         &self,
         db: &Connection,
         requested: &LogicalSourceNamespace,
     ) -> Result<bool, StorageError> {
-        if matches!(self, Self::Semantic(_)) {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
         self.validate_listing(db, requested)
     }
 
@@ -54,11 +49,6 @@ impl NativeReaderBinding {
             Self::Semantic(owner) => owner.validate_ready(db)?,
             Self::Admitted(_) => {
                 namespace::require_admitted(db, requested)?;
-            }
-            Self::TransitionalUnboundLocal(_) => {
-                if namespace::is_bound(db).map_err(failed)? {
-                    return Err(StorageError::NamespaceUpgradePending);
-                }
             }
         }
         if !crate::events::store::current_contract(db).map_err(failed)? {
@@ -83,10 +73,7 @@ impl NativeReaderBinding {
         {
             return Err(StorageError::ScopeChanged);
         }
-        if !matches!(self, Self::TransitionalUnboundLocal(_)) {
-            return super::catalog_namespace::scope_readers(db);
-        }
-        Ok(false)
+        super::catalog_namespace::scope_readers(db)
     }
 
     /// Repair and lazy proof readers retain this admitted snapshot until their
@@ -94,9 +81,6 @@ impl NativeReaderBinding {
     pub(crate) fn proof_snapshot(
         &self,
     ) -> Result<std::sync::Arc<crate::events::store::chunk_proofs::Snapshot>, StorageError> {
-        if matches!(self, Self::Semantic(_)) {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.validate(&db, &self.config().namespace)?;

@@ -4,6 +4,7 @@
 pub(crate) mod catalog;
 #[cfg(test)]
 mod conformance;
+mod host_source;
 pub mod native_events;
 pub(crate) mod navigation;
 #[cfg(feature = "postgres")]
@@ -14,6 +15,11 @@ pub(crate) mod query;
 pub(crate) mod selected;
 pub(crate) mod semantic_owner;
 pub mod source_observations;
+pub use host_source::HostSource;
+
+fn local_database(cache: &std::path::Path) -> std::path::PathBuf {
+    crate::events::EventCache::path(cache)
+}
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
@@ -22,14 +28,7 @@ pub(crate) fn read_local_catalog_page(
     source_key: &str,
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
-    let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
-        "local"
-    } else {
-        source_key
-    })?;
-    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
-        options, namespace,
-    ));
+    let binding = local_reader_binding(options)?;
     sqlite::catalog::read_page(&binding, options, source_key, request)
 }
 
@@ -38,30 +37,24 @@ pub(crate) fn source_proof_observation(
     root: &str,
     absolute: &str,
 ) -> Result<Option<catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
-    let namespace = LogicalSourceNamespace::new("source-proof")?;
-    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
-        options, namespace,
-    ));
+    let binding = local_reader_binding(options)?;
     sqlite::catalog::source_proof_observation(&binding, options, root, absolute)
 }
 
 pub(crate) fn local_query_catalog(
     options: &crate::Options,
-    namespace: LogicalSourceNamespace,
-) -> Box<dyn query::QueryCatalogStore> {
-    Box::new(sqlite::query::SqliteQueryCatalog {
+    _namespace: LogicalSourceNamespace,
+) -> Result<Box<dyn query::QueryCatalogStore>, StorageError> {
+    Ok(Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
-        binding: NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
-            options, namespace,
-        )),
-    })
+        binding: local_reader_binding(options)?,
+    }))
 }
 
 /// The only Options bridge is explicit and cannot enter an enrolled store.
 #[derive(Clone, Debug)]
 pub(crate) enum NativeReaderBinding {
     Admitted(StoreConfig),
-    TransitionalUnboundLocal(StoreConfig),
     /// Private producer custody; never constructed by public configuration.
     Semantic(crate::events::store::configured::NativeOwnership),
 }
@@ -69,7 +62,7 @@ pub(crate) enum NativeReaderBinding {
 impl NativeReaderBinding {
     pub(crate) fn config(&self) -> &StoreConfig {
         match self {
-            Self::Admitted(config) | Self::TransitionalUnboundLocal(config) => config,
+            Self::Admitted(config) => config,
             Self::Semantic(owner) => owner.config(),
         }
     }
@@ -100,11 +93,15 @@ impl QueryRuntimeBinding {
 
 pub(crate) fn local_navigation_binding(
     options: &crate::Options,
-    source: &str,
+    _source: &str,
 ) -> Result<NativeReaderBinding, StorageError> {
-    let namespace = LogicalSourceNamespace::new(if source.is_empty() { "local" } else { source })?;
-    Ok(NativeReaderBinding::TransitionalUnboundLocal(
-        StoreConfig::local_metadata(options, namespace),
+    local_reader_binding(options)
+}
+
+fn local_reader_binding(options: &crate::Options) -> Result<NativeReaderBinding, StorageError> {
+    let config = options.source.config(&options.cache)?;
+    Ok(NativeReaderBinding::Semantic(
+        crate::events::store::configured::NativeOwnership::restore(&config)?,
     ))
 }
 

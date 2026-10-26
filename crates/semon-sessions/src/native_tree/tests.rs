@@ -24,6 +24,7 @@ impl Home {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join("settings.json"),
             codex_home: root.join("codex"),
@@ -49,7 +50,7 @@ impl Home {
     }
 
     fn cache(&self) -> events::EventCache {
-        events::EventCache::open_scoped(&self.options.cache).unwrap()
+        events::EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap()
     }
 
     fn observe(
