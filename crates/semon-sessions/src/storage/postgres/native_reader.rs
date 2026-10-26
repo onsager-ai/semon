@@ -143,7 +143,9 @@ fn read_rows(
         let last = raw.last().ok_or(StorageError::ScopeChanged)?;
         let mut next: Vec<Box<dyn ToSql + Sync>> = Vec::new();
         for key in keys {
-            if one_page { break; }
+            if one_page {
+                break;
+            }
             let at = names
                 .iter()
                 .position(|name| name.split(':').next() == Some(*key))

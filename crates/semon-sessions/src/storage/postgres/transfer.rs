@@ -254,16 +254,17 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
-        use transfer::reported::tests::{apply, root, seed_native, sqlite, sqlite_core, stage};
+        use transfer::reported::tests::{apply, root, seed_native, seed_native_usage, sqlite, sqlite_core, stage};
         let root = root();
         let source = sqlite(&root, "native-source");
         let reverse = sqlite(&root, "native-reverse");
         let path = root.join("old.jsonl");
-        seed_native(&source, &path, 130, '2');
+        seed_native_usage(&source, &path, 130);
         let expected = sqlite_core(&source, &path);
         let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&source).unwrap();
         let sqlite_reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
         let (expected_ledger, expected_native) = sqlite_reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(expected_native.usage().len(),130);
         let expected_chunks = expected_native.source_chunks.as_ref().unwrap();
         let expected_launch = serde_json::to_value(expected_native.handoff_index.as_ref().unwrap()).unwrap();
         drop(sqlite_reader);
@@ -284,6 +285,7 @@ mod tests {
             .checkpoint(&manifest)
             .unwrap()
             .sequence;
+        std::fs::remove_file(&path).unwrap();
         apply(&config, &manifest);
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             // The actual production native reader verifies immutable page roots,
@@ -292,6 +294,9 @@ mod tests {
             assert_eq!(ledger, expected_ledger);
             assert_eq!(serde_json::to_value(&native.events).unwrap(),serde_json::to_value(&expected_native.events).unwrap());
             assert_eq!(serde_json::to_value(&native.extras).unwrap(),serde_json::to_value(&expected_native.extras).unwrap());
+            assert_eq!(native.usage(),expected_native.usage());
+            assert_eq!(native.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
+            assert_eq!(serde_json::to_value(&native.signals).unwrap(),serde_json::to_value(&expected_native.signals).unwrap());
             let chunks = native.source_chunks.as_ref().unwrap();
             assert_eq!(chunks.hashes,expected_chunks.hashes);
             assert_eq!(chunks.fingerprint(),expected_chunks.fingerprint());
@@ -327,11 +332,17 @@ mod tests {
         }
         let new_path = root.join("new.jsonl");
         seed_native(&config, &new_path, 3, '3');
-        std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(&new_path).unwrap();
         let manifest = stage(&config, &reverse, &[98; 32]);
         apply(&reverse, &manifest);
         assert_eq!(sqlite_core(&reverse, &path), expected);
+        let cap=crate::storage::sqlite::semantic::SemanticStaging::admit(&reverse).unwrap();
+        let reader=crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
+        let (_,restored)=reader.load_file(path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(restored.usage(),expected_native.usage());
+        assert_eq!(restored.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
+        assert_eq!(restored.source_chunks.as_ref().unwrap().hashes,expected_chunks.hashes);
+        drop(reader);
         assert_eq!(
             sqlite_core(&reverse, &new_path)["events"]
                 .as_array()

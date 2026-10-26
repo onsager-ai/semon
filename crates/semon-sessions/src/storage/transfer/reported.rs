@@ -363,7 +363,9 @@ pub(crate) fn prepare_apply(
                     .map_err(|_| StorageError::ScopeChanged)?;
             }
             TransferRecord::NativeRow { .. } => native_rows::validate(record)?,
-            TransferRecord::NativeSource(_) | TransferRecord::NativePage { .. } | TransferRecord::NativeMetadata { .. } => native_pages::validate(record)?,
+            TransferRecord::NativeSource(_)
+            | TransferRecord::NativePage { .. }
+            | TransferRecord::NativeMetadata { .. } => native_pages::validate(record)?,
             TransferRecord::NativeFile { .. } | TransferRecord::NativeEvent { .. } => {
                 record.validate_native()?
             }

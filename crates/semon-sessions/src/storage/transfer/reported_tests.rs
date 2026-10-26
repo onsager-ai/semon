@@ -292,6 +292,12 @@ pub(crate) fn seed_native(config: &StoreConfig, path: &Path, count: usize, opera
     cache.flush_cold_writes().unwrap();
 }
 
+pub(crate) fn seed_native_usage(config: &StoreConfig, path: &Path, count: usize) {
+    let body=(0..count).map(|i| format!("{}\n",serde_json::json!({"type":"assistant","uuid":format!("r{i}"),"timestamp":"2026-01-01T00:00:00Z","message":{"id":format!("m{i}"),"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"sanitized"}],"usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}}}))).collect::<String>();
+    std::fs::write(path,body).unwrap();
+    let mut cache=cache(config);cache.ingest(&"4".repeat(64),path,"claude").unwrap();cache.flush_cold_writes().unwrap();
+}
+
 pub(crate) fn sqlite_core(config: &StoreConfig, path: &Path) -> serde_json::Value {
     let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
     let store = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
