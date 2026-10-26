@@ -1313,6 +1313,33 @@ mod tests {
         }
     }
 
+    /// Scratch cache initialized by the production producer open.
+    struct CacheFixture {
+        root: PathBuf,
+        cache_path: PathBuf,
+    }
+
+    impl CacheFixture {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "semon-source-observation-cache-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            let cache_path = root.join("index.json");
+            drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
+            Self { root, cache_path }
+        }
+    }
+
+    impl Drop for CacheFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     /// The fault occurs after the real backend transaction has committed its
     /// effect+receipt, before EventCache observes that terminal result.
     struct LoseDiscoverAck {
@@ -1523,18 +1550,6 @@ mod tests {
     #[test]
     fn event_cache_reconciles_real_committed_intents_before_later_work_and_after_restart() {
         for restart in [false, true] {
-            let unbound = LegacyFixture::new();
-            producer_restart_conformance(
-                || {
-                    EventCache::open_scoped(&unbound.cache_path, &crate::Options::default().source)
-                        .unwrap()
-                },
-                || unbound.open(),
-                &EventCache::path(&unbound.cache_path),
-                &unbound.root,
-                "",
-                restart,
-            );
             let configured = Fixture::new_with_namespace("configured\0source");
             configured.assign();
             let StoreBackend::Sqlite { database } = &configured.config.backend;
@@ -1550,120 +1565,109 @@ mod tests {
     }
 
     #[test]
-    fn finish_backfill_uses_a_real_published_generation_on_both_sqlite_profiles() {
-        for configured in [false, true] {
-            let fixture = LegacyFixture::new();
-            let mut cache =
-                EventCache::open_scoped(&fixture.cache_path, &crate::Options::default().source)
-                    .unwrap();
-            let generation = cache
-                .publish_catalog_projection_fenced(
-                    &crate::slot_projection::Publication {
-                        rows: &[],
-                        transcripts: None,
-                    },
-                    None,
+    fn finish_backfill_uses_a_real_published_generation() {
+        let fixture = CacheFixture::new();
+        let mut cache =
+            EventCache::open_scoped(&fixture.cache_path, &crate::Options::default().source)
+                .unwrap();
+        let generation = cache
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &[],
+                    transcripts: None,
+                },
+                None,
+            )
+            .unwrap()
+            .expect("real publisher generation");
+        drop(cache);
+        let database = EventCache::path(&fixture.cache_path);
+        let config = {
+            let db = Connection::open(&database).unwrap();
+            let epoch = db
+                .query_row(
+                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                    [],
+                    |row| row.get(0),
                 )
-                .unwrap()
-                .expect("real publisher generation");
-            drop(cache);
-            let database = EventCache::path(&fixture.cache_path);
-            let config = if configured {
-                let db = Connection::open(&database).unwrap();
-                let epoch = db
-                    .query_row(
-                        "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                let config = StoreConfig {
-                    backend: StoreBackend::Sqlite {
-                        database: database.clone(),
-                    },
-                    namespace: LogicalSourceNamespace::new("finish\0source").unwrap(),
-                    expected_stream_epoch: Some(epoch),
-                };
-                config.admit_namespace().unwrap();
-                let mut complete = false;
-                for _ in 0..128 {
-                    if config.assign_catalog_namespace(64).unwrap().complete {
-                        complete = true;
-                        break;
-                    }
+                .unwrap();
+            let config = StoreConfig {
+                backend: StoreBackend::Sqlite {
+                    database: database.clone(),
+                },
+                namespace: LogicalSourceNamespace::new("finish\0source").unwrap(),
+                expected_stream_epoch: Some(epoch),
+            };
+            config.admit_namespace().unwrap();
+            let mut complete = false;
+            for _ in 0..128 {
+                if config.assign_catalog_namespace(64).unwrap().complete {
+                    complete = true;
+                    break;
                 }
-                assert!(complete);
-                Some(config)
-            } else {
-                None
-            };
-            let open = || match &config {
-                Some(config) => config.source_observations().unwrap(),
-                None => fixture.open(),
-            };
-            let namespace = config
-                .as_ref()
-                .map_or("", |config| config.namespace.as_str());
-            let mut store = open();
-            let discovery = discover_operation(namespace, &[], true);
-            store.discover(&discovery, &[], true).unwrap();
-            let wrong = finish_operation(namespace, Some("wrong-generation"));
-            assert_eq!(
-                store
-                    .finish_backfill(&wrong, Some("wrong-generation"))
-                    .unwrap(),
-                SourceMutationReceipt::Conflict
-            );
-            assert_eq!(store.backfill_state().unwrap().as_deref(), Some("draining"));
-            let operation = finish_operation(namespace, Some(&generation));
-            let intent = SourceIntent::FinishBackfill {
-                operation: operation.clone(),
-                expected_generation: Some(generation),
-            };
-            store.persist_intent(&intent).unwrap();
-            assert_eq!(
-                intent.apply(store.as_mut()).unwrap(),
-                SourceMutationReceipt::Applied
-            );
-            drop(store);
-            let mut store = open();
-            assert_eq!(
-                intent.apply(store.as_mut()).unwrap(),
-                SourceMutationReceipt::AlreadyApplied
-            );
-            store.acknowledge_intent(&operation).unwrap();
-            assert_eq!(store.backfill_state().unwrap().as_deref(), Some("complete"));
-            assert!(store.pending_intents().unwrap().is_empty());
-            if let Some(config) = &config {
-                let journal = SourceJournal(config.clone());
-                let db = journal.connection().unwrap();
-                journal.validate(&db).unwrap();
-                // The backfill-specific guard does not qualify other metadata.
-                assert!(
-                    db.execute(
-                        "INSERT INTO meta(key,value) VALUES('native_forbidden','x')",
-                        []
-                    )
-                    .is_err()
-                );
-                assert!(
-                    db.execute(
-                        "INSERT INTO meta(key,value) VALUES('catalog_backfill_state','draining')",
-                        []
-                    )
-                    .is_err()
-                );
             }
-        }
+            assert!(complete);
+            config
+        };
+        let open = || config.source_observations().unwrap();
+        let namespace = config.namespace.as_str();
+        let mut store = open();
+        let discovery = discover_operation(namespace, &[], true);
+        store.discover(&discovery, &[], true).unwrap();
+        let wrong = finish_operation(namespace, Some("wrong-generation"));
+        assert_eq!(
+            store
+                .finish_backfill(&wrong, Some("wrong-generation"))
+                .unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(store.backfill_state().unwrap().as_deref(), Some("draining"));
+        let operation = finish_operation(namespace, Some(&generation));
+        let intent = SourceIntent::FinishBackfill {
+            operation: operation.clone(),
+            expected_generation: Some(generation),
+        };
+        store.persist_intent(&intent).unwrap();
+        assert_eq!(
+            intent.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        drop(store);
+        let mut store = open();
+        assert_eq!(
+            intent.apply(store.as_mut()).unwrap(),
+            SourceMutationReceipt::AlreadyApplied
+        );
+        store.acknowledge_intent(&operation).unwrap();
+        assert_eq!(store.backfill_state().unwrap().as_deref(), Some("complete"));
+        assert!(store.pending_intents().unwrap().is_empty());
+        let journal = SourceJournal(config.clone());
+        let db = journal.connection().unwrap();
+        journal.validate(&db).unwrap();
+        // The backfill-specific guard does not qualify other metadata.
+        assert!(
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('native_forbidden','x')",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('catalog_backfill_state','draining')",
+                []
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn durable_source_queue_enforces_the_256_intent_admission_bound() {
-        let fixture = LegacyFixture::new();
-        let mut store = fixture.open();
+        let fixture = Fixture::new();
+        let mut store = fixture.config.source_observations().unwrap();
         for index in 0..256 {
             let paths = vec![format!("source-{index}")];
-            let operation = discover_operation("", &paths, false);
+            let operation = discover_operation("A", &paths, false);
             store
                 .persist_intent(&SourceIntent::Discover {
                     operation,
@@ -1675,7 +1679,7 @@ mod tests {
         let before = store.pending_intents().unwrap();
         assert_eq!(before.len(), 256);
         let paths = vec!["overflow".into()];
-        let operation = discover_operation("", &paths, false);
+        let operation = discover_operation("A", &paths, false);
         assert_eq!(
             store.persist_intent(&SourceIntent::Discover {
                 operation,
@@ -1693,10 +1697,10 @@ mod tests {
 
     #[test]
     fn durable_intent_capture_refuses_rebinding_and_premature_ack() {
-        let fixture = LegacyFixture::new();
-        let mut store = fixture.open();
+        let fixture = Fixture::new();
+        let mut store = fixture.config.source_observations().unwrap();
         let paths = vec!["first".into()];
-        let operation = discover_operation("", &paths, true);
+        let operation = discover_operation("A", &paths, true);
         let intent = SourceIntent::Discover {
             operation: operation.clone(),
             paths,
@@ -1708,7 +1712,7 @@ mod tests {
             Err(StorageError::Conflict)
         );
         let changed_paths = vec!["changed".into()];
-        let mut changed_operation = discover_operation("", &changed_paths, true);
+        let mut changed_operation = discover_operation("A", &changed_paths, true);
         changed_operation.id = operation.id.clone();
         let changed = SourceIntent::Discover {
             operation: changed_operation.clone(),
@@ -1738,12 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_observation_conformance_runs_on_legacy_and_configured_sqlite() {
-        let legacy = LegacyFixture::new();
-        crate::storage::source_observations::conformance::shared_source_observation_conformance(
-            || legacy.open(),
-            "",
-        );
+    fn shared_observation_conformance_runs_on_configured_sqlite() {
         let configured = Fixture::new_with_namespace("configured\0source");
         configured.assign();
         crate::storage::source_observations::conformance::shared_source_observation_conformance(
