@@ -45,7 +45,36 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
             &[3],
         ),
         SearchCount => ("session_search_counts", "read_scope,gram,members", &[]),
+        Dependency => (
+            "catalog_native_dependencies",
+            "source_path,harness,native_id",
+            &[],
+        ),
+        Description => (
+            "session_descriptions",
+            "session_key,version,inputs,description",
+            &[],
+        ),
+        HistoryProgress => (
+            "(SELECT namespace,substr(key,18) AS session_key,value AS metadata FROM main.meta WHERE key>='history_transfer:' AND key<'history_transfer;')",
+            "session_key,metadata",
+            &[],
+        ),
     }
+}
+
+/// Refuse all already-owned Catalog content before applying the first page.
+/// A later unique-key failure is too late: earlier pages would already commit.
+pub(super) fn occupied(tx: &Inbox<'_>) -> Result<bool, StorageError> {
+    let mut terms = CatalogRowKind::ALL.iter().map(|kind| {
+        let (table, _, _) = spec(*kind);
+        let table = if table.starts_with('(') { table.to_owned() } else { format!("main.{table}") };
+        format!("EXISTS(SELECT 1 FROM {table} WHERE namespace=?1)")
+    }).collect::<Vec<_>>();
+    for table in ["session_catalog_sources", "session_history_slot_parts", "session_overview"] {
+        terms.push(format!("EXISTS(SELECT 1 FROM main.{table} WHERE namespace=?1)"));
+    }
+    tx.0.query_row(&format!("SELECT {}", terms.join(" OR ")), [tx.1], |row| row.get(0)).map_err(failed)
 }
 
 fn sql_value(value: &serde_json::Value) -> Result<Value, StorageError> {
@@ -200,10 +229,18 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         return Err(StorageError::InvalidArguments);
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
-    if *kind == CatalogRowKind::HistoryOriginal {
+    if matches!(
+        kind,
+        CatalogRowKind::HistoryOriginal | CatalogRowKind::HistoryProgress
+    ) {
         return tx.put(
             &format!(
-                "history_original_header:{}",
+                "{}{}",
+                if *kind == CatalogRowKind::HistoryOriginal {
+                    "history_original_header:"
+                } else {
+                    "history_transfer:"
+                },
                 values[0].as_str().ok_or(StorageError::ScopeChanged)?
             ),
             values[1]

@@ -275,6 +275,12 @@ pub(crate) fn prepare_apply(
                             | Category::PageBlobs
                             | Category::NativeHeaders
                             | Category::Usage
+                            | Category::CatalogCurrent
+                            | Category::CatalogHistory
+                            | Category::Recipes
+                            | Category::Slots
+                            | Category::Trace
+                            | Category::Search
                     ))
         })
     {
@@ -354,6 +360,7 @@ pub(crate) fn prepare_apply(
     }
     for record in &page.records {
         match record {
+            TransferRecord::CatalogRow { .. } => super::catalog_rows::validate(record)?,
             TransferRecord::ReportedFact(run) => {
                 crate::events::reported_rows::ReportedRow::new(run)
                     .map_err(|_| StorageError::ScopeChanged)?;

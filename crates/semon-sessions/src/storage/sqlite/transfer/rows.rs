@@ -215,6 +215,10 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         ),
         rusqlite::params_from_iter(binds),
     )
-    .map_err(failed)?;
+    .map_err(|error| {
+        #[cfg(test)]
+        eprintln!("transfer SQLite child apply failed: table={table}");
+        failed(error)
+    })?;
     Ok(())
 }
