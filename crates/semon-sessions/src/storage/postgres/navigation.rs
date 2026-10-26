@@ -31,7 +31,8 @@ pub(crate) fn source_proof_observation(
         }
         let source = row.sources.iter().find(|source| source.path.to_str() == Some(absolute)).ok_or(StorageError::ScopeChanged)?;
         let (_, ledger) = super::native_reader::ledger(&mut tx, absolute)?.ok_or(StorageError::ScopeChanged)?;
-        if !crate::storage::catalog::source_matches_ledger(source, &ledger) {
+        if !crate::storage::catalog::source_matches_ledger(source, &ledger)
+            || source.size != ledger.stat.size || source.modified_ns != ledger.stat.modified_ns {
             return Err(StorageError::ScopeChanged);
         }
         Ok(Some(crate::storage::catalog::SourceProofObservation { key, source: source.clone(), generation: generation.clone() }))

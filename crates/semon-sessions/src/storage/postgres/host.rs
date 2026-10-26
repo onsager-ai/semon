@@ -1,30 +1,56 @@
 //! Ordinary host Source mutations use the selected namespace, never cache paths.
-use super::{model_cache, native_keys, sqlstate, txn::{PgTxn, TxnKind}};
+use super::{
+    model_cache, native_keys, sqlstate,
+    txn::{PgTxn, TxnKind},
+};
 use crate::storage::{StorageError, StoreBackend, StoreConfig};
 
 fn binding(tx: &mut PgTxn<'_>, config: &StoreConfig) -> Result<(), StorageError> {
-    if config.expected_stream_epoch.as_deref() != Some(model_cache::binding(tx)?.stream_epoch.as_str()) {
+    if config.expected_stream_epoch.as_deref()
+        != Some(model_cache::binding(tx)?.stream_epoch.as_str())
+    {
         return Err(StorageError::ScopeChanged);
     }
     Ok(())
 }
 fn archive(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageError> {
-    if let Some(bytes) = native_keys::read_meta(tx, format!("archive_event_index:{path}").as_bytes(), 16384)? {
+    if let Some(bytes) =
+        native_keys::read_meta(tx, format!("archive_event_index:{path}").as_bytes(), 16384)?
+    {
         let value = std::str::from_utf8(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         crate::events::store::validate_archive_marker(value)?;
     }
     Ok(())
 }
-pub(crate) fn enqueue_sources(config: &StoreConfig, options: &crate::Options, inputs: &[crate::Input]) -> Result<(), StorageError> {
-    if inputs.len() > 64 { return Err(StorageError::Busy); }
-    let paths = inputs.iter().map(|input| {
-        if !crate::is_input_path(input.root.as_str(), &input.path) || !input.path.ends_with(".jsonl") {
-            return Err(StorageError::InvalidArguments);
-        }
-        input.full_path(options).to_str().map(str::to_owned).ok_or(StorageError::InvalidArguments)
-    }).collect::<Result<Vec<_>,_>>()?;
-    if paths.iter().map(String::len).sum::<usize>() > 1024 * 1024 { return Err(StorageError::Busy); }
-    let StoreBackend::Postgres { pool, control } = &config.backend else { return Err(StorageError::InvalidArguments); };
+pub(crate) fn enqueue_sources(
+    config: &StoreConfig,
+    options: &crate::Options,
+    inputs: &[crate::Input],
+) -> Result<(), StorageError> {
+    if inputs.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let paths = inputs
+        .iter()
+        .map(|input| {
+            if !crate::is_input_path(input.root.as_str(), &input.path)
+                || !input.path.ends_with(".jsonl")
+            {
+                return Err(StorageError::InvalidArguments);
+            }
+            input
+                .full_path(options)
+                .to_str()
+                .map(str::to_owned)
+                .ok_or(StorageError::InvalidArguments)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.iter().map(String::len).sum::<usize>() > 1024 * 1024 {
+        return Err(StorageError::Busy);
+    }
+    let StoreBackend::Postgres { pool, control } = &config.backend else {
+        return Err(StorageError::InvalidArguments);
+    };
     pool.transaction(&config.namespace, TxnKind::Write, control, |tx| {
         binding(tx, config)?;
         for path in &paths {
@@ -34,11 +60,24 @@ pub(crate) fn enqueue_sources(config: &StoreConfig, options: &crate::Options, in
         native_keys::put_meta(tx, b"catalog_push_driven", b"1")
     })
 }
-pub(crate) fn complete_relocation(config: &StoreConfig, options: &crate::Options, input: &crate::Input, evidence: &crate::source_change::RelocationEvidence) -> Result<(), StorageError> {
-    let path = input.full_path(options).to_str().ok_or(StorageError::InvalidArguments)?.to_owned();
+pub(crate) fn complete_relocation(
+    config: &StoreConfig,
+    options: &crate::Options,
+    input: &crate::Input,
+    evidence: &crate::source_change::RelocationEvidence,
+) -> Result<(), StorageError> {
+    let path = input
+        .full_path(options)
+        .to_str()
+        .ok_or(StorageError::InvalidArguments)?
+        .to_owned();
     let encoded = serde_json::to_vec(evidence).map_err(|_| StorageError::Unavailable)?;
-    if encoded.len() > 1024 * 1024 { return Err(StorageError::Busy); }
-    let StoreBackend::Postgres { pool, control } = &config.backend else { return Err(StorageError::InvalidArguments); };
+    if encoded.len() > 1024 * 1024 {
+        return Err(StorageError::Busy);
+    }
+    let StoreBackend::Postgres { pool, control } = &config.backend else {
+        return Err(StorageError::InvalidArguments);
+    };
     pool.transaction(&config.namespace, TxnKind::Write, control, |tx| {
         binding(tx, config)?;
         archive(tx, &path)?;
@@ -52,16 +91,26 @@ pub(crate) fn complete_relocation(config: &StoreConfig, options: &crate::Options
     })
 }
 pub(crate) fn catalog_work_pending(config: &StoreConfig) -> Result<bool, StorageError> {
-    let StoreBackend::Postgres { pool, control } = &config.backend else { return Err(StorageError::InvalidArguments); };
+    let StoreBackend::Postgres { pool, control } = &config.backend else {
+        return Err(StorageError::InvalidArguments);
+    };
     pool.transaction(&config.namespace, TxnKind::ReadSnapshot, control, |tx| {
         binding(tx, config)?;
         let ns = config.namespace.as_str().as_bytes();
         Ok(tx.driver.query_one("SELECT semantic_pending OR backfill_state<>'complete' OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0))
     })
 }
-pub(crate) fn indexed_codex_sources(config: &StoreConfig, options: &crate::Options, id: &str) -> Result<Vec<crate::Input>, StorageError> {
-    if id.is_empty() || id.len()>4096 { return Err(StorageError::InvalidArguments); }
-    let StoreBackend::Postgres { pool, control } = &config.backend else { return Err(StorageError::InvalidArguments); };
+pub(crate) fn indexed_codex_sources(
+    config: &StoreConfig,
+    options: &crate::Options,
+    id: &str,
+) -> Result<Vec<crate::Input>, StorageError> {
+    if id.is_empty() || id.len() > 4096 {
+        return Err(StorageError::InvalidArguments);
+    }
+    let StoreBackend::Postgres { pool, control } = &config.backend else {
+        return Err(StorageError::InvalidArguments);
+    };
     pool.transaction(&config.namespace, TxnKind::ReadSnapshot, control, |tx| {
         binding(tx, config)?;
         let generation = model_cache::generation(tx)?.ok_or(StorageError::ScopeChanged)?;

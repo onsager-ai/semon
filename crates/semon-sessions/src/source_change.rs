@@ -652,8 +652,14 @@ impl SessionSourceRelocation {
 pub fn indexed_codex_sources(options: &Options, native_id: &str) -> io::Result<Vec<Input>> {
     #[cfg(feature = "postgres")]
     if let Some(config) = options.source.selected_store() {
-        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
-            return crate::storage::postgres::host::indexed_codex_sources(config, options, native_id).map_err(io::Error::other);
+        if matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        ) {
+            return crate::storage::postgres::host::indexed_codex_sources(
+                config, options, native_id,
+            )
+            .map_err(io::Error::other);
         }
     }
     use rusqlite::{Connection, OpenFlags};

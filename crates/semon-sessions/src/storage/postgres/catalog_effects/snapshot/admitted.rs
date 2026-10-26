@@ -18,8 +18,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         &'a self,
         path: &std::path::Path,
     ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
-        super::super::super::current_sources::in_snapshot(self, path)
-            .map_err(failed)
+        super::super::super::current_sources::in_snapshot(self, path).map_err(failed)
     }
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         let mut tx = self.tx.lock().ok()?;

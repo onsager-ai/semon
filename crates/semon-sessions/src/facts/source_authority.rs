@@ -264,10 +264,18 @@ pub(crate) trait SourceAuthority {
     fn codex_current(&self, relative: &str) -> io::Result<Option<bool>>;
 }
 impl SourceAuthority for Sources {
-    fn validate(&self) -> io::Result<()> { Sources::validate(self) }
-    fn facts_known(&self) -> bool { Sources::facts_known(self) }
-    fn selection_known(&self) -> bool { Sources::selection_known(self) }
-    fn hostname(&self) -> Option<String> { Sources::hostname(self) }
+    fn validate(&self) -> io::Result<()> {
+        Sources::validate(self)
+    }
+    fn facts_known(&self) -> bool {
+        Sources::facts_known(self)
+    }
+    fn selection_known(&self) -> bool {
+        Sources::selection_known(self)
+    }
+    fn hostname(&self) -> Option<String> {
+        Sources::hostname(self)
+    }
     fn codex_current(&self, relative: &str) -> io::Result<Option<bool>> {
         Sources::codex_current(self, relative)
     }

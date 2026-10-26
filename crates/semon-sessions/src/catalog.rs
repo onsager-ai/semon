@@ -76,9 +76,7 @@ pub fn session_source_proof(
     let current = options
         .facts
         .as_ref()
-        .map(|file| {
-            crate::storage::facts_authority(options, file).map_err(|_| Unavailable)
-        })
+        .map(|file| crate::storage::facts_authority(options, file).map_err(|_| Unavailable))
         .transpose()?;
     if current.as_ref().is_some_and(|source| {
         !source.facts_known() || (root == "codex" && !source.selection_known())
