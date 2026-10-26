@@ -61,14 +61,18 @@ fn invalidate_prepared<'a>(
     }
     let statements = statements.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
     work.executions += 1;
-    let rows = statements.revision.execute([namespace])
+    let rows = statements
+        .revision
+        .execute([namespace])
         .map_err(|error| diagnose_sql("revision-write", error))?;
     work.revision_rows += rows;
     if rows != 1 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     work.executions += 1;
-    work.claim_rows += statements.claim.execute(params![namespace, path, reason, now()])?;
+    work.claim_rows += statements
+        .claim
+        .execute(params![namespace, path, reason, now()])?;
     Ok(())
 }
 
@@ -152,7 +156,8 @@ fn discover_prepared(
         crate::native_timing::discovery_count(|counts| counts.statements += 1);
         let membership = membership.as_mut().ok_or(rusqlite::Error::InvalidQuery)?;
         work.executions += 1;
-        let inserted = membership.execute(params![namespace, path])
+        let inserted = membership
+            .execute(params![namespace, path])
             .map_err(|error| diagnose_sql("membership-write", error))?;
         work.membership_rows += inserted;
         if inserted > 0 {
@@ -189,7 +194,9 @@ pub(crate) fn claims(
     paths
         .iter()
         .map(|path| {
-            let revision = statement.query_row(params![path, namespace], |r| r.get(0)).optional()?;
+            let revision = statement
+                .query_row(params![path, namespace], |r| r.get(0))
+                .optional()?;
             Ok((path.clone(), revision))
         })
         .collect()
@@ -397,9 +404,9 @@ impl SourceObservationStore for SourceJournal {
         if operation.namespace != self.namespace() {
             return Err(StorageError::NamespaceMismatch);
         }
-        let namespace = Some(self.namespace());
+        let namespace = self.namespace();
         let payload = serde_json::to_vec(&cursor).map_err(|_| StorageError::InvalidArguments)?;
-        if let Some(receipt) = operation_replay(operation, namespace, "recover", &payload)? {
+        if let Some(receipt) = operation_replay(operation, Some(namespace), "recover", &payload)? {
             return Ok((receipt, false));
         }
         let mut db = self.connection()?;
@@ -466,7 +473,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        persist_intent_sql(&tx, Some(self.namespace()), intent)?;
+        persist_intent_sql(&tx, self.namespace(), intent)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 
@@ -474,7 +481,7 @@ impl SourceObservationStore for SourceJournal {
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
-        load_intents(&tx, Some(self.namespace()))
+        load_intents(&tx, self.namespace())
     }
 
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
@@ -483,7 +490,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        acknowledge_intent_sql(&tx, Some(self.namespace()), operation)?;
+        acknowledge_intent_sql(&tx, self.namespace(), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 
@@ -508,12 +515,12 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, Some(expected_namespace), operation)? {
+        if let Some(receipt) = stored_receipt(&tx, expected_namespace, operation)? {
             return Ok(receipt);
         }
         discover(&tx, expected_namespace, paths, complete)
             .map_err(|error| phase_failed("discover-effect", error))?;
-        insert_receipt(&tx, Some(expected_namespace), operation)?;
+        insert_receipt(&tx, expected_namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(SourceMutationReceipt::Applied)
     }
@@ -548,18 +555,18 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, Some(expected_namespace), operation)? {
+        if let Some(receipt) = stored_receipt(&tx, expected_namespace, operation)? {
             return Ok(receipt);
         }
         if claims(&tx, expected_namespace, &paths).map_err(failed)? != expected {
-            insert_terminal_receipt(&tx, Some(expected_namespace), operation, "conflict")?;
+            insert_terminal_receipt(&tx, expected_namespace, operation, "conflict")?;
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             return Ok(SourceMutationReceipt::Conflict);
         }
         for path in paths {
             invalidate(&tx, expected_namespace, &path, "changed").map_err(failed)?;
         }
-        insert_receipt(&tx, Some(expected_namespace), operation)?;
+        insert_receipt(&tx, expected_namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(SourceMutationReceipt::Applied)
     }
@@ -619,7 +626,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
-        if let Some(receipt) = stored_receipt(&tx, Some(self.config.namespace.as_str()), operation)?
+        if let Some(receipt) = stored_receipt(&tx, self.config.namespace.as_str(), operation)?
         {
             return Ok(receipt);
         }
@@ -639,7 +646,7 @@ impl SourceObservationStore for SourceJournal {
             )
             .map_err(failed)?;
         if generation.as_deref() != expected_generation || pending {
-            insert_terminal_receipt(&tx, Some(self.namespace()), operation, "conflict")?;
+            insert_terminal_receipt(&tx, self.namespace(), operation, "conflict")?;
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             return Ok(SourceMutationReceipt::Conflict);
         }
@@ -654,7 +661,7 @@ impl SourceObservationStore for SourceJournal {
         if updated != 1 {
             return Err(StorageError::Unavailable);
         }
-        insert_receipt(&tx, Some(self.config.namespace.as_str()), operation)?;
+        insert_receipt(&tx, self.config.namespace.as_str(), operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(SourceMutationReceipt::Applied)
     }
@@ -760,13 +767,13 @@ fn qualify_operation_tables(db: &Connection) -> Result<(), StorageError> {
 
 pub(crate) fn stored_receipt(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
 ) -> Result<Option<SourceMutationReceipt>, StorageError> {
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
     let captured_digest: Option<String> = db.query_row(
         "SELECT payload_digest FROM main.source_observation_intents WHERE namespace=?1 AND operation_id=?2",
-        params![namespace.unwrap_or(""), operation.id], |row| row.get(0),
+        params![namespace, operation.id], |row| row.get(0),
     ).optional().map_err(|error| phase_failed("intent-binding-read", error))?;
     if captured_digest
         .as_ref()
@@ -777,7 +784,7 @@ pub(crate) fn stored_receipt(
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
     let found: Option<(String, String)> = db.query_row(
         "SELECT payload_digest,outcome FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2",
-        params![namespace.unwrap_or(""), operation.id],
+        params![namespace, operation.id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|error| phase_failed("receipt-read", error))?;
     Ok(found.map(|(digest, outcome)| {
@@ -791,7 +798,7 @@ pub(crate) fn stored_receipt(
 
 pub(crate) fn recovery_receipt(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
 ) -> Result<Option<(SourceMutationReceipt, bool)>, StorageError> {
     let Some(receipt) = stored_receipt(db, namespace, operation)? else {
@@ -799,7 +806,7 @@ pub(crate) fn recovery_receipt(
     };
     let done: Option<Option<bool>> = db.query_row(
         "SELECT recovery_done FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3",
-        params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0),
+        params![namespace, operation.id, operation.payload_digest], |row| row.get(0),
     ).optional().map_err(failed)?;
     match done {
         Some(Some(done)) => Ok(Some((receipt, done))),
@@ -811,7 +818,7 @@ pub(crate) fn recovery_receipt(
 
 pub(crate) fn insert_recovery_receipt(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
     applied: bool,
     done: bool,
@@ -820,14 +827,14 @@ pub(crate) fn insert_recovery_receipt(
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
     db.execute(
         "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES(?1,?2,?3,?4,?5)",
-        params![namespace.unwrap_or(""), operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
+        params![namespace, operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
     ).map_err(|error| phase_failed("recovery-receipt-insert", error))?;
     Ok(())
 }
 
 pub(crate) fn insert_receipt(
     tx: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
 ) -> Result<(), StorageError> {
     insert_terminal_receipt(tx, namespace, operation, "applied")
@@ -835,7 +842,7 @@ pub(crate) fn insert_receipt(
 
 pub(crate) fn insert_terminal_receipt(
     tx: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
     outcome: &str,
 ) -> Result<(), StorageError> {
@@ -845,17 +852,17 @@ pub(crate) fn insert_terminal_receipt(
     });
     tx.execute(
         "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome) VALUES(?1,?2,?3,?4)",
-        params![namespace.unwrap_or(""), operation.id, operation.payload_digest, outcome],
+        params![namespace, operation.id, operation.payload_digest, outcome],
     ).map_err(|error| phase_failed("receipt-insert", error))?;
     Ok(())
 }
 
 pub(crate) fn persist_intent_sql(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     intent: &SourceIntent,
 ) -> Result<(), StorageError> {
-    validate_intent(namespace, intent)?;
+    validate_intent(Some(namespace), intent)?;
     let operation = intent.operation();
     let payload = serde_json::to_string(intent).map_err(|_| StorageError::InvalidArguments)?;
     if payload.len() > 2 * 1024 * 1024 {
@@ -863,7 +870,7 @@ pub(crate) fn persist_intent_sql(
     }
     let existing: Option<String> = db.query_row(
         "SELECT payload FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND octet_length(payload)<=2097152",
-        params![namespace.unwrap_or(""), operation.id], |row| row.get(0),
+        params![namespace, operation.id], |row| row.get(0),
     ).optional().map_err(failed)?;
     if let Some(existing) = existing {
         return if existing == payload {
@@ -872,7 +879,7 @@ pub(crate) fn persist_intent_sql(
             Err(StorageError::Conflict)
         };
     }
-    let count: i64 = db.query_row("SELECT count(*) FROM (SELECT 1 FROM source_observation_intents WHERE namespace=?1 LIMIT 256)", [namespace.unwrap_or("")], |row| row.get(0)).map_err(failed)?;
+    let count: i64 = db.query_row("SELECT count(*) FROM (SELECT 1 FROM source_observation_intents WHERE namespace=?1 LIMIT 256)", [namespace], |row| row.get(0)).map_err(failed)?;
     if count >= 256 {
         return Err(StorageError::Busy);
     }
@@ -880,22 +887,22 @@ pub(crate) fn persist_intent_sql(
         stored_receipt(db, namespace, operation)?,
         Some(SourceMutationReceipt::Conflict)
     ) {
-        let same_payload: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
+        let same_payload: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
         if !same_payload {
             return Err(StorageError::Conflict);
         }
     }
-    db.execute("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest, payload]).map_err(failed)?;
+    db.execute("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)", params![namespace, operation.id, operation.payload_digest, payload]).map_err(failed)?;
     Ok(())
 }
 
 pub(crate) fn load_intents(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
 ) -> Result<Vec<SourceIntent>, StorageError> {
     let mut statement = db.prepare("SELECT operation_id,payload_digest,CASE WHEN octet_length(payload)<=2097152 THEN payload END FROM source_observation_intents WHERE namespace=?1 ORDER BY sequence LIMIT 257").map_err(failed)?;
     let rows = statement
-        .query_map([namespace.unwrap_or("")], |row| {
+        .query_map([namespace], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -911,7 +918,7 @@ pub(crate) fn load_intents(
         let (id, digest, payload) = row.map_err(failed)?;
         let intent: SourceIntent = serde_json::from_str(&payload.ok_or(StorageError::Unavailable)?)
             .map_err(|_| StorageError::Unavailable)?;
-        validate_intent(namespace, &intent)?;
+        validate_intent(Some(namespace), &intent)?;
         if intent.operation().id != id || intent.operation().payload_digest != digest {
             return Err(StorageError::Conflict);
         }
@@ -922,19 +929,19 @@ pub(crate) fn load_intents(
 
 pub(crate) fn acknowledge_intent_sql(
     db: &Connection,
-    namespace: Option<&str>,
+    namespace: &str,
     operation: &SourceOperation,
 ) -> Result<(), StorageError> {
-    if operation.namespace != namespace.unwrap_or("") {
+    if operation.namespace != namespace {
         return Err(StorageError::Conflict);
     }
-    let terminal: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
+    let terminal: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
     if !terminal {
         return Err(StorageError::Conflict);
     }
     // A reused key with a different digest is never allowed to clear the old
     // pending intent, even though its public mutation result is Conflict.
-    db.execute("DELETE FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3 AND EXISTS(SELECT 1 FROM source_observation_receipts r WHERE r.namespace=?1 AND r.operation_id=?2 AND r.payload_digest=?3)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest]).map_err(failed)?;
+    db.execute("DELETE FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3 AND EXISTS(SELECT 1 FROM source_observation_receipts r WHERE r.namespace=?1 AND r.operation_id=?2 AND r.payload_digest=?3)", params![namespace, operation.id, operation.payload_digest]).map_err(failed)?;
     Ok(())
 }
 
@@ -1083,17 +1090,37 @@ mod tests {
         tx.rollback().unwrap();
         assert!(batch_rows(&db).is_empty());
         let membership: i64 = db
-            .query_row("SELECT count(*) FROM catalog_backfill_sources WHERE namespace='A'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM catalog_backfill_sources WHERE namespace='A'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(membership, 0);
-        let revision: i64 = db.query_row("SELECT revision FROM storage_source_journal WHERE namespace='A'", [], |r| r.get(0)).unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace='A'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(revision, 0);
         // Rolled-back DDL cannot retain prepared statements across a call.
-        db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE rolled_back_probe(value TEXT); ROLLBACK;").unwrap();
-        discover_prepared(&db, "A", &["after-aba".into()], true, || 42, &mut JournalWork::default()).unwrap();
-        assert_eq!(batch_rows(&db), [("after-aba".into(), 1, "changed".into(), 42)]);
+        db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE rolled_back_probe(value TEXT); ROLLBACK;")
+            .unwrap();
+        discover_prepared(
+            &db,
+            "A",
+            &["after-aba".into()],
+            true,
+            || 42,
+            &mut JournalWork::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            batch_rows(&db),
+            [("after-aba".into(), 1, "changed".into(), 42)]
+        );
     }
 
     #[test]
@@ -1407,7 +1434,7 @@ mod tests {
             "one original operation plus the later operation"
         );
         assert_eq!(
-            stored_receipt(&db, Some(namespace), &operation).unwrap(),
+            stored_receipt(&db, namespace, &operation).unwrap(),
             Some(SourceMutationReceipt::AlreadyApplied)
         );
         // Foreign intent capture and dispatch both refuse before any effects.
