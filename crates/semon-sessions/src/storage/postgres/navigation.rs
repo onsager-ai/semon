@@ -24,6 +24,7 @@ pub(crate) fn captured_source_proof(
     if key.is_empty() || key.len() > 4096 || !crate::is_input_path(&reference.root, &reference.path) {
         return Err(StorageError::InvalidArguments);
     }
+    super::require_configured(config, pool, control)?;
     let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), control)?;
     snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
         let history = snapshot.catalog(key, true)?.is_some();
