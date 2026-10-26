@@ -23,6 +23,7 @@ pub(crate) mod chunk_proofs;
 pub(crate) mod configured;
 mod launch_calls;
 pub(crate) mod native_commit;
+mod native_decode;
 pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
@@ -48,13 +49,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-use super::Yield;
 use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
-use super::native_rows::EventState;
+#[cfg(test)]
+use super::{BillingUsage, Peer, Reply, Yield};
 use super::{
-    BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
-    MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
+    CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded, MessageUsage,
+    ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
 };
 use crate::storage::sqlite::source_journal;
 use crate::storage::{
@@ -5919,21 +5919,6 @@ fn from_json<T: DeserializeOwned>(column: usize, text: &str) -> rusqlite::Result
     })
 }
 
-fn event_state(column: usize, text: &str) -> rusqlite::Result<EventState> {
-    let state: EventState = from_json(column, text)?;
-    if state.version != 1 {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            column,
-            Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unsupported event-state version",
-            )),
-        ));
-    }
-    Ok(state)
-}
-
 /// An enum's serde name (`Kind`, `SignalKind`), so a new variant needs no
 /// table change and an unknown name fails to decode.
 fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
@@ -5944,12 +5929,6 @@ fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
         )),
         Err(error) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
     }
-}
-
-fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T> {
-    serde_json::from_value(Value::String(text)).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
 }
 
 const NATIVE_METADATA_MAX: usize = 1024 * 1024;
@@ -6422,21 +6401,8 @@ pub(crate) fn ledger_row(
 }
 
 fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
-    Ok((
-        row.get(0)?,
-        Ledger {
-            stat: Stat {
-                dev: uint(row.get(1)?),
-                ino: uint(row.get(2)?),
-                size: uint(row.get(3)?),
-                modified_ns: u128::from_be_bytes(row.get(4)?),
-                changed_ns: row.get::<_, Option<[u8; 16]>>(8)?.map(i128::from_be_bytes),
-            },
-            offset: uint(row.get(5)?),
-            prefix: row.get(6)?,
-            tail: row.get(7)?,
-        },
-    ))
+    crate::events::native_decode::ledger(&native_decode::values(row, &[])?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 /// The per-file child queries, prepared once per read.
@@ -6525,14 +6491,11 @@ fn read_file(
         if seq_of(signal_row.get(0)?) != signals.len() {
             return Err(gap("signals"));
         }
-        signals.push(Signal {
-            k: untag(1, signal_row.get(1)?)?,
-            o: uint(signal_row.get(2)?),
-            t: signal_row.get(3)?,
-            at: signal_row.get(4)?,
-            n: signal_row.get(5)?,
-            v: signal_row.get::<_, Option<i64>>(6)?.map(uint),
-        });
+        signals.push(
+            crate::events::native_decode::signal(&native_decode::values(signal_row, &[])?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .1,
+        );
     }
 
     let mut usage_by_id = BTreeMap::new();
@@ -6550,20 +6513,14 @@ fn read_file(
         if seq_of(codex_row.get(0)?) != codex_usage_events.len() {
             return Err(gap("codex usage"));
         }
-        codex_usage_events.push(CodexUsageEvent {
-            model: codex_row.get(1)?,
-            tokens: ModelTokens {
-                input: uint(codex_row.get(2)?),
-                output: uint(codex_row.get(3)?),
-                cache_write: uint(codex_row.get(4)?),
-                cache_read: uint(codex_row.get(5)?),
-            },
-            timestamp: codex_row.get(6)?,
-        });
+        codex_usage_events.push(
+            crate::events::native_decode::codex_usage(&native_decode::values(codex_row, &[])?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .1,
+        );
     }
 
-    let index = FileIndex {
-        dirty_rows: None,
+    let children = crate::events::native_decode::Children {
         native_usage_observations: native_usage::normalized(readers.connection, &path, &ledger)?
             .then(Vec::new),
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
@@ -6584,135 +6541,30 @@ fn read_file(
         events,
         extras,
         signals,
-        pending: from_json(18, &row.get::<_, String>(18)?)?,
-        tool_ids: from_json(19, &row.get::<_, String>(19)?)?,
-        yields: from_json(20, &row.get::<_, String>(20)?)?,
-        busy: from_json(21, &row.get::<_, String>(21)?)?,
-        links: from_json(22, &row.get::<_, String>(22)?)?,
-        entrypoint: row.get(9)?,
-        title: row.get(10)?,
-        agent_name: row.get(11)?,
-        last_model: row.get(12)?,
-        failed: row.get(13)?,
-        first: row.get(14)?,
-        last: row.get(15)?,
-        cwd: row.get(16)?,
-        branch: row.get(17)?,
         usage_by_id,
-        codex_tokens: from_json(23, &row.get::<_, String>(23)?)?,
-        codex_tokens_by_model: from_json(24, &row.get::<_, String>(24)?)?,
         codex_usage_events,
-        copilot: row
-            .get::<_, Option<String>>(27)?
-            .map(|text| from_json(27, &text))
-            .transpose()?,
         codex_native_usage: native_usage::restore(
             readers.connection,
             &path,
             &ledger,
             row.get(26)?,
         )?,
-        rate_limits: row
-            .get::<_, Option<String>>(25)?
-            .map(|text| from_json(25, &text))
-            .transpose()?,
     };
+    let index = crate::events::native_decode::file(&native_decode::values(row, &[13])?, children)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok((path, ledger, index))
 }
 
 /// One `events` row, selected as [`EVENT_COLUMNS`].
 fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
-    let state = row
-        .get::<_, Option<String>>(12)?
-        .map(|text| event_state(12, &text))
-        .transpose()?;
-    let (y, poll_target, result_source, native_direct_call) = match state {
-        Some(state) => (
-            state.yielded,
-            state.poll_target,
-            state.result_source,
-            state.native_direct_call,
-        ),
-        None => (None, None, false, false),
-    };
-    let r = if row.get::<_, bool>(14)? {
-        Some(Reply {
-            o: uint(row.get(15)?),
-            b: row.get(16)?,
-            t: row.get(17)?,
-            e: row.get(18)?,
-            f: row.get(19)?,
-            m: row.get(20)?,
-        })
-    } else {
-        None
-    };
-    let peer = if row.get::<_, bool>(22)? {
-        Some(Peer {
-            sock: row.get(23)?,
-            pid: row.get::<_, Option<i64>>(24)?.map(uint),
-            start: row.get(25)?,
-        })
-    } else {
-        None
-    };
-    let event = Event {
-        k: untag(2, row.get(2)?)?,
-        o: uint(row.get(3)?),
-        b: row.get(4)?,
-        t: row.get(5)?,
-        id: row.get(6)?,
-        n: row.get(7)?,
-        code_mode: row.get(8)?,
-        native_direct_call,
-        code_mode_open: row.get(9)?,
-        parent: row.get::<_, Option<i64>>(10)?.map(seq_of),
-        script: row.get(11)?,
-        poll_target,
-        result_source,
-        y,
-        poll: row.get::<_, Option<i64>>(13)?.map(seq_of),
-        r,
-        item: row.get::<_, Option<i64>>(21)?.map(uint),
-        peer,
-        u: row.get(26)?,
-    };
-    Ok((row.get(0)?, seq_of(row.get(1)?), event))
+    crate::events::native_decode::event(&native_decode::values(row, &[0, 8, 9, 14, 18, 22])?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 /// One `usage` row, selected as [`USAGE_COLUMNS`].
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
-    let usage = MessageUsage {
-        record_ids: from_json(22, &row.get::<_, String>(22)?)?,
-        model: row.get(1)?,
-        tokens: Tokens {
-            input: uint(row.get(2)?),
-            cached_input: uint(row.get(3)?),
-            output: uint(row.get(4)?),
-            reasoning_output: uint(row.get(5)?),
-            total: uint(row.get(6)?),
-        },
-        model_tokens: ModelTokens {
-            input: uint(row.get(7)?),
-            output: uint(row.get(8)?),
-            cache_write: uint(row.get(9)?),
-            cache_read: uint(row.get(10)?),
-        },
-        billing: BillingUsage {
-            input: uint(row.get(11)?),
-            output: uint(row.get(12)?),
-            cache_read: uint(row.get(13)?),
-            cache_write_5m: uint(row.get(14)?),
-            cache_write_1h: uint(row.get(15)?),
-            web_search_requests: uint(row.get(16)?),
-            speed: row.get(17)?,
-            service_tier: row.get(18)?,
-            prompt_size: uint(row.get(19)?),
-            timestamp: row.get(20)?,
-            split_unknown: row.get(21)?,
-        },
-    };
-    Ok((row.get(0)?, usage))
+    crate::events::native_decode::usage(&native_decode::values(row, &[21])?)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {

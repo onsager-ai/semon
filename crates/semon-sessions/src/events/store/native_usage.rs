@@ -205,13 +205,6 @@ impl Observation {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Root {
-    projection_version: u32,
-    tokens: Tokens,
-    cost: CostBuild,
-}
-
 pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
     super::super::file_rows::encoded_native_usage(index)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -279,16 +272,8 @@ pub(super) fn restore(
 }
 
 fn restore_root(c: &Connection, id: i64, encoded: &str) -> rusqlite::Result<CodexNativeUsage> {
-    let root: Root = from_json(26, encoded)?;
-    if root.projection_version != 1 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let mut native = CodexNativeUsage {
-        tokens: root.tokens,
-        cost: Some(root.cost),
-        ..Default::default()
-    };
-    let cost = native.cost.as_mut().expect("cost restored");
+    let mut native = crate::events::native_decode::usage_root(encoded)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let mut statement = c.prepare(sql(c,
         "SELECT kind,dimension,value FROM native_usage_dimensions WHERE source_id=?1 ORDER BY kind,dimension",
         "SELECT kind,dimension,value FROM native_usage_dimensions WHERE namespace=semon_namespace() AND source_id=?1 ORDER BY kind,dimension")?)?;
@@ -300,25 +285,11 @@ fn restore_root(c: &Connection, id: i64, encoded: &str) -> rusqlite::Result<Code
         let kind: String = row.get(0)?;
         let key: String = row.get(1)?;
         let value: String = row.get(2)?;
-        match kind.as_str() {
-            "model" => {
-                native.by_model.insert(key, from_json(2, &value)?);
-            }
-            "cost_model" => {
-                cost.models.insert(key, from_json(2, &value)?);
-            }
-            "cost_day" => {
-                cost.by_day.insert(key, from_json(2, &value)?);
-            }
-            _ => return Err(rusqlite::Error::InvalidQuery),
-        }
+        crate::events::native_decode::usage_dimension(&mut native, &kind, key, &value)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
     }
-    cost.unpriced_models = cost
-        .models
-        .iter()
-        .filter(|(_, model)| model.unpriced)
-        .map(|(name, _)| name.clone())
-        .collect();
+    crate::events::native_decode::finish_usage(&mut native)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(native)
 }
 
