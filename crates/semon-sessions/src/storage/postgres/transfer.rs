@@ -241,6 +241,11 @@ mod tests {
         assert_eq!(postwrite.len(), 3);
         // Retained observations survive despite disappearing from input.
         assert_eq!(&postwrite[..2], expected.as_slice());
+        super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
+        assert!(matches!(
+            config.transfer_inbox().snapshot_reported_facts(&[4; 32]),
+            Err(StorageError::CommitUncertain)
+        ));
         let reverse = stage(&config, &rollback, &[4; 32]);
         rollback
             .transfer_inbox()
@@ -253,6 +258,15 @@ mod tests {
             "reverse must not reset the original store"
         );
         assert!(input.exists(), "transfer must leave Facts input untouched");
+        let foreign = LogicalSourceNamespace::new("foreign228").unwrap();
+        pool.transaction(&foreign, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+            let count: i64 = tx.driver.query_one(
+                "SELECT (SELECT count(*) FROM semon_pg_native_reported_runs)+(SELECT count(*) FROM semon_pg_native_reported_stamp)",
+                &[],
+            ).map_err(sqlstate::error)?.get(0);
+            assert_eq!(count, 0, "forced RLS must hide materialized Facts and their stamp");
+            Ok(())
+        }).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
