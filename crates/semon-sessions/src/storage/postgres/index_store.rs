@@ -94,8 +94,8 @@ impl NativeIndex {
 
 impl IndexStore for NativeIndex {
     fn prepare_facts_authority(&self, options: &crate::Options) -> std::io::Result<()> {
-        if let Some(path) = &options.facts {
-            super::current_sources::prepare(&self.pool, &self.namespace, &self.control, path)
+        if options.facts.is_some() {
+            super::current_sources::prepare(&self.pool, &self.namespace, &self.control, options)
                 .map_err(std::io::Error::other)?;
         }
         Ok(())

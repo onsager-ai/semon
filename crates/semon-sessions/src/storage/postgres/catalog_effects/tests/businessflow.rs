@@ -2122,6 +2122,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     assert_eq!(facts_generation.len(), 64);
+    // The existing Facts-write scene also exercises the bounded authority
+    // under the process-wide SQLite guard, including actual header values.
+    let facts_authority = {
+        let limits = crate::selected_read::SelectedReadControl::default().with_limits(256, 16 * 1024);
+        let _scope = crate::selected_read::Scope::enter(&limits);
+        let authority = moved_cache.facts_authority(&facts_path).unwrap();
+        assert!(authority.facts_known());
+        assert_eq!(authority.hostname().as_deref(), Some("source-write-after158"));
+        assert_eq!(authority.codex_current("sessions/unselected.jsonl").unwrap(), None);
+        authority.validate().unwrap();
+        authority
+    };
+    assert!(other.facts_authority(&facts_path).is_err(), "namespace cannot borrow another Facts head");
+    let binding = crate::storage::NativeReaderBinding::Admitted(config.clone());
+    let navigation = crate::storage::navigation_store(binding.clone());
+    assert_eq!(navigation.catalog_generation().unwrap(), facts_generation);
+    let bookmark = binding.bookmark_identity(&facts_options, namespace.as_str(), &facts_rows[0].key).unwrap().unwrap();
+    assert_eq!(bookmark.catalog_key, facts_rows[0].key);
+    assert_eq!(bookmark.generation, facts_generation);
+
     let facts_store =
         crate::storage::configured_query_catalog(&facts_options, config.clone()).unwrap();
     let mut facts_query = crate::Query::from_sources(std::sync::Arc::new(
@@ -2510,6 +2530,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .complete()
     .unwrap();
     assert_eq!(crate::read_facts(&facts_path).unwrap(), archived_facts);
+    assert!(facts_authority.validate().is_err(), "exact canonical replacement invalidates the old authority");
+    moved_cache.prepare_facts_authority(&facts_options).unwrap();
+    let selected = moved_cache.facts_authority(&facts_path).unwrap();
+    assert_eq!(selected.codex_current(&format!("archived_sessions/rollout-{codex_id}.jsonl")).unwrap(), Some(true));
+    assert_eq!(selected.codex_current("sessions/unselected.jsonl").unwrap(), Some(false));
+
     // A global Facts change invalidates every Current Source (> 64 here) by
     // bounded pages instead of refusing, and replays its lost ACK.
     let mut renamed = archived_facts.clone();

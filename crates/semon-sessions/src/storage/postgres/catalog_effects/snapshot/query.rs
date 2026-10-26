@@ -32,7 +32,8 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
-        let runtime = crate::native_evidence::query_runtime_generation(&self.options)
+        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
+        let runtime = runtime_observation.generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         // Use the same qualified window closure as listing. Its generation is
         // immutable; the selected snapshot below also fences its runtime.
@@ -181,7 +182,7 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                    if crate::native_evidence::query_runtime_generation(&self.options)
+                    if runtime_observation.generation(&self.options)
                         .map_err(|_| StorageError::Unavailable)?
                         != runtime
                     {
@@ -225,7 +226,7 @@ impl QueryCatalogStore for QueryCatalog {
                 )
                 .map_err(|_| StorageError::Unavailable)?;
                 records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                if crate::native_evidence::query_runtime_generation(&self.options)
+                if runtime_observation.generation(&self.options)
                     .map_err(|_| StorageError::Unavailable)?
                     != runtime
                 {
@@ -249,7 +250,8 @@ impl QueryCatalogStore for QueryCatalog {
         let cutoff = (!self.options.all).then(|| {
             now.saturating_sub(i64::try_from(self.options.since.as_millis()).unwrap_or(i64::MAX))
         });
-        let runtime = crate::native_evidence::query_runtime_generation(&self.options)
+        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
+        let runtime = runtime_observation.generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
@@ -325,8 +327,7 @@ impl QueryCatalogStore for QueryCatalog {
                 // An immutable owner's relationship summaries may still name
                 // a withdrawn peer. Membership comes from this cohort, as in
                 // the SQLite reader, rather than from embedded old summaries.
-                let keep = loaded.keys().cloned().collect::<BTreeSet<_>>();
-                for row in loaded.into_values() { emit(row, Some(&keep), bytes_left)?; }
+                let mut keep = loaded.keys().cloned().collect::<BTreeSet<_>>();
                 // Each saved owner contains its complete relationship summaries.
                 // Exact edge/turn sets are loaded below from the immutable effects.
                 let (edges, turns) = {
@@ -340,10 +341,18 @@ impl QueryCatalogStore for QueryCatalog {
                             tx.check()?;
                             let after_key = after.as_ref().map(|v| v.0.as_slice());
                             let after_id = after.as_ref().map(|v| v.1.as_slice());
-                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
                             for row in &page {
                                 let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
                                 *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
+                                if column == "edge_id" {
+                                    let bytes = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?;
+                                    *bytes_left = bytes_left.checked_sub(bytes.len()).ok_or(StorageError::Busy)?;
+                                    let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+                                    let from = metadata["from"].as_str().ok_or(StorageError::ScopeChanged)?;
+                                    keep.insert(from.to_owned());
+                                    if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") { keep.insert(to.to_owned()); }
+                                }
                                 values.insert(value);
                             }
                             if page.len() < 64 { break; }
@@ -353,6 +362,7 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                     (sets.remove(0), sets.remove(0))
                 };
+                for row in loaded.into_values() { emit(row, Some(&keep), bytes_left)?; }
                 return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns });
             };
             // Recent window: edges active or touched since the cutoff, then the
@@ -484,9 +494,10 @@ impl QueryCatalogStore for QueryCatalog {
         .map_err(unavailable)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
+        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
         if namespace != &self.namespace
             || part.generation != self.generation
-            || crate::native_evidence::query_runtime_generation(&self.options)
+            || runtime_observation.generation(&self.options)
                 .map_err(|error| QueryError::io(&error))?
                 != part.runtime
         {
