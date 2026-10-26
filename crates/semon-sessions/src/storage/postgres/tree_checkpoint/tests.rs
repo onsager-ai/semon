@@ -385,6 +385,10 @@ pub(crate) fn parser_fixture(harness: &str) -> Fixture {
 }
 
 pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
+    parser_fixture_keys(harness, long_path, false)
+}
+
+pub(crate) fn parser_fixture_keys(harness: &str, long_path: bool, long_keys: bool) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "pg100-{}-{}-{harness}",
         std::process::id(),
@@ -414,11 +418,21 @@ pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
     }
     let cache_path = root.join("index.json");
     let path = source_root.join("one.jsonl");
+    let long_key = |domain: &str| {
+        let mut key = format!("{domain}\0🦀");
+        for block in 0..60 {
+            key.push_str(&format!("{:x}", Sha256::digest(format!("tree134-{domain}-{block}"))));
+        }
+        key
+    };
+    let model = if long_keys { long_key("model") } else { "claude-🦀".into() };
+    let tool = if long_keys { long_key("tool") } else { "tool\0🦀".into() };
+    let name = if long_keys { long_key("name") } else { "Bash'\0🦀".into() };
     let body = match harness {
         "claude" => format!(
             "{}\n{}\n{}\n",
             serde_json::json!({"type":"user","uuid":"u\0🦀","cwd":"/w\0🦀","gitBranch":"b'🦀","timestamp":"2026-09-29T00:00:00Z","message":{"role":"user","content":"Raw fixture"}}),
-            serde_json::json!({"type":"assistant","uuid":"record\0🦀","timestamp":"2026-09-29T00:00:01Z","message":{"id":"message\0🦀","role":"assistant","model":"claude-🦀","content":[{"type":"tool_use","id":"tool\0🦀","name":"Bash'\0🦀","input":{}}],"usage":{"input_tokens":3,"output_tokens":2}}}),
+            serde_json::json!({"type":"assistant","uuid":"record\0🦀","timestamp":"2026-09-29T00:00:01Z","message":{"id":"message\0🦀","role":"assistant","model":model,"content":[{"type":"tool_use","id":tool,"name":name,"input":{}}],"usage":{"input_tokens":3,"output_tokens":2}}}),
             serde_json::json!({"type":"assistant","uuid":"r2","timestamp":"2026-09-29T00:00:02Z","message":{"id":"m2","role":"assistant","model":"claude-🦀","content":[{"type":"tool_use","id":"open\0🦀","name":"Read","input":{}}]}})
         ),
         "codex" => format!(

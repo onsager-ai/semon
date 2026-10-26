@@ -316,6 +316,7 @@ fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, Stor
 }
 
 pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
+    tree_state::register(db)?;
     crate::storage::LogicalSourceNamespace::new(namespace)
         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
     let namespace = namespace.to_owned();
@@ -361,6 +362,7 @@ fn create_with_layout(config: &StoreConfig, layout: PhysicalLayout) -> Result<()
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(failed)?;
+    tree_state::register(&db).map_err(failed)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failed)?;
     let tx = db
@@ -4879,6 +4881,7 @@ mod tests {
     fn configured_semantic_stage_validates_every_authored_shape_and_cookie_rollback() {
         for composite in [false, true] {
             let mut db = Connection::open_in_memory().unwrap();
+            tree_state::register(&db).unwrap();
             let layout = if composite {
                 PhysicalLayout {
                     core: true,
@@ -4974,6 +4977,7 @@ mod tests {
     #[test]
     fn configured_semantic_support_cache_rejects_transient_and_corrupt_layouts() {
         let mut db = Connection::open_in_memory().unwrap();
+        tree_state::register(&db).unwrap();
         for ddl in authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap() {
             db.execute_batch(ddl).unwrap();
         }

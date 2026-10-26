@@ -21,17 +21,22 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
  source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
- projection_id INTEGER NOT NULL,model TEXT NOT NULL,PRIMARY KEY(projection_id,model)
+ projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
+ PRIMARY KEY(projection_id,model)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(projection_id,label)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(projection_id,tool_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(projection_id,message_id)
@@ -83,9 +88,11 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
  PRIMARY KEY(namespace,projection_id,model),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(namespace,projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,label),
@@ -93,10 +100,12 @@ CREATE TABLE IF NOT EXISTS native_tree_labels (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(namespace,projection_id,tool_id),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(namespace,projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,message_id),
@@ -124,6 +133,22 @@ END;
 
 pub(super) fn schema(composite: bool) -> &'static str {
     if composite { COMPOSITE_SCHEMA } else { SCHEMA }
+}
+
+pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    c.create_scalar_function(
+        "semon_tree_digest",
+        2,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let domain: String = context.get(0)?;
+            let key: String = context.get(1)?;
+            Ok(crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec())
+        },
+    )
 }
 
 pub(super) fn sql<'a>(
@@ -498,10 +523,8 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    // Keep the physical SQLite query and its admission charge identical to the
-    // original witness.  `row` inspects the one encoded json_array cell before
-    // `get` allocates it; the shared writer then frames that canonical value
-    // while the cursor is still streaming.
+    // The stored digest indexes stream the current authenticated order. `row`
+    // admits each encoded cell before allocation; no dimension is collected.
     let mut writer = crate::events::tree_rows::witness::Writer::new();
     for (family, (plain, scoped)) in [
         (
@@ -509,12 +532,12 @@ pub(super) fn witness(
             "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
         ),
         (
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
         ),
         (
-            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
         ),
     ]
     .into_iter()
@@ -592,6 +615,7 @@ mod namespace_tests {
     #[test]
     fn native_usage_tree_colliding_generations_restore_witness_and_rollback() {
         let mut db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE files (
             namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
@@ -691,6 +715,7 @@ mod namespace_tests {
         use crate::events::tree_rows::witness::digest;
         use sha2::{Digest, Sha256};
         let c = rusqlite::Connection::open_in_memory().unwrap();
+        register(&c).unwrap();
         c.execute_batch("CREATE TABLE native_tree_labels(projection_id,label,value);CREATE TABLE native_tree_models(projection_id,model);CREATE TABLE native_tree_tools(projection_id,tool_id,name,closed);").unwrap();
         let odd = "a\0b\u{1}\u{1f}\t\n\r\u{8}\u{c}\"\\/\u{7f}\u{2028}é🦀";
         let labels = [
@@ -723,12 +748,12 @@ mod namespace_tests {
             .unwrap();
         }
         let mut oracle = Sha256::new();
-        for sql in [
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+        for (domain, sql) in [
+            ("semon.tree.witness.4.labels", "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label"),
+            ("semon.tree.witness.4.models", "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.model',model)"),
+            ("semon.tree.witness.4.tools", "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.tool',tool_id)"),
         ] {
-            oracle.update(sql.as_bytes());
+            oracle.update(domain.as_bytes());
             let mut statement = c.prepare(sql).unwrap();
             let mut rows = statement.query([7]).unwrap();
             while let Some(row) = rows.next().unwrap() {
@@ -739,12 +764,13 @@ mod namespace_tests {
         }
         let mut models = ["m\0", "m🦀", "Z"];
         models.sort_unstable();
-        let actual = digest(labels, models, [("t\0", odd), ("t🦀", "n")]);
-        assert_eq!(actual, format!("{:x}", oracle.finalize()));
+        let actual = digest(labels, models, [("t\0", Some(odd), false), ("t🦀", Some("n"), false), ("u", Some("closed"), true), ("v", None, false)]);
+        assert_eq!(actual, format!("tree4:{:x}", oracle.finalize()));
     }
 
     fn qualified_tree(summary: Summary) -> (Connection, Ledger, &'static str) {
         let mut db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE files (
             namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
@@ -809,16 +835,16 @@ mod namespace_tests {
         let mut bytes = 0;
         for (domain, query) in [
             (
-                "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+                "semon.tree.witness.4.labels",
                 "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
             ),
             (
-                "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
+                "semon.tree.witness.4.models",
+                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
             ),
             (
-                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+                "semon.tree.witness.4.tools",
+                "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
             ),
         ] {
             hash.update(domain.as_bytes());
@@ -832,7 +858,41 @@ mod namespace_tests {
                 bytes += 64 + encoded.len() * 8;
             }
         }
-        (format!("{:x}", hash.finalize()), rows, bytes)
+        (format!("tree4:{:x}", hash.finalize()), rows, bytes)
+    }
+
+    #[test]
+    fn tree_witness_current_addresses_authenticate_closed_null_and_missing_rows() {
+        let summary = Summary {
+            models: BTreeSet::from(["m\0🦀".into(), "second".into()]),
+            tools: BTreeMap::from([("closed\0🦀".into(), "retained-name".into())]),
+            closed_tools: BTreeSet::from(["closed\0🦀".into(), "null-name".into()]),
+            ..Summary::default()
+        };
+        let (mut db, ledger, path) = qualified_tree(summary);
+        let expected = witness(&db, path, &ledger).unwrap().unwrap();
+        assert!(expected.starts_with("tree4:"));
+        for mutation in [
+            "UPDATE native_tree_tools SET name='tampered' WHERE tool_id='null-name'",
+            "UPDATE native_tree_tools SET closed=0 WHERE tool_id='null-name'",
+            "DELETE FROM native_tree_models WHERE model='second'",
+        ] {
+            let tx = db.transaction().unwrap();
+            assert!(tx.execute(mutation, []).unwrap() > 0);
+            assert_ne!(witness(&tx, path, &ledger).unwrap().unwrap(), expected);
+            tx.rollback().unwrap();
+            assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
+        }
+        let encoded: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        old["projection_witness"] = "unversioned-old-witness".into();
+        let old = serde_json::to_string(&old).unwrap();
+        db.execute("UPDATE meta SET value=?1 WHERE namespace=semon_namespace() AND key=?2", params![old, tree_summary_key(path)]).unwrap();
+        let mut statement = db.prepare(native_metadata_value(&db).unwrap()).unwrap();
+        assert!(read_tree_summary(&db, &mut statement, path, &ledger).unwrap().is_none());
+        let retained: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        assert_eq!(retained, old, "unsupported witness remains untouched");
+        assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
     }
 
     #[test]

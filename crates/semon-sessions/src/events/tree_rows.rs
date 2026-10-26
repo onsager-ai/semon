@@ -97,21 +97,27 @@ impl<'a> TreeRows<'a> {
     }
 }
 
-// Canonical Tree witness recipe shared by every physical backend. Each backend
-// supplies its persisted rows in UTF-8 byte order (SQLite BINARY, PostgreSQL
-// bytea); the recipe owns row encoding and digest framing. String arrays
-// always serialize. The domain tags
-// remain the original witness's fixed bytes, not backend query SQL.
+// One current authenticated stream. Both engines traverse their persisted
+// fixed-width addresses, never sort a materialized dimension. Namespace is
+// bound by the captured header and physical owner, not by an interchangeable
+// logical source's witness bytes.
 pub(crate) mod witness {
     use sha2::{Digest, Sha256};
 
-    const LABELS: &str = "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label";
-    const MODELS: &str =
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model";
-    const TOOLS: &str = "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id";
+    const LABELS: &str = "semon.tree.witness.4.labels";
+    const MODELS: &str = "semon.tree.witness.4.models";
+    const TOOLS: &str = "semon.tree.witness.4.tools";
+
+    pub(crate) fn address(domain: &str, key: &[u8]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(domain.as_bytes());
+        hash.update(key);
+        hash.finalize().into()
+    }
 
     /// Incremental canonical Tree witness writer.  A physical reader begins a
-    /// family, then supplies one persisted row at a time in its binary order.
+    /// family, then supplies one persisted row at a time in its address order
+    /// (labels retain their bounded fixed-label order).
     /// SQLite may pass its already-canonical `json_array` value directly;
     /// typed backends use the typed helpers, which serialize to the same bytes.
     pub(crate) struct Writer(Sha256);
@@ -151,12 +157,12 @@ pub(crate) mod witness {
         }
 
         #[cfg(any(feature = "postgres", test))]
-        pub(crate) fn tool(&mut self, id: &str, name: &str) {
-            self.encoded(&serde_json::to_string(&[id, name]).unwrap());
+        pub(crate) fn tool(&mut self, id: &str, name: Option<&str>, closed: bool) {
+            self.encoded(&serde_json::to_string(&(id, name, i64::from(closed))).unwrap());
         }
 
         pub(crate) fn finish(self) -> String {
-            format!("{:x}", self.0.finalize())
+            format!("tree4:{:x}", self.0.finalize())
         }
     }
 
@@ -164,7 +170,7 @@ pub(crate) mod witness {
     pub(crate) fn digest<'a>(
         labels: impl IntoIterator<Item = (&'a str, &'a str)>,
         models: impl IntoIterator<Item = &'a str>,
-        tools: impl IntoIterator<Item = (&'a str, &'a str)>,
+        tools: impl IntoIterator<Item = (&'a str, Option<&'a str>, bool)>,
     ) -> String {
         let mut writer = Writer::new();
         writer.labels();
@@ -172,12 +178,16 @@ pub(crate) mod witness {
             writer.label(key, value);
         }
         writer.models();
+        let mut models: Vec<_> = models.into_iter().collect();
+        models.sort_by_key(|key| address("tree.model", key.as_bytes()));
         for model in models {
             writer.model(model);
         }
         writer.tools();
-        for (id, name) in tools {
-            writer.tool(id, name);
+        let mut tools: Vec<_> = tools.into_iter().collect();
+        tools.sort_by_key(|(id, _, _)| address("tree.tool", id.as_bytes()));
+        for (id, name, closed) in tools {
+            writer.tool(id, name, closed);
         }
         writer.finish()
     }
