@@ -34,16 +34,17 @@ impl QueryCatalogStore for QueryCatalog {
                 }
                 let records = super::super::selected_reader::SelectedRecords {
                     pool:&self.pool, namespace:&self.namespace, control:&self.control, generation:&self.generation, host, sources,
-                    pins:std::cell::RefCell::new(BTreeMap::new()), bytes_left:std::cell::Cell::new(64*1024*1024),
+                    pins:std::sync::Mutex::new(BTreeMap::new()), bytes_left:std::sync::Mutex::new(64*1024*1024),
                 };
-                let anchor = crate::tx::Anchor::of(args["before"].as_u64().map(|v|v as usize), args["after"].as_u64().map(|v|v as usize), args["turn"].as_str()).ok_or(StorageError::InvalidArguments)?;
+                let anchor = crate::tx::Anchor::of(args["before"].as_u64().map(|v|v as usize), args["after"].as_u64().map(|v|v as usize), args["turn"].as_str().map(str::to_owned)).ok_or(StorageError::InvalidArguments)?;
                 let (forward, from) = match anchor {
                     crate::tx::Anchor::Last => (false,total),
                     crate::tx::Anchor::Before(at) => (false,at.min(total)),
                     crate::tx::Anchor::After(at) => (true,at.min(total)),
                     crate::tx::Anchor::Turn(turn) => {
                         let tx = snapshot.tx.borrow_mut();
-                        let first = tx.driver.query_opt("SELECT slot FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1", &[&self.namespace.as_str().as_bytes(), &self.generation.as_bytes(), &key.as_bytes(), &turn]).map_err(sqlstate::error)?.ok_or(StorageError::ScopeChanged)?;
+                        let first = tx.driver.query("SELECT slot FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1", &[&self.namespace.as_str().as_bytes(), &self.generation.as_bytes(), &key.as_bytes(), &turn]).map_err(sqlstate::error)?;
+                        let first = first.first().ok_or(StorageError::ScopeChanged)?;
                         (true, usize::try_from(first.get::<_,i64>(0)).map_err(|_|StorageError::ScopeChanged)?)
                     }
                 };

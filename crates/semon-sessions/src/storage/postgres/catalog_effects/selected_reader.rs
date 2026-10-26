@@ -113,8 +113,8 @@ pub(in crate::storage::postgres) struct SelectedRecords<'a> {
     pub generation: &'a str,
     pub host: &'a dyn SessionSourceReader,
     pub sources: Vec<(&'a CatalogSource, SessionSourceRef)>,
-    pub pins: RefCell<std::collections::BTreeMap<String, String>>,
-    pub bytes_left: std::cell::Cell<usize>,
+    pub pins: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    pub bytes_left: std::sync::Mutex<usize>,
 }
 impl SelectedRecords<'_> {
     fn reference(&self, path: &std::path::Path) -> io::Result<&SessionSourceRef> {
@@ -131,7 +131,7 @@ impl SelectedRecords<'_> {
     }
     pub fn finish(&self) -> io::Result<()> {
         for (_, reference) in &self.sources {
-            if self.pins.borrow().contains_key(&format!("{}:{}",reference.root,reference.path)) && reference.offset > 0 {
+            if self.pins.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?.contains_key(&format!("{}:{}",reference.root,reference.path)) && reference.offset > 0 {
                 self.read_range(reference, None, reference.offset - 1, 1)?;
             }
         }
@@ -142,15 +142,14 @@ impl SessionSourceReader for SelectedRecords<'_> {
     fn read_range(&self, reference: &SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> io::Result<SessionSourceRange> {
         let (source, saved) = self.sources.iter().find(|(_, saved)| saved == reference).ok_or_else(||io::Error::other(StorageError::ScopeChanged))?;
         let key = format!("{}:{}", reference.root, reference.path);
-        let pins = self.pins.borrow();
+        let mut pins = self.pins.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?;
         let pin = pins.get(&key).map(String::as_str);
         if expected.zip(pin).is_some_and(|(a,b)|a!=b) { return Err(io::Error::other(StorageError::ScopeChanged)); }
         let reader = Reader { pool:self.pool, namespace:self.namespace, control:self.control, generation:self.generation, source, reference:saved, host:self.host };
         let part = reader.read_range(reference, pin.or(expected), offset, max)?;
-        drop(pins);
-        let left = self.bytes_left.get().checked_sub(part.bytes.len()).ok_or_else(||io::Error::other(StorageError::Busy))?;
-        self.bytes_left.set(left);
-        self.pins.borrow_mut().entry(key).or_insert_with(||part.generation.clone());
+        let mut left = self.bytes_left.lock().map_err(|_|io::Error::other(StorageError::Unavailable))?;
+        *left = left.checked_sub(part.bytes.len()).ok_or_else(||io::Error::other(StorageError::Busy))?;
+        pins.entry(key).or_insert_with(||part.generation.clone());
         Ok(part)
     }
 }
