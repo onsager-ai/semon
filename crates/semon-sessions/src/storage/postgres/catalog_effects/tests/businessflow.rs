@@ -112,7 +112,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     fs::write(&claude_agent191,[
         serde_json::json!({"type":"user","sessionId":"one","uuid":"related191-user","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized agent prompt"}}),
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"related191-answer","parentUuid":"related191-user","timestamp":"2026-10-01T00:00:02Z","message":{"id":"related191-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized agent answer"}]}}),
-    ].iter().map(|line|format!("{line}\n")).collect::<String>()).unwrap();
+    ].into_iter().chain((0..75).flat_map(|turn| {
+        // A long subagent: its withdrawn retained recipe spans more than two
+        // 64-slot custody pages, so the catch-up below resumes several times.
+        let parent = if turn == 0 { "related191-answer".to_owned() } else { format!("related191-answer{}", turn - 1) };
+        [
+            serde_json::json!({"type":"user","sessionId":"one","uuid":format!("related191-user{turn}"),"parentUuid":parent,"timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":format!("sanitized agent follow-up {turn}")}}),
+            serde_json::json!({"type":"assistant","sessionId":"one","uuid":format!("related191-answer{turn}"),"parentUuid":format!("related191-user{turn}"),"timestamp":"2026-10-01T00:00:02Z","message":{"id":format!("related191-answer{turn}"),"role":"assistant","model":"claude-test","content":[{"type":"text","text":format!("sanitized agent answer {turn}")}]}}),
+        ]
+    })).map(|line|format!("{line}\n")).collect::<String>()).unwrap();
     fs::write(claude_agent191.with_extension("meta.json"),serde_json::json!({"agentType":"general-purpose","description":"sanitized agent task","toolUseId":"claude-related191-spawn"}).to_string()).unwrap();
     // Positive ClaudeName: the native custom-title record names the session.
     writeln!(fs::OpenOptions::new().append(true).open(&claude_parent).unwrap(), "{}",
@@ -2139,6 +2147,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert!(deferred < 64, "custody makes bounded progress");
     };
     assert_eq!(ack.0, crate::events::Outcome::Written);
+    // The long withdrawn recipe (>150 slots) cannot fit one 64-slot page.
+    assert!(deferred >= 2, "long recipe resumed by pages: {deferred}");
     // A lost Written ACK replays the exact operation and its generation.
     assert_eq!(
         catchup
