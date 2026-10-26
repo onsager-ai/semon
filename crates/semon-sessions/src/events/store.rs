@@ -2101,7 +2101,29 @@ fn selected_role_values(
 }
 
 /// Focused reads never prepare or convert another Semon storage contract.
-pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
+/// The binding registers its namespace and validates the stream epoch and
+/// sole current admission inside the opening read snapshot.
+pub(crate) fn focused_connection(
+    binding: &crate::storage::NativeReaderBinding,
+) -> io::Result<Connection> {
+    let db = binding.connection().map_err(io::Error::other)?;
+    let read = db.unchecked_transaction().map_err(io::Error::other)?;
+    if !binding
+        .validate(&read, &binding.config().namespace)
+        .map_err(io::Error::other)?
+    {
+        return Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ));
+    }
+    require_current(&read)?;
+    read.commit().map_err(io::Error::other)?;
+    Ok(db)
+}
+
+/// Held legacy-fixture tests only; the current runtime has no unbound reader.
+#[cfg(test)]
+pub(crate) fn focused_unbound_connection(path: &Path) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
     let read = db.unchecked_transaction().map_err(io::Error::other)?;
@@ -5077,10 +5099,21 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
             .map_err(io::Error::other)?;
         return Ok(());
     }
-    match qualify_contract(connection).map_err(io::Error::other)? {
-        Init::Ready => Ok(()),
-        Init::Unsupported(reason) => Err(io::Error::other(reason)),
-        _ => Err(io::Error::other("session index is not initialized")),
+    // The current runtime has no unbound reader; only held legacy-fixture
+    // tests still qualify an unbound connection until they are retired.
+    #[cfg(not(test))]
+    {
+        Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ))
+    }
+    #[cfg(test)]
+    {
+        match qualify_contract(connection).map_err(io::Error::other)? {
+            Init::Ready => Ok(()),
+            Init::Unsupported(reason) => Err(io::Error::other(reason)),
+            _ => Err(io::Error::other("session index is not initialized")),
+        }
     }
 }
 

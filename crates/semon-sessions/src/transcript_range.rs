@@ -1278,12 +1278,20 @@ impl SessionSourceReader for Local<'_> {
                         &ledger,
                     )
                 } else {
-                    crate::events::store::chunk_proofs::Focused::open_with_raw(
-                        &EventCache::path(&self.options.cache),
-                        path.to_str().ok_or_else(invalid)?,
-                        &ledger,
-                        Some(before.size),
-                    )
+                    crate::storage::local_navigation_binding(&self.options, "")
+                        .map_err(|error| {
+                            crate::source_carrier::FailureStage::ProofOpenDb
+                                .wrap(io::Error::other(error))
+                        })
+                        .and_then(|binding| {
+                            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                                &binding,
+                                &EventCache::path(&self.options.cache),
+                                path.to_str().ok_or_else(invalid)?,
+                                &ledger,
+                                Some(before.size),
+                            )
+                        })
                 }
                 .map_err(|error| {
                     rejected(
