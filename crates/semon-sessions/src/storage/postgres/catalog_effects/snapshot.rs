@@ -38,7 +38,7 @@ pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
     })?;
     let result = with_generation(pool, namespace, control, generation, |snapshot| {
         let now = crate::model::now_ms();
-        let tx = snapshot.tx.borrow_mut();
+        let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
         let live: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_leases WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND lease_id=$2 AND generation=$3 AND expires_at>$4)", &[&namespace.as_str().as_bytes(), &lease, &generation.as_bytes(), &now]).map_err(sqlstate::error)?.get(0);
         drop(tx);
         if !live {
@@ -56,7 +56,7 @@ pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
 }
 
 pub(in crate::storage::postgres) struct Snapshot<'a, 'tx> {
-    tx: RefCell<&'a mut PgTxn<'tx>>,
+    pub(in crate::storage::postgres) tx: std::sync::Mutex<&'a mut PgTxn<'tx>>,
     generation: String,
 }
 
@@ -79,7 +79,7 @@ pub(in crate::storage::postgres) fn with_generation<T>(
     }
     pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
         read(&Snapshot {
-            tx: RefCell::new(tx),
+            tx: std::sync::Mutex::new(tx),
             generation: generation.to_owned(),
         })
     })
@@ -108,7 +108,7 @@ impl Snapshot<'_, '_> {
     }
 
     fn owner(&self, key: &str) -> Result<Option<String>, StorageError> {
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query("SELECT session_key=$4,CASE WHEN octet_length(owner_generation)=64 THEN owner_generation END FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
@@ -148,7 +148,7 @@ impl Snapshot<'_, '_> {
         } else {
             "semon_pg_native_catalog_rows"
         };
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query(&format!("SELECT session_key=$4,octet_length(metadata)::bigint,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3"), &[&ns, &owner.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
@@ -205,7 +205,7 @@ impl Snapshot<'_, '_> {
                 "semon_pg_native_catalog_recipe_rows",
             )
         };
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let hash = digest(key.as_bytes());

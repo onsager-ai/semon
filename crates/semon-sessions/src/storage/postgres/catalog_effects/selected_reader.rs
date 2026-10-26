@@ -1,15 +1,13 @@
 //! A request-owned host reader qualified by leased immutable PG native proofs.
 //! The host still authorizes bytes; Catalog metadata never opens a local file.
 use super::*;
-use crate::storage::postgres::{PgCancellation, PgPool, native_pages, txn::TxnKind};
+use crate::storage::postgres::{PgCancellation, PgPool, native_pages};
 use crate::storage::{LogicalSourceNamespace, proof_lifetime::ProofGenerationId};
 use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
 use std::{io, sync::Arc};
 
-struct Reader<'a> {
-    pool: &'a PgPool,
-    namespace: &'a LogicalSourceNamespace,
-    control: &'a PgCancellation,
+struct Reader<'a, 'b, 'tx> {
+    tx: &'a std::sync::Mutex<&'b mut PgTxn<'tx>>,
     generation: &'a str,
     source: &'a CatalogSource,
     reference: &'a SessionSourceRef,
@@ -33,11 +31,9 @@ pub(in crate::storage::postgres) fn with_reader<T>(
     {
         return Err(StorageError::ScopeChanged);
     }
-    snapshot::with_admitted_generation(pool, namespace, control, generation, |_| {
+    snapshot::with_admitted_snapshot(pool, namespace, control, generation, |snapshot| {
         read(&Reader {
-            pool,
-            namespace,
-            control,
+            tx: &snapshot.tx,
             generation,
             source,
             reference,
@@ -47,7 +43,7 @@ pub(in crate::storage::postgres) fn with_reader<T>(
     })
 }
 
-impl SessionSourceReader for Reader<'_> {
+impl SessionSourceReader for Reader<'_, '_, '_> {
     fn read_range(
         &self,
         reference: &SessionSourceRef,
@@ -66,8 +62,10 @@ impl SessionSourceReader for Reader<'_> {
         let index = usize::try_from(offset / size as u64).map_err(io::Error::other)?;
         let start = index as u64 * size as u64;
         let length = (self.source.offset - start).min(size as u64) as usize;
-        let hash = self.pool.transaction(self.namespace, TxnKind::ReadSnapshot, self.control, |tx| {
-            let ns = self.namespace.as_str().as_bytes();
+        let hash = (|| {
+            let mut borrowed = self.tx.lock().map_err(|_|StorageError::Unavailable)?;
+            let tx = &mut **borrowed;
+            let ns = tx.namespace.as_str().as_bytes();
             let rows = tx.driver.query("SELECT p.source_path=$3 AND s.source_path=$3 AND s.metadata=$4,CASE WHEN octet_length(p.page_generation)=64 THEN p.page_generation END FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_catalog_sources s USING(namespace_digest,namespace,generation,path_digest) WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND EXISTS(SELECT 1 FROM semon_pg_native_catalog_leases l WHERE l.namespace_digest=p.namespace_digest AND l.namespace=p.namespace AND l.generation=p.generation AND l.expires_at>(extract(epoch FROM clock_timestamp())*1000)::bigint) LIMIT 65", &[&ns, &self.generation.as_bytes(), &path(self.source)?.as_bytes(), &encoded(self.source)?]).map_err(sqlstate::error)?;
             if rows.is_empty() || rows.len() > 64 { return Err(StorageError::ScopeChanged); }
             for row in &rows {
@@ -77,7 +75,7 @@ impl SessionSourceReader for Reader<'_> {
             let source = self.source;
             let ledger = crate::events::Ledger { stat: crate::events::Stat { dev: source.dev, ino: source.ino, size: source.size, modified_ns: source.modified_ns, changed_ns: source.changed_ns }, offset: source.offset, prefix: source.prefix_sha256, tail: source.tail_sha256 };
             native_pages::open(tx, path(source)?, &ledger, ProofGenerationId(id))?.chunk_hash(tx, index)
-        }).map_err(io::Error::other)?;
+        })().map_err(io::Error::other)?;
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
         let part = self.host.read_range(reference, expected, start, length)?;
@@ -106,17 +104,15 @@ fn text(value: Vec<u8>) -> Result<String, StorageError> {
 }
 
 /// Multi-source request adapter. Neither a recipe nor a path grants host access.
-pub(in crate::storage::postgres) struct SelectedRecords<'a> {
-    pub pool: &'a PgPool,
-    pub namespace: &'a LogicalSourceNamespace,
-    pub control: &'a PgCancellation,
+pub(in crate::storage::postgres) struct SelectedRecords<'a, 'b, 'tx> {
+    pub tx: &'a std::sync::Mutex<&'b mut PgTxn<'tx>>,
     pub generation: &'a str,
     pub host: &'a dyn SessionSourceReader,
     pub sources: Vec<(&'a CatalogSource, SessionSourceRef)>,
     pub pins: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
     pub bytes_left: std::sync::Mutex<usize>,
 }
-impl SelectedRecords<'_> {
+impl SelectedRecords<'_, '_, '_> {
     fn reference(&self, path: &std::path::Path) -> io::Result<&SessionSourceRef> {
         self.sources
             .iter()
@@ -163,7 +159,7 @@ impl SelectedRecords<'_> {
         Ok(())
     }
 }
-impl SessionSourceReader for SelectedRecords<'_> {
+impl SessionSourceReader for SelectedRecords<'_, '_, '_> {
     fn read_range(
         &self,
         reference: &SessionSourceRef,
@@ -186,9 +182,7 @@ impl SessionSourceReader for SelectedRecords<'_> {
             return Err(io::Error::other(StorageError::ScopeChanged));
         }
         let reader = Reader {
-            pool: self.pool,
-            namespace: self.namespace,
-            control: self.control,
+            tx: self.tx,
             generation: self.generation,
             source,
             reference: saved,
@@ -212,12 +206,12 @@ impl SessionSourceReader for SelectedRecords<'_> {
         Ok(part)
     }
 }
-struct SelectedFile<'a, 'b> {
-    reader: &'a SelectedRecords<'b>,
+struct SelectedFile<'a, 'b, 'c, 'tx> {
+    reader: &'a SelectedRecords<'b, 'c, 'tx>,
     reference: &'a SessionSourceRef,
     position: u64,
 }
-impl std::io::Read for SelectedFile<'_, '_> {
+impl std::io::Read for SelectedFile<'_, '_, '_, '_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let max = buffer
             .len()
@@ -234,7 +228,7 @@ impl std::io::Read for SelectedFile<'_, '_> {
         Ok(part.bytes.len())
     }
 }
-impl std::io::Seek for SelectedFile<'_, '_> {
+impl std::io::Seek for SelectedFile<'_, '_, '_, '_> {
     fn seek(&mut self, from: std::io::SeekFrom) -> io::Result<u64> {
         let position = match from {
             std::io::SeekFrom::Start(at) => Some(at),
@@ -248,7 +242,7 @@ impl std::io::Seek for SelectedFile<'_, '_> {
     }
 }
 
-impl crate::query::transcript::QueryRecords for SelectedRecords<'_> {
+impl crate::query::transcript::QueryRecords for SelectedRecords<'_, '_, '_> {
     fn reader(&self) -> &dyn SessionSourceReader {
         self
     }
