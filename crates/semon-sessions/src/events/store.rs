@@ -646,6 +646,10 @@ fn open_admitted(
         configured::create(&config)?;
     }
     let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_STORAGE_INIT.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
     make_existing_private(path, &crate::state_dir())
         .map_err(|_| crate::storage::StorageError::Unavailable)?;
     let journal = capability.journal();
@@ -2588,13 +2592,6 @@ impl fmt::Display for Unopened {
     }
 }
 
-enum Init {
-    Ready,
-    NoWal,
-    Fresh,
-    Unsupported(&'static str),
-}
-
 /// A closed, unchanged identity component can advance without revisiting other
 /// event indexes. Repeat this metadata check inside the publication transaction.
 fn current_catalog_row(
@@ -3589,221 +3586,6 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn attempt(
-        path: &Path,
-        namespace: &crate::storage::LogicalSourceNamespace,
-    ) -> Result<(Self, Loaded), Unopened> {
-        Self::attempt_scoped(path, false, namespace)
-    }
-
-    fn attempt_scoped(
-        path: &Path,
-        scoped: bool,
-        namespace: &crate::storage::LogicalSourceNamespace,
-    ) -> Result<(Self, Loaded), Unopened> {
-        let classify = |error: rusqlite::Error| {
-            if is_corrupt(&error) {
-                Unopened::Corrupt(error)
-            } else if is_unavailable(&error) {
-                Unopened::Other(error.to_string())
-            } else {
-                Unopened::Unsupported(format!(
-                    "unsupported session index: malformed persistent state ({error})"
-                ))
-            }
-        };
-        if path.exists() {
-            let db = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            )
-            .map_err(classify)?;
-            db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
-            let read = db.unchecked_transaction().map_err(classify)?;
-            if let Init::Unsupported(reason) = qualify(&read).map_err(classify)? {
-                return Err(Unopened::Unsupported(reason.into()));
-            }
-            read.commit().map_err(classify)?;
-        }
-        #[cfg(test)]
-        if let Some(hook) = BEFORE_STORAGE_INIT.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        create_private(path, &crate::state_dir())
-            .map_err(|error| Unopened::Other(error.to_string()))?;
-        // Never through a symlink: the path is checked above, and SQLite
-        // refuses one too.
-        let mut connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(classify)?;
-        // Every statement reads and writes through the bound namespace.
-        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
-            .map_err(|error| Unopened::Other(error.to_string()))?;
-        match init(&mut connection).map_err(classify)? {
-            Init::Ready => {}
-            Init::NoWal => {
-                return Err(Unopened::Other(
-                    "its filesystem doesn't support WAL".to_owned(),
-                ));
-            }
-            Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
-            Init::Fresh => unreachable!("init initializes fresh storage"),
-        }
-        // Validate/cache the committed layout before the first writer
-        // transaction. A transaction may reuse this cookie but must not cache
-        // transient DDL whose schema cookie can be reused after rollback.
-        validate_copied_usage(&connection).map_err(classify)?;
-        semantic_stage::validate_support(&connection).map_err(classify)?;
-        let epoch: String = connection
-            .query_row(
-                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(classify)?;
-        let config = crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite {
-                database: path.to_owned(),
-            },
-            namespace: namespace.clone(),
-            expected_stream_epoch: Some(epoch),
-        };
-        let owner = configured::NativeOwnership::admit(&config)
-            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
-        let connection =
-            configured::connection(&config).map_err(|error| Unopened::Other(error.to_string()))?;
-        crate::storage::NativeReaderBinding::Semantic(owner.clone())
-            .validate(&connection, namespace)
-            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
-        let store = Self {
-            owner,
-            connection,
-            path: path.to_owned(),
-            selected_runs: scoped.then(std::collections::BTreeSet::new),
-            semantic_rejection: None,
-            #[cfg(test)]
-            traversal_observation: None,
-        };
-        let loaded = if scoped {
-            Loaded {
-                files: Vec::new(),
-                reported_runs: Vec::new(),
-                stamp: store.read_stamp().map_err(classify)?,
-            }
-        } else {
-            store.load().map_err(classify)?
-        };
-        Ok((store, loaded))
-    }
-
-    /// Opens an existing current store for bounded selected or recovery work.
-    /// Unlike producer opens, this does not initialize storage or inspect
-    /// unrelated archived markers.
-    fn attempt_selected(
-        path: &Path,
-        namespace: &crate::storage::LogicalSourceNamespace,
-    ) -> Result<Self, Unopened> {
-        crate::native_timing::discovery_count(|counts| counts.factory_opens += 1);
-        if !path.exists() {
-            return Self::attempt_scoped(path, true, namespace).map(|(store, _)| store);
-        }
-        let classify = |error: rusqlite::Error| {
-            if is_corrupt(&error) {
-                Unopened::Corrupt(error)
-            } else if is_unavailable(&error) {
-                Unopened::Other(error.to_string())
-            } else {
-                Unopened::Unsupported(format!(
-                    "unsupported session index: malformed persistent state ({error})"
-                ))
-            }
-        };
-        {
-            let db = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            )
-            .map_err(classify)?;
-            db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
-            let read = db.unchecked_transaction().map_err(classify)?;
-            match qualify_contract(&read).map_err(classify)? {
-                Init::Ready => {}
-                Init::Unsupported(reason) => {
-                    return Err(Unopened::Unsupported(reason.into()));
-                }
-                _ => {
-                    return Err(Unopened::Unsupported(
-                        "unsupported session index: existing store is not initialized".into(),
-                    ));
-                }
-            }
-            read.commit().map_err(classify)?;
-            let mode: String = db
-                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-                .map_err(classify)?;
-            if !mode.eq_ignore_ascii_case("wal") {
-                return Err(Unopened::Unsupported(
-                    "unsupported session index: journal mode".into(),
-                ));
-            }
-        }
-
-        // Keep the usual owner-only file and WAL permissions, but only after
-        // the persistent contract has been qualified and without creating it.
-        make_existing_private(path, &crate::state_dir())
-            .map_err(|error| Unopened::Other(error.to_string()))?;
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(classify)?;
-        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
-            .map_err(|error| Unopened::Other(error.to_string()))?;
-        connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
-        validate_copied_usage(&connection).map_err(classify)?;
-        semantic_stage::validate_support(&connection).map_err(classify)?;
-        let epoch: String = connection
-            .query_row(
-                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(classify)?;
-        let config = crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite {
-                database: path.to_owned(),
-            },
-            namespace: namespace.clone(),
-            expected_stream_epoch: Some(epoch),
-        };
-        let owner = configured::NativeOwnership::restore(&config)
-            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
-        let connection =
-            configured::connection(&config).map_err(|error| Unopened::Other(error.to_string()))?;
-        crate::storage::NativeReaderBinding::Semantic(owner.clone())
-            .validate(&connection, namespace)
-            .map_err(|error| Unopened::Unsupported(error.to_string()))?;
-        let store = Self {
-            owner,
-            connection,
-            path: path.to_owned(),
-            selected_runs: Some(std::collections::BTreeSet::new()),
-            semantic_rejection: None,
-            #[cfg(test)]
-            traversal_observation: None,
-        };
-        Ok(store)
-    }
-
     fn read_stamp(&self) -> rusqlite::Result<Option<ReportedFileStamp>> {
         Ok(self
             .connection
@@ -4106,64 +3888,6 @@ fn tightened(path: &Path, semon_state: &Path) -> Option<PathBuf> {
         .then(|| parent.to_owned())
 }
 
-/// Creates the store file owner-only (`0600`) when missing, so it is never
-/// readable by others, not even briefly; SQLite creates `-wal` and `-shm`
-/// with the main file's mode. A store left looser by anything else is
-/// tightened. Missing directories are created `0700`; an existing one is
-/// tightened only as [`tightened`] allows, and only when this user owns it.
-/// A symlink at the store's path is refused.
-fn create_private(path: &Path, semon_state: &Path) -> io::Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        builder.mode(0o700);
-        builder.create(parent)?;
-    }
-    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(io::Error::other("its path is a symlink"));
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    options.mode(0o600).custom_flags(O_NOFOLLOW);
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        for file in [
-            path.to_owned(),
-            sibling(path, "-wal"),
-            sibling(path, "-shm"),
-        ] {
-            if let Ok(metadata) = fs::symlink_metadata(&file)
-                && metadata.is_file()
-                && metadata.permissions().mode() & 0o077 != 0
-            {
-                fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
-            }
-        }
-        let owner = file.metadata()?.uid();
-        if let Some(state) = tightened(path, semon_state)
-            && let Ok(metadata) = fs::symlink_metadata(&state)
-            && metadata.is_dir()
-            && metadata.uid() == owner
-            && metadata.permissions().mode() & 0o077 != 0
-        {
-            fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = semon_state;
-        drop(file);
-    }
-    Ok(())
-}
-
 /// Tightens the existing store and its SQLite siblings without creating any
 /// of them. Selected opens call this only after read-only qualification.
 fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
@@ -4211,174 +3935,8 @@ fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
 /// CI-only paired measurements reuse the producer's connection-local policy.
 #[cfg(test)]
 pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connection> {
-    let mut connection = Connection::open(path)?;
-    if matches!(init(&mut connection)?, Init::Ready) {
-        Ok(connection)
-    } else {
-        Err(rusqlite::Error::InvalidQuery)
-    }
-}
-
-/// Classify in a read snapshot, before journal, schema or recovery writes.
-/// Version zero is fresh only when there are no schema objects.
-fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
-    tree_state::register(connection)?;
-    if crate::storage::sqlite::namespace::is_bound(connection)? {
-        return Ok(Init::Unsupported("namespace writer upgrade is pending"));
-    }
-    let application: i64 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    if application != 0 {
-        return Ok(Init::Unsupported(
-            "unsupported session index: application id",
-        ));
-    }
-    let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if schema == 0 {
-        let nonempty: bool =
-            connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
-                row.get(0)
-            })?;
-        return Ok(if nonempty {
-            Init::Unsupported("unsupported session index: nonempty schema zero")
-        } else {
-            Init::Fresh
-        });
-    }
-    if schema < SCHEMA_VERSION {
-        return Ok(Init::Unsupported("unsupported session index: older schema"));
-    }
-    if schema > SCHEMA_VERSION {
-        return Ok(Init::Unsupported("unsupported session index: newer schema"));
-    }
-    let meta: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !meta {
-        return Ok(Init::Unsupported(
-            "unsupported session index: missing metadata",
-        ));
-    }
-    configured::validate_statement_layout(connection)?;
-    let parser = match connection
-        .query_row(
-            "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope('cache_version') AND key='cache_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-    {
-        Ok(Some(value)) => match value.parse::<u32>() {
-            Ok(version) if value == version.to_string() => version,
-            _ => {
-                return Ok(Init::Unsupported(
-                    "unsupported session index: malformed metadata",
-                ));
-            }
-        },
-        Ok(None) => {
-            return Ok(Init::Unsupported(
-                "unsupported session index: missing metadata",
-            ));
-        }
-        Err(_) => {
-            return Ok(Init::Unsupported(
-                "unsupported session index: malformed metadata",
-            ));
-        }
-    };
-    if parser != CACHE_VERSION {
-        return Ok(Init::Unsupported(
-            "unsupported session index: parser version mismatch",
-        ));
-    }
-    // Qualify the actual loader statements, including their child-row readers,
-    // even when files is empty. A current label cannot hide incomplete DDL.
-    if let Err(error) = qualify_load_schema(connection) {
-        return malformed_schema(error);
-    }
-    for sql in [
-        "SELECT codex_pricing_fingerprint,ctime_ns,copilot FROM files LIMIT 0",
-        "SELECT pricing_fingerprint,lifecycle,parent_key FROM session_catalog LIMIT 0",
-        "SELECT usage_ready FROM native_usage_sources LIMIT 0",
-        "SELECT tree_root FROM native_tree_repairs LIMIT 0",
-        "SELECT source_generation FROM session_slot_projections LIMIT 0",
-        "SELECT metadata FROM session_history_catalog LIMIT 0",
-        "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
-    ] {
-        if let Err(error) = connection.prepare(sql) {
-            return malformed_schema(error);
-        }
-    }
-    let publication: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE namespace=semon_meta_scope('catalog_semantic_recipe') AND key='catalog_semantic_recipe' AND value<>?3)",
-        params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
-        |row| row.get(0),
-    )?;
-    if publication {
-        return Ok(Init::Unsupported(
-            "unsupported session index: publication version",
-        ));
-    }
-    if !current_objects_present(connection)? {
-        return Ok(Init::Unsupported(
-            "unsupported session index: missing current schema object",
-        ));
-    }
-    for sql in [
-        "SELECT namespace,operation_id,payload_digest,outcome,recovery_done FROM source_observation_receipts LIMIT 0",
-        "SELECT sequence,namespace,operation_id,payload_digest,payload FROM source_observation_intents LIMIT 0",
-    ] {
-        if let Err(error) = connection.prepare(sql) {
-            return malformed_schema(error);
-        }
-    }
-    let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(Init::Unsupported("unsupported session index: journal mode"));
-    }
-    Ok(Init::Ready)
-}
-
-// SQLITE_ERROR describes a missing/malformed SQL object here. Busy, I/O and
-// physical-corruption errors retain their existing operational/recovery paths.
-fn malformed_schema(error: rusqlite::Error) -> rusqlite::Result<Init> {
-    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_ERROR)
-    {
-        Ok(Init::Unsupported(
-            "unsupported session index: malformed schema",
-        ))
-    } else {
-        Err(error)
-    }
-}
-
-/// The complete open's SQL dependencies, without loading any source/history
-/// rows. Readers owns the event, signal, usage and native metadata statements;
-/// the other prepares cover the conditional normalized usage/tree restorers.
-fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
-    let _readers = Readers::new(connection)?;
-    connection.prepare(&format!(
-        "SELECT {FILE_COLUMNS} FROM files ORDER BY file_id LIMIT 0"
-    ))?;
-    connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start LIMIT 0"
-    ))?;
-    for sql in [
-        "SELECT source_path,source_id FROM native_usage_current LIMIT 0",
-        "SELECT source_id,receipt,parser_version,usage_ready FROM native_usage_sources LIMIT 0",
-        "SELECT source_id,kind,dimension,value FROM native_usage_dimensions LIMIT 0",
-        "SELECT source_path,file_id,projection_id,ledger FROM native_tree_headers LIMIT 0",
-        "SELECT projection_id,source_id,complete,version,receipt FROM native_tree_generations LIMIT 0",
-        "SELECT projection_id,label,value FROM native_tree_labels LIMIT 0",
-        "SELECT projection_id,model FROM native_tree_models LIMIT 0",
-        "SELECT projection_id,tool_id,name,closed FROM native_tree_tools LIMIT 0",
-    ] {
-        connection.prepare(sql)?;
-    }
-    Ok(())
+    let store = current_test_store(path, &fixture_namespace());
+    Ok(store.connection)
 }
 
 /// Bounded selected reads qualify the storage contract in their own snapshot.
@@ -4408,33 +3966,7 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
 /// before changing durable rows or proof metadata. Writers that touch archive
 /// custody validate only the selected marker at that call site.
 pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
-    match qualify_contract(connection)? {
-        Init::Ready => Ok(()),
-        Init::Unsupported(reason) => Err(rusqlite::Error::InvalidParameterName(reason.into())),
-        _ => Err(rusqlite::Error::InvalidParameterName(
-            "session index is not initialized".to_owned(),
-        )),
-    }
-}
-
-/// Writers also qualify retained marker formats before any mutation.
-fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
-    let found = qualify_contract(connection)?;
-    if !matches!(found, Init::Ready) {
-        return Ok(found);
-    }
-    validate_copied_usage(connection)?;
-    let unsupported_archive: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=semon_namespace() AND key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
-        [CACHE_VERSION],
-        |row| row.get(0),
-    )?;
-    if unsupported_archive {
-        return Ok(Init::Unsupported(
-            "unsupported session index: archived marker version",
-        ));
-    }
-    Ok(Init::Ready)
+    require_current(connection).map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 /// The single current physical contract. Every source-owned family uses a
@@ -4507,81 +4039,6 @@ pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Resu
         .query_row([], |row| row.get(0))
 }
 
-/// Initialize only a fresh store; requalify under the writer lock.
-fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
-    tree_state::register(connection)?;
-    connection.busy_timeout(BUSY_TIMEOUT)?;
-    connection.set_prepared_statement_cache_capacity(32);
-    let read = connection.transaction()?;
-    let found = qualify(&read)?;
-    read.commit()?;
-    if matches!(found, Init::Unsupported(_)) {
-        return Ok(found);
-    }
-    let fresh = matches!(found, Init::Fresh);
-    let mut initialized = false;
-    if fresh {
-        // Cold initialization retains exclusion through the first WAL switch.
-        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match qualify(&transaction)? {
-            Init::Fresh => {
-                for ddl in storage_ddl() {
-                    transaction.execute_batch(ddl)?;
-                }
-                transaction.execute(
-                    "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('cache_version'),'cache_version',?1)",
-                    [CACHE_VERSION.to_string()],
-                )?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                initialized = true;
-            }
-            Init::Ready => {}
-            unsupported => return Ok(unsupported),
-        }
-        transaction.commit()?;
-    }
-    #[cfg(test)]
-    if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
-    let mut mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    if initialized && !mode.eq_ignore_ascii_case("wal") {
-        mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-    }
-    if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh {
-            Init::NoWal
-        } else {
-            Init::Unsupported("unsupported session index: journal mode")
-        });
-    }
-    if fresh
-        && let Some(path) = connection
-            .path()
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-    {
-        let old = std::mem::replace(connection, Connection::open_in_memory()?);
-        drop(old);
-        *connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        return init(connection);
-    }
-    let _: i64 = connection.query_row(
-        &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
-        [],
-        |row| row.get(0),
-    )?;
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
-    crate::pricing::runtime::notify_reprice();
-    Ok(Init::Ready)
-}
-
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
     Ok(connection
         .prepare_cached("SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'")?
@@ -4594,7 +4051,7 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 /// replaced it since it was opened.
 pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
-    Ok(current_contract(connection)? && !crate::storage::sqlite::namespace::is_bound(connection)?)
+    Ok(current_contract(connection)? && require_current(connection).is_ok())
 }
 
 pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool> {
@@ -6599,14 +6056,11 @@ mod tests {
         let root = scratch("copied-layout-factories");
         let path = root.join("index.sqlite3");
         for selected in [false, true] {
-            let mut store = if selected {
-                SqliteStore::attempt_selected(&path, &fixture_namespace())
-                    .unwrap_or_else(|_| panic!("selected factory refused current store"))
-            } else {
-                SqliteStore::attempt_scoped(&path, true, &fixture_namespace())
-                    .unwrap_or_else(|_| panic!("producer factory refused current store"))
-                    .0
-            };
+            let mut store = current_test_store(&path, &fixture_namespace());
+            if selected {
+                let binding = fixture_reader_binding(&path).unwrap();
+                drop(focused_connection(&binding).unwrap());
+            }
             let cookie: i64 = store
                 .connection
                 .pragma_query_value(None, "schema_version", |r| r.get(0))
@@ -8816,10 +8270,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
-                    Ok((store, _)) => store,
-                    Err(error) => panic!("reopen transfer store: {error}"),
-                };
+                store = current_test_store(&path, &fixture_namespace());
                 assert!(steps <= count.div_ceil(64));
             }
             assert_eq!(steps, count.div_ceil(64));
@@ -8980,14 +8431,11 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, true, &fixture_namespace()) {
-                    Ok((store, loaded)) => {
-                        assert!(loaded.files.is_empty());
-                        assert!(loaded.reported_runs.is_empty());
-                        store
-                    }
-                    Err(error) => panic!("real scoped producer opens: {error}"),
-                }
+                let config = options.source.config(&path).unwrap();
+                let owner = configured::NativeOwnership::restore(&config).unwrap();
+                let connection = configured::connection(&config).unwrap();
+                crate::storage::NativeReaderBinding::Semantic(owner.clone()).validate(&connection, &config.namespace).unwrap();
+                SqliteStore { owner, connection, path, selected_runs: Some(Default::default()), semantic_rejection: None, traversal_observation: None }
             })
             .collect()
     }
@@ -10695,25 +10143,12 @@ mod tests {
                 assert!(!sibling(&path, ".corrupt").exists());
             };
             unchanged();
-            let fail = |result: Result<(SqliteStore, Loaded), Unopened>| match result {
-                Err(Unopened::Unsupported(error)) => {
-                    assert!(error.contains(reason), "{name}: {error}")
-                }
-                _ => panic!("{name} must be explicitly unsupported"),
-            };
-            fail(SqliteStore::attempt(&path, &fixture_namespace()));
-            unchanged();
-            fail(SqliteStore::attempt_scoped(
-                &path,
-                true,
-                &fixture_namespace(),
-            ));
-            unchanged();
+            let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
             if name != "archive" {
-                assert!(
-                    SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err(),
-                    "selected {name}"
-                );
+                assert!(open_admitted(&path, &source).is_err(), "{name} must be explicitly refused");
+                unchanged();
+            }
+            if name != "archive" {
                 assert!(
                     fixture_reader_binding(&path)
                         .and_then(|binding| focused_connection(&binding))
@@ -10728,8 +10163,9 @@ mod tests {
             }
             unchanged();
             match super::super::EventCache::open(&v1, &crate::Options::default().source) {
-                Err(error) => assert!(error.contains(reason), "{error}"),
-                Ok(_) => panic!("unsupported {name} became valid in-memory history"),
+                Err(_) if name != "archive" => {}
+                Ok(_) if name == "archive" => {}
+                _ => panic!("unexpected admission for {name}"),
             }
             unchanged();
             let options = crate::Options {
@@ -10807,18 +10243,16 @@ mod tests {
             .iter()
             .map(|path| fs::read(path).unwrap())
             .collect::<Vec<_>>();
-        for scoped in [false, true] {
-            assert!(matches!(
-                SqliteStore::attempt_scoped(&path, scoped, &fixture_namespace()),
-                Err(Unopened::Unsupported(_))
-            ));
+        let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+        for _ in 0..2 {
+            assert!(open_admitted(&path, &source).is_err());
             for (path, bytes) in paths.iter().zip(&before) {
                 let actual = fs::read(path).unwrap();
                 assert_eq!(Sha256::digest(&actual), Sha256::digest(bytes));
                 assert_eq!(&actual, bytes);
             }
         }
-        assert!(SqliteStore::attempt_selected(&path, &fixture_namespace()).is_err());
+        assert!(open_admitted(&path, &source).is_err());
         assert!(
             fixture_reader_binding(&path)
                 .and_then(|binding| focused_connection(&binding))
@@ -10973,10 +10407,8 @@ mod tests {
                 *live_writer.borrow_mut() = Some(db);
             }));
         });
-        match SqliteStore::attempt(&path, &fixture_namespace()) {
-            Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
-            _ => panic!("the concurrently committed WAL version must be refused"),
-        }
+        let source = crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
+        assert!(open_admitted(&path, &source).is_err(), "the concurrently committed WAL version must be refused");
         assert_eq!(*captured.borrow(), original);
         assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
         assert!(!wal.borrow().is_empty());
@@ -11018,7 +10450,7 @@ mod tests {
         store.write_runs(&[run()], &stamp()).unwrap();
         drop(store);
         let (store, loaded) = opened(&path);
-        assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
+        require_current(&store.connection).unwrap();
         assert_eq!(loaded.files.len(), 1);
         assert_eq!(loaded.reported_runs, [run()]);
         assert_eq!(loaded.stamp, Some(stamp()));
