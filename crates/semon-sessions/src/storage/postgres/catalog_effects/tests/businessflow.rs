@@ -631,7 +631,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Its order remains the independently observed SQLite page order above.
     ordered = oracle_history
         .iter()
-        .map(|key| expected.rows.iter().find(|row| &row.key == key).unwrap().clone())
+        .map(|key| {
+            expected
+                .rows
+                .iter()
+                .find(|row| &row.key == key)
+                .unwrap()
+                .clone()
+        })
         .collect();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
