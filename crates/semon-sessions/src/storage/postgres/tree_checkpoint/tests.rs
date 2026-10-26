@@ -381,7 +381,11 @@ fn read_ledger(sqlite: &rusqlite::Connection, path: &str) -> Ledger {
     sqlite.query_row("SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1", [path], |r| Ok(Ledger {stat: crate::events::Stat {dev:r.get::<_,i64>(0)? as u64,ino:r.get::<_,i64>(1)? as u64,size:r.get::<_,i64>(2)? as u64,modified_ns:u128::from_be_bytes(r.get::<_,Vec<u8>>(3)?.try_into().unwrap()),changed_ns:r.get::<_,Option<Vec<u8>>>(4)?.map(|b|i128::from_be_bytes(b.try_into().unwrap()))},offset:r.get::<_,i64>(5)? as u64,prefix:r.get::<_,Vec<u8>>(6)?.try_into().unwrap(),tail:r.get::<_,Vec<u8>>(7)?.try_into().unwrap()} )).unwrap()
 }
 pub(crate) fn parser_fixture(harness: &str) -> Fixture {
-    let root = std::env::temp_dir().join(format!(
+    parser_fixture_path(harness, false)
+}
+
+pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
+    let mut root = std::env::temp_dir().join(format!(
         "pg100-{}-{}-{harness}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -390,6 +394,20 @@ pub(crate) fn parser_fixture(harness: &str) -> Fixture {
             .as_nanos()
     ));
     std::fs::create_dir(&root).unwrap();
+    if long_path {
+        // Different SHA-256 blocks keep the real path nonrepeating rather
+        // than relying on PostgreSQL compression of a repeated character.
+        for segment in 0..15 {
+            let mut name = String::new();
+            for block in 0..3 {
+                name.push_str(&format!("{:x}", Sha256::digest(format!("tree132-{segment}-{block}"))));
+            }
+            root.push(name);
+            std::fs::create_dir(&root).unwrap();
+        }
+        assert!(root.as_os_str().len() > 2704);
+        assert!(root.as_os_str().len() < 4000);
+    }
     let cache_path = root.join("index.json");
     let path = root.join("one.jsonl");
     let body = match harness {

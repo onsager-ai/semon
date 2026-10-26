@@ -17,6 +17,33 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("cwd_digest", "sha256(cwd)", true),
         ],
         "meta" => &[("key_digest", "sha256(key)", false)],
+        "tree_headers" | "tree_repairs" => &[(
+            "source_path_digest",
+            "semon_pg_native_digest(namespace, source_path, 'tree.path'::text)",
+            false,
+        )],
+        "tree_usage_work" | "tree_usage_models" => &[(
+            "message_id_digest",
+            "semon_pg_native_digest(namespace, message_id, 'tree.message'::text)",
+            false,
+        )],
+        "tree_codex_work" => &[(
+            "identity_digest",
+            "semon_pg_native_digest(namespace, identity, 'tree.identity'::text)",
+            false,
+        )],
+        "tree_copied_identities" => &[
+            (
+                "message_id_digest",
+                "semon_pg_native_digest(namespace, message_id, 'tree.message'::text)",
+                false,
+            ),
+            (
+                "record_uuid_digest",
+                "semon_pg_native_digest(namespace, record_uuid, 'tree.record'::text)",
+                false,
+            ),
+        ],
         "usage_current" | "usage_sources" => &[(
             "source_path_digest",
             "semon_pg_native_digest(namespace, source_path, 'usage.path'::text)",
