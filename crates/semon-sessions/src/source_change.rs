@@ -270,11 +270,20 @@ impl Drop for SourceLock {
 
 /// A facts update holds the same durable intent and OS-fence contract as Raw.
 /// The producer processes only changed native/runtime dependency selectors.
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FactsIntent {
+    pub(crate) operation:String,
+    pub(crate) path:String,
+    pub(crate) head:Option<String>,
+    pub(crate) before:crate::Facts,
+    pub(crate) wanted:crate::Facts,
+    pub(crate) push_driven:bool,
+}
 pub struct SessionFactsWrite {
+    store:Box<dyn crate::events::IndexStore>,
+    intent:FactsIntent,
     options: Options,
-    before: crate::Facts,
-    wanted: crate::Facts,
-    push_driven: bool,
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
@@ -291,32 +300,25 @@ impl SessionFactsWrite {
         wanted: &crate::Facts,
         push_driven: bool,
     ) -> io::Result<Self> {
-        #[cfg(feature = "test-hooks")]
-        crate::test_hooks::run(options, "facts_write_wait");
-        let source_lock = SourceLock::acquire(options, "facts", true)?;
-        let before = options
-            .facts
-            .as_ref()
-            .and_then(|path| crate::read_facts(path).ok())
-            .unwrap_or_default();
-        crate::events::store::enqueue_facts(options, &before, wanted, push_driven)?;
-        Ok(Self {
-            options: options.clone(),
-            before,
-            wanted: wanted.clone(),
-            push_driven,
-            _lock: source_lock,
-        })
+        let store=crate::events::store::source_write_store(options)?;
+        Self::begin_with_store(options,wanted,push_driven,store,None)
     }
-    pub fn complete(self) -> io::Result<()> {
-        // Re-enqueue after publication; claimed revisions can never ACK a newer
-        // facts update, including recovery from a lost acknowledgment.
-        crate::events::store::enqueue_facts(
-            &self.options,
-            &self.before,
-            &self.wanted,
-            self.push_driven,
-        )
+    pub(crate) fn begin_with_store(options:&Options,wanted:&crate::Facts,push_driven:bool,mut store:Box<dyn crate::events::IndexStore>,resume:Option<FactsIntent>)->io::Result<Self> {
+        #[cfg(feature="test-hooks")] crate::test_hooks::run(options,"facts_write_wait");
+        let source_lock=SourceLock::acquire(options,"facts",true)?;
+        let path=options.facts.as_ref().ok_or_else(||io::Error::other("Facts path missing"))?;
+        let intent=if let Some(intent)=resume {intent} else {
+            let before=match crate::read_facts(path) {Ok(f)=>f,Err(e) if e.kind()==io::ErrorKind::NotFound=>crate::Facts::default(),Err(e)=>return Err(e)};
+            FactsIntent {operation:crate::storage::source_observations::SourceOperation::capture("facts-write","raw",path.to_string_lossy().as_bytes()).id,path:path.to_string_lossy().into_owned(),head:store.session_catalog_generation().map_err(|e|io::Error::other(e.to_string()))?,before,wanted:wanted.clone(),push_driven}
+        };
+        if intent.path!=path.to_string_lossy() || intent.wanted!=*wanted || intent.push_driven!=push_driven {return Err(io::Error::other("Facts request binding changed"));}
+        store.facts_write_begin(options,&intent).map_err(|e|io::Error::other(e.to_string()))?;
+        Ok(Self {store,intent,options:options.clone(),_lock:source_lock})
+    }
+    #[cfg(test)]
+    pub(crate) fn intent(&self)->FactsIntent {self.intent.clone()}
+    pub fn complete(mut self)->io::Result<()> {
+        self.store.facts_write_complete(&self.options,&self.intent).map_err(|e|io::Error::other(e.to_string()))
     }
 }
 
