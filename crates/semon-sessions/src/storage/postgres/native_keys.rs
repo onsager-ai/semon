@@ -92,6 +92,7 @@ mod tests {
     #[test]
     fn pg_native_keys125_warm_function_and_generated_expression_refuse_without_effects() {
         for alteration in [
+            "CREATE OR REPLACE FUNCTION semon_pg_native_digest(ns bytea,value bytea,domain text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS 'BEGIN RETURN sha256(value); END;'",
             "CREATE OR REPLACE FUNCTION semon_pg_native_key_matches(stored bytea,digest bytea,expected bytea) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS 'BEGIN RETURN true; END;'",
             "ALTER TABLE semon_pg_native_meta DROP COLUMN key_digest CASCADE; ALTER TABLE semon_pg_native_meta ADD COLUMN key_digest bytea GENERATED ALWAYS AS (sha256(value)) STORED NOT NULL",
         ] {

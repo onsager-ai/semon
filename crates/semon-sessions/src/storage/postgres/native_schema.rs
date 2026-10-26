@@ -312,7 +312,7 @@ const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, de
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v6");
+    hash.update(b"semon-private-native-v7");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());

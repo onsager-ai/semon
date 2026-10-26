@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[path = "native_schema.rs"]
 mod native;
 
-pub(super) const VERSION: i32 = 6;
+pub(super) const VERSION: i32 = 7;
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     let rows = tx
