@@ -175,6 +175,15 @@ through `call_catalog` with their `CatalogReaderFactory`, or `call_selected`
 with the authorized Source reader. This wiring remains under qualification;
 it does not establish complete backend, migration or rollback readiness.
 
+An explicitly captured PG publication uses `StoreConfig::call_captured_query_at`.
+Before entering that body lease, a host can call `captured_source_proof_at` with
+the same publication, canonical owner key and exact `SessionSourceRef`. It
+qualifies the admitted immutable recipe and its exact source metadata without
+reading Raw or opening SQLite. Its `retained` freshness describes the
+captured observation, not current runtime or host custody. The body read qualifies
+the persisted Native proof and still requires independent host authorization and
+byte-generation checks. An expired live reader remains expired.
+
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
 
 `write_one_dirty` commits Index ledger, native rows and `chunk_proofs::write` together in one SQLite `BEGIN IMMEDIATE` transaction. The same database file also contains Catalog, recipes and proof metadata: `EventCache::path(options.cache)`. `invalidate_catalog_source` only advances the durable revision journal. Catalog publication is a later `BEGIN IMMEDIATE` transaction in `publish_catalog_with_writer`, with collection-generation, source-ledger, claim and closure checks. Catalog identity, recipes and source context advance atomically; failed claims remain pending on restart. Index can therefore lead the published Catalog. This is a reachable interleaving, not a missing Index/Catalog CAS.
@@ -279,6 +288,14 @@ A host may explicitly advertise `global_union: true`, `source_key: ""` and
 `machine: { key, label }`; session keys remain source-local. Selected identity,
 transcript and control reads always require a concrete source. Existing focused
 Catalog contracts, filters and cursors remain unchanged.
+
+For admitted PG sources sharing the authorized pool, global selection uses one
+bounded metadata SQL page before source-specific presentation. Storage checks
+and SELECT-only RLS scope use each `StoreConfig.namespace`; the independent
+public `OverviewSource.key` remains the Machine label and ordering/cursor key.
+Machine IDs need not equal Source UUIDs. `no_repo=1` parses as the exact empty-repo
+predicate and is applied before SQL LIMIT. Workspace scope grants neither
+cross-Source writes nor Native proof/Raw reads.
 
 Workspace cursors bind the workspace, normalized metadata filters, source set
 and every Catalog generation. Ordering is descending recorded activity, then

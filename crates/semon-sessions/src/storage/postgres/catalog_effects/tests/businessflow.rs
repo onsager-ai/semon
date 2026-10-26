@@ -1360,16 +1360,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 for source in &row.sources {
                     let reference = crate::SessionSourceRef {
                         root: row.harness.clone(),
-                        path: crate::catalog::source_relative(&options,&row.harness,source).unwrap(),
-                        native_id: source.native_id.clone(), offset: source.offset,
-                        prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256,
+                        path: crate::catalog::source_relative(&options, &row.harness, source)
+                            .unwrap(),
+                        native_id: source.native_id.clone(),
+                        offset: source.offset,
+                        prefix_sha256: source.prefix_sha256,
+                        tail_sha256: source.tail_sha256,
                     };
-                    let proof = captured_config.captured_source_proof_at(&options,&generation,&row.key,&reference).unwrap();
-                    assert_eq!(proof.source,reference);
-                    assert_eq!((proof.dev,proof.ino,proof.size),(source.dev,source.ino,source.size));
+                    let proof = captured_config
+                        .captured_source_proof_at(&options, &generation, &row.key, &reference)
+                        .unwrap();
+                    assert_eq!(proof.source, reference);
+                    assert_eq!(
+                        (proof.dev, proof.ino, proof.size),
+                        (source.dev, source.ino, source.size)
+                    );
                     let mut changed = reference;
                     changed.prefix_sha256[0] ^= 1;
-                    assert!(captured_config.captured_source_proof_at(&options,&generation,&row.key,&changed).is_err());
+                    assert!(
+                        captured_config
+                            .captured_source_proof_at(&options, &generation, &row.key, &changed)
+                            .is_err()
+                    );
                 }
                 let args = serde_json::json!({"id":row.key,"limit":100});
                 let body = captured_config
@@ -3152,13 +3164,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
-    let prior_parent = super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,qualified.as_deref().unwrap(),|prior| prior.catalog("one",false)).unwrap();
-    super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,&caught,|snapshot| {
-        use crate::storage::catalog::CatalogSnapshot;
-        let current = snapshot.catalog("one",false)?;
-        eprintln!("withdrawal_parent prior_sources={} current_sources={} history={} parent_projection={}",prior_parent.as_ref().map_or(0,|row|row.sources.len()),current.as_ref().map_or(0,|row|row.sources.len()),snapshot.has_history("one").unwrap(),model.prepared().transcripts.iter().any(|projection|projection.key=="one"));
-        Ok(())
-    }).unwrap();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
         let mut counts = Vec::new();

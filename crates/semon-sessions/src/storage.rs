@@ -502,7 +502,9 @@ impl StoreConfig {
         let StoreBackend::Postgres { pool, control } = &self.backend else {
             return Err(StorageError::InvalidArguments);
         };
-        postgres::navigation::captured_source_proof(self, pool, control, options, generation, key, reference)
+        postgres::navigation::captured_source_proof(
+            self, pool, control, options, generation, key, reference,
+        )
     }
 
     /// Read a captured, admitted PostgreSQL publication using request-owned
