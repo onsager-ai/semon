@@ -297,6 +297,12 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
 }
 
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
+    fn facts_authority<'a>(
+        &'a self,
+        path: &std::path::Path,
+    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
+        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(path)?))
+    }
     fn require_current(&self) -> io::Result<()> {
         Ok(())
     }
