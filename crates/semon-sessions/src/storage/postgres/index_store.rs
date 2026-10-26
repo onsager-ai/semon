@@ -181,7 +181,8 @@ impl IndexStore for NativeIndex {
                         })
                         .collect::<Vec<_>>();
                     Ok(Selection {
-                        count: endpoints.len(),
+                        count: 1,
+                        key: Some(super::semantic_stage::native_key(tx, epoch, harness, native)?),
                         endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()),
                         ..Default::default()
                     })
