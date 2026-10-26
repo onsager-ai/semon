@@ -437,9 +437,24 @@ mod namespace_reader_tests {
 
     #[test]
     fn unported_indexed_reader_refuses_with_typed_storage_error_before_sql() {
-        // History qualification and search remain unported: their shared gate
-        // must refuse with the typed namespace error before any SQL.
-        let error = require_ported_helper(true).unwrap_err();
+        // No native tables exist: an unported search must refuse through its
+        // real adapter entry before a legacy query can reach SQLite.
+        let mut db = Connection::open_in_memory().unwrap();
+        let tx = db.transaction().unwrap();
+        let snapshot = AdmittedSnapshot(&tx, true);
+        let error = snapshot
+            .search(crate::catalog_search::Query {
+                scope: crate::CatalogReadScope::Current,
+                query: "missing",
+                harness: None,
+                repo: None,
+                model: None,
+                after: None,
+                limit: 1,
+                index_complete: false,
+            })
+            .err()
+            .expect("typed refusal before SQL");
         assert_eq!(
             error
                 .get_ref()
