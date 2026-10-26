@@ -10036,7 +10036,7 @@ mod tests {
                 "older schema",
             ),
             (
-                "older-with-future-parser",
+                "older-with-invalid-profile-admission",
                 "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "older schema",
             ),
@@ -10086,9 +10086,9 @@ mod tests {
                 "malformed metadata",
             ),
             (
-                "newer-parser",
+                "invalid-profile-admission",
                 "UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
-                "parser version mismatch",
+                "profile admission mismatch",
             ),
             (
                 "publication",
@@ -10194,7 +10194,7 @@ mod tests {
                 assert!(archived_index(&db, "original").is_err());
             }
             unchanged();
-            match super::super::EventCache::open(&v1, &crate::Options::default().source) {
+            match super::super::EventCache::open(&v1, &source) {
                 Err(_) if name != "archive" => {}
                 Ok(_) if name == "archive" => {}
                 _ => panic!("unexpected admission for {name}"),
