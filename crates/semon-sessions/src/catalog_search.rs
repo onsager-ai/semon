@@ -25,37 +25,6 @@ pub(crate) const MAX_SCAN_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 8192;
 const MAX_GRAMS: usize = 1024;
 
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS session_search_coverage (
-    read_scope TEXT PRIMARY KEY CHECK(read_scope IN ('current','retained_history')),
-    incomplete INTEGER NOT NULL CHECK(incomplete >= 0)
-) STRICT, WITHOUT ROWID;
-INSERT OR IGNORE INTO session_search_coverage VALUES('current',0),('retained_history',0);
-CREATE TABLE IF NOT EXISTS session_search_documents (
-    read_scope TEXT NOT NULL CHECK(read_scope IN ('current','retained_history')),
-    session_key TEXT NOT NULL,
-    fields TEXT NOT NULL,
-    complete INTEGER NOT NULL CHECK(complete IN (0,1)),
-    PRIMARY KEY(read_scope,session_key)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS session_search_memberships (
-    session_key TEXT NOT NULL,
-    gram TEXT NOT NULL,
-    current_last_ms INTEGER,
-    history_last_ms INTEGER,
-    PRIMARY KEY(session_key,gram),
-    CHECK(current_last_ms IS NOT NULL OR history_last_ms IS NOT NULL)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL;
-CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;
-CREATE TABLE IF NOT EXISTS session_search_counts (
-    read_scope TEXT NOT NULL CHECK(read_scope IN ('current','retained_history')),
-    gram TEXT NOT NULL,
-    members INTEGER NOT NULL CHECK(members >= 0),
-    PRIMARY KEY(read_scope,gram)
-) STRICT, WITHOUT ROWID;
-";
-
 pub(crate) fn scope_key(scope: crate::CatalogReadScope) -> &'static str {
     match scope {
         crate::CatalogReadScope::Current => "current",
@@ -74,14 +43,14 @@ fn membership(scope: &str) -> rusqlite::Result<(&'static str, &'static str)> {
 /// Qualify the selected current representation before changing either scope.
 /// Bound the union first so an absent scope cannot hide excess other-scope rows.
 pub(crate) fn validate_key(connection: &Connection, key: &str) -> rusqlite::Result<()> {
-    let (physical, valid): (i64, i64) = connection.prepare_cached("SELECT COUNT(*),COUNT(valid) FROM (SELECT CASE WHEN octet_length(gram)<=12 THEN 1 ELSE NULL END AS valid FROM session_search_memberships WHERE session_key=?1 LIMIT ?2)")?.query_row(params![key,(MAX_GRAMS*2+1) as i64], |row|Ok((row.get(0)?,row.get(1)?)))?;
+    let (physical, valid): (i64, i64) = connection.prepare_cached("SELECT COUNT(*),COUNT(valid) FROM (SELECT CASE WHEN octet_length(gram)<=12 THEN 1 ELSE NULL END AS valid FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 LIMIT ?2)")?.query_row(params![key,(MAX_GRAMS*2+1) as i64], |row|Ok((row.get(0)?,row.get(1)?)))?;
     if physical > (MAX_GRAMS * 2) as i64 || physical != valid {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for scope in ["current", "retained_history"] {
         let (column, _) = membership(scope)?;
         let sql = format!(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM session_search_memberships WHERE session_key=?1 AND {column} IS NOT NULL LIMIT ?2)"
+            "SELECT COUNT(*) FROM (SELECT 1 FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 AND {column} IS NOT NULL LIMIT ?2)"
         );
         let count: i64 = connection
             .prepare_cached(&sql)?
@@ -94,7 +63,7 @@ pub(crate) fn validate_key(connection: &Connection, key: &str) -> rusqlite::Resu
 }
 
 pub(crate) fn clear(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("DELETE FROM session_search_memberships; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;")
+    transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();")
 }
 
 pub(crate) fn normalize_query(value: &str) -> Option<String> {
@@ -133,7 +102,7 @@ fn fields(row: &CatalogRow) -> Vec<String> {
 }
 
 pub(crate) fn row_present(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<bool> {
-    transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_search_documents WHERE read_scope='current' AND session_key=?1) AND EXISTS(SELECT 1 FROM session_search_documents WHERE read_scope='retained_history' AND session_key=?1)", [key], |row|row.get(0))
+    transaction.query_row("SELECT EXISTS(SELECT 1 FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='current' AND session_key=?1) AND EXISTS(SELECT 1 FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='retained_history' AND session_key=?1)", [key], |row|row.get(0))
 }
 
 /// Called inside the existing source/generation-CAS publication transaction.
@@ -150,12 +119,13 @@ pub(crate) fn publish_row(
     // source-key range scan. Per-gram SQL programs dominated cold batches.
     insert_row(transaction, scope, row, false)?;
     let (column, _) = membership(scope)?;
-    transaction.prepare_cached(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,gram,1 FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute(params![scope,row.key])?;
+    transaction.prepare_cached(&format!("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT semon_namespace(), ?1,gram,1 FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?2 AND {column} IS NOT NULL ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute(params![scope,row.key])?;
     Ok(())
 }
 
 /// Update a bounded producer cohort's current/history postings together. The
 /// temporary key set never becomes another read model or survives the transaction.
+#[cfg(test)]
 pub(crate) fn publish_current_rows(
     transaction: &Transaction<'_>,
     rows: &[&CatalogRow],
@@ -257,6 +227,7 @@ pub(crate) fn assert_posting_multiset(rows: &[CatalogRow]) -> rusqlite::Result<(
     Ok(())
 }
 
+#[cfg(test)]
 fn publish_current_rows_order(
     transaction: &Transaction<'_>,
     rows: &[&CatalogRow],
@@ -265,7 +236,7 @@ fn publish_current_rows_order(
 ) -> rusqlite::Result<()> {
     publish_current_rows_effects(
         transaction,
-        &crate::storage::sqlite::search::SearchWriter::unbound(transaction),
+        &crate::storage::sqlite::search::SearchWriter::admitted(transaction, &tests::source(transaction)).map_err(|_| rusqlite::Error::InvalidQuery)?,
         rows,
         owners,
         #[cfg(test)]
@@ -429,19 +400,6 @@ pub(crate) fn publish_current_rows_effects<
 /// Remove only this cohort's old documents and postings. Aggregate shared gram
 /// decrements once, using source-key lookups rather than scanning all members of
 /// each gram. The temporary tables and count changes roll back with publication.
-pub(crate) fn remove_members(transaction: &Connection, scope: &str) -> rusqlite::Result<()> {
-    transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_removals(gram TEXT PRIMARY KEY,members INTEGER NOT NULL) WITHOUT ROWID; DELETE FROM catalog_search_removals;")?;
-    let (column, other) = membership(scope)?;
-    transaction.prepare_cached(&format!("INSERT INTO catalog_search_removals SELECT p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(gram) DO UPDATE SET members=members+excluded.members"))?.execute([])?;
-    transaction.prepare_cached("UPDATE session_search_counts SET members=members-(SELECT r.members FROM catalog_search_removals r WHERE r.gram=session_search_counts.gram) WHERE read_scope=?1 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
-    transaction.prepare_cached("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
-    transaction.prepare_cached("UPDATE session_search_coverage SET incomplete=incomplete-(SELECT COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_documents d WHERE d.read_scope=?1 AND d.session_key=m.session_key AND d.complete=0) WHERE read_scope=?1")?.execute([scope])?;
-    transaction.prepare_cached(&format!("DELETE FROM session_search_memberships WHERE {other} IS NULL AND session_key IN (SELECT session_key FROM catalog_search_members)"))?.execute([])?;
-    transaction.prepare_cached(&format!("UPDATE session_search_memberships SET {column}=NULL WHERE {column} IS NOT NULL AND session_key IN (SELECT session_key FROM catalog_search_members)"))?.execute([])?;
-    transaction.prepare_cached("DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key IN (SELECT session_key FROM catalog_search_members)")?.execute([scope])?;
-    Ok(())
-}
-
 /// A complete rebuild starts with empty postings and documents. Aggregate
 /// their exact member counts once, rather than updating each gram per row.
 pub(crate) fn backfill_row(
@@ -462,7 +420,7 @@ pub(crate) fn backfill_catalog_row(
         return backfill_row(transaction, crate::CatalogReadScope::RetainedHistory, row);
     }
     if transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_search_memberships WHERE session_key=?1)",
+        "SELECT EXISTS(SELECT 1 FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1)",
         [&row.key],
         |r| r.get::<_, bool>(0),
     )? {
@@ -473,7 +431,7 @@ pub(crate) fn backfill_catalog_row(
         insert_document(transaction, scope, row, &encoded, complete)?;
     }
     if complete {
-        let mut posting = transaction.prepare_cached("INSERT INTO session_search_memberships(session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?3)")?;
+        let mut posting = transaction.prepare_cached("INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(semon_namespace(),?1,?2,?3,?3)")?;
         for gram in grams {
             posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
         }
@@ -490,10 +448,10 @@ pub(crate) fn begin_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<
 }
 
 pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL; CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;")?;
+    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(namespace,gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL; CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(namespace,gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;")?;
     for scope in ["current", "retained_history"] {
         let (column, _) = membership(scope)?;
-        transaction.execute(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,gram,COUNT(*) FROM session_search_memberships WHERE {column} IS NOT NULL GROUP BY gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"), [scope])?;
+        transaction.execute(&format!("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT semon_namespace(), ?1,gram,COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND {column} IS NOT NULL GROUP BY gram ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members"), [scope])?;
     }
     Ok(())
 }
@@ -551,10 +509,10 @@ fn insert_fields(
         // per producer cohort inside this same publication transaction.
         let (column, _) = membership(scope)?;
         let sql = format!(
-            "INSERT INTO session_search_memberships(session_key,gram,{column}) VALUES(?1,?2,?3) ON CONFLICT(session_key,gram) DO UPDATE SET {column}=excluded.{column}"
+            "INSERT INTO main.session_search_memberships(namespace,session_key,gram,{column}) VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,session_key,gram) DO UPDATE SET {column}=excluded.{column}"
         );
         let mut posting = transaction.prepare_cached(&sql)?;
-        let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
+        let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) VALUES(semon_namespace(),?1,?2,1) ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
         for gram in grams {
             posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
             if let Some(count) = &mut count {
@@ -572,11 +530,11 @@ pub(crate) fn insert_document(
     encoded: &str,
     complete: bool,
 ) -> rusqlite::Result<()> {
-    transaction.prepare_cached("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)")?.execute(params![scope,row.key,encoded,complete])?;
+    transaction.prepare_cached("INSERT INTO main.session_search_documents(namespace,read_scope,session_key,fields,complete) VALUES(semon_namespace(),?1,?2,?3,?4)")?.execute(params![scope,row.key,encoded,complete])?;
     if !complete {
         transaction
             .prepare_cached(
-                "UPDATE session_search_coverage SET incomplete=incomplete+1 WHERE read_scope=?1",
+                "UPDATE main.session_search_coverage SET incomplete=incomplete+1 WHERE namespace=semon_namespace() AND read_scope=?1",
             )?
             .execute([scope])?;
     }
@@ -586,18 +544,18 @@ pub(crate) fn insert_document(
 fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite::Result<()> {
     validate_key(transaction, key)?;
     let (column, other) = membership(scope)?;
-    transaction.prepare_cached("UPDATE session_search_coverage SET incomplete=incomplete-1 WHERE read_scope=?1 AND EXISTS(SELECT 1 FROM session_search_documents WHERE read_scope=?1 AND session_key=?2 AND complete=0)")?.execute(params![scope,key])?;
-    transaction.prepare_cached(&format!("UPDATE session_search_counts SET members=members-1 WHERE read_scope=?1 AND gram IN (SELECT gram FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
-    transaction.prepare_cached(&format!("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
+    transaction.prepare_cached("UPDATE main.session_search_coverage SET incomplete=incomplete-1 WHERE namespace=semon_namespace() AND read_scope=?1 AND EXISTS(SELECT 1 FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope=?1 AND session_key=?2 AND complete=0)")?.execute(params![scope,key])?;
+    transaction.prepare_cached(&format!("UPDATE main.session_search_counts SET members=members-1 WHERE namespace=semon_namespace() AND read_scope=?1 AND gram IN (SELECT gram FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
+    transaction.prepare_cached(&format!("DELETE FROM main.session_search_counts WHERE namespace=semon_namespace() AND read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
     transaction
         .prepare_cached(&format!(
-            "DELETE FROM session_search_memberships WHERE session_key=?1 AND {other} IS NULL"
+            "DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 AND {other} IS NULL"
         ))?
         .execute([key])?;
-    transaction.prepare_cached(&format!("UPDATE session_search_memberships SET {column}=NULL WHERE session_key=?1 AND {column} IS NOT NULL"))?.execute([key])?;
+    transaction.prepare_cached(&format!("UPDATE main.session_search_memberships SET {column}=NULL WHERE namespace=semon_namespace() AND session_key=?1 AND {column} IS NOT NULL"))?.execute([key])?;
     transaction
         .prepare_cached(
-            "DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key=?2",
+            "DELETE FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope=?1 AND session_key=?2",
         )?
         .execute(params![scope, key])?;
     Ok(())
@@ -617,7 +575,7 @@ pub(crate) fn retire_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::
 
 /// Current membership retirement does not erase retained-history search rows.
 pub(crate) fn retire_missing(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    let mut statement = transaction.prepare("SELECT session_key FROM session_search_documents WHERE read_scope='current' AND session_key NOT IN (SELECT session_key FROM catalog_members) LIMIT 512")?;
+    let mut statement = transaction.prepare("SELECT session_key FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='current' AND session_key NOT IN (SELECT session_key FROM catalog_members) LIMIT 512")?;
     loop {
         let retired = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -736,11 +694,6 @@ struct Filter {
     ns: &'static str,
     using: &'static str,
 }
-const UNBOUND: Filter = Filter {
-    table: "",
-    ns: "",
-    using: "",
-};
 /// Admitted reads see only the bound namespace through its leading indexes.
 const ADMITTED: Filter = Filter {
     table: "main.",
@@ -749,7 +702,7 @@ const ADMITTED: Filter = Filter {
 };
 
 pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Result<Selection> {
-    read_filtered(connection, request, UNBOUND)
+    read_filtered(connection, request, ADMITTED)
 }
 
 /// Search the current namespace of an admitted snapshot.
@@ -1088,17 +1041,30 @@ mod sqlite_tests {
             sources: Vec::new(),
         }
     }
+    pub(super) fn source(db: &Connection) -> crate::storage::sqlite::semantic::AdmittedSource {
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite { database: std::path::PathBuf::from(db.path().unwrap()) },
+            namespace: crate::storage::LogicalSourceNamespace::new(db.query_row("SELECT semon_namespace()", [], |r| r.get::<_, String>(0)).unwrap()).unwrap(),
+            expected_stream_epoch: Some(db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap()),
+        };
+        crate::storage::sqlite::semantic::AdmittedSource::native(crate::events::store::configured::NativeOwnership::restore(&config).unwrap())
+    }
     fn database() -> Connection {
-        let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        connection.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,last_ms INTEGER,harness TEXT,repo TEXT,lifecycle TEXT,metadata TEXT); CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT); CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;").unwrap();
+        use crate::storage::{StoreBackend, StoreConfig, LogicalSourceNamespace};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!("semon-current-search-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let config = StoreConfig { backend: StoreBackend::Sqlite { database: path }, namespace: LogicalSourceNamespace::new("search-current").unwrap(), expected_stream_epoch: Some("a".repeat(64)) };
+        config.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let connection = crate::events::store::configured::connection(&config).unwrap();
+        connection.execute_batch("CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;").unwrap();
         connection
     }
     fn put(transaction: &Transaction<'_>, row: &CatalogRow) {
         let encoded = serde_json::to_string(row).unwrap();
         transaction
             .execute(
-                "INSERT OR REPLACE INTO session_catalog VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT OR REPLACE INTO main.session_catalog(namespace,session_key,last_ms,harness,repo,lifecycle,metadata) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6)",
                 params![
                     row.key,
                     row.last.unwrap_or(0),
@@ -1111,7 +1077,7 @@ mod sqlite_tests {
             .unwrap();
         transaction
             .execute(
-                "INSERT OR REPLACE INTO session_history_catalog VALUES(?1,?2)",
+                "INSERT OR REPLACE INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(semon_namespace(),?1,?2)",
                 params![row.key, encoded],
             )
             .unwrap();
@@ -1442,7 +1408,7 @@ mod sqlite_tests {
     #[test]
     fn oversized_compact_history_refuses_before_an_absent_current_scope_scan() {
         let mut connection = database();
-        connection.execute("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO session_search_memberships SELECT 'selected',printf('%05d',x),NULL,0 FROM n",[(MAX_GRAMS*2) as i64]).unwrap();
+        connection.execute("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO main.session_search_memberships SELECT semon_namespace(),'selected',printf('%05d',x),NULL,0 FROM n",[(MAX_GRAMS*2) as i64]).unwrap();
         let before = strings(&connection, PHYSICAL_COMPACT);
         let selected = row("selected", "replacement");
         {
@@ -1469,7 +1435,7 @@ mod sqlite_tests {
         transaction.commit().unwrap();
         for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
             let first =
-                posting_page(&connection, UNBOUND, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
+                posting_page(&connection, ADMITTED, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
             assert_eq!(first.len(), MAX_CANDIDATES + 1);
             assert_eq!(
                 first.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
@@ -1479,7 +1445,7 @@ mod sqlite_tests {
             );
             let last = posting_page(
                 &connection,
-                UNBOUND,
+                ADMITTED,
                 scope,
                 "nee",
                 Some(&first[MAX_CANDIDATES - 1]),
@@ -1511,7 +1477,7 @@ mod sqlite_tests {
         }
         let selected_work = |connection: &Connection, scope| {
             SQL_STEPS.with(|value| value.set(0));
-            let page = posting_page(connection, UNBOUND, scope, "nee", None, 2).unwrap();
+            let page = posting_page(connection, ADMITTED, scope, "nee", None, 2).unwrap();
             (
                 page.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
                 SQL_STEPS.with(|value| value.get()),
@@ -1519,7 +1485,7 @@ mod sqlite_tests {
         };
         let before_current = selected_work(&connection, CatalogReadScope::Current);
         let before_history = selected_work(&connection, CatalogReadScope::RetainedHistory);
-        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_search_memberships SELECT 'unrelated-'||printf('%05d',x),'irr',NULL,1 FROM n;").unwrap();
+        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO main.session_search_memberships SELECT semon_namespace(),'unrelated-'||printf('%05d',x),'irr',NULL,1 FROM n;").unwrap();
         assert_eq!(
             selected_work(&connection, CatalogReadScope::Current),
             before_current
@@ -1534,7 +1500,7 @@ mod sqlite_tests {
         connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                posting_sql(UNBOUND, scope, "1", 3)
+                posting_sql(ADMITTED, scope, "1", 3)
             ))
             .unwrap()
             .query_map(params![scope_key(scope), "nee", 2], |row| row.get(3))
@@ -1549,7 +1515,7 @@ mod sqlite_tests {
         let transaction = connection.transaction().unwrap();
         put(&transaction, &row("current", "Harbor queue"));
         transaction
-            .execute("DELETE FROM session_history_catalog", [])
+            .execute("DELETE FROM main.session_history_catalog", [])
             .unwrap();
         transaction.commit().unwrap();
         let query = || Query {
@@ -1568,7 +1534,7 @@ mod sqlite_tests {
         assert!(!found.report.partial);
         // An absent retained source is not a readable current fallback.
         connection
-            .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+            .execute("UPDATE main.session_catalog SET lifecycle='retained'", [])
             .unwrap();
         assert!(read(&connection, query()).is_err());
     }
@@ -1601,7 +1567,7 @@ mod sqlite_tests {
         let next = first.next.clone().unwrap();
         let template = serde_json::to_string(&row("unrelated", "Irrelevant history")).unwrap();
         connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog SELECT 'unrelated-'||printf('%05d',x),1,'claude','fixture','current',json_set(?1,'$.key','unrelated-'||printf('%05d',x),'$.native_ids',json_array('unrelated-'||printf('%05d',x))) FROM n",[template]).unwrap();
-        connection.execute_batch("INSERT INTO session_search_memberships SELECT session_key,'irr',last_ms,NULL FROM session_catalog WHERE session_key LIKE 'unrelated-%'; INSERT INTO session_search_counts VALUES('current','irr',20000);").unwrap();
+        connection.execute_batch("INSERT INTO main.session_search_memberships SELECT semon_namespace(),session_key,'irr',last_ms,NULL FROM session_catalog WHERE session_key LIKE 'unrelated-%'; INSERT INTO main.session_search_counts VALUES(semon_namespace(),'current','irr',20000);").unwrap();
         SQL_STEPS.with(|steps| steps.set(0));
         let grown_started = std::time::Instant::now();
         let grown = search(&connection, "needle", None, 2);
@@ -1675,8 +1641,8 @@ mod sqlite_tests {
         connection.execute_batch("DELETE FROM catalog_members; INSERT INTO catalog_members SELECT session_key FROM session_catalog WHERE session_key!='candidate-00900';").unwrap();
         let transaction = connection.transaction().unwrap();
         retire_missing(&transaction).unwrap();
-        transaction.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
-        transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
+        transaction.execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
+        transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='candidate-00900'",[]).unwrap();
         transaction.commit().unwrap();
         assert!(search(&connection, "replacement", None, 2).rows.is_empty());
         let history = read(
@@ -1736,8 +1702,8 @@ mod sqlite_tests {
         assert_eq!(incomplete(&connection, "current"), 1);
         let transaction = connection.transaction().unwrap();
         remove_row(&transaction, "current", "oversized").unwrap();
-        transaction.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='oversized'",[]).unwrap();
-        transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='oversized'",[]).unwrap();
+        transaction.execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='oversized'",[]).unwrap();
+        transaction.execute("UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='oversized'",[]).unwrap();
         transaction.commit().unwrap();
         assert_eq!(incomplete(&connection, "current"), 0);
         assert_eq!(incomplete(&connection, "retained_history"), 1);

@@ -1181,24 +1181,14 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache_path = root.join("index.json");
-            drop(EventCache::open_scoped(&cache_path, &crate::Options::default().source).unwrap());
-            let database = EventCache::path(&cache_path);
-            let db = Connection::open(&database).unwrap();
-            let epoch = db
-                .query_row(
-                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
             let config = StoreConfig {
-                backend: StoreBackend::Sqlite { database },
+                backend: StoreBackend::Sqlite { database: EventCache::path(&cache_path) },
                 namespace: LogicalSourceNamespace::new(namespace).unwrap(),
-                expected_stream_epoch: Some(epoch),
+                expected_stream_epoch: Some("a".repeat(64)),
             };
-            config.admit_namespace().unwrap();
+            config.create_native_store().unwrap();
+            crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
             let fixture = Self { root, config };
-            fixture.assign();
             // Seed through the admitted journal and acknowledge one source through
             // the configured consumer; both counters belong to this namespace.
             let seed_paths = vec!["seed".into(), "acknowledged".into()];
@@ -1224,14 +1214,6 @@ mod tests {
         fn db(&self) -> Connection {
             let StoreBackend::Sqlite { database } = &self.config.backend;
             Connection::open(database).unwrap()
-        }
-        fn assign(&self) {
-            for _ in 0..128 {
-                if self.config.assign_catalog_namespace(64).unwrap().complete {
-                    return;
-                }
-            }
-            panic!("source journal assignment did not finish");
         }
     }
     impl Drop for Fixture {
@@ -1478,7 +1460,6 @@ mod tests {
     fn event_cache_reconciles_real_committed_intents_before_later_work_and_after_restart() {
         for restart in [false, true] {
             let configured = Fixture::new_with_namespace("configured\0source");
-            configured.assign();
             let StoreBackend::Sqlite { database } = &configured.config.backend;
             producer_restart_conformance(
                 || EventCache::open_configured(&configured.config).unwrap(),
@@ -1522,18 +1503,10 @@ mod tests {
                 backend: StoreBackend::Sqlite {
                     database: database.clone(),
                 },
-                namespace: LogicalSourceNamespace::new("finish\0source").unwrap(),
+                namespace: crate::Options::default().source.namespace().unwrap(),
                 expected_stream_epoch: Some(epoch),
             };
-            config.admit_namespace().unwrap();
-            let mut complete = false;
-            for _ in 0..128 {
-                if config.assign_catalog_namespace(64).unwrap().complete {
-                    complete = true;
-                    break;
-                }
-            }
-            assert!(complete);
+            crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
             config
         };
         let open = || config.source_observations().unwrap();
@@ -1671,7 +1644,6 @@ mod tests {
     #[test]
     fn shared_observation_conformance_runs_on_configured_sqlite() {
         let configured = Fixture::new_with_namespace("configured\0source");
-        configured.assign();
         crate::storage::source_observations::conformance::shared_source_observation_conformance(
             || configured.config.source_observations().unwrap(),
             "configured\0source",
@@ -1681,7 +1653,6 @@ mod tests {
     #[test]
     fn configured_recovery_refuses_without_changing_the_database() {
         let f = Fixture::new();
-        f.assign();
         let mut store = f.config.source_observations().unwrap();
         let db = f.db();
         let before: i64 = db
@@ -1716,13 +1687,6 @@ mod tests {
     #[test]
     fn configured_discovery_claim_cas_restart_and_originals() {
         let f = Fixture::new();
-        assert!(matches!(
-            f.config.source_observations(),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
-        // First one-row migration call and reopening retain bounded progress.
-        f.config.assign_catalog_namespace(1).unwrap();
-        f.assign();
         let mut store = f.config.source_observations().unwrap();
         let paths = vec!["seed".into(), "new".into()];
         assert_eq!(
@@ -1779,22 +1743,13 @@ mod tests {
         let restarted = f.config.source_observations().unwrap();
         assert_eq!(restarted.claims(&paths).unwrap(), before_conflict);
         let db = f.db();
-        let originals:Vec<(String,i64)> = db.prepare("SELECT source_path,revision FROM storage_original_session_catalog_invalidations ORDER BY source_path").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-        assert_eq!(originals, vec![("seed".into(), 1)]);
-        assert!(
-            db.execute(
-                "DELETE FROM storage_original_session_catalog_invalidations",
-                []
-            )
-            .is_err()
-        );
-        assert_eq!(super::super::namespace::WRITER_QUALIFICATION_VERSION, 0);
+        assert_eq!(db.query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace='A' AND source_path='seed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert!(db.execute("DELETE FROM session_catalog_invalidations WHERE namespace='A'", []).is_err());
     }
 
     #[test]
     fn configured_discovery_rolls_back_mid_batch_and_keeps_foreign_rows_invisible() {
         let f = Fixture::new();
-        f.assign();
         let mut store = f.config.source_observations().unwrap();
         let db = f.db();
         // Isolated adapter fixture only: the registry still admits exactly A.
@@ -1832,7 +1787,6 @@ mod tests {
     #[test]
     fn configured_source_writer_epoch_bounds_and_unported_families_refuse() {
         let f = Fixture::new();
-        f.assign();
         let mut wrong = f.config.clone();
         wrong.expected_stream_epoch = None;
         assert!(matches!(
@@ -2006,7 +1960,6 @@ mod tests {
     #[test]
     fn configured_source_writer_revalidates_live_epoch_and_reports_busy() {
         let f = Fixture::new();
-        f.assign();
         let mut store = f.config.source_observations().unwrap();
         let db = f.db();
         db.execute_batch("BEGIN IMMEDIATE").unwrap();
