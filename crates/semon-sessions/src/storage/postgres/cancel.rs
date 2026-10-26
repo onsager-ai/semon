@@ -22,7 +22,7 @@ impl PgCancellation {
     }
     /// Bind only at a read call, never in a retained checkpoint. Nested scopes
     /// already resolve to their outer request in selected_read.
-    pub(super) fn for_selected_read(&self) -> Self {
+    pub(crate) fn for_selected_read(&self) -> Self {
         Self {
             host: self.host.clone(),
             request: crate::selected_read::io_control(),

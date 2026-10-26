@@ -20,6 +20,57 @@ pub(super) fn fail_clean() -> bool {
 }
 static NEXT_SCHEMA: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
+    struct NoConnection;
+    impl PgConnectionFactory for NoConnection {
+        fn connect(&self) -> ConnectFuture<'_> {
+            panic!("cancelled captured query must not connect or execute SQL")
+        }
+    }
+    let pool = PgPool::new(Arc::new(NoConnection), limits()).unwrap();
+    let namespace = ns("source-uuid-a");
+    let config = crate::storage::StoreConfig {
+        namespace: namespace.clone(),
+        expected_stream_epoch: Some("a".repeat(64)),
+        backend: crate::storage::StoreBackend::Postgres {
+            pool,
+            control: PgCancellation::default(),
+        },
+    };
+    let options = crate::Options {
+        source: crate::storage::HostSource::new(namespace, "a".repeat(64)).unwrap(),
+        all: true,
+        ..crate::Options::default()
+    };
+    let host = |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+        panic!("cancelled request must not invoke its host")
+    };
+    for (cancelled, deadline, reason) in [
+        (true, Instant::now() + Duration::from_secs(20), "cancelled"),
+        (false, Instant::now(), "expired"),
+    ] {
+        let request = crate::SelectedReadControl::new(
+            deadline,
+            Arc::new(std::sync::atomic::AtomicBool::new(cancelled)),
+        );
+        let error = config
+            .call_captured_query_at(
+                &options,
+                "external-machine-z",
+                &"b".repeat(64),
+                "get_session",
+                &json!({"id":"claude:one"}),
+                0,
+                &request,
+                &host,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "unavailable");
+        assert!(error.message.contains(reason));
+    }
+}
+
 pub(super) struct Factory {
     pub(super) dsn: String,
     pub(super) schema: String,

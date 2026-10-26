@@ -1328,6 +1328,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     // Captured content uses its admitted immutable generation and independent
     // host/proof authority. It is not an old live Query runtime context.
+    let request = crate::SelectedReadControl::default();
     let captured_bodies = |pool: &crate::storage::postgres::PgPool| {
         let mut captured_config = config.clone();
         captured_config.backend = crate::storage::StoreBackend::Postgres {
@@ -1415,23 +1416,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let body = captured_config
                     .call_captured_query_at(
                         &options,
+                        "external-machine-z",
                         &generation,
                         "read_transcript",
                         &args,
                         1790812802000,
+                        &request,
                         &host,
                     )
                     .unwrap();
-                let fields = captured_config
+                let mut fields = captured_config
                     .call_captured_query_at(
                         &options,
+                        "external-machine-z",
                         &generation,
                         "get_session",
                         &serde_json::json!({"id":row.key}),
                         1790812802000,
+                        &request,
                         &host,
                     )
                     .unwrap();
+                assert_eq!(fields["session"]["machine"], "external-machine-z");
+                fields["session"]["machine"] =
+                    expected_bodies[&row.key]["fields"]["session"]["machine"].clone();
                 (
                     row.key.clone(),
                     serde_json::json!({"body":body,"fields":fields}),
@@ -1451,10 +1459,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         config
             .call_captured_query_at(
                 &options,
+                "external-machine-z",
                 &generation,
                 "read_transcript",
                 &serde_json::json!({"id":prepared.rows[0].key,"limit":100}),
                 1790812802000,
+                &request,
                 &denied_capture
             )
             .is_err()
@@ -1466,10 +1476,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         config
             .call_captured_query_at(
                 &options,
+                "external-machine-z",
                 &generation,
                 "list_sessions",
                 &serde_json::json!({}),
                 1790812802000,
+                &request,
                 &uncalled
             )
             .is_err()

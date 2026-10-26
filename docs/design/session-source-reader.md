@@ -120,6 +120,15 @@ leaves the ordinary producer responsible for completing the upgrade.
 
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 
+`StoreConfig::call_captured_query_at(options, machine, generation, tool, args,
+now, request, provider)` enters that same request control before PostgreSQL
+metadata admission. The scope spans binding SQL, host factory admission, leased
+proof/body rendering and the final check. `machine` is the external host Machine
+key, independent of the Source namespace; the factory receives the admitted
+namespace and canonical selected key. Captured session Machine labels use the
+external key. Captured reads still require `all=true` and qualified history;
+they never revive an expired live runtime.
+
 The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent. The replay path charges raw body bytes eightfold before buffering and parsed line bytes eightfold again, plus fixed event/catalog costs, against that same 64 MiB budget. Its effective raw-body replay ceiling is therefore about 4 MiB before those other costs, often less; the separate 64 MiB raw I/O ceiling is not an availability promise for replay. A long selected owner can return unavailable during complete preparation even when its requested transcript page is small. Narrowing turns or page size, or a time window that still includes the same complete source, does not reduce complete Index preparation; excluding source files can. The normal generation-bound native paged transcript/tool path remains available for long sessions and does not become complete-history replay.
 
 The native-line oracle requests bounded chunks, pins generation and length,
