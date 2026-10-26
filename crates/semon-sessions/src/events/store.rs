@@ -259,7 +259,7 @@ fn emit_catalog_publish_attempt(
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: pre-cleanup proof/tree/usage representations are rebuilt together.
-pub(crate) const SCHEMA_VERSION: i64 = 33;
+pub(crate) const SCHEMA_VERSION: i64 = 34;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -5087,6 +5087,7 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
 /// Classify in a read snapshot, before journal, schema or recovery writes.
 /// Version zero is fresh only when there are no schema objects.
 fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
+    tree_state::register(connection)?;
     if crate::storage::sqlite::namespace::is_bound(connection)? {
         return Ok(Init::Unsupported("namespace writer upgrade is pending"));
     }
@@ -5460,6 +5461,7 @@ fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(profile) {
         let reference = Connection::open_in_memory()?;
+        tree_state::register(&reference)?;
         for chunk in ddl {
             reference.execute_batch(chunk)?;
         }
@@ -5485,6 +5487,7 @@ fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
 
 /// Initialize only a fresh store; requalify under the writer lock.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
+    tree_state::register(connection)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
     let read = connection.transaction()?;

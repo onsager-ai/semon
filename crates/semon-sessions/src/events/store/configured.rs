@@ -316,6 +316,7 @@ fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, Stor
 }
 
 pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
+    tree_state::register(db)?;
     crate::storage::LogicalSourceNamespace::new(namespace)
         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
     let namespace = namespace.to_owned();

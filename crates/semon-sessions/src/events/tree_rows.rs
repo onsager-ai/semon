@@ -97,18 +97,23 @@ impl<'a> TreeRows<'a> {
     }
 }
 
-// Canonical Tree witness recipe shared by every physical backend. Each backend
-// supplies its persisted rows in UTF-8 byte order (SQLite BINARY, PostgreSQL
-// bytea); the recipe owns row encoding and digest framing. String arrays
-// always serialize. The domain tags
-// remain the original witness's fixed bytes, not backend query SQL.
+// One current authenticated stream. Both engines traverse their persisted
+// fixed-width addresses, never sort a materialized dimension. Namespace is
+// bound by the captured header and physical owner, not by an interchangeable
+// logical source's witness bytes.
 pub(crate) mod witness {
     use sha2::{Digest, Sha256};
 
-    const LABELS: &str = "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label";
-    const MODELS: &str =
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model";
-    const TOOLS: &str = "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id";
+    const LABELS: &str = "semon.tree.witness.4.labels";
+    const MODELS: &str = "semon.tree.witness.4.models";
+    const TOOLS: &str = "semon.tree.witness.4.open-tools";
+
+    pub(crate) fn address(domain: &str, key: &[u8]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(domain.as_bytes());
+        hash.update(key);
+        hash.finalize().into()
+    }
 
     /// Incremental canonical Tree witness writer.  A physical reader begins a
     /// family, then supplies one persisted row at a time in its binary order.
@@ -140,23 +145,20 @@ pub(crate) mod witness {
             self.0.update(row.as_bytes());
         }
 
-        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn label(&mut self, key: &str, value: &str) {
             self.encoded(&serde_json::to_string(&[key, value]).unwrap());
         }
 
-        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn model(&mut self, model: &str) {
             self.encoded(&serde_json::to_string(&[model]).unwrap());
         }
 
-        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn tool(&mut self, id: &str, name: &str) {
             self.encoded(&serde_json::to_string(&[id, name]).unwrap());
         }
 
         pub(crate) fn finish(self) -> String {
-            format!("{:x}", self.0.finalize())
+            format!("tree4:{:x}", self.0.finalize())
         }
     }
 
