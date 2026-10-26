@@ -850,6 +850,45 @@ fn pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite() {
 }
 
 #[test]
+fn pg_native_keys134_tool_selected_physical_rows_and_bytes_ignore_unrelated_history() {
+    let data = super::super::tree_checkpoint::tests::parser_fixture_keys("claude", false, true);
+    let (tool, name) = data.oracle.tools.iter().find(|(key, _)| key.len() > 2704).unwrap();
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("tree\0🦀");
+    let control = PgCancellation::default();
+    let projection = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        install_without_tree(tx, &data)?;
+        Ok(stage_fixture(tx, &data)?.0)
+    }).unwrap();
+    let mut previous = 0_i64;
+    for noise in [0_i64, 256, 2048] {
+        let (visited, bytes) = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            if noise > previous {
+                tx.driver.execute("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) SELECT $1,10000+n,$2,$3,false FROM generate_series($4::bigint,$5::bigint) n", &[&namespace.as_str().as_bytes(), &tool.as_bytes(), &name.as_bytes(), &previous, &(noise-1)]).map_err(sqlstate::error)?;
+            }
+            let query = super::super::tree_checkpoint::TOOL_NAME_LENGTH_SQL;
+            let args: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&namespace.as_str().as_bytes(), &projection, &tool.as_bytes()];
+            let plan: serde_json::Value = tx.driver.query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}"), args).map_err(sqlstate::error)?.get(0);
+            fn physical_rows(plan: &serde_json::Value) -> u64 {
+                let removed = plan.get("Rows Removed by Filter").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                    + plan.get("Rows Removed by Index Recheck").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                match plan.get("Plans").and_then(serde_json::Value::as_array) {
+                    Some(children) => removed + children.iter().map(physical_rows).sum::<u64>(),
+                    None => (removed + plan["Actual Rows"].as_u64().unwrap()) * plan["Actual Loops"].as_u64().unwrap(),
+                }
+            }
+            let bytes: i64 = tx.driver.query_one(query, args).map_err(sqlstate::error)?.get(0);
+            Ok((physical_rows(&plan[0]["Plan"]), bytes))
+        }).unwrap();
+        assert!(visited <= 4, "noise={noise} actual selected SQL rows={visited}");
+        assert_eq!(bytes as usize, name.len());
+        eprintln!("keys134_tool noise={noise} sql_rows={visited} heap_name_bytes={bytes}");
+        previous = noise;
+    }
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
 fn pg_native_keys134_tree_warm_generated_and_index_drift_refuses_before_effects() {
     let data = parser_fixture("claude");
     for alteration in [
@@ -877,7 +916,8 @@ fn pg_native_keys134_tree_warm_generated_and_index_drift_refuses_before_effects(
 #[test]
 fn pg_native_keys132_tree_real_sqlite_long_path_publication_and_restart() {
     // Finish the real SQLite parser/store oracle before creating a PG pool.
-    // Models/tools remain short: their bounded traversal is still open work.
+    // This retained path-specific oracle keeps models/tools short. Worker134
+    // separately exercises real long model/tool/name inputs.
     let data = super::super::tree_checkpoint::tests::parser_fixture_path("claude", true);
     let expected = oracle_record(&data);
     assert!(data.path.len() > 2704);
