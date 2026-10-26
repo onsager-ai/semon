@@ -102,6 +102,19 @@ never authorize changing engines. Preserve actual before/after append evidence,
 Raw/Facts/history custody, byte/WAL/mtime nonmutation checks and reader leases.
 Current publication cohorts remain 2..64 rows with a 1 MiB payload bound.
 
+SQLite native ingestion propagates typed `Busy` after the existing 100 ms
+reservation timeout. It does not promise that every competing scan succeeds.
+The ordinary viewer records a failed refresh and schedules its next check;
+committed rows remain the next scan's base. The concurrent-writer fixture permits
+only that typed refusal during its existing scan rounds, then requires a final
+scan after both writers finish and exact persisted equality with a cold read.
+It neither retries within a scan nor extends the reservation deadline.
+
+An unchanged large source that needs a Tree representation repair queues that
+repair before beginning native ingestion. The projection worker owns no ingest
+OpID or receipt. It must not leave an unexecuted ingest intent behind to block
+the semantic publication recovery fence.
+
 The user allowed the original two-second first-page target to be relaxed. The
 eight-second threshold for 0/256/2048-history fixtures was adopted during
 implementation; it is not an explicit user requirement. That test measures wall
@@ -254,7 +267,6 @@ SQLite oracles are tracked separately in the writer inventory.
 | `received.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `retention.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `storage/postgres/catalog_effects/tests.rs` | direct | Catalog124 real parser/model and ordinary SQLite Current/recipe producer oracle runs before private PG immutable effects; no complete Catalog or no-SQLite backend qualification. |
 | `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |

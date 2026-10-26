@@ -978,12 +978,12 @@ pub(crate) enum StoreError {
     /// Explicit backend errors never detach a configured producer or fork it
     /// into an in-memory/unbound writer.
     Configured(crate::storage::StorageError),
-    /// Another process held the store past its wait: this change stays in
-    /// memory and is written with the file's next one.
+    /// Another process held the store past its bounded wait. The configured
+    /// producer propagates Busy without publishing an in-memory replacement.
     Busy(String),
-    /// A row didn't decode: its file is read from the log again.
+    /// A stored row did not decode under the current contract.
     Data(String),
-    /// The store can't be used any more: the rest of the run is in memory.
+    /// The store is unavailable; a configured producer refuses the operation.
     Failed(String),
 }
 
@@ -1008,8 +1008,8 @@ pub(crate) enum Outcome {
     /// A bounded original-custody checkpoint committed. Current publication and
     /// its durable source claims remain pending for the next producer step.
     Deferred,
-    /// Another version of Semon rebuilt the store for its own parser or
-    /// schema. Nothing was written.
+    /// The captured store or parser contract is no longer current. Nothing
+    /// was written.
     Stale,
 }
 
@@ -1438,8 +1438,8 @@ struct CachedFile {
     index: Option<Arc<FileIndex>>,
 }
 
-/// The event index: every file's [`FileIndex`] in memory, written through
-/// to an [`IndexStore`] file by file when one could be opened.
+/// The admitted event index: selected [`FileIndex`] values in memory, written
+/// through the explicitly owned [`IndexStore`].
 #[derive(Default)]
 pub(crate) struct EventCache {
     files: BTreeMap<String, CachedFile>,
@@ -3349,8 +3349,55 @@ pub(crate) fn scan_file(
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
-        let prepared_ledger = {
-            let expected = cache.recorded(&key)?;
+        let started = cache.scan_measurements.start();
+        let mut file = LogFile::open(path)?;
+        let stat = Stat::from_metadata(&file.metadata()?)?;
+        cache.scan_measurements.record("open_stat", started, 1);
+        let mut recorded = cache.recorded(&key)?;
+        if recorded.is_none()
+            && harness == "codex"
+            && let Some(id) = crate_id_for_relocation(path)
+        {
+            let started = cache.scan_measurements.start();
+            if let Some(old) = cache
+                .store
+                .as_mut()
+                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+                .relocate_codex(&key, &stat, &id, &mut file, &mut cache.scan_measurements)
+                .map_err(store_io_error)?
+            {
+                cache.files.remove(&old);
+                recorded = cache.recorded(&key)?;
+            }
+            cache
+                .scan_measurements
+                .record("relocation_lookup", started, 1);
+        }
+        // Resolve a known deferred representation before journaling ingestion.
+        // The projection worker repairs this same committed Ledger; it does
+        // not own, complete, or acknowledge a native ingest operation.
+        let mut existing_base = None;
+        if let Some(ledger) = &recorded
+            && harness != "copilot"
+            && ledger.offset > 1024 * 1024
+            && ledger.stat == stat
+            && let Base::Found(index) = cache.base(&key, ledger)?
+        {
+            if index.tree_summary.is_none() {
+                cache
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+                    .queue_tree_repair(&key, ledger, harness)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native tree projection repair pending",
+                ));
+            }
+            existing_base = Some(index);
+        }
+        {
+            let expected = recorded.as_ref();
             // Each bounded host attempt owns a distinct immutable intent.
             // Explicit ingest keeps its caller's exact replay identity.
             let operation = host_operation.as_ref().map(|operation| {
@@ -3365,7 +3412,7 @@ pub(crate) fn scan_file(
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
                 .prepare_file(
                     &key,
-                    expected.as_ref(),
+                    expected,
                     operation
                         .as_deref()
                         .or(cache.event_operation.as_deref())
@@ -3383,20 +3430,8 @@ pub(crate) fn scan_file(
                 }
                 result => result.map_err(store_io_error)?,
             }
-            expected
-        };
-        // Stat'ed before reading: a line that lands during the read makes
-        // the next check see a change.
+        }
         let started = cache.scan_measurements.start();
-        let mut file = LogFile::open(path)?;
-        let stat = Stat::from_metadata(&file.metadata()?)?;
-        cache.scan_measurements.record("open_stat", started, 1);
-        let started = cache.scan_measurements.start();
-        cache
-            .scan_measurements
-            .record("relocation_lookup", started, 1);
-        let started = cache.scan_measurements.start();
-        let recorded = prepared_ledger;
         let trusted_receiver = match recorded.as_ref() {
             Some(ledger) if !verify_prefix => cache
                 .store
@@ -3413,7 +3448,11 @@ pub(crate) fn scan_file(
             && !force_replace
             && (ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file))
         {
-            match cache.base(&key, ledger)? {
+            let restored = match existing_base.take() {
+                Some(index) => Base::Found(index),
+                None => cache.base(&key, ledger)?,
+            };
+            match restored {
                 Base::Found(index) => {
                     cache.require_usage_store(&index)?;
                     trusted_append = trusted_receiver
@@ -3546,7 +3585,7 @@ pub(crate) fn scan_file(
         let deferred_tree =
             harness != "copilot" && writable.tree_summary.is_none() && from > 1024 * 1024;
         if deferred_tree {
-            // Small compatibility repairs have a fixed byte ceiling. Large
+            // Small representation repairs have a fixed byte ceiling. Large
             // retained sources resume through the verified projection worker;
             // never rebuild a historical Summary in the foreground reader.
             if let (Some(store), Some(ledger)) = (cache.store.as_mut(), recorded.as_ref()) {
@@ -10503,8 +10542,22 @@ mod tests {
                         );
                         append_lines(&logs[writer], &[claude_result(&id)]);
                         for log in &logs {
-                            scan_file(log, "claude", &mut cache, &mut false)
-                                .unwrap_or_else(|error| panic!("{error:?}: {:?}", ledger_trace()));
+                            if let Err(error) = scan_file(log, "claude", &mut cache, &mut false) {
+                                // The configured writer refuses after its bounded
+                                // 100ms wait. Ordinary producers propagate Busy;
+                                // the next existing scan resumes committed rows.
+                                // All other errors remain failures, and the final
+                                // durable oracle below must still match exactly.
+                                assert_eq!(
+                                    error
+                                        .get_ref()
+                                        .and_then(|error| error
+                                            .downcast_ref::<crate::storage::StorageError>()),
+                                    Some(&crate::storage::StorageError::Busy),
+                                    "{error:?}: {:?}",
+                                    ledger_trace()
+                                );
+                            }
                         }
                     }
                 })
