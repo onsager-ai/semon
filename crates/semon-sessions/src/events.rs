@@ -1404,6 +1404,7 @@ pub(crate) struct EventCache {
     /// Cold ingestion advances complete records by a bounded byte slice.
     pub(crate) scan_byte_budget: Option<u64>,
     cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
+    atomic_cold: bool,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -3099,6 +3100,64 @@ impl EventCache {
         Ok(())
     }
 
+    /// Request-owned cold Source batch. Parsing still uses scan_file, while
+    /// every durable family effect waits for the single final store commit.
+    /// Reconcile all identities before Raw, including after a lost batch ACK.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)] // Private native integration, not a public backend.
+    pub(crate) fn ingest_initial_batch(
+        &mut self,
+        requests: &[(&str, &Path, &str)],
+    ) -> Result<Vec<crate::storage::native_events::EventReceipt>, crate::storage::StorageError> {
+        use crate::storage::StorageError;
+        if !self.explicit_store || requests.is_empty() || requests.len() > 64
+            || !self.cold_writes.is_empty() || self.event_operation.is_some()
+        {
+            return Err(StorageError::InvalidArguments);
+        }
+        let mut paths = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        let store = self.store.as_ref().ok_or(StorageError::Unavailable)?;
+        let mut replay = Vec::new();
+        for (id, path, harness) in requests {
+            let path = path.to_str().ok_or(StorageError::InvalidArguments)?;
+            if !paths.insert(path) || !ids.insert(id) {
+                return Err(StorageError::InvalidArguments);
+            }
+            if let Some(receipt) = store.reconcile_event(id, path, harness).map_err(configured_error)? {
+                replay.push(receipt);
+            }
+        }
+        if replay.len() == requests.len() {
+            return Ok(replay);
+        }
+        if !replay.is_empty() {
+            return Err(StorageError::Conflict);
+        }
+        let prior_budget = self.scan_byte_budget;
+        self.scan_byte_budget = Some(prior_budget.unwrap_or(1024 * 1024).min(1024 * 1024));
+        self.atomic_cold = true;
+        let scanned = (|| {
+            for (id, path, harness) in requests {
+                self.event_operation = Some((*id).to_owned());
+                scan_file(path, harness, self, &mut false)?;
+            }
+            self.flush_cold_writes()
+        })();
+        self.atomic_cold = false;
+        self.event_operation = None;
+        self.scan_byte_budget = prior_budget;
+        if let Err(error) = scanned {
+            self.cold_writes.clear();
+            return Err(error.get_ref().and_then(|e| e.downcast_ref::<StorageError>()).copied().unwrap_or(StorageError::Unavailable));
+        }
+        requests.iter().map(|(_, path, _)| {
+            self.store.as_ref().ok_or(StorageError::Unavailable)?
+                .event_receipt(path.to_str().ok_or(StorageError::InvalidArguments)?)
+                .map_err(configured_error)
+        }).collect()
+    }
+
     /// Writes a file's change through to the store. `true` when another
     /// process moved the file on first, so the change must be redone. A
     /// change that isn't written is noted, and read again next scan.
@@ -3712,6 +3771,9 @@ pub(crate) fn scan_file(
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
+        }
+        if cache.atomic_cold && (recorded.is_some() || bounded || ledger.offset != ledger.stat.size) {
+            return Err(io::Error::other(crate::storage::StorageError::Conflict));
         }
         if cache.scan_byte_budget.is_some()
             && recorded.is_none()
