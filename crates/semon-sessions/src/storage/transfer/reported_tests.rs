@@ -851,10 +851,25 @@ pub(crate) mod selected_receipts {
         let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
             .connection()
             .unwrap();
-        // A same-harness append replaces Current without inventing a retained
-        // Catalog owner. The frozen Source still owns both persisted receipts;
-        // qualify each through its real generation-bound reader below.
-        let refs = db.prepare("SELECT session_key,id FROM storage_proof_generations WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
+        // The real withdrawal/successor lifecycle must retain both references.
+        // Unreferenced receipt inventory alone cannot qualify retained custody.
+        let references = db.prepare("SELECT session_key,kind,id FROM storage_proof_refs WHERE namespace=?1 ORDER BY session_key,kind,id LIMIT 65").unwrap()
+            .query_map([config.namespace.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(references.len(), 2, "fixture must retain both references");
+        assert_eq!(
+            references
+                .iter()
+                .map(|(_, kind, _)| kind.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["current", "history"])
+        );
+        let mut refs: Vec<_> = references
+            .into_iter()
+            .map(|(key, _, id)| (key, id))
+            .collect();
+        refs.sort();
+        let inventory = db.prepare("SELECT session_key,id FROM storage_proof_generations WHERE namespace=?1 ORDER BY session_key,id LIMIT 65").unwrap()
             .query_map([config.namespace.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(
@@ -862,6 +877,7 @@ pub(crate) mod selected_receipts {
             2,
             "fixture must qualify both original and successor receipts"
         );
+        assert_eq!(refs, inventory, "references must bind the exact receipt inventory");
         drop(db);
         let runtime = crate::storage::NativeReaderBinding::Semantic(owner)
             .reader_runtime()
