@@ -1350,6 +1350,9 @@ fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
 fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generation() {
     let fixture = Fixture::new();
     fixture.publish(2);
+    let original = session_catalog_identity(&fixture.options, "source", "session-00000")
+        .unwrap()
+        .unwrap();
     let (status, list) = fixture.body("limit=2&scope=retained_history");
     assert_eq!(status, 200);
     assert!(
@@ -1425,11 +1428,26 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     // ingest and the ordinary Catalog producer; the retained original trace
     // must not supply details for this Current cohort.
     let path = fixture.source("session-00000");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            json!({"type":"user","sessionId":"session-00000","uuid":"replacement","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"replacement native prompt"}})
+        ),
+    )
+    .unwrap();
     let bytes = fs::read(&path).unwrap();
     fixture.publish_existing();
     assert_eq!(fs::read(&path).unwrap(), bytes, "publication mutated Raw");
     let (status, changed) = fixture.body("sid=session-00000");
     assert_eq!(status, 200);
+    assert_eq!(changed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(changed["items"][0]["key"], "session-00000");
+    let current = session_catalog_identity(&fixture.options, "source", "session-00000")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.native_ids, original.native_ids);
+    assert_ne!(current.source_refs, original.source_refs);
     assert!(
         changed["items"][0].get("details").is_none(),
         "changed native provenance must not supply recorded details"
@@ -1441,6 +1459,20 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
         "retained details remain bound to the original source generation"
     );
     assert_eq!(retained["items"][0]["details"]["turns"], 1);
+    assert_eq!(
+        session_catalog_history_identity(&fixture.options, "source", "session-00000")
+            .unwrap()
+            .unwrap()
+            .source_refs
+            .into_iter()
+            .map(|observation| observation.source)
+            .collect::<Vec<_>>(),
+        original
+            .source_refs
+            .into_iter()
+            .map(|observation| observation.source)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         fixture.body("sid=session-00001&scope=retained_history").1["items"][0]["details"]["turns"],
         1
