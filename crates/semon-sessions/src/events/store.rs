@@ -2618,9 +2618,7 @@ fn queue_tree_repair_tx(tx: &Transaction<'_>, path: &str, ledger: &Ledger) -> io
             "native tree compact metadata exceeds budget",
         ));
     }
-    tx.execute(native_usage::repair_sql(&tx,
-            "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",
-            "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END").map_err(io::Error::other)?,params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
+    tx.execute("INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
     Ok(())
 }
 
@@ -5311,9 +5309,7 @@ fn write_tree_summary(
                 params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
             )?;
             transaction.execute(
-                native_usage::repair_sql(transaction,
-                    "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
-                    "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1")?,
+                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1",
                 [path],
             )?;
             return Ok(());

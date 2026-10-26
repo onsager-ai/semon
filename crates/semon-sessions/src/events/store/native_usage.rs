@@ -57,7 +57,6 @@ std::thread_local! {
 }
 pub(super) use repair::advance;
 pub(super) use repair::pending as repair_pending;
-pub(super) use repair::sql as repair_sql;
 
 const SCHEMA: &str = "
 CREATE TABLE native_usage_sources (
@@ -534,9 +533,7 @@ mod namespace_tests {
                 ..FileIndex::default()
             };
             write(&tx, path, &ledger, &index).unwrap();
-            tx.execute(repair_sql(&tx,
-                "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2)",
-                "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)").unwrap(),
+            tx.execute("INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)",
                 params![path,header_ledger(&ledger)]).unwrap();
             put_dimension(&tx, 1, "model", "same-model", &namespace).unwrap();
             // The original observation at the same offset reconciles exactly.
@@ -549,9 +546,7 @@ mod namespace_tests {
         let b = state(&db, "b");
         assert!(repair_pending(&db).unwrap());
         bind(&db, "a");
-        db.execute(repair_sql(&db,
-            "UPDATE native_tree_repairs SET state='done' WHERE source_path=?1",
-            "UPDATE native_tree_repairs SET state='done' WHERE namespace=semon_namespace() AND source_path=?1").unwrap(), [path]).unwrap();
+        db.execute("UPDATE native_tree_repairs SET state='done' WHERE namespace=semon_namespace() AND source_path=?1", [path]).unwrap();
         assert!(!repair_pending(&db).unwrap());
         bind(&db, "b");
         assert!(repair_pending(&db).unwrap());
