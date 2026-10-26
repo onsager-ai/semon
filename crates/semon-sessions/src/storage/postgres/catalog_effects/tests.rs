@@ -420,10 +420,18 @@ fn build_oracle(keep_raw: bool) -> Input {
     assert!(!prepared.rows.is_empty());
     assert!(!prepared.transcripts.is_empty());
     drop(cache);
+    // Reopen the same current native profile through its admitted owner.  The
+    // oracle must exercise the namespace-keyed publisher, rather than the
+    // transitional unbound port whose conflict keys are deliberately absent
+    // from the current schema.
+    let config = options.source.config(&options.cache).unwrap();
+    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap(),
+    );
     let mut connection =
         rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
     let db = connection.transaction().unwrap();
-    let writer = CurrentWriter::unbound(&db);
+    let writer = CurrentWriter::admitted(&db, &admission).unwrap();
     for row in &prepared.rows {
         writer
             .current(row, &serde_json::to_string(row).unwrap())
@@ -431,7 +439,7 @@ fn build_oracle(keep_raw: bool) -> Input {
         catalog::publish_current_sources(&writer, row).unwrap();
         if let Some(trace) = &row.trace {
             crate::causal_trace::publish_with_store(
-                &crate::storage::sqlite::trace::TraceWriter::unbound(&db),
+                &crate::storage::sqlite::trace::TraceWriter::admitted(&db, &admission).unwrap(),
                 row,
                 trace,
             )
@@ -439,13 +447,17 @@ fn build_oracle(keep_raw: bool) -> Input {
         }
     }
     catalog::publish_slot_rows(
-        &SlotWriter::unbound(&db),
+        &SlotWriter::admitted(&db, &admission).unwrap(),
         &prepared.rows,
         &prepared.transcripts,
     )
     .unwrap();
-    crate::catalog_search::publish_current_rows(&db, &prepared.rows.iter().collect::<Vec<_>>())
-        .unwrap();
+    crate::catalog_search::publish_current_rows_with_store(
+        &db,
+        &prepared.rows.iter().collect::<Vec<_>>(),
+        &crate::storage::sqlite::search::SearchWriter::admitted(&db, &admission).unwrap(),
+    )
+    .unwrap();
     let read = |sql: &str| {
         db.prepare(sql)
             .unwrap()
