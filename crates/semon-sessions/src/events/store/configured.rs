@@ -543,6 +543,30 @@ pub(crate) fn validate_staging_owner(
     validate(db, config)
 }
 
+/// The same scoped profile gates admitted readers and native owners, inside
+/// their payload snapshot; mutable profile rows are never schema-cookie cached.
+pub(crate) fn validate_read_profile(
+    db: &Connection,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    admission: i64,
+) -> Result<(), StorageError> {
+    // Readers and native writers share the producer's current scoped
+    // profile. A retained capability cannot authorize a replaced recipe.
+    let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![namespace.as_str(),admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
+    if !profile {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_version','search_version') AND value<>CASE key WHEN 'catalog_version' THEN ?2 ELSE ?3 END)",params![namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
+    if !publications {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [namespace.as_str()], |r| r.get(0)).map_err(failed)?;
+    if incoming {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    Ok(())
+}
+
 /// Private primitive writer authority. Database flags cannot manufacture it;
 /// public configuration always uses the sole-Source admission path.
 #[derive(Clone, Debug)]
@@ -610,6 +634,9 @@ impl NativeOwnership {
                 return Ok(());
             }
         }
+        if !current_objects_present(db).map_err(failed)? {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         validate_core(db)?;
         validate_statement_layout(db).map_err(failed)?;
         // Qualify the ordinary Current keyset read when the DDL cookie
@@ -638,20 +665,7 @@ impl NativeOwnership {
 
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
         self.validate(db)?;
-        // Readers and native writers share the producer's current scoped
-        // profile. A retained capability cannot authorize a replaced recipe.
-        let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![self.config.namespace.as_str(),self.admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
-        if !profile {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-        let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_version','search_version') AND value<>CASE key WHEN 'catalog_version' THEN ?2 ELSE ?3 END)",params![self.config.namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
-        if !publications {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-        let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        if incoming {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
+        validate_read_profile(db, &self.config.namespace, self.admission)?;
         let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);

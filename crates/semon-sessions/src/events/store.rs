@@ -10045,7 +10045,7 @@ mod tests {
             ),
             (
                 "foreign",
-                "DROP TABLE events; DROP TABLE files",
+                "ALTER TABLE events RENAME TO foreign_events; ALTER TABLE files RENAME TO foreign_files",
                 "malformed schema",
             ),
             (
@@ -10054,7 +10054,7 @@ mod tests {
                 "older schema",
             ),
             (
-                "older-with-future-parser",
+                "older-with-invalid-profile-admission",
                 "PRAGMA user_version=32; UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
                 "older schema",
             ),
@@ -10104,9 +10104,9 @@ mod tests {
                 "malformed metadata",
             ),
             (
-                "newer-parser",
+                "invalid-profile-admission",
                 "UPDATE main.storage_semantic_profiles SET admission=2147483647 WHERE namespace=semon_namespace()",
-                "parser version mismatch",
+                "profile admission mismatch",
             ),
             (
                 "publication",
@@ -10139,7 +10139,8 @@ mod tests {
             let path = v1.with_extension("sqlite3");
             let source =
                 crate::storage::HostSource::new(fixture_namespace(), "a".repeat(64)).unwrap();
-            let native = root.join("original.jsonl");
+            let native = root.join("claude/projects/fixture/original.jsonl");
+            fs::create_dir_all(native.parent().unwrap()).unwrap();
             fs::write(&native, "{\"type\":\"user\",\"uuid\":\"original\",\"sessionId\":\"original\",\"message\":{\"role\":\"user\",\"content\":\"original native input\"}}\n").unwrap();
             let mut cache = super::super::EventCache::open_scoped(&v1, &source).unwrap();
             super::super::scan_file(&native, "claude", &mut cache, &mut false).unwrap();
@@ -10163,7 +10164,16 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            store.connection.execute_batch(change).unwrap();
+            if name == "archive" {
+                // Bind the unsupported marker to the real consumed input, so
+                // Facts discovery reaches its normal selected-source reader.
+                store.connection.execute("INSERT INTO main.meta(namespace,key,value) VALUES('fixture-source',?1,'{\"version\":7}')", [archive_index_key(native.to_str().unwrap())]).unwrap();
+            } else {
+                store
+                    .connection
+                    .execute_batch(change)
+                    .unwrap_or_else(|error| panic!("{name} fixture corruption: {error}"));
+            }
             let original_state = snapshot(&store.connection);
             // Finish fixture writes before snapshotting the original file.
             let checkpoint: (i64, i64, i64) = store
@@ -10206,10 +10216,10 @@ mod tests {
                 let db = fixture_reader_binding(&path)
                     .and_then(|binding| focused_connection(&binding))
                     .unwrap();
-                assert!(archived_index(&db, "original").is_err());
+                assert!(archived_index(&db, native.to_str().unwrap()).is_err());
             }
             unchanged();
-            match super::super::EventCache::open(&v1, &crate::Options::default().source) {
+            match super::super::EventCache::open(&v1, &source) {
                 Err(_) if name != "archive" => {}
                 Ok(_) if name == "archive" => {}
                 _ => panic!("unexpected admission for {name}"),
