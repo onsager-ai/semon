@@ -8287,6 +8287,7 @@ mod tests {
         cache
             .refresh_reported_runs(&claude_json, 5000, &mut dirty)
             .unwrap();
+        cache.select_reported_runs(&BTreeSet::from(["run-one".to_owned(), "run-two".to_owned()])).unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
         let mut reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
@@ -9964,7 +9965,7 @@ mod tests {
             writer.sync_all().unwrap();
             intent.complete(from + append.len() as u64).unwrap();
             drop(cache);
-            let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+            let db = crate::storage::sqlite::source_journal::SourceJournal(options.source.config(&options.cache).unwrap()).connection().unwrap();
             db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
             let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let full = HASHED_BYTES.with(std::cell::Cell::get);
