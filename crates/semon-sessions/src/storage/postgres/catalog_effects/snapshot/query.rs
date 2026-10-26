@@ -1,5 +1,5 @@
-//! Private Query injection over an acknowledged generation. It deliberately
-//! refuses cohorts requiring retained-history merge until that route is ported.
+//! Private Query injection over an acknowledged generation. Cohorts merge
+//! retained history exactly as the SQLite reader: history rows win per key.
 use super::*;
 use crate::{
     Options, QueryError,
@@ -206,7 +206,16 @@ impl QueryCatalogStore for QueryCatalog {
                     last: row.last.unwrap_or(0), key: row.key.clone(),
                 });
                 for row in catalog {
-                    if snapshot.has_history(&row.key).map_err(|_| StorageError::Unavailable)? { return Err(StorageError::NamespaceUpgradePending); }
+                    // As the SQLite reader: a Current key with retained history
+                    // contributes its retained history row to the cohort.
+                    let row = match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
+                        Some(text) => {
+                            let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+                            if history.key != row.key { return Err(StorageError::ScopeChanged); }
+                            history
+                        }
+                        None => row,
+                    };
                     if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
                     let expected = observations.expected(&row);
                     let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
