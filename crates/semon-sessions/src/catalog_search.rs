@@ -236,7 +236,11 @@ fn publish_current_rows_order(
 ) -> rusqlite::Result<()> {
     publish_current_rows_effects(
         transaction,
-        &crate::storage::sqlite::search::SearchWriter::admitted(transaction, &tests::source(transaction)).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        &crate::storage::sqlite::search::SearchWriter::admitted(
+            transaction,
+            &sqlite_tests::source(transaction),
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?,
         rows,
         owners,
         #[cfg(test)]
@@ -439,16 +443,14 @@ pub(crate) fn backfill_catalog_row(
     Ok(())
 }
 
-/// Rebuild the ordering index once after bulk insertion. This runs inside the
-/// Catalog publication transaction: readers retain the previous complete index,
-/// and rollback restores both its contents and schema.
+/// Rebuild only the current namespace inside the publication transaction.
+/// The shared ordering indexes remain available to every other namespace.
 pub(crate) fn begin_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
     clear(transaction)?;
-    transaction.execute_batch("DROP INDEX IF EXISTS session_search_current_order; DROP INDEX IF EXISTS session_search_history_order;")
+    Ok(())
 }
 
 pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(namespace,gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL; CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(namespace,gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;")?;
     for scope in ["current", "retained_history"] {
         let (column, _) = membership(scope)?;
         transaction.execute(&format!("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT semon_namespace(), ?1,gram,COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND {column} IS NOT NULL GROUP BY gram ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members"), [scope])?;
@@ -1050,13 +1052,12 @@ mod sqlite_tests {
         crate::storage::sqlite::semantic::AdmittedSource::native(crate::events::store::configured::NativeOwnership::restore(&config).unwrap())
     }
     fn database() -> Connection {
-        use crate::storage::{StoreBackend, StoreConfig, LogicalSourceNamespace};
+        use crate::storage::LogicalSourceNamespace;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!("semon-current-search-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        let config = StoreConfig { backend: StoreBackend::Sqlite { database: path }, namespace: LogicalSourceNamespace::new("search-current").unwrap(), expected_stream_epoch: Some("a".repeat(64)) };
-        config.create_native_store().unwrap();
-        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-        let connection = crate::events::store::configured::connection(&config).unwrap();
+        let connection = crate::events::store::current_search_test_connection(
+            &path, &LogicalSourceNamespace::new("search-current").unwrap(),
+        );
         connection.execute_batch("CREATE TEMP TABLE catalog_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID;").unwrap();
         connection
     }

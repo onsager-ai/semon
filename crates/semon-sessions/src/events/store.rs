@@ -11934,3 +11934,16 @@ pub(crate) fn qualify_catalog_tx(
 
     tx.query_row("SELECT (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version')=?1 AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=semon_namespace()) AND (SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')=(SELECT value FROM meta WHERE namespace=semon_meta_scope('slot_projection_catalog_generation') AND key='slot_projection_catalog_generation')", [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
 }
+
+#[cfg(test)]
+pub(crate) fn current_search_test_connection(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+) -> Connection {
+    let (mut store, _) = SqliteStore::attempt(path, namespace).unwrap();
+    store.publish_catalog_with_generation(
+        &crate::slot_projection::Publication { rows: &[], transcripts: None },
+        None, None, false, None,
+    ).unwrap();
+    store.connection
+}
