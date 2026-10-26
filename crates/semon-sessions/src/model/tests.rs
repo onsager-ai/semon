@@ -10651,10 +10651,15 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     home.top("root", &[human("root", ts(0, 0), "current root prompt")]);
     let removed=home.top("cleared", &[json!({"type":"user","uuid":"old-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"unsupported old native prompt"}})]);
     home.build_query();
-    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     connection
         .execute(
-            "UPDATE session_slot_projections SET version=version+1 WHERE session_key='root'",
+            "UPDATE main.session_slot_projections SET version=version+1 WHERE namespace=semon_namespace() AND session_key='root'",
             [],
         )
         .unwrap();
@@ -12106,7 +12111,12 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         .unwrap()
         .unwrap();
     crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
-    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let marker_key = format!(
         "archive_event_index:{}",
         home.options.codex_home.join(&relative).display()
@@ -12122,7 +12132,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     // certify a V5 source cohort. A new Current owner must retain this custody
     // without granting an empty or rebound historical observation.
     db.execute(
-        "UPDATE session_slot_projections SET version=4,source_generation=NULL WHERE session_key=?1",
+        "UPDATE main.session_slot_projections SET version=4,source_generation=NULL WHERE namespace=semon_namespace() AND session_key=?1",
         [native],
     )
     .unwrap();
