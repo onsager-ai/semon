@@ -144,6 +144,7 @@ pub(crate) fn catalog_page(
     pool: &PgPool,
     control: &PgCancellation,
     options: &crate::Options,
+    source: &str,
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, super::StorageError> {
     let generation = configured_generation(config, pool, control)?;
@@ -155,7 +156,7 @@ pub(crate) fn catalog_page(
         |snapshot| {
             crate::catalog::read_page_snapshot(
                 options,
-                config.namespace.as_str(),
+                source,
                 request,
                 snapshot,
             )

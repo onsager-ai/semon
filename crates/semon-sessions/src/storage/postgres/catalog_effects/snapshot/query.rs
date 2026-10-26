@@ -32,8 +32,15 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
-        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
-        let runtime = runtime_observation.generation(&self.options)
+        let runtime_observation = super::super::super::current_sources::Runtime::open(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.options,
+        )
+        .map_err(unavailable)?;
+        let runtime = runtime_observation
+            .generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         // Use the same qualified window closure as listing. Its generation is
         // immutable; the selected snapshot below also fences its runtime.
@@ -182,7 +189,8 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|_| StorageError::Unavailable)?;
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                    if runtime_observation.generation(&self.options)
+                    if runtime_observation
+                        .generation(&self.options)
                         .map_err(|_| StorageError::Unavailable)?
                         != runtime
                     {
@@ -226,7 +234,8 @@ impl QueryCatalogStore for QueryCatalog {
                 )
                 .map_err(|_| StorageError::Unavailable)?;
                 records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                if runtime_observation.generation(&self.options)
+                if runtime_observation
+                    .generation(&self.options)
                     .map_err(|_| StorageError::Unavailable)?
                     != runtime
                 {
@@ -250,8 +259,15 @@ impl QueryCatalogStore for QueryCatalog {
         let cutoff = (!self.options.all).then(|| {
             now.saturating_sub(i64::try_from(self.options.since.as_millis()).unwrap_or(i64::MAX))
         });
-        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
-        let runtime = runtime_observation.generation(&self.options)
+        let runtime_observation = super::super::super::current_sources::Runtime::open(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.options,
+        )
+        .map_err(unavailable)?;
+        let runtime = runtime_observation
+            .generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
@@ -494,10 +510,17 @@ impl QueryCatalogStore for QueryCatalog {
         .map_err(unavailable)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
-        let runtime_observation = super::super::super::current_sources::Runtime::open(&self.pool, &self.namespace, &self.control, &self.options).map_err(unavailable)?;
+        let runtime_observation = super::super::super::current_sources::Runtime::open(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.options,
+        )
+        .map_err(unavailable)?;
         if namespace != &self.namespace
             || part.generation != self.generation
-            || runtime_observation.generation(&self.options)
+            || runtime_observation
+                .generation(&self.options)
                 .map_err(|error| QueryError::io(&error))?
                 != part.runtime
         {
