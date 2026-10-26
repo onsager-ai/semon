@@ -153,6 +153,15 @@ pub(crate) fn publish_current_measured(
     row: &crate::model::summary::CatalogRow,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
+    publish_current_owned(tx, row, measurements, None)
+}
+
+pub(crate) fn publish_current_owned(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    measurements: &mut crate::native_timing::Measurements,
+    owner: Option<&crate::events::store::configured::NativeOwnership>,
+) -> rusqlite::Result<()> {
     let started = measurements.start();
     let history = crate::history_projection::catalog(tx, &row.key)?
         .map(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text))
@@ -197,12 +206,12 @@ pub(crate) fn publish_current_measured(
                 measurements.record("trace_update", started, 1);
             }
             let started = measurements.start();
-            tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
+            tx.prepare_cached("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1")?
                 .execute([format!("overview_needed:{}", row.key)])?;
             measurements.record("cleanup", started, 1);
         } else {
             let started = measurements.start();
-            tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')")?
+            tx.prepare_cached("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1')")?
                 .execute([format!("overview_needed:{}", row.key)])?;
             measurements.record("repair_request", started, 1);
         }
@@ -210,7 +219,9 @@ pub(crate) fn publish_current_measured(
     }
     if let Some(trace) = &row.trace {
         let started = measurements.start();
-        if started.is_some() {
+        if let Some(owner) = owner {
+            crate::causal_trace::publish_owned(tx, owner, row, trace)?;
+        } else if started.is_some() {
             crate::causal_trace::publish_measured(tx, row, trace, measurements)?;
         } else {
             crate::causal_trace::publish(tx, row, trace)?;
@@ -221,7 +232,7 @@ pub(crate) fn publish_current_measured(
         publish_measured(tx, &row.key, row.last.unwrap_or(0), summary, measurements)?;
     }
     let started = measurements.start();
-    tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
+    tx.prepare_cached("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1")?
         .execute([format!("overview_needed:{}", row.key)])?;
     measurements.record("cleanup", started, 1);
     Ok(())

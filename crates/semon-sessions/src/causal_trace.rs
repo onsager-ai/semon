@@ -442,7 +442,7 @@ pub(crate) fn update_current_observation(
             Sha256::digest(json!([version, metadata]).to_string().as_bytes())
         );
         tx.execute(
-            "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE session_key=?1",
+            "UPDATE main.session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
             params![key, text, generation],
         )?;
     }
