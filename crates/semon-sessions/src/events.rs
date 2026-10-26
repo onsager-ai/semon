@@ -3610,7 +3610,12 @@ pub(crate) fn scan_file(
                 recorded.as_ref().expect("trusted ledger exists").prefix,
             ) {
                 Ok(captured) => captured,
-                Err(_) if !last => {
+                Err(error)
+                    if !last
+                        && error.get_ref().and_then(|error| {
+                            error.downcast_ref::<crate::storage::StorageError>()
+                        }) == Some(&crate::storage::StorageError::Conflict) =>
+                {
                     force_replace = true;
                     continue;
                 }
