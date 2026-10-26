@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 pub(crate) mod inventory;
+pub(crate) mod reported;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_PAGE_ROWS: usize = 64;

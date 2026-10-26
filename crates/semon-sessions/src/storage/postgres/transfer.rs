@@ -96,10 +96,92 @@ pub(crate) fn checkpoint(
     })
 }
 
+pub(crate) fn snapshot_reported(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, operation: &[u8; 32]) -> Result<SnapshotManifest, StorageError> {
+    transaction(config, pool, control, |tx| {
+        if let Some(manifest) = transfer::reported::saved_reported(tx, config, operation)? { return Ok(manifest); }
+        let ns = config.namespace.as_str().as_bytes();
+        // Publication lock serializes every ordinary source writer through the
+        // capture and durable page commit; subsequent changes cannot alter it.
+        let sizes = tx.0.driver.query("SELECT octet_length(record)::bigint+octet_length(session_id)::bigint FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY session_digest,start LIMIT 65", &[&ns]).map_err(sqlstate::error)?;
+        if sizes.len() > transfer::MAX_PAGE_ROWS || sizes.iter().try_fold(0_i64, |sum,row| sum.checked_add(row.get::<_, i64>(0))).is_none_or(|sum| sum > 120000) { return Err(StorageError::Busy); }
+        tx.0.check()?;
+        let rows = tx.0.driver.query("SELECT session_id,start,record FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY session_digest,start LIMIT 65", &[&ns]).map_err(sqlstate::error)?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let record = crate::events::reported_rows::ReportedRow::decode(&row.get::<_, Vec<u8>>(2)).map_err(|_| StorageError::ScopeChanged)?;
+            if record.run.last_session_id.as_bytes() != row.get::<_, Vec<u8>>(0) || record.run.last_start_time != row.get::<_, i64>(1) { return Err(StorageError::ScopeChanged); }
+            runs.push(record.run);
+        }
+        runs.sort_by(|a,b| (&a.last_session_id,a.last_start_time).cmp(&(&b.last_session_id,b.last_start_time)));
+        let stamp = tx.0.driver.query("SELECT CASE WHEN octet_length(stamp)<=16384 THEN stamp END FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton", &[&ns]).map_err(sqlstate::error)?;
+        let stamp = stamp.first().map(|row| crate::events::reported_rows::decode_stamp(&row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)).transpose()?;
+        let revision: i64 = tx.0.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+        let binding = model_cache::binding(tx.0)?.admission;
+        transfer::reported::capture_reported(tx, config, operation, binding, u64::try_from(revision).map_err(|_| StorageError::ScopeChanged)?, runs, stamp)
+    })
+}
+
+pub(crate) fn materialize_reported(config: &StoreConfig, pool: &PgPool, control: &PgCancellation, manifest: &SnapshotManifest) -> Result<TransferCheckpoint, StorageError> {
+    transaction(config, pool, control, |tx| {
+        let materialization = transfer::reported::reported_materialization(tx, manifest)?;
+        if materialization.replayed { return Ok(materialization.checkpoint); }
+        let ns = config.namespace.as_str().as_bytes();
+        let occupied: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)", &[&ns]).map_err(sqlstate::error)?.get(0);
+        if occupied { return Err(StorageError::Conflict); }
+        for run in &materialization.runs {
+            tx.0.check()?;
+            let record = crate::events::reported_rows::ReportedRow::new(run).and_then(|row| row.encode()).map_err(|_| StorageError::ScopeChanged)?;
+            tx.0.driver.execute("INSERT INTO semon_pg_native_reported_runs(namespace,session_digest,session_id,start,record) VALUES($1,sha256($2::bytea),$2,$3,$4)", &[&ns,&run.last_session_id.as_bytes(),&run.last_start_time,&record]).map_err(sqlstate::error)?;
+        }
+        if let Some(stamp) = &materialization.stamp {
+            let bytes = crate::events::reported_rows::encode_stamp(stamp).map_err(|_| StorageError::ScopeChanged)?;
+            tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&bytes]).map_err(sqlstate::error)?;
+        }
+        transfer::reported::acknowledge_reported(tx, &materialization.checkpoint)?;
+        Ok(materialization.checkpoint)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
+
+    #[test]
+    fn pg_current_transfer225_reported_authoritative_roundtrip_lost_ack_and_postwrite_reverse() {
+        use transfer::reported::tests::{root, sqlite, observe, read, stage};
+        let root = root();
+        let source = sqlite(&root, "source");
+        let rollback = sqlite(&root, "rollback");
+        let input = root.join(".claude.json");
+        observe(&source, &input, 100, 101);
+        observe(&source, &input, 200, 202);
+        let expected = read(&source);
+        let (pool, _) = super::super::tests::fixture(|_| {});
+        let config = StoreConfig {
+            backend: StoreBackend::Postgres { pool: pool.clone(), control: PgCancellation::default() },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        config.create_native_store().unwrap();
+        let manifest = stage(&source, &config, &[3;32]);
+        assert!(read(&config).is_empty());
+        super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
+        assert!(matches!(config.transfer_inbox().materialize_reported_facts(&manifest), Err(StorageError::CommitUncertain)));
+        assert_eq!(read(&config), expected, "ordinary reader must see authoritative committed rows after lost ACK");
+        config.transfer_inbox().materialize_reported_facts(&manifest).unwrap();
+        observe(&config, &input, 300, 303);
+        let postwrite = read(&config);
+        assert_eq!(postwrite.len(), 3);
+        // Retained observations survive despite disappearing from input.
+        assert_eq!(&postwrite[..2], expected.as_slice());
+        let reverse = stage(&config, &rollback, &[4;32]);
+        rollback.transfer_inbox().materialize_reported_facts(&reverse).unwrap();
+        assert_eq!(read(&rollback), postwrite);
+        assert_eq!(read(&source), expected, "reverse must not reset the original store");
+        assert!(input.exists(), "transfer must leave Facts input untouched");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pg_current_transfer225_inbox_restart_exact_replay_rls_and_unknown_commit() {
