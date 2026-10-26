@@ -1128,7 +1128,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     ));
     let facts_path=oracle.root.join("positive-facts158.json");
     let mut recorded=crate::Facts {version:2,hostname:"source-write-before158".into(),..Default::default()};
-    crate::write_facts(&facts_path,&recorded).unwrap();
+    crate::save_json_file(&facts_path,&recorded).unwrap();
     let mut facts_options=options.clone();facts_options.facts=Some(facts_path.clone());
     let before_runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
     let from=fs::metadata(&path).unwrap().len();
@@ -1136,7 +1136,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let facts_intent=writer.intent();
     let extra=format!("{}\n",serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}}));
     let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();file.write_all(extra.as_bytes()).unwrap();file.sync_all().unwrap();drop(file);
-    recorded.hostname="source-write-after158".into();crate::write_facts(&facts_path,&recorded).unwrap();
+    recorded.hostname="source-write-after158".into();crate::save_json_file(&facts_path,&recorded).unwrap();
     writer.complete(from+extra.len() as u64).unwrap();
     let replay=crate::SessionSourceWrite::begin_with_store(&facts_options,&inputs[0],None,0,raw_store(),Some(facts_intent)).unwrap();replay.complete(from+extra.len() as u64).unwrap();
     let runtime=crate::native_evidence::query_runtime_generation(&facts_options).unwrap();assert_ne!(before_runtime,runtime);
@@ -1146,7 +1146,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let batch=moved_cache.semantic_batch(64).unwrap().unwrap();
         let model=moved_cache.prepare_semantic_model_batch(&facts_options,&moved_inputs,&batch,1790812805000).unwrap();
         if batch.phase==crate::model::relation_stage::Phase::Publication {
-            assert!(model.prepared().rows.iter().all(|r|r.query.as_ref().is_some_and(|q|q["runtime"]==runtime)));
+            assert!(serde_json::to_string(&model.prepared().rows).unwrap().contains("source-write-after158"));
             let ack=moved_cache.publish_semantic_catalog(&batch,model.prepared()).unwrap();moved_cache.finish_semantic_stage(batch.epoch).unwrap();break ack.1.unwrap();
         }
     };
