@@ -117,7 +117,9 @@ pub(super) fn apply_native(
             let extra = values[0].as_bool().ok_or(StorageError::ScopeChanged)?;
             let sequence = values[1].as_i64().ok_or(StorageError::ScopeChanged)?;
             let expected: i64 = tx.0.driver.query_one("SELECT coalesce(max(seq),-1)+1 FROM semon_pg_native_events WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND extra=$3", &[&ns,&id,&extra]).map_err(sqlstate::error)?.get(0);
-            if sequence != expected { return Err(StorageError::Conflict); }
+            if sequence != expected {
+                return Err(StorageError::Conflict);
+            }
             let mut row = vec![serde_json::Value::from(id)];
             row.extend(values.clone());
             ("events", format!("file_id,{EVENT}"), row)
