@@ -68,7 +68,16 @@ pub(crate) struct WriteCompletion {
     pub(crate) facts: Option<String>,
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static SOURCE_SQL_LOCK:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
+#[cfg(test)]
+pub(crate) struct SqlLockScope;
+#[cfg(test)]
+impl SqlLockScope {pub(crate) fn enter()->Self {SOURCE_SQL_LOCK.with(|v|assert!(!v.replace(true)));Self}}
+#[cfg(test)]
+impl Drop for SqlLockScope {fn drop(&mut self) {SOURCE_SQL_LOCK.with(|v|v.set(false));}}
 pub(crate) fn bytes_hash(path: &std::path::Path, length:u64, mut check:impl FnMut()->io::Result<()>) -> io::Result<[u8;32]> {
+    #[cfg(test)] SOURCE_SQL_LOCK.with(|v|assert!(!v.get(),"history I/O under SourceState lock"));
     use std::io::Read;
     use sha2::{Digest,Sha256};
     let mut file=crate::sealed::LogFile::open(path)?;

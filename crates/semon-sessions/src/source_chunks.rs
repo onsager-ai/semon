@@ -246,6 +246,7 @@ pub(crate) fn capture_append(
 /// The receiver fence and exact old ledger authorize unchanged earlier blocks;
 /// the affected boundary is independently compared against the old full digest.
 pub(crate) fn continue_prefix(file:&mut(impl Read+Seek),state:&PrefixState,from:u64,expected:[u8;32],to:u64,mut check:impl FnMut()->io::Result<()>)->io::Result<[u8;32]> {
+    #[cfg(test)] crate::source_change::SOURCE_SQL_LOCK.with(|v|assert!(!v.get(),"history I/O under SourceState lock"));
     if from>to || state.at!=from/SIZE as u64*SIZE as u64 {return Err(unavailable());}
     let boundary=state.at;
     let mut old=vec![0;(from-boundary) as usize];
