@@ -438,24 +438,6 @@ pub(super) fn context(tx: &mut PgTxn<'_>, epoch: i64) -> Result<Context, Storage
     Ok(stage.context)
 }
 
-pub(super) fn native_key(
-    tx: &mut PgTxn<'_>,
-    epoch: i64,
-    harness: &str,
-    native: &str,
-) -> Result<String, StorageError> {
-    let stage = load(tx, true)?.ok_or(StorageError::Conflict)?;
-    if stage.epoch != epoch || stage.generation != model_cache::generation(tx)? {
-        return Err(StorageError::Conflict);
-    }
-    stage
-        .identities
-        .iter()
-        .find(|(h, n, _)| h == harness && n == native)
-        .map(|(_, _, key)| key.clone())
-        .ok_or(StorageError::ScopeChanged)
-}
-
 // The ordinary relationship recipe owns candidate cardinality and endpoint
 // validation. This adapter supplies the epoch-fenced, native-derived cohort.
 pub(super) fn select(
@@ -466,6 +448,7 @@ pub(super) fn select(
     use crate::model::relation_stage::{self, Selection, SelectorEndpointRow, SelectorLookup};
     struct Lookup {
         context: Context,
+        identities: Vec<(String, String, String)>,
         events: Vec<crate::events::store::semantic_stage::ProjectedEvent>,
         hints: Vec<(String, String)>,
         replay: Vec<String>,
@@ -486,8 +469,27 @@ pub(super) fn select(
         fn invalid(&self, _: &'static str) -> StorageError {
             StorageError::ScopeChanged
         }
-        fn native_key(&self, _: &str, _: &str) -> Result<Selection, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn native_key(&self, native: &str, harness: &str) -> Result<Selection, StorageError> {
+            let key = self
+                .identities
+                .iter()
+                .find(|(h, n, _)| h == harness && n == native)
+                .map(|(_, _, key)| key.clone())
+                .ok_or(StorageError::ScopeChanged)?;
+            let endpoints = self
+                .context
+                .endpoints
+                .values()
+                .filter(|e| {
+                    e.row.harness == harness && e.row.native_ids.iter().any(|n| n == native)
+                })
+                .collect::<Vec<_>>();
+            Ok(Selection {
+                count: 1,
+                key: Some(key),
+                endpoint: (endpoints.len() == 1).then(|| endpoints[0].clone()),
+                ..Default::default()
+            })
         }
         fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, StorageError> {
             Ok(self
@@ -639,7 +641,23 @@ pub(super) fn select(
         }
     }
     lock(tx)?;
-    let context = context(tx, epoch)?;
+    tx.check()?;
+    let stage = load(tx, true)?.ok_or(StorageError::Conflict)?;
+    if stage.epoch != epoch || stage.generation != model_cache::generation(tx)? {
+        return Err(StorageError::Conflict);
+    }
+    let (context, identities) = (stage.context, stage.identities);
+    if let relation_stage::Selector::NativeKey { .. } = selector {
+        // Stage identities answer this selector; no event projection needed.
+        let mut lookup = Lookup {
+            context,
+            identities,
+            events: Vec::new(),
+            hints: Vec::new(),
+            replay: Vec::new(),
+        };
+        return relation_stage::select_with(&mut lookup, selector).map(Some);
+    }
     let events = super::semantic_events::project(tx, &context)?;
     let generation = model_cache::generation(tx)?;
     let ns = tx.namespace.as_str().as_bytes();
@@ -682,6 +700,7 @@ pub(super) fn select(
     }
     let mut lookup = Lookup {
         context,
+        identities,
         events,
         hints,
         replay: Vec::new(),
