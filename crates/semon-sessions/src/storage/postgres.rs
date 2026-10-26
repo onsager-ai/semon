@@ -58,3 +58,106 @@ mod native_recovery_tests;
 
 #[cfg(test)]
 mod proxy_test;
+
+pub(crate) fn configured_query_catalog(
+    options: &crate::Options,
+    config: &super::StoreConfig,
+    pool: PgPool,
+    control: PgCancellation,
+) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
+    let generation = configured_generation(config, &pool, &control)?;
+    Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
+        pool,
+        namespace: config.namespace.clone(),
+        control,
+        generation,
+        options: options.clone(),
+    }))
+}
+
+pub(crate) fn create_native_store(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<(), super::StorageError> {
+    let epoch = config
+        .expected_stream_epoch
+        .as_deref()
+        .filter(|epoch| epoch.len() == 64 && epoch.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or(super::StorageError::InvalidArguments)?;
+    pool.transaction(&config.namespace, txn::TxnKind::Write, control, |tx| {
+        let inserted = tx.driver.execute(
+            "INSERT INTO semon_pg_source_state(namespace) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&config.namespace.as_str().as_bytes()],
+        ).map_err(sqlstate::error)?;
+        if inserted != 1 { return Err(super::StorageError::Conflict); }
+        tx.driver.execute(
+            "INSERT INTO semon_pg_native_semantic_runtime(namespace,singleton,admission,stream_epoch) VALUES($1,true,1,$2)",
+            &[&config.namespace.as_str().as_bytes(), &epoch.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        Ok(())
+    })
+}
+
+pub(crate) fn require_configured(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<(), super::StorageError> {
+    pool.transaction(
+        &config.namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| {
+            let binding = model_cache::binding(tx)?;
+            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+                return Err(super::StorageError::ScopeChanged);
+            }
+            Ok(())
+        },
+    )
+}
+
+fn configured_generation(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<String, super::StorageError> {
+    pool.transaction(
+        &config.namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| {
+            let binding = model_cache::binding(tx)?;
+            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+                return Err(super::StorageError::ScopeChanged);
+            }
+            model_cache::generation(tx)?.ok_or(super::StorageError::ScopeChanged)
+        },
+    )
+}
+
+pub(crate) fn catalog_page(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    options: &crate::Options,
+    request: &crate::catalog::Request,
+) -> Result<crate::ViewerReply, super::StorageError> {
+    let generation = configured_generation(config, pool, control)?;
+    catalog_effects::snapshot::with_admitted_generation(
+        pool,
+        &config.namespace,
+        control,
+        &generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                options,
+                config.namespace.as_str(),
+                request,
+                snapshot,
+            )
+            .map_err(|_| super::StorageError::Unavailable)
+        },
+    )
+}

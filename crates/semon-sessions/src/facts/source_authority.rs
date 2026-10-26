@@ -247,6 +247,62 @@ impl CurrentSources {
     }
 }
 
+/// A producer-owned snapshot of canonical Raw Facts. It has the same current
+/// selection semantics as the SQLite selected projection, with no database
+/// coordinates. The exact file identity fences deferred model publication.
+pub(crate) struct RawSources {
+    path: PathBuf,
+    identity: Identity,
+    facts: Facts,
+}
+impl RawSources {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let identity = current(path)?;
+        let bytes = crate::read_regular_at_most(path, 64 * 1024 * 1024)?;
+        let facts: Facts = serde_json::from_slice(&bytes)?;
+        let source = Self {
+            path: path.to_owned(),
+            identity,
+            facts,
+        };
+        source.validate()?;
+        Ok(source)
+    }
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        if current(&self.path)? != self.identity {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+    pub(crate) fn facts_known(&self) -> bool {
+        self.facts.version == FACTS_VERSION
+    }
+    pub(crate) fn selection_known(&self) -> bool {
+        self.facts_known() && self.facts.codex_rollouts.is_some()
+    }
+    pub(crate) fn hostname(&self) -> Option<String> {
+        (self.facts_known() && self.facts.hostname.len() <= 4096)
+            .then(|| self.facts.hostname.clone())
+    }
+    pub(crate) fn codex_current(&self, relative: &str) -> io::Result<Option<bool>> {
+        self.validate()?;
+        if !self.selection_known() {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.facts
+                .codex_rollouts
+                .as_ref()
+                .is_some_and(|paths| paths.contains(relative))
+                || self
+                    .facts
+                    .codex_provisional_rollouts
+                    .as_ref()
+                    .is_some_and(|paths| paths.contains(relative)),
+        ))
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

@@ -21,7 +21,7 @@ pub(crate) mod semantic;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
-    StorageError, StoreBackend, StoreConfig,
+    StorageError, StoreConfig,
 };
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
@@ -67,7 +67,7 @@ impl SqliteMetadataStore {
         if namespace != &self.0.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
-        let StoreBackend::Sqlite { database } = &self.0.backend;
+        let database = self.0.backend.sqlite_database()?;
         let flags = if write {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         } else {
@@ -187,6 +187,7 @@ impl SessionMetadataStore for SqliteMetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StoreBackend;
     use crate::storage::conformance::{MetadataFixture, metadata_conformance};
     use std::{
         path::PathBuf,

@@ -2,7 +2,7 @@
 //! Event/ledger/proof and Catalog publication remain independently fenced.
 use super::{catalog_namespace, failed};
 use crate::storage::{
-    NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
+    NativeReaderBinding, StorageError, StoreConfig,
     source_observations::{
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
         operation_replay, validate_intent, validate_paths,
@@ -241,7 +241,7 @@ impl SourceJournal {
         {
             return Err(StorageError::InvalidArguments);
         }
-        let StoreBackend::Sqlite { database } = &self.config.backend;
+        let database = self.config.backend.sqlite_database()?;
         if database.as_os_str().is_empty() || database == std::path::Path::new(":memory:") {
             return Err(StorageError::InvalidArguments);
         }
@@ -360,9 +360,10 @@ impl SourceJournal {
 
 impl SourceJournal {
     pub(crate) fn database_path(&self) -> &PathBuf {
-        match &self.config.backend {
-            StoreBackend::Sqlite { database } => database,
-        }
+        self.config
+            .backend
+            .sqlite_database()
+            .expect("admitted SQLite Source journal")
     }
 
     pub(crate) fn namespace(&self) -> &str {
@@ -948,6 +949,7 @@ pub(crate) fn acknowledge_intent_sql(
 mod tests {
     use super::*;
     use crate::events::{EventCache, FileIndex, Ledger, Stat, StoreError};
+    use crate::storage::StoreBackend;
     use crate::storage::{LogicalSourceNamespace, source_observations::SourceObservationStore};
     use std::{
         fs,
@@ -1220,7 +1222,7 @@ mod tests {
             fixture
         }
         fn db(&self) -> Connection {
-            let StoreBackend::Sqlite { database } = &self.config.backend;
+            let database = self.config.backend.sqlite_database().unwrap();
             Connection::open(database).unwrap()
         }
     }
@@ -1498,7 +1500,7 @@ mod tests {
     fn event_cache_reconciles_real_committed_intents_before_later_work_and_after_restart() {
         for restart in [false, true] {
             let configured = Fixture::new_with_namespace("configured\0source");
-            let StoreBackend::Sqlite { database } = &configured.config.backend;
+            let database = configured.config.backend.sqlite_database().unwrap();
             producer_restart_conformance(
                 || {
                     EventCache::open_scoped(
