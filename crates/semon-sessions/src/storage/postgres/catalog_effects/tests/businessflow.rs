@@ -3152,7 +3152,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
-    let prior_parent = super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,qualified.as_deref().unwrap(),|prior| prior.catalog("one",false)).unwrap();
+    let prior_parent = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        qualified.as_deref().unwrap(),
+        |prior| prior.catalog("one", false),
+    )
+    .unwrap();
     super::super::snapshot::with_admitted_snapshot(&pool,&namespace,&control,&caught,|snapshot| {
         use crate::storage::catalog::CatalogSnapshot;
         let current = snapshot.catalog("one",false)?;
