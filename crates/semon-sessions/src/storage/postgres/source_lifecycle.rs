@@ -180,6 +180,7 @@ pub(super) fn resolve(
             Err(StorageError::Conflict)
         };
     }
+    if super::native_keys::read_meta(tx,format!("raw-write-inflight:{path}").as_bytes(),16384)?.is_some() {return Ok(Outcome::Conflict);}
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
     if active {
         return Ok(Outcome::Conflict);
@@ -548,6 +549,7 @@ pub(super) fn write_complete(tx:&mut PgTxn<'_>,options:&crate::Options,input:&cr
     if claims.first().map(|r|r.get::<_,i64>(0))!=Some(revision) {return Err(StorageError::Conflict);}
     let path=input.full_path(options);
     if crate::events::Stat::of(&path).ok()!=Some(completion.after) || completion.after.size!=completion.to || crate::source_change::bytes_hash(&path,completion.to).map_err(|_|StorageError::ScopeChanged)?!=completion.hash {return Err(StorageError::ScopeChanged);}
+    if completion.evidence!=crate::source_change::append_plan(intent.generation.clone(),intent.before,state.previous,intent.from,completion.after,completion.to) {return Err(StorageError::ScopeChanged);}
     if let Some(evidence)=&completion.evidence {
         let before=intent.before.ok_or(StorageError::ScopeChanged)?;
         if !evidence.qualifies(&evidence.before,&completion.after) || intent.generation.as_deref()!=Some(evidence.generation.as_str()) || before.size!=intent.from || crate::source_change::bytes_hash(&path,before.size).map_err(|_|StorageError::ScopeChanged)?!=intent.before_hash.ok_or(StorageError::ScopeChanged)? {return Err(StorageError::ScopeChanged);}
