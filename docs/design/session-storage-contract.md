@@ -1642,3 +1642,26 @@ now publish through the production PG Tree writer instead of importing a header
 without a scalar. Public backend qualification remains zero, with complete
 IndexStore/reader/proof lifetimes, recovery, migration and Hub #313 still pending.
 The #380 predecessor completion requirement before MAIN remains unchanged.
+
+Worker120 continues this component with one current record contract only. The
+SQLite reuse path now consumes the same typed validator too, and a persisted
+failure marker refuses SQLite scalar restoration. PG publication uses an exact
+namespace/key delete (the unique key bounds it); PostgreSQL does not support a
+`DELETE ... LIMIT` clause.
+
+The exact native117 integration API remains crate-private:
+`Snapshot::restore(PgPool, LogicalSourceNamespace, &str, &Ledger, PgCancellation)
+-> io::Result<Summary>`. The host cancellation is independent of the active
+`selected_read::Scope`; callers retain their worker guard until real I/O ends.
+The returned Summary owns its deferred `TreeCheckpoint::Pg`. A future bundle
+reader must not replace a refusal with an empty Summary or qualify an unpublished
+checkpoint. No old-schema importer or upgrade path is part of this component.
+
+The `pg_tree_scalar119` CI group covers real producer initial/append/replacement
+and restart scalar parity, field-by-field initial and deferred refusal, committed
+interpretation drift, and equal physical IDs in two namespaces. Unsupported
+record bytes remain untouched while the other namespace stays readable. The
+independent SQLite phase also captures persisted closed tool IDs, compared with
+PG alongside the complete scalar and open dimensions. Unrelated-history checks
+cover 0/256/2048 rows; their decoded-row counter is a bounded-read assertion, not
+a claim about allocator peak, SQL planner cost, or full backend qualification.
