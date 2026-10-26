@@ -1224,7 +1224,7 @@ pub(crate) fn read_page_snapshot(
         items.push(item);
     }
     if runtime.as_ref().is_some_and(|before| {
-        crate::native_evidence::query_runtime_generation(options)
+        transaction.runtime_generation(options)
             .ok()
             .as_ref()
             != Some(before)
