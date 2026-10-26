@@ -58,6 +58,46 @@ fn read(tx: &mut PgTxn<'_>, path: &str) -> Result<Vec<(String, String)>, Storage
 }
 
 #[test]
+fn pg_native_keys128_dependencies_real_sqlite_long_opaque_identity() {
+    use sha2::{Digest, Sha256};
+    let root = fixture_root();
+    let key = (0u32..56)
+        .map(|i| format!("{:x}", Sha256::digest(i.to_be_bytes())))
+        .collect::<String>();
+    let native = format!("{key}\0🦀");
+    let source = root.join("long.jsonl");
+    std::fs::write(&source, format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":native,"parent_thread_id":native,"thread_source":"cli"}}))).unwrap();
+    let (index, expected) = crate::events::store::native_commit::parser_oracle(
+        &root.join("cache.json"),
+        &source,
+        "codex",
+    );
+    assert!(expected.iter().any(|(_, id)| id.len() > 2704));
+    let path = format!("/{native}");
+    let (pool, _) = fixture(|l| l.max_connections = 1);
+    let control = PgCancellation::default();
+    for namespace in [ns("keys128-dependency"), ns("keys128-foreign")] {
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            relationships(tx, &path, &index, false)?;
+            assert_eq!(read(tx, &path)?, expected);
+            relationships(tx, &path, &index, false)?;
+            assert_eq!(read(tx, &path)?, expected);
+            Ok(())
+        })
+        .unwrap();
+        assert!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.batch_execute("ALTER TABLE semon_pg_native_native_dependencies ALTER COLUMN source_path_digest DROP EXPRESSION; UPDATE semon_pg_native_native_dependencies SET source_path=decode('00','hex')").map_err(sqlstate::error)?;
+            relationships(tx, &path, &index, false)
+        }).is_err());
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            assert_eq!(read(tx, &path)?, expected);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
 fn pg_native_commit_relationships_real_parser_replacement_restart_oracle() {
     let root = fixture_root();
     // Every oracle runs its real SQLite IndexStore before any PG operation.
