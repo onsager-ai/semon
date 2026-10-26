@@ -203,12 +203,14 @@ pub(crate) fn claims(
 }
 
 pub(crate) struct SourceJournal {
+    writer: std::cell::RefCell<Option<Connection>>,
     config: StoreConfig,
     owner: Option<crate::events::store::configured::NativeOwnership>,
 }
 #[allow(non_snake_case)]
 pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
     SourceJournal {
+        writer: std::cell::RefCell::new(None),
         config,
         owner: None,
     }
@@ -228,6 +230,7 @@ pub(crate) fn configured(config: &StoreConfig) -> Box<dyn SourceObservationStore
 impl SourceJournal {
     pub(crate) fn owned(owner: crate::events::store::configured::NativeOwnership) -> Self {
         Self {
+            writer: std::cell::RefCell::new(None),
             config: owner.config().clone(),
             owner: Some(owner),
         }
@@ -279,6 +282,19 @@ impl SourceJournal {
         Ok(db)
     }
 
+    // Reuse only this journal's writer connection. Reader snapshots remain
+    // independent. Qualify the committed physical layout before reserving the
+    // writer; validate() still checks live admission and epoch in every tx.
+    fn writer(&self) -> Result<std::cell::RefMut<'_, Connection>, StorageError> {
+        let mut writer = self.writer.borrow_mut();
+        if writer.is_none() {
+            *writer = Some(self.connection()?);
+        }
+        let writer = std::cell::RefMut::map(writer, |writer| writer.as_mut().unwrap());
+        crate::events::store::configured::NativeOwnership::validate_physical(&writer)?;
+        Ok(writer)
+    }
+
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
             return owner.validate(db);
@@ -294,7 +310,7 @@ impl SourceJournal {
     /// Validate the enrolled current journal in a read snapshot. Reopen never
     /// creates tables, repairs profiles or adopts metadata counters.
     pub(crate) fn prepare(&self) -> Result<(), StorageError> {
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
         let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name='storage_source_journal'", [], |r|r.get(0)).optional().map_err(failed)?;
@@ -389,7 +405,7 @@ impl SourceObservationStore for SourceJournal {
         if let Some(receipt) = operation_replay(operation, Some(namespace), "recover", &payload)? {
             return Ok((receipt, false));
         }
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
@@ -448,7 +464,7 @@ impl SourceObservationStore for SourceJournal {
         if matches!(intent, SourceIntent::Recover { .. }) && self.owner.is_none() {
             return Err(StorageError::Unavailable);
         }
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
@@ -458,14 +474,14 @@ impl SourceObservationStore for SourceJournal {
     }
 
     fn pending_intents(&self) -> Result<Vec<SourceIntent>, StorageError> {
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
         load_intents(&tx, self.namespace())
     }
 
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
@@ -490,7 +506,7 @@ impl SourceObservationStore for SourceJournal {
             return Ok(receipt);
         }
         crate::native_timing::discovery_count(|counts| counts.statements += 2);
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
@@ -530,7 +546,7 @@ impl SourceObservationStore for SourceJournal {
         {
             return Ok(receipt);
         }
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
@@ -601,7 +617,7 @@ impl SourceObservationStore for SourceJournal {
         )? {
             return Ok(receipt);
         }
-        let mut db = self.connection()?;
+        let mut db = self.writer()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;

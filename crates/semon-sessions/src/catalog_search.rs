@@ -32,6 +32,7 @@ pub(crate) fn scope_key(scope: crate::CatalogReadScope) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn membership(scope: &str) -> rusqlite::Result<(&'static str, &'static str)> {
     match scope {
         "current" => Ok(("current_last_ms", "history_last_ms")),
@@ -42,6 +43,7 @@ fn membership(scope: &str) -> rusqlite::Result<(&'static str, &'static str)> {
 
 /// Qualify the selected current representation before changing either scope.
 /// Bound the union first so an absent scope cannot hide excess other-scope rows.
+#[cfg(test)]
 pub(crate) fn validate_key(connection: &Connection, key: &str) -> rusqlite::Result<()> {
     let (physical, valid): (i64, i64) = connection.prepare_cached("SELECT COUNT(*),COUNT(valid) FROM (SELECT CASE WHEN octet_length(gram)<=12 THEN 1 ELSE NULL END AS valid FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 LIMIT ?2)")?.query_row(params![key,(MAX_GRAMS*2+1) as i64], |row|Ok((row.get(0)?,row.get(1)?)))?;
     if physical > (MAX_GRAMS * 2) as i64 || physical != valid {
@@ -60,10 +62,6 @@ pub(crate) fn validate_key(connection: &Connection, key: &str) -> rusqlite::Resu
         }
     }
     Ok(())
-}
-
-pub(crate) fn clear(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();")
 }
 
 pub(crate) fn normalize_query(value: &str) -> Option<String> {
@@ -101,6 +99,7 @@ fn fields(row: &CatalogRow) -> Vec<String> {
     .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn row_present(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<bool> {
     transaction.query_row("SELECT EXISTS(SELECT 1 FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='current' AND session_key=?1) AND EXISTS(SELECT 1 FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='retained_history' AND session_key=?1)", [key], |row|row.get(0))
 }
@@ -401,63 +400,7 @@ pub(crate) fn publish_current_rows_effects<
     Ok(())
 }
 
-/// Remove only this cohort's old documents and postings. Aggregate shared gram
-/// decrements once, using source-key lookups rather than scanning all members of
-/// each gram. The temporary tables and count changes roll back with publication.
-/// A complete rebuild starts with empty postings and documents. Aggregate
-/// their exact member counts once, rather than updating each gram per row.
-pub(crate) fn backfill_row(
-    transaction: &Transaction<'_>,
-    scope: crate::CatalogReadScope,
-    row: &CatalogRow,
-) -> rusqlite::Result<()> {
-    insert_row(transaction, scope_key(scope), row, false)
-}
-
-/// Current and retained-history search share the same allowlisted fields.
-/// Normalize and tokenize one current row once before inserting both scopes.
-pub(crate) fn backfill_catalog_row(
-    transaction: &Transaction<'_>,
-    row: &CatalogRow,
-) -> rusqlite::Result<()> {
-    if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
-        return backfill_row(transaction, crate::CatalogReadScope::RetainedHistory, row);
-    }
-    if transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1)",
-        [&row.key],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let (encoded, grams, complete) = prepared_fields(row)?;
-    for scope in ["current", "retained_history"] {
-        insert_document(transaction, scope, row, &encoded, complete)?;
-    }
-    if complete {
-        let mut posting = transaction.prepare_cached("INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(semon_namespace(),?1,?2,?3,?3)")?;
-        for gram in grams {
-            posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
-        }
-    }
-    Ok(())
-}
-
-/// Rebuild only the current namespace inside the publication transaction.
-/// The shared ordering indexes remain available to every other namespace.
-pub(crate) fn begin_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    clear(transaction)?;
-    Ok(())
-}
-
-pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    for scope in ["current", "retained_history"] {
-        let (column, _) = membership(scope)?;
-        transaction.execute(&format!("INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) SELECT semon_namespace(), ?1,gram,COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND {column} IS NOT NULL GROUP BY gram ON CONFLICT(namespace,read_scope,gram) DO UPDATE SET members=members+excluded.members"), [scope])?;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn insert_row(
     transaction: &Transaction<'_>,
     scope: &str,
@@ -477,6 +420,7 @@ fn insert_row(
     )
 }
 
+#[cfg(test)]
 fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<String>, bool)> {
     prepared_fields_port(row).map_err(|_| rusqlite::Error::InvalidQuery)
 }
@@ -495,6 +439,7 @@ fn prepared_fields_port(
     Ok((encoded, grams, complete))
 }
 
+#[cfg(test)]
 fn insert_fields(
     transaction: &Transaction<'_>,
     scope: &str,
@@ -525,6 +470,7 @@ fn insert_fields(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn insert_document(
     transaction: &Connection,
     scope: &str,
@@ -543,6 +489,7 @@ pub(crate) fn insert_document(
     Ok(())
 }
 
+#[cfg(test)]
 fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite::Result<()> {
     validate_key(transaction, key)?;
     let (column, other) = membership(scope)?;
@@ -563,6 +510,7 @@ fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn retire_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
     let current: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')",
@@ -571,23 +519,6 @@ pub(crate) fn retire_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::
     )?;
     if !current {
         remove_row(transaction, "current", key)?;
-    }
-    Ok(())
-}
-
-/// Current membership retirement does not erase retained-history search rows.
-pub(crate) fn retire_missing(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    let mut statement = transaction.prepare("SELECT session_key FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope='current' AND session_key NOT IN (SELECT session_key FROM catalog_members) LIMIT 512")?;
-    loop {
-        let retired = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if retired.is_empty() {
-            break;
-        }
-        for key in retired {
-            remove_row(transaction, "current", &key)?;
-        }
     }
     Ok(())
 }
@@ -1189,7 +1120,7 @@ mod sqlite_tests {
     }
 
     #[test]
-    fn backfilled_member_counts_support_subsequent_updates_and_rollback() {
+    fn admitted_member_counts_support_subsequent_updates_and_rollback() {
         let mut connection = database();
         let rows = [
             row("one", "shared rare"),
@@ -1204,17 +1135,13 @@ mod sqlite_tests {
             row("large", &"x".repeat(MAX_DOCUMENT_BYTES + 1)),
         ];
         let transaction = connection.transaction().unwrap();
-        begin_backfill(&transaction).unwrap();
-        for row in &rows {
-            backfill_catalog_row(&transaction, row).unwrap();
-        }
+        publish_current_rows(&transaction, &rows.iter().collect::<Vec<_>>()).unwrap();
         let mut retained = row("retained", "shared rare");
         retained.lifecycle = CatalogLifecycle::Retained;
-        backfill_catalog_row(&transaction, &retained).unwrap();
-        finish_backfill(&transaction).unwrap();
+        publish_row(&transaction, CatalogReadScope::RetainedHistory, &retained).unwrap();
         transaction.commit().unwrap();
-        // The bulk insert's full batches and final partial batch must preserve
-        // every Unicode gram and both scopes, including incomplete coverage.
+        // The admitted producer and the single-row current-schema oracle must
+        // preserve every Unicode gram and both scopes, including incomplete coverage.
         let mut incremental = database();
         let transaction = incremental.transaction().unwrap();
         for row in &rows {
@@ -1273,8 +1200,7 @@ mod sqlite_tests {
         assert_eq!(original, ["one", "three", "two"]);
         {
             let transaction = connection.transaction().unwrap();
-            begin_backfill(&transaction).unwrap();
-            backfill_catalog_row(&transaction, &row("replacement", "other")).unwrap();
+            publish_current_rows(&transaction, &[&row("replacement", "other")]).unwrap();
             // An interrupted publication must restore the old search and its
             // ordering index, including the exact aggregate member counts.
         }
