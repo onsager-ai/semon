@@ -62,6 +62,27 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Capture bounded native-tree append diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          cargo test --locked -p semon-sessions --lib configured_semantic_domain94_receipt_order_ties_append_and_restart_oracle -- --nocapture > "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
+          python3 - <<'PYSAFE'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          lines = []
+          for line in (root / 'native-tree-test.log').open():
+              line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
+              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native SQL stage=', 'test result:')):
+                  lines.append(line)
+          (root / 'native-tree-diagnostic.txt').write_text('\n'.join(lines[:30]))
+          PYSAFE
+      - name: Retain bounded native-tree diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-tree-diagnostic
+          path: ${{ runner.temp }}/native-tree-diagnostic.txt
       - name: Default admitted current Source restart and isolation
         run: cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
       - name: Canonical namespace factory structure and drift refusal
