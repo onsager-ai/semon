@@ -52,16 +52,37 @@ pub(crate) fn captured_source_proof(
                     && source.tail_sha256 == reference.tail_sha256
             })
             .ok_or(StorageError::ScopeChanged)?;
-        // The admitted immutable recipe binds the historical consumed prefix.
-        // Preparation grants no bytes: the body reader still opens the exact
-        // persisted Native header and verifies each requested physical block.
+        // Qualify the exact persisted prefix under this publication's lease.
+        // A historical recipe's old descriptor clocks are not a witness for
+        // today's covering file. The host separately verifies Native block
+        // hashes while copying bytes using the returned current descriptor.
+        let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
+        let metadata = serde_json::to_vec(source).map_err(|_| StorageError::ScopeChanged)?;
+        let rows = tx.driver.query("SELECT p.source_path=$3 AND s.source_path=$3 AND s.metadata=$4,p.page_generation FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_catalog_sources s USING(namespace_digest,namespace,generation,path_digest) WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) LIMIT 65", &[&config.namespace.as_str().as_bytes(), &generation.as_bytes(), &absolute.as_bytes(), &metadata]).map_err(super::sqlstate::error)?;
+        if rows.is_empty() || rows.len() > 64 || rows.iter().any(|row| !row.get::<_, bool>(0)) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let id = String::from_utf8(rows[0].get(1)).map_err(|_| StorageError::ScopeChanged)?;
+        super::native_pages::open(&mut tx, absolute, &crate::source_carrier::ledger(source), crate::storage::proof_lifetime::ProofGenerationId(id))?;
+        tx.check()?;
+        let file = crate::open_input(&source.path).map_err(|_| StorageError::ScopeChanged)?;
+        let stat = crate::events::Stat::from_metadata(&file.metadata().map_err(|_| StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)?;
+        if stat.dev != source.dev || stat.ino != source.ino || stat.size < source.offset {
+            return Err(StorageError::ScopeChanged);
+        }
+        let named = std::fs::symlink_metadata(&source.path).map_err(|_| StorageError::ScopeChanged)?;
+        if !named.is_file() || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)? != stat {
+            return Err(StorageError::ScopeChanged);
+        }
+        tx.check()?;
         Ok(crate::SessionSourceProof {
             source: reference.clone(),
-            dev: source.dev,
-            ino: source.ino,
-            size: source.size,
-            modified_ns: source.modified_ns,
-            changed_ns: source.changed_ns,
+            dev: stat.dev,
+            ino: stat.ino,
+            size: stat.size,
+            modified_ns: stat.modified_ns,
+            changed_ns: stat.changed_ns,
             freshness: crate::CatalogFreshness {
                 state: "retained".into(),
             },
