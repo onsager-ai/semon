@@ -287,13 +287,26 @@ impl Query {
             source_key.clone()
         })
         .map_err(|_| unavailable("Invalid selected Source namespace"))?;
-        store.selected_body(
+        let mut answer = store.selected_body(
             &namespace,
             args["id"].as_str().expect("validated selected id"),
             &selected_args,
             now,
             host,
-        )
+        )?;
+        self.start = self
+            .sources
+            .machines
+            .iter()
+            .filter(|(_, source)| !source.options.all)
+            .map(|(_, source)| {
+                now.saturating_sub(
+                    i64::try_from(source.options.since.as_millis()).unwrap_or(i64::MAX),
+                )
+            })
+            .max();
+        answer["window_start"] = json!(self.start);
+        Ok(answer)
     }
 
     fn execute_catalog_store_at(

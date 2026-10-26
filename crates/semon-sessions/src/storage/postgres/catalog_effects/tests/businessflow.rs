@@ -225,25 +225,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite complete ordinary source publication");
     // Selected body/field reads consume the fully published ordinary Query
     // profile, including its completion and reader binding, not a partial head.
-    crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-        vec![("vertical140-oracle".into(), sqlite_options.clone())],
-    )))
-    .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
-    .expect("SQLite fully published body/field oracle");
+    let mut oracle_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(
+            "vertical140-oracle".into(),
+            sqlite_options.clone(),
+        )]),
+    ));
+    oracle_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .expect("SQLite fully published body/field oracle");
     let expected_bodies = expected
         .rows
         .iter()
         .map(|row| {
-            let body = crate::query::transcript::read(
-                &sqlite_options,
-                &row.key,
-                &serde_json::json!({"id":row.key,"limit":100}),
-                None,
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
-            .unwrap()
-            .unwrap_or_else(|| panic!("SQLite body missing: {} {}", row.harness, row.key));
+            let body = oracle_query
+                .call_at(
+                    "read_transcript",
+                    &serde_json::json!({"id":row.key,"limit":100}),
+                    1790812802000,
+                )
+                .unwrap();
             assert!(
                 body.to_string().contains("sanitized"),
                 "ordinary body missing for {} {} {:?}",
@@ -251,16 +252,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 row.kind,
                 row.native_ids
             );
-            let session = crate::query::transcript::session(
-                &sqlite_options,
-                &row.key,
-                &serde_json::json!({"id":row.key}),
-                None,
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
-            .unwrap()
-            .expect("SQLite ordinary session fields");
+            let session = oracle_query
+                .call_at(
+                    "get_session",
+                    &serde_json::json!({"id":row.key}),
+                    1790812802000,
+                )
+                .expect("SQLite ordinary session fields");
             (
                 row.key.clone(),
                 serde_json::json!({"body":body,"fields":session}),
