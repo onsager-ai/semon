@@ -307,8 +307,8 @@ pub(super) fn persisted_witness(
         (
             "tools",
             "tool_id_digest",
-            "tool_id,name",
-            " AND NOT closed AND name IS NOT NULL",
+            "tool_id,name,closed",
+            "",
         ),
     ] {
         match family {
@@ -321,7 +321,13 @@ pub(super) fn persisted_witness(
         );
         let sizes = columns
             .split(',')
-            .map(|col| format!("octet_length({col})::bigint"))
+            .map(|col| {
+                if col == "closed" {
+                    "1::bigint".to_owned()
+                } else {
+                    format!("coalesce(octet_length({col}),0)::bigint")
+                }
+            })
             .collect::<Vec<_>>()
             .join(",");
         let mut cursor: Option<Vec<u8>> = None;
@@ -371,15 +377,17 @@ pub(super) fn persisted_witness(
             let key = std::str::from_utf8(&first).map_err(|_| StorageError::Unavailable)?;
             match family {
                 "models" => writer.model(key),
-                _ => {
+                "labels" => {
                     let value: Vec<u8> = row.get(1);
                     let value =
                         std::str::from_utf8(&value).map_err(|_| StorageError::Unavailable)?;
-                    if family == "labels" {
-                        writer.label(key, value);
-                    } else {
-                        writer.tool(key, value);
-                    }
+                    writer.label(key, value);
+                }
+                _ => {
+                    let name: Option<Vec<u8>> = row.get(1);
+                    let name = name.as_deref().map(std::str::from_utf8).transpose()
+                        .map_err(|_| StorageError::Unavailable)?;
+                    writer.tool(key, name, row.get(2));
                 }
             }
             cursor = Some(address);

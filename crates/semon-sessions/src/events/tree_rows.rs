@@ -106,7 +106,7 @@ pub(crate) mod witness {
 
     const LABELS: &str = "semon.tree.witness.4.labels";
     const MODELS: &str = "semon.tree.witness.4.models";
-    const TOOLS: &str = "semon.tree.witness.4.open-tools";
+    const TOOLS: &str = "semon.tree.witness.4.tools";
 
     pub(crate) fn address(domain: &str, key: &[u8]) -> [u8; 32] {
         let mut hash = Sha256::new();
@@ -145,16 +145,19 @@ pub(crate) mod witness {
             self.0.update(row.as_bytes());
         }
 
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn label(&mut self, key: &str, value: &str) {
             self.encoded(&serde_json::to_string(&[key, value]).unwrap());
         }
 
+        #[cfg(any(feature = "postgres", test))]
         pub(crate) fn model(&mut self, model: &str) {
             self.encoded(&serde_json::to_string(&[model]).unwrap());
         }
 
-        pub(crate) fn tool(&mut self, id: &str, name: &str) {
-            self.encoded(&serde_json::to_string(&[id, name]).unwrap());
+        #[cfg(any(feature = "postgres", test))]
+        pub(crate) fn tool(&mut self, id: &str, name: Option<&str>, closed: bool) {
+            self.encoded(&serde_json::to_string(&(id, name, i64::from(closed))).unwrap());
         }
 
         pub(crate) fn finish(self) -> String {
@@ -166,7 +169,7 @@ pub(crate) mod witness {
     pub(crate) fn digest<'a>(
         labels: impl IntoIterator<Item = (&'a str, &'a str)>,
         models: impl IntoIterator<Item = &'a str>,
-        tools: impl IntoIterator<Item = (&'a str, &'a str)>,
+        tools: impl IntoIterator<Item = (&'a str, Option<&'a str>, bool)>,
     ) -> String {
         let mut writer = Writer::new();
         writer.labels();
@@ -174,12 +177,16 @@ pub(crate) mod witness {
             writer.label(key, value);
         }
         writer.models();
+        let mut models: Vec<_> = models.into_iter().collect();
+        models.sort_by_key(|key| address("tree.model", key.as_bytes()));
         for model in models {
             writer.model(model);
         }
         writer.tools();
-        for (id, name) in tools {
-            writer.tool(id, name);
+        let mut tools: Vec<_> = tools.into_iter().collect();
+        tools.sort_by_key(|(id, _, _)| address("tree.tool", id.as_bytes()));
+        for (id, name, closed) in tools {
+            writer.tool(id, name, closed);
         }
         writer.finish()
     }

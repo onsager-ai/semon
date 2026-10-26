@@ -1497,6 +1497,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
                 .collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         let configured_reference = Connection::open_in_memory().unwrap();
+        tree_state::register(&configured_reference).unwrap();
         for ddl in configured_original {
             configured_reference.execute_batch(ddl).unwrap();
         }
@@ -1519,6 +1520,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
         drop(configured_actual);
         fs::remove_dir_all(directory).unwrap();
         let reference = Connection::open_in_memory().unwrap();
+        tree_state::register(&reference).unwrap();
         for ddl in original {
             reference.execute_batch(ddl).unwrap();
         }
@@ -2083,6 +2085,7 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
     fn native_usage_copied_family_rejects_mixed_shapes_before_payload_dml() {
         for composite in [false, true] {
             let mut db = Connection::open_in_memory().unwrap();
+            tree_state::register(&db).unwrap();
             db.execute_batch(configured::CORE_SCHEMA).unwrap();
             db.execute_batch(crate::events::store::SCHEMA).unwrap();
             db.execute_batch(metadata_schema(false)).unwrap();
