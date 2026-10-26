@@ -712,6 +712,7 @@ pub(crate) fn audit_catalog_sources(
         Transaction::new_unchecked(&db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let mut changed = std::collections::BTreeSet::new();
+    let mut absent_paths = std::collections::BTreeSet::new();
     let mut removed = Vec::new();
     let mut source_locks = Vec::new();
     for input in discovered {
@@ -746,9 +747,13 @@ pub(crate) fn audit_catalog_sources(
         }
         let path = input.full_path(options);
         let key = path.to_string_lossy().into_owned();
+        let observed = super::Stat::of(&path);
+        if observed.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+            absent_paths.insert(key.clone());
+        }
         let recorded = ledger_row(&tx, &key).map_err(io::Error::other)?;
         if match recorded.as_ref() {
-            Some((_, ledger)) => super::Stat::of(&path).ok().as_ref() != Some(&ledger.stat),
+            Some((_, ledger)) => observed.ok().as_ref() != Some(&ledger.stat),
             None => true,
         } {
             changed.insert(key.clone());
@@ -798,6 +803,9 @@ pub(crate) fn audit_catalog_sources(
             )?);
             let absent = fs::symlink_metadata(&path)
                 .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+            if absent {
+                absent_paths.insert(path.clone());
+            }
             if absent && let Some((_, ledger)) = &recorded {
                 removed.push((path.clone(), Some(ledger.clone())));
             }
@@ -821,6 +829,16 @@ pub(crate) fn audit_catalog_sources(
     remove_files_tx(&tx, &removed, config.namespace.as_str()).map_err(io::Error::other)?;
     for path in changed {
         if !removed.iter().any(|(removed, _)| removed == &path) {
+            // Discovery can have queued this path before its ordinary removal
+            // committed. Do not replace that durable negative evidence with a
+            // generic change after the ledger is gone. A present/reappeared
+            // file still follows the ordinary changed-source path.
+            if absent_paths.contains(&path) {
+                let removed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND reason='removed')", [&path], |row| row.get(0)).map_err(io::Error::other)?;
+                if removed {
+                    continue;
+                }
+            }
             invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
         }
     }
