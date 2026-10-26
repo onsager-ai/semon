@@ -67,13 +67,21 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           result=0
-          for group in configured::tests::current_recovery:: current_history_custody:: catalog_namespace::current_navigation_tests:: sqlite::navigation::tests:: source_journal::tests:: catalog_search::sqlite_tests::; do
-            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture >> "$RUNNER_TEMP/current-owner-tests.log" 2>&1 || result=$?
+          for group in configured::tests::current_recovery:: current_history_custody:: catalog_namespace::current_navigation_tests:: sqlite::navigation::tests:: source_journal::tests:: catalog_search::sqlite_tests:: native_usage_; do
+            group_result=0
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/current-owner-group.log" 2>&1 || group_result=$?
+            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/current-owner-group.log"; then
+              group_result=1
+              echo "NO_MATCH group=$group" >> "$RUNNER_TEMP/current-owner-tests.log"
+            fi
+            cat "$RUNNER_TEMP/current-owner-group.log" >> "$RUNNER_TEMP/current-owner-tests.log"
+            echo "GROUP group=$group status=$group_result" >> "$RUNNER_TEMP/current-owner-tests.log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
           done
           tail -150 "$RUNNER_TEMP/current-owner-tests.log"
           exit "$result"
-      - name: Retain current owner test failures
-        if: ${{ !cancelled() && steps.current_owner.outcome == 'failure' }}
+      - name: Retain current owner test results
+        if: ${{ !cancelled() && steps.current_owner.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: current-owner-tests

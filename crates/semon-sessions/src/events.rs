@@ -10409,15 +10409,17 @@ mod tests {
             assert!(
                 scan_file(&log, "codex", &mut cache, &mut false)
                     .unwrap_err()
-                    .to_string()
-                    .contains("usage store unavailable")
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+                    == Some(&crate::storage::StorageError::Unavailable)
             );
             append_lines(&log, &[usage]);
             assert!(
                 scan_file(&log, "codex", &mut cache, &mut false)
                     .unwrap_err()
-                    .to_string()
-                    .contains("usage store unavailable")
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+                    == Some(&crate::storage::StorageError::Unavailable)
             );
             let mut reopened = EventCache::open(&v1, &crate::Options::default().source).unwrap();
             let index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();

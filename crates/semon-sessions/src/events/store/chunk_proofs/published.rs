@@ -14,64 +14,22 @@ fn namespaces(prefix: &str) -> [String; 2] {
     [prefix.to_owned(), format!("native_proof_tree:{prefix}:")]
 }
 
-// Reference ownership follows Catalog families, independently of proof/meta
-// layout. Always address physical main tables, including on assigned readers
-// that have connection-local scoped views. History's singleton publisher is
-// still unported: nonempty singleton history cannot prove its Source owner in
-// a composite current Catalog and must refuse before payload reads or GC.
+// Every reference belongs to the current namespace-leading Catalog family.
+// Refuse an unsupported physical shape before decoding owners or collecting proofs.
 fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> {
-    let mut shapes = Vec::new();
-    for table in [
-        "session_catalog",
-        "session_catalog_sources",
-        "session_history_catalog",
-    ] {
-        let (namespaces, namespace_key, session_key): (i64, i64, i64) = db.query_row(
-            "SELECT coalesce(sum(name='namespace'),0),coalesce(max(CASE WHEN name='namespace' THEN pk END),0),coalesce(max(CASE WHEN name='session_key' THEN pk END),0) FROM pragma_table_info(?1,'main')",
-            [table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    for table in ["session_catalog", "session_catalog_sources", "session_history_catalog"] {
+        let (namespace_key, session_key): (i64, i64) = db.query_row(
+            "SELECT coalesce(max(CASE WHEN name='namespace' AND [notnull]=1 THEN pk END),0),coalesce(max(CASE WHEN name='session_key' THEN pk END),0) FROM pragma_table_info(?1,'main')",
+            [table], |r| Ok((r.get(0)?,r.get(1)?)),
         )?;
-        shapes.push(match (namespaces, namespace_key, session_key) {
-            (0, 0, 1) => false,
-            (1, 1, 2) => true,
-            _ => return Err(rusqlite::Error::InvalidQuery),
-        });
+        if (namespace_key, session_key) != (1, 2) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
-    let [catalog, sources, history] = shapes.as_slice() else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    if catalog != sources {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    if *catalog
-        && !*history
-        && db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog)",
-            [],
-            |r| r.get::<_, bool>(0),
-        )?
-    {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let current = if *catalog {
-        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1"
-    } else {
-        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c USING(session_key) WHERE s.source_path=?1"
-    };
-    let retained = match (*sources, *history) {
-        (false, false) => {
-            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.source_path=?1"
-        }
-        (false, true) => {
-            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE c.namespace=semon_namespace() AND s.source_path=?1"
-        }
-        (true, false) => {
-            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.namespace=semon_namespace() AND s.source_path=?1"
-        }
-        (true, true) => {
-            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1"
-        }
-    };
-    Ok([current, retained])
+    Ok([
+        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1",
+        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1",
+    ])
 }
 
 /// Run before replacing/deleting live proofs, in the same Index transaction.
