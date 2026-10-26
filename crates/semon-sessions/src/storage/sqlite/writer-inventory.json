@@ -32,6 +32,7 @@
     "store.rs observation/recovery/backfill/generation/slot/search/publication metadata, schema qualification/init and reported-file stamp; archive GLOB/current file count selects core and meta layouts independently"
   ],
   "native_tree_noop_witness": "transaction-local current header/generation/dimension digest plus parser/ledger/pricing/recipe interpretation; missing or stale witnesses repair",
+  "native_tree_scalar_reader": "scalar119 private PG restore and SQLite read/reuse share the strict current TreeSummaryRecord codec; PG deferred calls requalify captured scalar/dimensions/interpretation under the caller snapshot; no retained L1 lease or public backend qualification; real-producer lifecycle, namespace collision and refusal CI pending",
   "native_usage_composite": false,
   "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [

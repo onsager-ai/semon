@@ -433,10 +433,36 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
     oracle.load_shared_usage().unwrap();
     let sqlite = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
     let ledger = read_ledger(&sqlite, path.to_str().unwrap());
+    // The compact scalar and SQLite's lazy restore omit closed IDs. Capture
+    // their persisted dimension oracle before closing SQLite for the PG phase.
+    oracle.closed_tools = sqlite
+        .prepare("SELECT t.tool_id FROM native_tree_tools t JOIN native_tree_headers h USING(projection_id) WHERE h.source_path=?1 AND t.closed=1 ORDER BY t.tool_id")
+        .unwrap()
+        .query_map([path.to_str().unwrap()], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
     // Verify the persisted scalar oracle before any PG connection exists.
-    let stored: String = sqlite.query_row("SELECT value FROM meta WHERE key=?1", [format!("native_tree_summary:{}", path.to_str().unwrap())], |r| r.get(0)).unwrap();
-    let stored: crate::events::tree_rows::TreeSummaryRecord = serde_json::from_str(&stored).unwrap();
-    assert_eq!(serde_json::to_value(&stored.summary).unwrap(), serde_json::to_value(index.tree_summary.as_ref().unwrap().compact(index.native_usage_observations.is_some())).unwrap());
+    let stored: String = sqlite
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{}", path.to_str().unwrap())],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored: crate::events::tree_rows::TreeSummaryRecord =
+        serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        serde_json::to_value(&stored.summary).unwrap(),
+        serde_json::to_value(
+            index
+                .tree_summary
+                .as_ref()
+                .unwrap()
+                .compact(index.native_usage_observations.is_some())
+        )
+        .unwrap()
+    );
     assert!(stored.summary.line_count > 0);
     let mut rows: OracleRows = Vec::new();
     for family in [
@@ -479,7 +505,9 @@ fn capture_fixture(root: std::path::PathBuf, harness: &str) -> Fixture {
         rows.push((family, data));
     }
     let source_paths = sqlite
-        .prepare("SELECT source_path FROM native_usage_sources ORDER BY source_id")
+        // Retained UsageSource generations are not additional Current files.
+        // Replaying them as duplicate paths violates Core's exact ledger CAS.
+        .prepare("SELECT source_path FROM native_usage_current ORDER BY source_id")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -553,25 +581,59 @@ pub(crate) fn append_fixture(data: &Fixture, harness: &str) -> Fixture {
 // Test-only physical import of the independently persisted parser oracle rows.
 // No SQLite connections survive into the PG operation/read phase.
 pub(crate) fn install(tx: &mut PgTxn<'_>, fixture: &Fixture) -> Result<(), StorageError> {
-    publish_current(tx, fixture, None)
+    publish_current(tx, fixture, None, false)
 }
-fn publish_current(tx: &mut PgTxn<'_>, fixture: &Fixture, previous: Option<&Fixture>) -> Result<(), StorageError> {
+fn publish_current(
+    tx: &mut PgTxn<'_>,
+    fixture: &Fixture,
+    previous: Option<&Fixture>,
+    append: bool,
+) -> Result<(), StorageError> {
     // Real production Core + Usage + Tree writers; SQLite is closed before PG.
-    let prior = |path: &str| previous.and_then(|f| f.sources.iter().find(|(p, _, _)| p == path).map(|(_, ledger, _)| ledger));
+    let prior = |path: &str| {
+        previous.and_then(|f| {
+            f.sources
+                .iter()
+                .find(|(p, _, _)| p == path)
+                .map(|(_, ledger, _)| ledger)
+        })
+    };
     for (path, ledger, index) in &fixture.sources {
         super::super::native_core::write(tx, path, prior(path), ledger, index, None)?;
     }
     {
         let mut effects = super::super::native_usage::Usage::new(tx)?;
         for (path, ledger, index) in &fixture.sources {
-            crate::events::store::native_usage::algorithm::begin(&mut effects, path, prior(path), ledger, false)?;
-            crate::events::store::native_usage::algorithm::write(&mut effects, path, ledger, index)?;
+            crate::events::store::native_usage::algorithm::begin(
+                &mut effects,
+                path,
+                prior(path),
+                ledger,
+                append,
+            )?;
+            crate::events::store::native_usage::algorithm::write(
+                &mut effects,
+                path,
+                ledger,
+                index,
+            )?;
         }
     }
     for (path, ledger, index) in &fixture.sources {
         let source: i64 = tx.driver.query_one("SELECT source_id FROM semon_pg_native_usage_current WHERE namespace=$1 AND source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        let summary = index.tree_summary.as_ref().ok_or(StorageError::Unavailable)?;
-        if !super::super::tree_writer::publish(tx, path, ledger, prior(path), source, summary, index.native_usage_observations.is_some())? {
+        let summary = index
+            .tree_summary
+            .as_ref()
+            .ok_or(StorageError::Unavailable)?;
+        if !super::super::tree_writer::publish(
+            tx,
+            path,
+            ledger,
+            prior(path),
+            source,
+            summary,
+            index.native_usage_observations.is_some(),
+        )? {
             return Err(StorageError::Unavailable);
         }
     }
@@ -707,6 +769,7 @@ fn assert_oracle(actual: &mut Summary, expected: &Summary) {
     );
     assert_eq!(actual.models, expected.models);
     assert_eq!(actual.tools, expected.tools);
+    assert_eq!(actual.closed_tools, expected.closed_tools);
     actual.load_shared_usage().unwrap();
     assert_eq!(actual.usage_records, expected.usage_records);
     assert_eq!(
@@ -1017,10 +1080,6 @@ fn pg_tree_scalar119_published_record_and_authority_refuse_without_payload() {
                 record.as_object_mut().unwrap().remove(field);
                 invalid.push(serde_json::to_vec(&record).unwrap());
             }
-            // Even a valid replacement scalar is not the already captured scalar.
-            let mut changed = base.clone();
-            changed["summary"]["line_count"] = serde_json::json!(999);
-            invalid.push(serde_json::to_vec(&changed).unwrap());
             for bytes in invalid {
                 tx.driver
                     .batch_execute("SAVEPOINT scalar119")
@@ -1032,10 +1091,42 @@ fn pg_tree_scalar119_published_record_and_authority_refuse_without_payload() {
                     )
                     .map_err(sqlstate::error)?;
                 assert!(snapshot.validate(tx).is_err());
+                // Initial capture must refuse too, without relying on a prior
+                // scalar digest. These are the production capture predicates.
+                DECODED.with(|n| n.set(0));
+                assert!(
+                    snapshot
+                        .authority(tx, false)
+                        .and_then(|(file, projection, _)| snapshot.scalar(tx, file, projection))
+                        .is_err()
+                );
+                assert_eq!(DECODED.with(|n| n.get()), 0);
                 tx.driver
                     .batch_execute("ROLLBACK TO SAVEPOINT scalar119")
                     .map_err(sqlstate::error)?;
             }
+            // A newly published valid scalar can be captured, but cannot
+            // silently replace a scalar already held by a deferred reader.
+            let mut changed = base.clone();
+            changed["summary"]["line_count"] = serde_json::json!(999);
+            let changed = serde_json::to_vec(&changed).unwrap();
+            tx.driver
+                .execute(
+                    "UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2",
+                    &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &changed],
+                )
+                .map_err(sqlstate::error)?;
+            assert!(snapshot.validate(tx).is_err());
+            tx.driver
+                .execute(
+                    "UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2",
+                    &[
+                        &tx.namespace.as_str().as_bytes(),
+                        &key.as_bytes(),
+                        &original,
+                    ],
+                )
+                .map_err(sqlstate::error)?;
             for mutation in [
                 "UPDATE semon_pg_native_files SET dev=dev+1",
                 "UPDATE semon_pg_native_files SET ino=ino+1",
@@ -1063,6 +1154,13 @@ fn pg_tree_scalar119_published_record_and_authority_refuse_without_payload() {
                     .map_err(sqlstate::error)?;
                 tx.driver.batch_execute(mutation).map_err(sqlstate::error)?;
                 assert!(snapshot.validate(tx).is_err(), "{mutation}");
+                assert!(
+                    snapshot
+                        .authority(tx, false)
+                        .and_then(|(file, projection, _)| snapshot.scalar(tx, file, projection))
+                        .is_err(),
+                    "initial capture: {mutation}"
+                );
                 tx.driver
                     .batch_execute("ROLLBACK TO SAVEPOINT scalar119")
                     .map_err(sqlstate::error)?;
@@ -1120,6 +1218,97 @@ fn pg_tree_scalar119_committed_interpretation_drift_refuses_deferred_payload() {
 }
 
 #[test]
+fn pg_tree_scalar119_equal_ids_isolate_unsupported_record_without_rewriting() {
+    let data = parser_fixture("claude");
+    let sqlite_path = EventCache::path(&data.root.join("index.json"));
+    std::fs::rename(&sqlite_path, data.root.join("oracle-held")).unwrap();
+    let (pool, _) = fixture(|b| b.max_connections = 1);
+    let mut identities = Vec::new();
+    for namespace in [ns("tree\0🦀"), ns("tree\0é")] {
+        let ids = pool
+            .transaction(&namespace, TxnKind::Write, &PgCancellation::default(), |tx| {
+                install(tx, &data)?;
+                let row = tx.driver.query_one("SELECT file_id,projection_id FROM semon_pg_native_tree_headers WHERE namespace=$1 AND source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?;
+                Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
+            })
+            .unwrap();
+        identities.push(ids);
+    }
+    assert_eq!(identities[0], identities[1], "actual physical IDs collide");
+    let mut first = restore(&pool, &data);
+    let mut other = Snapshot::restore(
+        pool.clone(),
+        ns("tree\0é"),
+        &data.path,
+        &data.ledger,
+        PgCancellation::default(),
+    )
+    .unwrap();
+    assert_oracle(&mut other, &data.oracle);
+    let key = format!("native_tree_summary:{}", data.path);
+    let unsupported = pool
+        .transaction(
+            &ns("tree\0🦀"),
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| {
+                let encoded: Vec<u8> = tx.driver.query_one("SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+                let mut record: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+                record["version"] = serde_json::json!(2);
+                let unsupported = serde_json::to_vec(&record).unwrap();
+                tx.driver.execute("UPDATE semon_pg_native_meta SET value=$3 WHERE namespace=$1 AND key=$2", &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &unsupported]).map_err(sqlstate::error)?;
+                Ok(unsupported)
+            },
+        )
+        .unwrap();
+    DECODED.with(|n| n.set(0));
+    assert!(first.tool_name("tool\0🦀").is_err());
+    assert!(first.load_shared_usage().is_err());
+    assert!(
+        Snapshot::restore(
+            pool.clone(),
+            ns("tree\0🦀"),
+            &data.path,
+            &data.ledger,
+            PgCancellation::default()
+        )
+        .is_err()
+    );
+    assert_eq!(DECODED.with(|n| n.get()), 0);
+    pool.transaction(
+        &ns("tree\0🦀"),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            let after: Vec<u8> = tx
+                .driver
+                .query_one(
+                    "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1",
+                    &[&tx.namespace.as_str().as_bytes(), &key.as_bytes()],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
+            assert_eq!(
+                after, unsupported,
+                "unsupported bytes must remain untouched"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_oracle(&mut other, &data.oracle);
+    assert_eq!(
+        other.tool_name("tool\0🦀").unwrap(),
+        Some("Bash'\0🦀".into())
+    );
+    assert!(
+        !sqlite_path.exists(),
+        "no hidden SQLite in either PG namespace"
+    );
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
 fn pg_tree_scalar119_real_producers_append_replacement_restart_and_history_bounds() {
     for harness in ["claude", "codex"] {
         // Complete all independent SQLite production/oracle phases first.
@@ -1132,8 +1321,34 @@ fn pg_tree_scalar119_real_producers_append_replacement_restart_and_history_bound
         let (mut pool, factory) = fixture(|_| {});
         let mut previous = None;
         let mut old = None::<Summary>;
-        for data in [&initial, &appended, &replacement] {
-            pool.transaction(&ns("tree\0🦀"), TxnKind::Write, &PgCancellation::default(), |tx| publish_current(tx, data, previous)).unwrap();
+        let mut previous_ids = None;
+        for (data, append) in [(&initial, false), (&appended, true), (&replacement, false)] {
+            pool.transaction(
+                &ns("tree\0🦀"),
+                TxnKind::Write,
+                &PgCancellation::default(),
+                |tx| publish_current(tx, data, previous, append),
+            )
+            .unwrap();
+            let ids = pool
+                .transaction(
+                    &ns("tree\0🦀"),
+                    TxnKind::ReadSnapshot,
+                    &PgCancellation::default(),
+                    |tx| {
+                        let row = tx.driver.query_one("SELECT g.source_id,h.projection_id FROM semon_pg_native_tree_headers h JOIN semon_pg_native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=$1 AND h.source_path=$2 LIMIT 1", &[&tx.namespace.as_str().as_bytes(), &data.path.as_bytes()]).map_err(sqlstate::error)?;
+                        Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
+                    },
+                )
+                .unwrap();
+            if let Some(previous_ids) = previous_ids {
+                if append {
+                    assert_eq!(ids, previous_ids, "append retains the qualified generation");
+                } else {
+                    assert_ne!(ids, previous_ids, "replacement creates a new generation");
+                }
+            }
+            previous_ids = Some(ids);
             if let Some(mut old) = old.take() {
                 assert!(old.tool_name("missing").is_err());
                 assert!(old.load_shared_usage().is_err());
