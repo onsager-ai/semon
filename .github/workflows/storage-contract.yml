@@ -74,7 +74,7 @@ jobs:
           lines = []
           for line in (root / 'native-tree-test.log').open():
               line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
-              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source-journal phase=', 'storage_sqlite_failure ', 'test result:')):
+              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source-journal phase=', 'native diagnostic route=', 'storage_sqlite_failure ', 'test result:')):
                   lines.append(line)
               elif match := re.search(r'panicked at (crates/[A-Za-z0-9_./-]+:\d+:\d+):', line):
                   lines.append('native diagnostic panic=' + match.group(1))

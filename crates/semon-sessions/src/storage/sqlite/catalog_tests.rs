@@ -3474,6 +3474,9 @@ fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
         ),
     ] {
         let reply = core.respond("GET", path, query, None);
+        if reply.status != 200 {
+            eprintln!("native diagnostic route={path} status={}", reply.status);
+        }
         assert_eq!(
             reply.status,
             200,
