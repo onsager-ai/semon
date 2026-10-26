@@ -1207,7 +1207,9 @@ mod tests {
         // Low-level proof tests use an in-memory meta table. Keep the tables
         // queried by published::preserve present, as they are after a real
         // Index open/migration, while leaving the reference set empty.
-        connection.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
+        connection
+            .execute_batch(super::COMPOSITE_CATALOG_SCHEMA)
+            .unwrap();
         connection
             .execute_batch(crate::history_projection::SCHEMA)
             .unwrap();

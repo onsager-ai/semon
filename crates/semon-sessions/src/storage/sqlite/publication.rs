@@ -148,7 +148,10 @@ impl crate::storage::catalog::SlotPublicationStore for SlotWriter<'_> {
             .map_err(crate::events::store::failure)
     }
     fn replace(&self, key: &str, metadata: &[String]) -> Result<(), Self::Error> {
-        let (remove, put) = ("DELETE FROM main.session_slots WHERE namespace=?1 AND session_key=?2", "INSERT INTO main.session_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)");
+        let (remove, put) = (
+            "DELETE FROM main.session_slots WHERE namespace=?1 AND session_key=?2",
+            "INSERT INTO main.session_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)",
+        );
         self.db
             .execute(remove, params![self.namespace, key])
             .map_err(crate::events::store::failure)?;

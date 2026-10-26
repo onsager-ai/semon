@@ -1060,7 +1060,13 @@ impl Writer {
             .map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
-            owner: self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.clone(),
+            owner: self
+                .owner
+                .as_ref()
+                .ok_or(StoreError::Configured(
+                    StorageError::NamespaceUpgradePending,
+                ))?
+                .clone(),
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1102,7 +1108,13 @@ impl Writer {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
-            owner: self.owner.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?.clone(),
+            owner: self
+                .owner
+                .as_ref()
+                .ok_or(StoreError::Configured(
+                    StorageError::NamespaceUpgradePending,
+                ))?
+                .clone(),
             connection,
             path: database.clone(),
             selected_runs: None,

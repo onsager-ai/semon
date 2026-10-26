@@ -17,12 +17,10 @@ use std::io;
 pub(crate) fn rows(
     connection: &Connection,
     request: &Request,
-    _qualified: bool,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
     if let Some(sid) = &request.sid {
         return read_range(
             connection,
-            true,
             "sqlite_autoindex_session_catalog_1",
             if request.require_complete && request.scope == CatalogReadScope::Current {
                 "lifecycle='current' AND "
@@ -78,7 +76,6 @@ pub(crate) fn rows(
         args.push(SqlValue::Text(cursor.key.clone()));
         let mut found = read_range(
             connection,
-            true,
             &index,
             &filters,
             if cursor.inclusive {
@@ -95,8 +92,7 @@ pub(crate) fn rows(
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
-                true,
-                &index,
+                    &index,
                 &filters,
                 "last_ms < ?",
                 args,
@@ -105,7 +101,7 @@ pub(crate) fn rows(
         }
         found
     } else {
-        read_range(connection, true, &index, &filters, "1", base, limit)?
+        read_range(connection, &index, &filters, "1", base, limit)?
     };
     // Capacity returned by SQLite is bounded by the requested page plus one.
     found.shrink_to_fit();
@@ -119,7 +115,6 @@ thread_local! {
 
 fn read_range(
     connection: &Connection,
-    _qualified: bool,
     index: &str,
     filters: &str,
     range: &str,
@@ -310,7 +305,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        rows(self.0, request, true).map_err(io::Error::other)
+        rows(self.0, request).map_err(io::Error::other)
     }
     fn search(
         &self,

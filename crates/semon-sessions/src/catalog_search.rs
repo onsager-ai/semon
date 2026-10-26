@@ -782,10 +782,10 @@ fn read_filtered(
         |query| anchor(connection, filter, scope, query),
         |gram, after, limit| posting_page(connection, filter, scope, gram, after, limit),
         |key, budget| {
-            let found = document.query_row(
-                params![scope_key(scope), key, budget as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            let found = document
+                .query_row(params![scope_key(scope), key, budget as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
             record_steps(&document);
             Ok(found)
         },

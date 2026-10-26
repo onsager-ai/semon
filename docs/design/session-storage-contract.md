@@ -588,7 +588,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
+| `events/store/configured.rs` | direct | Current namespace-native Event/Facts writer and admitted owner qualification. Public backend qualification remains incomplete. |
+| `events/store/history_custody_tests.rs` | direct | Current admitted publisher custody tests retain row/byte budgets, rollback, original recipes and immutable history. |
 | `events/store/configured_selected60.rs` | direct | Test-only committed-publication assertions for selected facts, retained-generation witnesses, independent private-witness binding, tamper-before-Raw refusal, negative reference/lease GC and real native multi-window range oracles; writer qualification remains zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |
@@ -625,10 +626,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
 | `storage/postgres/native_ingest_tests.rs` | direct | Independent ordinary SQLite parser oracle for the private PostgreSQL native EventCache integration; no complete backend qualification. |
-| `storage/postgres/native_recovery_tests.rs` | direct | Current native recovery compares ordinary SQLite producer state before the isolated PostgreSQL phase; full backend qualification remains incomplete. |
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
-| `storage/postgres/reported_facts.rs` | direct | Test-only real reported-source SQLite producer/oracle; the private PG effects use no SQLite connection or path. Public backend qualification remains zero. |
 | `storage/postgres/semantic_events.rs` | direct | Private PG event projection reuses the ordinary qualifier through its existing rusqlite result type; error-type decoupling remains required. It reads PG native rows and does not open SQLite. Full backend qualification remains incomplete. |
 | `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
