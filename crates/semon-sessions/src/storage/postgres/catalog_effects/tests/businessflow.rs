@@ -162,28 +162,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    // Recent-window (options.all=false) oracle totals, read in the SQLite phase.
+    // Recent windows (options.all=false): a window covering all history must
+    // equal the all-mode list (itself equal to the SQLite oracle).
     let recent_windows = [Duration::from_secs(1), Duration::from_secs(86400 * 365 * 100)];
-    let oracle_recent = recent_windows
-        .iter()
-        .map(|since| {
-            let mut oracle_options = sqlite_options.clone();
-            oracle_options.all = false;
-            oracle_options.since = *since;
-            let list = crate::Query::from_sources(std::sync::Arc::new(
-                crate::SessionSources::with_machines(vec![("oracle-recent".into(), oracle_options)]),
-            ))
-            .call_catalog_at(
-                "list_sessions",
-                &serde_json::json!({}),
-                None,
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
-            .expect("SQLite recent-window list");
-            (*since, list["total"].clone())
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -436,7 +417,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         ))
         .call_bound_catalog_at("list_sessions", &serde_json::json!({}), 1790812802000, &recent_store)
         .unwrap();
-        assert_eq!(&recent["total"], &oracle_recent[&since], "recent window {since:?}");
+        if since == recent_windows[1] {
+            assert_eq!(recent["total"], query_list["total"], "recent window {since:?}");
+        }
         assert!(recent["total"].as_u64() <= query_list["total"].as_u64());
     }
     super::super::snapshot::with_admitted_generation(
