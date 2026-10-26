@@ -377,7 +377,7 @@ impl ReductionWitness {
 }
 
 fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWitness> {
-    let rows=c.prepare("SELECT source_path,claim,ledger FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 ORDER BY source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows=c.prepare("SELECT s.source_path,s.claim,s.ledger,s.withdrawal IS NOT NULL,EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // A bounded reducer cannot certify an unbounded component. Native owner
     // closure qualification remains a separate, explicitly limited port.
     if rows.len() > 64 {
@@ -394,17 +394,49 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             return Ok(ReductionWitness::Changed);
         }
     }
-    for (path, claim, recorded) in rows {
+    for (path, claim, recorded, withdrawn, indexed) in rows {
         let actual = super::source_journal::claims(c, ns, std::slice::from_ref(&path))?[0].1;
         let ledger = crate::events::store::ledger_row(c, &path)?
             .map(|(_, l)| serde_json::to_string(&l))
             .transpose()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if actual != claim || ledger != recorded {
+        if actual != claim
+            || ledger != recorded
+            || (!indexed && !withdrawn && !removed_source(c, ns, &path)?)
+        {
             return Ok(ReductionWitness::Changed);
         }
     }
     Ok(ReductionWitness::Current)
+}
+
+// A missing scan result is not a withdrawal. Only an ordinary producer's
+// durable removal, with no live ledger, can complete its staged path. Physical
+// absence is observed by the producer under Source locks before this transaction;
+// reduction/publication consume only persisted evidence and exact claims/ledgers.
+// Retained recipes and proofs remain owned by the Catalog.
+fn removed_source(c: &Connection, ns: &str, path: &str) -> rusqlite::Result<bool> {
+    let removed: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND reason='removed')", params![ns,path], |r| r.get(0))?;
+    if !removed {
+        return Ok(false);
+    }
+    match crate::events::store::ledger_row(c, path)? {
+        None => Ok(true),
+        Some((_, ledger)) => crate::events::store::archive_ledger_retained(c, path, &ledger),
+    }
+}
+
+fn removed_paths(c: &Connection, ns: &str) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let paths = c.prepare("SELECT s.source_path FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.index_done=1 AND s.withdrawal IS NULL AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) ORDER BY s.source_path LIMIT 65")?.query_map([ns], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if paths.len() > 64 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    for path in &paths {
+        if !removed_source(c, ns, path)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 fn withdrawal_runtime_matches(
@@ -507,16 +539,18 @@ fn retirement_plan(
                 .iter()
                 .any(|w| s.path == std::path::Path::new(&w.path))
         });
-        if !withdrawn
-            && old.sources.iter().any(|s| {
-                !prepared
+        if !withdrawn {
+            for s in &old.sources {
+                if !prepared
                     .rows
                     .iter()
                     .flat_map(|r| &r.sources)
                     .any(|new| new.path == s.path)
-            })
-        {
-            return Err(refuse("semantic_affected_owner_transition_pending"));
+                    && !removed_source(db, ns, s.path.to_string_lossy().as_ref()).map_err(error)?
+                {
+                    return Err(refuse("semantic_affected_owner_transition_pending"));
+                }
+            }
         }
         outgoing.push(old.clone());
         plan.push((old.key.clone(), withdrawn));
@@ -1433,6 +1467,7 @@ impl Stage {
             return Ok((Outcome::Conflict, None));
         }
         let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
+        covered.extend(removed_paths(&tx, ns).map_err(error)?);
         let mut keys = std::collections::BTreeSet::new();
         let mut unchanged = true;
         for (row, encoded) in prepared.rows.iter().zip(&metadata) {
@@ -2318,8 +2353,8 @@ impl Stage {
         }
         let mut result_phase = Phase::Indexing;
         // Enroll the complete recorded old-owner incident closure before any
-        // native reduction. A missing Raw path remains a producer refusal,
-        // never a fabricated negative observation or an omitted old owner.
+        // native reduction. Missing Raw requires the producer's exact durable
+        // removal; it never fabricates a Facts withdrawal or omits an old owner.
         if self.source.owner.is_some() && !resetting {
             let seeds = staged_paths(&tx, ns)?;
             let prior = owners::Owners {
@@ -2584,7 +2619,9 @@ impl Stage {
                 eprintln!("semantic_record_conflict: publication_witness");
                 return Ok(Outcome::Conflict);
             }
-            if (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
+            if (prepared.rows.is_empty()
+                && prepared.withdrawals.is_empty()
+                && prepared.relationships.retired_owners.is_empty())
                 || prepared.rows.len() > 64
                 || prepared.transcripts.len() > 64
             {
@@ -2592,6 +2629,7 @@ impl Stage {
             }
             let mut metadata = Vec::new();
             let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
+            covered.extend(removed_paths(&tx, ns).map_err(error)?);
             let mut keys = std::collections::BTreeSet::new();
             for row in &prepared.rows {
                 if !keys.insert(&row.key) || row.sources.is_empty() {
@@ -2826,7 +2864,7 @@ impl Stage {
             tx.commit().map_err(error)?;
             return Ok(Outcome::Written);
         }
-        if prepared.indexed_sources.len() + prepared.withdrawals.len() != batch.paths.len() {
+        if prepared.indexed_sources.len() + prepared.withdrawals.len() > batch.paths.len() {
             #[cfg(test)]
             eprintln!("semantic_record_conflict: indexing_source_coverage");
             return Ok(Outcome::Conflict);
@@ -2890,6 +2928,28 @@ impl Stage {
             }
             .withdrawal(withdrawal)
             .map_err(error)?;
+        }
+        for path in &batch.paths {
+            if seen.contains(path) || prepared.withdrawals.iter().any(|w| &w.path == path) {
+                continue;
+            }
+            if !prepared.removed_sources.contains(path)
+                || !removed_source(&tx, ns, path).map_err(error)?
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "semantic_record_conflict: removal_evidence physical_absent={} durable_removed={}",
+                    prepared.removed_sources.contains(path),
+                    removed_source(&tx, ns, path).map_err(error)?
+                );
+                return Ok(Outcome::Conflict);
+            }
+            let retained = crate::events::store::ledger_row(&tx, path)
+                .map_err(error)?
+                .map(|(_, ledger)| serde_json::to_string(&ledger))
+                .transpose()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            tx.execute("UPDATE main.catalog_semantic_sources SET ledger=?3,index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path,retained]).map_err(error)?;
         }
         for (path, harness, native) in &prepared.indexed_native_parents {
             if !seen.contains(path) {

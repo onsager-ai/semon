@@ -121,10 +121,10 @@ pub(crate) fn indexed_codex_sources(
         let mut inputs = Vec::new();
         for row in rows {
             let path = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
-            if let Some(relative) = std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|relative| relative.to_str()) {
-                if crate::is_input_path("codex", relative) {
-                    inputs.push(crate::Input { root: crate::InputRoot::Codex, path: relative.into() });
-                }
+            if let Some(relative) = std::path::Path::new(&path).strip_prefix(&options.codex_home).ok().and_then(|relative| relative.to_str())
+                && crate::is_input_path("codex", relative)
+            {
+                inputs.push(crate::Input { root: crate::InputRoot::Codex, path: relative.into() });
             }
         }
         Ok(inputs)

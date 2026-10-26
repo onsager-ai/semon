@@ -3122,6 +3122,7 @@ mod tests {
             message_dependencies: None,
             relationships: Context::default(),
             indexed_sources: Vec::new(),
+            removed_sources: BTreeSet::new(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
         }

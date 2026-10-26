@@ -5660,6 +5660,7 @@ mod tests {
             message_dependencies: Some(Vec::new()),
             relationships: Default::default(),
             indexed_sources: vec![("codex".into(), source)],
+            removed_sources: Default::default(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
         }
