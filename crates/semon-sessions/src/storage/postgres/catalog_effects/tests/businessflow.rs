@@ -124,7 +124,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .map(|i| fs::read(i.full_path(&options)).unwrap())
         .collect::<Vec<_>>();
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
-    let (pool, _) = fixture(|_| {});
+    let (pool, _) = fixture(|limits| limits.max_connections = 1);
     let namespace = ns("vertical140\0🦀");
     let control = PgCancellation::default();
     let mut pg =

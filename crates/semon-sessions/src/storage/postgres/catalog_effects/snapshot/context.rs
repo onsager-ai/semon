@@ -11,7 +11,7 @@ impl Snapshot<'_, '_> {
         key: &str,
         id: Option<(&str, &str, &str)>,
     ) -> io::Result<Option<String>> {
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes();
         let hash = digest(key.as_bytes());
@@ -115,7 +115,7 @@ impl ContextLookup for Snapshot<'_, '_> {
         )
     }
     fn target_turns(&self, key: &str, id: &str) -> io::Result<Vec<String>> {
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
         tx.check().map_err(io::Error::other)?;
         let rows = tx.driver.query("SELECT turn_id FROM semon_pg_native_catalog_trace_turns WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND start_id=$4 ORDER BY turn_id LIMIT 2", &[&tx.namespace.as_str().as_bytes(), &self.generation.as_bytes(), &key.as_bytes(), &id.as_bytes()]).map_err(sqlstate::error).map_err(io::Error::other)?;
         rows.iter()

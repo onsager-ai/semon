@@ -103,9 +103,7 @@ impl QueryCatalogStore for QueryCatalog {
                     return Err(StorageError::Busy);
                 }
                 let records = super::super::selected_reader::SelectedRecords {
-                    pool: &self.pool,
-                    namespace: &self.namespace,
-                    control: &self.control,
+                    tx: &snapshot.tx,
                     generation: &self.generation,
                     host,
                     sources,
@@ -184,7 +182,7 @@ impl QueryCatalogStore for QueryCatalog {
         }
         let runtime = crate::native_evidence::query_runtime_generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
-        with_admitted_generation(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
+        with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
             let observations = crate::native_evidence::RuntimeObservations::bound(&tx_snapshot, &runtime).map_err(|_| StorageError::ScopeChanged)?;
             let request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
@@ -210,16 +208,15 @@ impl QueryCatalogStore for QueryCatalog {
                 }
                 witnesses.push((row.key.clone(), witness));
                 // Content generation belongs to the same immutable selected trace.
-                let version = with_generation(&self.pool, namespace, &self.control, &self.generation, |physical| {
-                    use crate::storage::selected::ContextLookup;
-                    physical.preview_header(&row.key).map_err(|_| StorageError::Unavailable)
-                })?;
+                use crate::storage::selected::ContextLookup;
+                let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
                 if let Some((_, Some(version))) = version { content.insert(row.key, version); }
             }
             if rows.len() > 64 { return Err(StorageError::Busy); }
             // Each saved owner contains its complete relationship summaries.
             // Exact edge/turn sets are loaded below from the immutable effects.
-            let (edges, turns) = self.pool.transaction(namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
+            let (edges, turns) = {
+                let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
                 let mut sets = Vec::new();
                 for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
                     let values = tx.driver.query(&format!("SELECT CASE WHEN octet_length({column})<=65536 THEN {column} END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error)?;
@@ -227,8 +224,8 @@ impl QueryCatalogStore for QueryCatalog {
                     let values = values.iter().map(|row| text(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)).collect::<Result<BTreeSet<_>, _>>()?;
                     sets.push(values);
                 }
-                Ok((sets.remove(0), sets.remove(0)))
-            })?;
+                (sets.remove(0), sets.remove(0))
+            };
             for id in edges.iter().chain(turns.iter()) {
                 *bytes_left = bytes_left.checked_sub(id.len()).ok_or(StorageError::Busy)?;
             }
@@ -293,7 +290,7 @@ impl QueryCatalogStore for QueryCatalog {
 struct PgPage<'a, 'b, 'tx, 'r> {
     snapshot: &'a Snapshot<'b, 'tx>,
     key: &'a str,
-    records: &'a super::super::selected_reader::SelectedRecords<'r>,
+    records: &'a super::super::selected_reader::SelectedRecords<'r, 'b, 'tx>,
 }
 impl crate::query::transcript::PageSource for PgPage<'_, '_, '_, '_> {
     fn slots(
@@ -341,7 +338,7 @@ impl Snapshot<'_, '_> {
         key: &str,
         turn: &str,
     ) -> Result<(usize, crate::slot_projection::SavedSlot), StorageError> {
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let rows=tx.driver.query("SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'turn'=$4 AND (CASE WHEN octet_length(metadata)<=65536 THEN convert_from(metadata,'UTF8')::jsonb END)->>'first'='true' ORDER BY slot LIMIT 1", &[&tx.namespace.as_str().as_bytes(),&self.generation.as_bytes(),&key.as_bytes(),&turn]).map_err(sqlstate::error)?;
         tx.check()?;

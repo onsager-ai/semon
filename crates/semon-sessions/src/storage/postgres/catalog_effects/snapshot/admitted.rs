@@ -12,10 +12,10 @@ fn unavailable<T>() -> io::Result<T> {
 
 impl CatalogSnapshot for Snapshot<'_, '_> {
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
-        super::super::super::model_cache::binding(&mut self.tx.borrow_mut()).ok()
+        super::super::super::model_cache::binding(&mut self.tx.lock().ok()?).ok()
     }
     fn require_current(&self) -> io::Result<()> {
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
         tx.check().map_err(failed)?;
         let admitted: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
         if admitted { Ok(()) } else { unavailable() }
@@ -35,7 +35,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         if request.limit > 64 || request.scope != crate::CatalogReadScope::Current {
             return unavailable();
         }
-        let tx = self.tx.borrow_mut();
+        let tx = self.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
         let ns = tx.namespace.as_str().as_bytes();
         let bytes: i64 = tx.driver.query_one("SELECT coalesce(sum(octet_length(metadata)),0)::bigint FROM (SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 65) bounded", &[&ns, &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
         if bytes > MAX as i64 {
