@@ -1203,7 +1203,7 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
-        let ready = super::qualify_catalog_tx(&tx, Some(self.config.namespace.as_str()))?;
+        let ready = super::qualify_catalog_tx(&tx, self.config.namespace.as_str())?;
         tx.commit()
             .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
         Ok(ready)
@@ -1246,7 +1246,7 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
-        super::remove_files_tx(&tx, files, Some(self.config.namespace.as_str()))
+        super::remove_files_tx(&tx, files, self.config.namespace.as_str())
             .map_err(failure)?;
         tx.commit()
             .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
@@ -1548,7 +1548,7 @@ impl Writer {
         }
         let revision = crate::storage::sqlite::source_journal::claims(
             &tx,
-            Some(self.config.namespace.as_str()),
+            self.config.namespace.as_str(),
             &[path.to_owned()],
         )
         .map_err(failed)?[0]
@@ -1628,7 +1628,7 @@ impl Writer {
             }
             let revision = crate::storage::sqlite::source_journal::claims(
                 &tx,
-                Some(self.config.namespace.as_str()),
+                self.config.namespace.as_str(),
                 &[(*path).to_owned()],
             )
             .map_err(failed)?[0]
@@ -1662,7 +1662,7 @@ impl Writer {
                 *changes,
                 *expected,
                 &mut crate::native_timing::Measurements::default(),
-                Some(self.config.namespace.as_str()),
+                self.config.namespace.as_str(),
             )
             .map_err(|error| failed(error))?;
             let intent = &self.intents[*path];
@@ -5011,16 +5011,15 @@ mod tests {
     }
 
     #[test]
-    fn configured_semantic_publisher_keeps_unbound_head_refusal() {
+    fn configured_semantic_publisher_refuses_foreign_binding_without_changes() {
         let (a, _, _) = same_db_sources();
-        let mut db = a.db();
+        let db = a.db();
+        let owner = NativeOwnership::restore(&a.config).unwrap();
         let before = shared_state(&a);
-        let tx = db.transaction().unwrap();
-        assert!(matches!(
-            crate::storage::sqlite::publication::transitional_head(&tx),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
-        drop(tx);
+        let foreign = LogicalSourceNamespace::new("not-admitted").unwrap();
+        assert!(crate::storage::NativeReaderBinding::Semantic(owner)
+            .validate(&db, &foreign)
+            .is_err());
         assert_eq!(shared_state(&a), before);
     }
 

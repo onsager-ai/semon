@@ -1321,7 +1321,7 @@ fn invalidate_bound_catalog_source(
     reason: &str,
 ) -> rusqlite::Result<()> {
     let namespace: String = tx.query_row("SELECT semon_namespace()", [], |r| r.get(0))?;
-    crate::storage::sqlite::source_journal::invalidate(tx, Some(&namespace), path, reason)
+    crate::storage::sqlite::source_journal::invalidate(tx, &namespace, path, reason)
 }
 
 pub(crate) fn enqueue_native(options: &crate::Options, harness: &str, id: &str) -> io::Result<()> {
@@ -2362,7 +2362,7 @@ impl IndexStore for SqliteStore {
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
-        let ready = qualify_catalog_tx(&tx, None)?;
+        let ready = qualify_catalog_tx(&tx, self.owner.config().namespace.as_str())?;
         tx.commit().map_err(failure)?;
         Ok(ready)
     }
@@ -2547,7 +2547,7 @@ fn invalidate_catalog_source(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
-    crate::storage::sqlite::source_journal::invalidate(transaction, None, path, reason)
+    crate::storage::sqlite::source_journal::invalidate(transaction, &transaction.query_row("SELECT semon_namespace()", [], |row| row.get::<_, String>(0))?, path, reason)
 }
 
 fn queue_tree_repair_tx(tx: &Transaction<'_>, path: &str, ledger: &Ledger) -> io::Result<()> {
@@ -4021,7 +4021,7 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         require_current_sql(&transaction)?;
-        remove_files_tx(&transaction, files, None)?;
+        remove_files_tx(&transaction, files, self.owner.config().namespace.as_str())?;
         transaction.commit()?;
         Ok(Outcome::Written)
     }
@@ -5784,7 +5784,7 @@ fn write_index_changes(
         changes,
         expected,
         &mut crate::native_timing::Measurements::default(),
-        None,
+        &transaction.query_row("SELECT semon_namespace()", [], |row| row.get::<_, String>(0))?,
         layout,
         &mut UsageDeletes::default(),
     )
@@ -5799,7 +5799,7 @@ fn write_index_changes_measured(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
-    namespace: Option<&str>,
+    namespace: &str,
 ) -> rusqlite::Result<()> {
     let layout = WriterLayout::new(transaction)?;
     write_index_changes_with_usage_deletes(
@@ -5825,7 +5825,7 @@ fn write_index_changes_with_usage_deletes<'tx>(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
-    namespace: Option<&str>,
+    namespace: &str,
     layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
@@ -11705,7 +11705,7 @@ pub(crate) fn read_file_ledgers(
 pub(crate) fn remove_files_tx(
     transaction: &Transaction<'_>,
     files: &[(String, Option<Ledger>)],
-    namespace: Option<&str>,
+    namespace: &str,
 ) -> rusqlite::Result<()> {
     validate_copied_usage(transaction)?;
     for (path, expected) in files {
@@ -11904,7 +11904,7 @@ pub(crate) fn read_catalog_component_paths(
 
 pub(crate) fn qualify_catalog_tx(
     tx: &Transaction<'_>,
-    namespace: Option<&str>,
+    namespace: &str,
 ) -> Result<bool, StoreError> {
     let repairs = {
         let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE namespace=semon_namespace() AND version=?1 AND source_generation IS NULL LIMIT 64) LIMIT 64").map_err(failure)?;

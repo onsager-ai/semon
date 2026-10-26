@@ -8,7 +8,7 @@ pub(super) struct Writer<'a, 'tx, 'conn> {
     pub(super) transaction: &'tx Transaction<'conn>,
     pub(super) layout: &'a WriterLayout<'tx, 'conn>,
     pub(super) measurements: &'a mut crate::native_timing::Measurements,
-    pub(super) namespace: Option<&'a str>,
+    pub(super) namespace: &'a str,
     pub(super) usage_deletes: &'a mut UsageDeletes<'tx>,
     pub(super) relationship_started: Option<Instant>,
     pub(super) relationship_rows_before: Option<u64>,
