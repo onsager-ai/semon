@@ -135,6 +135,43 @@ pub(super) fn schema(composite: bool) -> &'static str {
     if composite { COMPOSITE_SCHEMA } else { SCHEMA }
 }
 
+// Static test diagnostics at the native-tree boundary; never include SQL values.
+pub(super) fn diagnose(statement: &'static str, error: rusqlite::Error) -> rusqlite::Error {
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(code, message) = &error {
+        let message = message.as_deref().unwrap_or("");
+        let reason = if message.contains("ON CONFLICT clause does not match") {
+            "conflict_target"
+        } else if message.contains("view") {
+            "view_effect"
+        } else if message.starts_with("no such column:") {
+            "missing_column"
+        } else if message.starts_with("no such table:") {
+            "missing_table"
+        } else if message.contains("values were supplied") {
+            "column_count"
+        } else if message.contains("readonly") || message.contains("read-only") {
+            "readonly"
+        } else if message.contains("FOREIGN KEY") || message.contains("foreign key") {
+            "foreign_key"
+        } else if message.contains("constraint") {
+            "constraint"
+        } else if message.contains("datatype") {
+            "datatype"
+        } else if message.contains("arguments on") {
+            "function_arity"
+        } else if message.contains("malformed") {
+            "malformed"
+        } else {
+            "other_sql_contract"
+        };
+        eprintln!("native tree statement={statement} code={} reason={reason}", code.extended_code);
+    }
+    #[cfg(not(test))]
+    let _ = statement;
+    error
+}
+
 pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
     use rusqlite::functions::FunctionFlags;
     c.create_scalar_function(
@@ -334,7 +371,8 @@ pub(super) fn write(
         None => new_generation(tx, source_id, ledger)?,
     };
     tx.execute(sql(tx, "INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", "INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?,params![path,id,projection_id,header_ledger(ledger)])?;
-    write_values(tx, projection_id, summary)?;
+    write_values(tx, projection_id, summary)
+        .map_err(|error| diagnose("write_values", error))?;
     tx.execute(
         sql(tx, "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1", "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?,
         params![projection_id, header_ledger(ledger)],

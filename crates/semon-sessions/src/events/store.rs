@@ -5791,8 +5791,10 @@ fn write_tree_summary(
     if let Some(summary) = summary {
         let current = TreeSummaryRecord::new(
             header_ledger(ledger),
-            tree_state::witness(transaction, path, ledger)?,
-            tree_interpretation(transaction, path)?,
+            tree_state::witness(transaction, path, ledger)
+                .map_err(|error| tree_state::diagnose("witness", error))?,
+            tree_interpretation(transaction, path)
+                .map_err(|error| tree_state::diagnose("interpretation", error))?,
             summary,
             normalized_usage,
         );
@@ -5817,11 +5819,14 @@ fn write_tree_summary(
     }
     let encoded = summary
         .map(|summary| {
-            tree_state::write(transaction, path, ledger, summary)?;
+            tree_state::write(transaction, path, ledger, summary)
+                .map_err(|error| tree_state::diagnose("write", error))?;
             json(&TreeSummaryRecord::new(
                 header_ledger(ledger),
-                tree_state::witness(transaction, path, ledger)?,
-                tree_interpretation(transaction, path)?,
+                tree_state::witness(transaction, path, ledger)
+                .map_err(|error| tree_state::diagnose("witness", error))?,
+                tree_interpretation(transaction, path)
+                .map_err(|error| tree_state::diagnose("interpretation", error))?,
                 summary,
                 normalized_usage,
             ))
