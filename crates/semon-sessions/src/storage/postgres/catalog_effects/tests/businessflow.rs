@@ -776,6 +776,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let model = pg
             .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000)
             .unwrap();
+        let current_binding = pg.query_runtime_binding().unwrap().unwrap();
+        assert_eq!(current_binding.namespace, binding.namespace);
+        assert_eq!(current_binding.admission, binding.admission);
+        assert_eq!(current_binding.stream_epoch, binding.stream_epoch);
+        let current_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+        assert_eq!(current_runtime, stage_runtime, "staged runtime changed");
+        let expected_runtime = current_binding.witness(&current_runtime).unwrap();
+        for row in &model.prepared().rows {
+            assert!(
+                row.query.as_ref().is_some_and(|query| query["runtime"].as_str() == Some(expected_runtime.as_str())),
+                "staged row runtime differs: phase={:?}", batch.phase
+            );
+        }
         if batch.phase == crate::model::relation_stage::Phase::Relations {
             use crate::model::relation_stage::Selector;
             let selected = pg
