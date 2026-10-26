@@ -167,7 +167,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .map(|i| fs::read(i.full_path(&options)).unwrap())
         .collect::<Vec<_>>();
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
-    let (pool, _) = fixture(|limits| limits.max_connections = 1);
+    let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let namespace = ns("vertical140\0🦀");
     let control = PgCancellation::default();
     let mut pg =
@@ -1413,5 +1413,64 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies,
         "old selected bodies after incremental publication and restart"
+    );
+    // Fresh Pool: new connections run the cold binding audit, then read the
+    // committed head, every older committed generation's cohort (retained
+    // history merged as in SQLite) and the old selected bodies.
+    drop(reopened);
+    let cold = crate::storage::postgres::PgPool::new(
+        factory.clone(),
+        crate::storage::postgres::tests::limits(),
+    )
+    .unwrap();
+    let cold_cache =
+        EventCache::open_pg_native(cold.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        cold_cache.session_catalog_generation().as_deref(),
+        Some(successor.as_str())
+    );
+    let cold_store = |generation: &str, options: &Options| {
+        super::super::snapshot::query::QueryCatalog {
+            pool: cold.clone(),
+            namespace: namespace.clone(),
+            control: control.clone(),
+            generation: generation.to_owned(),
+            options: options.clone(),
+        }
+    };
+    let started = std::time::Instant::now();
+    let first = facts_query
+        .call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            1790812809000,
+            &cold_store(&successor, &facts_options),
+        )
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8), "cold first page");
+    assert_eq!(first["total"].as_u64(), Some(total - 1));
+    for (at, expected) in [
+        (&bulk_generation, total),
+        (&partial_generation, total),
+        (&withdrawn, total - 1),
+    ] {
+        let listed = facts_query
+            .call_bound_catalog_at(
+                "list_sessions",
+                &serde_json::json!({}),
+                1790812809000,
+                &cold_store(at, &facts_options),
+            )
+            .unwrap();
+        assert_eq!(listed["total"].as_u64(), Some(expected), "older cohort");
+    }
+    assert_eq!(
+        read_bodies(
+            &mut query,
+            &cold_store(&generation, &options),
+            &retained_host
+        ),
+        expected_bodies,
+        "old selected bodies through a fresh Pool"
     );
 }
