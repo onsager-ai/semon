@@ -251,12 +251,12 @@ pub(crate) fn parser_oracle(
     source: &Path,
     harness: &str,
 ) -> (FileIndex, Vec<(String, String)>) {
-    let source = crate::storage::HostSource::new(
+    let host_source = crate::storage::HostSource::new(
         crate::storage::LogicalSourceNamespace::new(format!("native-commit-{harness}")).unwrap(),
         "4".repeat(64),
     )
     .unwrap();
-    let mut cache = super::super::EventCache::open(cache_path, &source).unwrap();
+    let mut cache = super::super::EventCache::open(cache_path, &host_source).unwrap();
     let index = super::super::scan_file(source, harness, &mut cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
     drop(cache);
