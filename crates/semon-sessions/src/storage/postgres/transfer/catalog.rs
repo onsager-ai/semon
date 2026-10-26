@@ -69,11 +69,21 @@ const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generat
 /// any page commits. Namespace binding remains explicit on every relation.
 pub(super) fn occupied(tx: &mut Inbox<'_, '_>) -> Result<bool, StorageError> {
     let ns = tx.0.namespace.as_str().as_bytes();
-    let terms = CatalogRowKind::ALL.iter().map(|kind| {
+    let mut terms = CatalogRowKind::ALL.iter().map(|kind| {
         let (table, _) = spec(*kind);
         format!("EXISTS(SELECT 1 FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)")
     }).collect::<Vec<_>>();
-    Ok(tx.0.driver.query_one(&format!("SELECT {}", terms.join(" OR ")), &[&ns]).map_err(sqlstate::error)?.get(0))
+    // Include orphaned physical rows too. The visible-owner joins above must
+    // not make a corrupt destination appear empty before earlier pages commit.
+    for table in ["catalog_sources", "catalog_links", "catalog_history_headers", "catalog_history_slots", "catalog_history_sources", "catalog_history_progress"] {
+        terms.push(format!("EXISTS(SELECT 1 FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)"));
+    }
+    Ok(tx
+        .0
+        .driver
+        .query_one(&format!("SELECT {}", terms.join(" OR ")), &[&ns])
+        .map_err(sqlstate::error)?
+        .get(0))
 }
 
 pub(super) fn capture(
@@ -255,11 +265,18 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
             // Rebuild the producer's physical incident index from the exact
             // transferred metadata; this is content, never publication authority.
-            let edges = row.query.as_ref()
+            let edges = row
+                .query
+                .as_ref()
                 .and_then(|query| query["selected"]["edges"].as_array())
-                .into_iter().flatten()
+                .into_iter()
+                .flatten()
                 .flat_map(|edge| ["from", "to"].map(move |field| edge["query"][field].as_str()));
-            let peers = row.parent.as_deref().into_iter().chain(edges.flatten())
+            let peers = row
+                .parent
+                .as_deref()
+                .into_iter()
+                .chain(edges.flatten())
                 .filter(|peer| *peer != row.key)
                 .collect::<std::collections::BTreeSet<_>>();
             for peer in peers {
@@ -372,6 +389,36 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
 mod tests {
     use super::*;
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
+
+    #[test]
+    fn pg_current_transfer246_occupied_description_refused_before_native_commit() {
+        let root = root();
+        let source = sqlite(&root, "occupied-pg-source");
+        crate::storage::transfer::reported::tests::seed_native_usage(&source, &root.join("native.jsonl"), 130);
+        let (pool, _) = super::super::super::tests::fixture(|_| {});
+        let control = PgCancellation::default();
+        let config = StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        config.create_native_store().unwrap();
+        let mut writer = crate::storage::transfer::reported::tests::cache(&config);
+        writer.save_session_description("existing", 1, "inputs", "owned destination");
+        writer.publish_session_descriptions();
+        assert_eq!(writer.session_description("existing", 1, "inputs").as_deref(), Some("owned destination"));
+        drop(writer);
+        let manifest = stage(&source, &config, &[123; 32]);
+        assert_eq!(config.transfer_inbox().apply_page(&manifest, 1), Err(StorageError::Conflict));
+        pool.transaction(&config.namespace, TxnKind::Transfer, &control, |tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            let row = tx.driver.query_one("SELECT (SELECT metadata FROM semon_pg_native_descriptions WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2),(SELECT count(*) FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)", &[&ns, &b"existing".as_slice()]).map_err(sqlstate::error)?;
+            assert_eq!(row.get::<_, Vec<u8>>(0), b"owned destination");
+            assert_eq!(row.get::<_, i64>(1), 0);
+            Ok(())
+        }).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw() {

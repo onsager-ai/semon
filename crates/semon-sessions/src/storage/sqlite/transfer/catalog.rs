@@ -66,11 +66,14 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
 /// Refuse all already-owned Catalog content before applying the first page.
 /// A later unique-key failure is too late: earlier pages would already commit.
 pub(super) fn occupied(tx: &Inbox<'_>) -> Result<bool, StorageError> {
-    let terms = CatalogRowKind::ALL.iter().map(|kind| {
+    let mut terms = CatalogRowKind::ALL.iter().map(|kind| {
         let (table, _, _) = spec(*kind);
         let table = if table.starts_with('(') { table.to_owned() } else { format!("main.{table}") };
         format!("EXISTS(SELECT 1 FROM {table} WHERE namespace=?1)")
     }).collect::<Vec<_>>();
+    for table in ["session_catalog_sources", "session_history_slot_parts", "session_overview"] {
+        terms.push(format!("EXISTS(SELECT 1 FROM main.{table} WHERE namespace=?1)"));
+    }
     tx.0.query_row(&format!("SELECT {}", terms.join(" OR ")), [tx.1], |row| row.get(0)).map_err(failed)
 }
 
