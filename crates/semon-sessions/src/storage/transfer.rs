@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 pub(crate) mod inventory;
 pub(crate) mod reported;
+pub use reported::CaptureProgress;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_PAGE_ROWS: usize = 64;
@@ -121,6 +122,18 @@ pub struct SnapshotManifest {
 }
 
 impl SnapshotManifest {
+    pub(crate) fn identity(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"semon-current-snapshot-identity-v1");
+        digest.update(self.snapshot_id);
+        digest.update((self.namespace.len() as u64).to_be_bytes());
+        digest.update(self.namespace.as_bytes());
+        digest.update(self.stream_epoch.as_bytes());
+        digest.update(self.binding_epoch.to_be_bytes());
+        digest.update(self.revision.to_be_bytes());
+        digest.finalize().into()
+    }
+
     pub fn seal(&mut self) -> Result<(), StorageError> {
         self.digest = self.content_digest()?;
         self.validate()
@@ -272,15 +285,17 @@ pub struct TransferCheckpoint {
     pub sequence: u64,
     pub digest: [u8; 32],
     pub rows: Vec<u64>,
+    pub digests: Vec<[u8; 32]>,
 }
 
 impl TransferCheckpoint {
     pub(crate) fn initial(manifest: &SnapshotManifest) -> Self {
         Self {
-            snapshot: manifest.digest,
+            snapshot: manifest.identity(),
             sequence: 0,
             digest: [0; 32],
             rows: vec![0; Category::ALL.len()],
+            digests: vec![[0; 32]; Category::ALL.len()],
         }
     }
 
@@ -289,11 +304,12 @@ impl TransferCheckpoint {
         manifest: &SnapshotManifest,
         page: &TransferPage,
     ) -> Result<Self, StorageError> {
-        if self.snapshot != manifest.digest
-            || page.snapshot != manifest.digest
+        if self.snapshot != manifest.identity()
+            || page.snapshot != manifest.identity()
             || self.sequence.checked_add(1) != Some(page.sequence)
             || self.digest != page.previous
             || self.rows.len() != Category::ALL.len()
+            || self.digests.len() != Category::ALL.len()
         {
             return Err(StorageError::Conflict);
         }
@@ -307,6 +323,9 @@ impl TransferCheckpoint {
             .ok_or(StorageError::InvalidArguments)?;
         if next.rows[index] > manifest.categories[index].rows {
             return Err(StorageError::Conflict);
+        }
+        for record in &page.records {
+            next.digests[index] = hash(&(next.digests[index], record))?;
         }
         next.sequence = page.sequence;
         next.digest = page.digest;
@@ -346,7 +365,7 @@ impl TransferInbox {
     ) -> Result<TransferCheckpoint, StorageError> {
         manifest.bind(&self.0)?;
         let bytes = page.encoded()?;
-        if page.snapshot != manifest.digest {
+        if page.snapshot != manifest.identity() {
             return Err(StorageError::ScopeChanged);
         }
         for record in &page.records {
@@ -424,8 +443,8 @@ pub(crate) fn begin_tx(
     tx: &mut impl InboxTransaction,
     manifest: &SnapshotManifest,
 ) -> Result<TransferCheckpoint, StorageError> {
-    let manifest_key = key(&manifest.digest, "manifest");
-    let checkpoint_key = key(&manifest.digest, "checkpoint");
+    let manifest_key = key(&manifest.identity(), "manifest");
+    let checkpoint_key = key(&manifest.identity(), "checkpoint");
     let bytes = encode_bounded(manifest, MAX_MANIFEST_BYTES)?;
     if let Some(stored) = tx.get(&manifest_key, MAX_MANIFEST_BYTES)? {
         if stored != bytes {
@@ -451,8 +470,9 @@ fn decode_checkpoint(
 ) -> Result<TransferCheckpoint, StorageError> {
     let value: TransferCheckpoint =
         serde_json::from_slice(bytes).map_err(|_| StorageError::ScopeChanged)?;
-    if value.snapshot != manifest.digest
+    if value.snapshot != manifest.identity()
         || value.rows.len() != Category::ALL.len()
+        || value.digests.len() != Category::ALL.len()
         || value
             .rows
             .iter()
@@ -469,13 +489,13 @@ pub(crate) fn checkpoint_tx(
     manifest: &SnapshotManifest,
 ) -> Result<TransferCheckpoint, StorageError> {
     let stored = tx
-        .get(&key(&manifest.digest, "manifest"), MAX_MANIFEST_BYTES)?
+        .get(&key(&manifest.identity(), "manifest"), MAX_MANIFEST_BYTES)?
         .ok_or(StorageError::ScopeChanged)?;
     if stored != encode_bounded(manifest, MAX_MANIFEST_BYTES)? {
         return Err(StorageError::Conflict);
     }
     let bytes = tx
-        .get(&key(&manifest.digest, "checkpoint"), MAX_MANIFEST_BYTES)?
+        .get(&key(&manifest.identity(), "checkpoint"), MAX_MANIFEST_BYTES)?
         .ok_or(StorageError::ScopeChanged)?;
     decode_checkpoint(&bytes, manifest)
 }
@@ -487,8 +507,8 @@ pub(crate) fn stage_tx(
     bytes: &[u8],
 ) -> Result<TransferCheckpoint, StorageError> {
     let checkpoint = begin_tx(tx, manifest)?;
-    let operation_key = key(&manifest.digest, &key(&page.operation, "operation"));
-    let page_key = key(&manifest.digest, &format!("page:{}", page.sequence));
+    let operation_key = key(&manifest.identity(), &key(&page.operation, "operation"));
+    let page_key = key(&manifest.identity(), &format!("page:{}", page.sequence));
     if let Some(receipt) = tx.get(&operation_key, MAX_MANIFEST_BYTES)? {
         let committed = decode_checkpoint(&receipt, manifest)?;
         if committed.sequence != page.sequence
@@ -506,7 +526,7 @@ pub(crate) fn stage_tx(
     let encoded = encode_bounded(&next, MAX_MANIFEST_BYTES)?;
     tx.put(&page_key, bytes)?;
     tx.put(&operation_key, &encoded)?;
-    tx.put(&key(&manifest.digest, "checkpoint"), &encoded)?;
+    tx.put(&key(&manifest.identity(), "checkpoint"), &encoded)?;
     Ok(next)
 }
 
@@ -516,20 +536,20 @@ pub(crate) fn page_tx(
     sequence: u64,
 ) -> Result<TransferPage, StorageError> {
     let manifest_bytes = tx
-        .get(&key(&manifest.digest, "manifest"), MAX_MANIFEST_BYTES)?
+        .get(&key(&manifest.identity(), "manifest"), MAX_MANIFEST_BYTES)?
         .ok_or(StorageError::ScopeChanged)?;
     if manifest_bytes != encode_bounded(manifest, MAX_MANIFEST_BYTES)? {
         return Err(StorageError::Conflict);
     }
     let bytes = tx
         .get(
-            &key(&manifest.digest, &format!("page:{sequence}")),
+            &key(&manifest.identity(), &format!("page:{sequence}")),
             MAX_PAGE_BYTES,
         )?
         .ok_or(StorageError::ScopeChanged)?;
     let page: TransferPage =
         serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-    if page.sequence != sequence || page.snapshot != manifest.digest || page.encoded()? != bytes {
+    if page.sequence != sequence || page.snapshot != manifest.identity() || page.encoded()? != bytes {
         return Err(StorageError::ScopeChanged);
     }
     Ok(page)
@@ -571,7 +591,7 @@ pub(crate) mod tests {
         previous: [u8; 32],
     ) -> TransferPage {
         let mut page = TransferPage {
-            snapshot: manifest.digest,
+            snapshot: manifest.identity(),
             sequence,
             previous,
             operation: [sequence as u8; 32],
