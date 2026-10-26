@@ -298,6 +298,8 @@ impl SourceJournal {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
+        #[cfg(test)]
+        let reserved = std::time::Instant::now();
         self.validate(&tx)?;
         tx.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
             .map_err(failed)?;
@@ -349,6 +351,13 @@ impl SourceJournal {
         )
         .map_err(failed)?;
         catalog_namespace::guard(&tx, "storage_source_journal")?;
+        #[cfg(test)]
+        if reserved.elapsed() >= Duration::from_millis(50) {
+            eprintln!(
+                "configured_reservation stage=journal_prepare total_us={}",
+                reserved.elapsed().as_micros()
+            );
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)
     }
 

@@ -1921,6 +1921,8 @@ impl Stage {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
+        #[cfg(test)]
+        let reserved = std::time::Instant::now();
         let admission = if let Some(owner) = &capability.owner {
             owner.validate_ready(&tx)?;
             owner.admission()
@@ -1988,6 +1990,13 @@ impl Stage {
         let valid: bool = tx.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![config.namespace.as_str(),admission_sql,recipe], |r| r.get(0)).map_err(failed)?;
         if !valid {
             return Err(StorageError::NamespaceUpgradePending);
+        }
+        #[cfg(test)]
+        if reserved.elapsed() >= std::time::Duration::from_millis(50) {
+            eprintln!(
+                "configured_reservation stage=semantic_open total_us={}",
+                reserved.elapsed().as_micros()
+            );
         }
         let generation = head(&tx).map_err(failed)?;
         let epoch = tx
