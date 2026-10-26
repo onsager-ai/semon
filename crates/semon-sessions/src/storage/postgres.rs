@@ -29,10 +29,10 @@ mod source_journal;
 mod source_lifecycle;
 mod sqlstate;
 mod store_metadata;
+pub(crate) mod transfer;
 pub(crate) mod tree_checkpoint;
 mod tree_writer;
 mod txn;
-pub(crate) mod transfer;
 
 pub use cancel::PgCancellation;
 pub(super) use changes::MetadataStore;
