@@ -180,9 +180,6 @@ impl IndexStore for ConfiguredIndex {
         self.native.receipt(path).map_err(StoreError::Configured)
     }
 
-    fn describe(&self) -> String {
-        "configured source observations".to_owned()
-    }
     fn session_description(
         &self,
         key: &str,

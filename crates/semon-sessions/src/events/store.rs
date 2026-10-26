@@ -2023,10 +2023,6 @@ impl IndexStore for SqliteStore {
     fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
         crate::facts::source_authority::Sources::sqlite(path)
     }
-    fn describe(&self) -> String {
-        self.path.display().to_string()
-    }
-
     fn session_description(
         &self,
         key: &str,

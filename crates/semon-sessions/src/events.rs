@@ -1078,9 +1078,6 @@ pub(crate) trait IndexStore: Send {
         Ok(())
     }
 
-    /// Where the store is, for messages.
-    fn describe(&self) -> String;
-
     /// A compatible metadata-only session description. Dependencies are checked
     /// by the model after a successful source scan, before this lookup.
     fn session_description(
