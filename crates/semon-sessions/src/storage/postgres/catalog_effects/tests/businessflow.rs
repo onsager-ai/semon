@@ -150,15 +150,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             Ok(crate::SessionSourceRange { generation: "authorized-fixture".into(), length: self.bytes.len() as u64, offset, bytes: std::sync::Arc::from(bytes), cached: false })
         }
     }
-    let (projection, slot) = prepared.transcripts.iter().find_map(|projection| projection.slots.iter().find(|slot| slot.field.is_some() && slot.file.is_some()).map(|slot| (projection, slot))).expect("ordinary producer must capture a selected native field");
+    let (projection, slot) = prepared.transcripts.iter().find_map(|projection| projection.slots.iter().find(|slot| matches!(slot.recipe, crate::slot_projection::Recipe::U) && slot.field.is_some() && slot.file.is_some()).map(|slot| (projection, slot))).expect("ordinary producer must capture a selected native user field");
     let selected = prepared.rows.iter().find(|row| row.key == projection.key).unwrap();
     let source = selected.sources.iter().find(|source| source.path == slot.file.as_ref().unwrap().path).unwrap();
     let input = inputs.iter().find(|input| input.full_path(&options) == source.path).unwrap();
-    let reference = crate::SessionSourceRef { root: input.root.clone(), path: input.path.clone(), native_id: source.native_id.clone(), offset: source.offset, prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256 };
+    let reference = crate::SessionSourceRef { root: input.root.as_str().to_owned(), path: input.path.clone(), native_id: source.native_id.clone(), offset: source.offset, prefix_sha256: source.prefix_sha256, tail_sha256: source.tail_sha256 };
     let host = Host { source: reference.clone(), bytes: std::sync::Arc::from(fs::read(&source.path).unwrap()) };
     let field = slot.field.as_ref().unwrap();
-    let expected_field = crate::native_field::preview(&host, &reference, field, "text", &mut (1024 * 1024)).unwrap();
-    let read_selected = || super::super::selected_reader::with_reader(&pool, &namespace, &control, &generation, source, &reference, &host, |reader| crate::native_field::preview(reader, &reference, field, "text", &mut (1024 * 1024))).unwrap();
+    let expected_field = crate::native_field::preview(&host, &reference, field, "prompt", &mut (1024 * 1024)).unwrap();
+    let read_selected = || super::super::selected_reader::with_reader(&pool, &namespace, &control, &generation, source, &reference, &host, |reader| crate::native_field::preview(reader, &reference, field, "prompt", &mut (1024 * 1024))).unwrap();
     assert_eq!(read_selected(), expected_field);
     drop(pg);
     let mut resumed =
