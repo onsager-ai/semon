@@ -298,7 +298,10 @@ impl NativeEvidence {
         }) = &self.store_config
         {
             return crate::storage::postgres::current_sources::Runtime::open(
-                pool, namespace, control, &self.options,
+                pool,
+                namespace,
+                control,
+                &self.options,
             )
             .map_err(io::Error::other)?
             .generation(&self.options);
@@ -942,7 +945,10 @@ impl NativeEvidence {
         }) = &self.store_config
         {
             return crate::storage::postgres::navigation::query_target(
-                self.store_config.as_ref().expect("configured source"), pool, control, key,
+                self.store_config.as_ref().expect("configured source"),
+                pool,
+                control,
+                key,
             )
             .map_err(io::Error::other);
         }

@@ -357,7 +357,14 @@ impl StoreConfig {
             crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
         #[cfg(feature = "postgres")]
         if let StoreBackend::Postgres { pool, control } = &self.backend {
-            return postgres::catalog_page(self, pool, control, options, self.namespace.as_str(), &request);
+            return postgres::catalog_page(
+                self,
+                pool,
+                control,
+                options,
+                self.namespace.as_str(),
+                &request,
+            );
         }
         let binding = NativeReaderBinding::Admitted(self.clone());
         sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(
