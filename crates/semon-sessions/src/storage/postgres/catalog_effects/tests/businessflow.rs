@@ -328,8 +328,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
     let parked = [
-        (claude_agent.clone(), oracle.root.join("parked-agent180.jsonl")),
-        (claude_agent191.clone(), oracle.root.join("parked-agent191.jsonl")),
+        (
+            claude_agent.clone(),
+            oracle.root.join("parked-agent180.jsonl"),
+        ),
+        (
+            claude_agent191.clone(),
+            oracle.root.join("parked-agent191.jsonl"),
+        ),
     ];
     for (from, to) in &parked {
         fs::rename(from, to).unwrap();
