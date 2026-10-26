@@ -102,7 +102,7 @@ mod tests {
             .unwrap();
         let journal = config.source_observations().unwrap();
         let mut writer = config.native_events().unwrap();
-        assert!(journal.recovery_cursor().is_ok());
+        journal.recovery_cursor().expect("initialized current source cursor");
         pinned
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
