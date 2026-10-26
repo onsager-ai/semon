@@ -482,6 +482,9 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
+    // Generated native-tree addresses are evaluated on every physical writer,
+    // including a reopened connection updating an existing projection.
+    tree_state::register(&db).map_err(failed)?;
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(

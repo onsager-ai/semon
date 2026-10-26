@@ -2065,8 +2065,7 @@ impl Stage {
     }
 
     pub(crate) fn begin(&mut self, paths: &[String], runtime: &str) -> Result<Outcome, StoreError> {
-        if paths.is_empty()
-            || paths.len() > 64
+        if paths.len() > 64
             || runtime.len() > 65536
             || paths.iter().any(|p| p.is_empty() || p.len() > 4096)
             || paths
@@ -2123,6 +2122,12 @@ impl Stage {
             )
             .optional()
             .map_err(error)?;
+        // The ordinary producer probes for resumable work with no new seeds.
+        // Retain every runtime/epoch/generation fence when resuming, and do
+        // not create an empty stage in place of an ordinary publication.
+        if paths.is_empty() && existing.is_none() {
+            return Ok(Outcome::Conflict);
+        }
         if let Some((_, generation)) = &existing
             && generation != &self.source.generation
         {

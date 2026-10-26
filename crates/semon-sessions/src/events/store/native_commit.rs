@@ -85,14 +85,17 @@ impl Effects for Writer<'_, '_, '_> {
         } = *input;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
-        relocation::advance(transaction, path, expected, ledger, changes.is_some()).inspect_err(|_| {
-            #[cfg(test)]
-            eprintln!("native SQL stage=relocation");
-        })?;
-        native_usage::begin_source(transaction, path, expected, ledger, changes.is_some()).inspect_err(|_| {
-            #[cfg(test)]
-            eprintln!("native SQL stage=usage_begin");
-        })?;
+        relocation::advance(transaction, path, expected, ledger, changes.is_some()).inspect_err(
+            |_| {
+                #[cfg(test)]
+                eprintln!("native SQL stage=relocation");
+            },
+        )?;
+        native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native SQL stage=usage_begin");
+            })?;
         measurements.record("relocation", started, 1);
         record_writer_rows(
             transaction,
@@ -125,7 +128,8 @@ impl Effects for Writer<'_, '_, '_> {
             measurements,
             self.layout,
             usage_deletes,
-        ).inspect_err(|_| {
+        )
+        .inspect_err(|_| {
             #[cfg(test)]
             eprintln!("native SQL stage=file_rows");
         })?;
@@ -154,7 +158,8 @@ impl Effects for Writer<'_, '_, '_> {
             input.ledger,
             input.index,
             self.measurements,
-        ).inspect_err(|_| {
+        )
+        .inspect_err(|_| {
             #[cfg(test)]
             eprintln!("native SQL stage=tree");
         })
@@ -167,7 +172,8 @@ impl Effects for Writer<'_, '_, '_> {
             input.index,
             self.measurements,
             stage,
-        ).inspect_err(|_| {
+        )
+        .inspect_err(|_| {
             #[cfg(test)]
             eprintln!("native SQL stage=auxiliary");
         })
@@ -202,7 +208,8 @@ impl Effects for Writer<'_, '_, '_> {
                 namespace,
                 path,
                 "changed",
-            ).inspect_err(|_| {
+            )
+            .inspect_err(|_| {
                 #[cfg(test)]
                 eprintln!("native SQL stage=invalidation");
             })?;
