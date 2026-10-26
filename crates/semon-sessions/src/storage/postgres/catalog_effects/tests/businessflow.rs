@@ -56,7 +56,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let hostname = options.proc_root.join("sys/kernel/hostname");
     fs::create_dir_all(hostname.parent().unwrap()).unwrap();
     fs::write(&hostname, "synthetic-local-before207\n").unwrap();
-    let local_authority = crate::model::relation_stage::LifecycleAuthority::capture(&options).unwrap();
+    let local_authority =
+        crate::model::relation_stage::LifecycleAuthority::capture(&options).unwrap();
     assert!(local_authority.current().unwrap());
     fs::write(&hostname, "synthetic-local-after207\n").unwrap();
     assert!(!local_authority.current().unwrap());

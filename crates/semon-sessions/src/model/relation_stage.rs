@@ -112,9 +112,16 @@ pub(crate) struct LifecycleAuthority {
 
 impl LifecycleAuthority {
     pub(crate) fn capture(options: &Options) -> io::Result<Self> {
-        let facts = options.facts.as_ref().map(|path| {
-            Ok::<_, io::Error>((path.clone(), crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?))
-        }).transpose()?;
+        let facts = options
+            .facts
+            .as_ref()
+            .map(|path| {
+                Ok::<_, io::Error>((
+                    path.clone(),
+                    crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?,
+                ))
+            })
+            .transpose()?;
         let authority = Self {
             facts,
             source: options.source.clone(),
@@ -134,7 +141,9 @@ impl LifecycleAuthority {
     }
     pub(crate) fn current(&self) -> io::Result<bool> {
         let facts = if let Some((path, identity)) = &self.facts {
-            if crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? != *identity {
+            if crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
+                != *identity
+            {
                 return Ok(false);
             }
             let facts = crate::facts::source_authority::CurrentSources::open(path)?;
@@ -162,9 +171,11 @@ impl LifecycleAuthority {
             session: None,
             scan_window: false,
         };
-        let mut current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime;
+        let mut current =
+            crate::native_evidence::query_runtime_generation(&options)? == self.runtime;
         if let Some((path, identity)) = &self.facts {
-            current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)? == *identity;
+            current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
+                == *identity;
         }
         if let Some(facts) = facts {
             facts.validate()?;
