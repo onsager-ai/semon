@@ -424,7 +424,6 @@ const SCHEMA: &str = concat!(
     catalog_support_ddl!(),
     source_observation_receipts_ddl!()
 );
-const SLOT_SCHEMA: &str = slot_ddl!();
 const CATALOG_SUPPORT_SCHEMA: &str = catalog_support_ddl!();
 
 const COMPOSITE_CATALOG_SCHEMA: &str = "
@@ -5184,16 +5183,16 @@ fn authored_storage_ddl() -> [&'static str; 22] {
     [
         crate::storage::sqlite::publication::SLOT_SCHEMA,
         catalog_schema(true),
-        semantic_stage::support_schema(true, true),
+        semantic_stage::support_schema(),
         metadata_schema(),
         configured::CORE_SCHEMA,
         copied_usage_schema(true),
         usage,
         repair,
         tree_state::schema(true),
-        semantic_stage::schema(true),
+        semantic_stage::schema(),
         semantic_stage::SEMANTIC_CORE_INDEXES_NS,
-        semantic_stage::metadata_indexes(true),
+        semantic_stage::metadata_indexes(),
         crate::overview::SCHEMA,
         crate::causal_trace::header_schema(true),
         crate::storage::sqlite::trace::SCHEMA,
@@ -5201,9 +5200,9 @@ fn authored_storage_ddl() -> [&'static str; 22] {
         crate::storage::sqlite::search::SCHEMA,
         crate::storage::sqlite::changes::schema(true, true),
         SOURCE_OBSERVATION_RECEIPTS_SCHEMA,
-        reprice::queue_schema(true),
-        reprice::catalog_schema(true, true, true),
-        reprice::file_schema(true, true),
+        reprice::queue_schema(),
+        reprice::catalog_schema(),
+        reprice::file_schema(),
     ]
 }
 

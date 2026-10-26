@@ -8,8 +8,7 @@ use std::collections::BTreeSet;
 
 const CORE_TABLES: &[&str] = &["files", "events", "signals"];
 
-// Authored separately from the transitional Options schema. There are no
-// namespace defaults, views, SQL rewriting, or implicit namespace row adoption.
+// The canonical core has no namespace defaults or implicit row adoption.
 pub(super) const CORE_SCHEMA: &str = "
 CREATE TABLE files (
  namespace TEXT NOT NULL, file_id INTEGER NOT NULL, path TEXT NOT NULL,
@@ -73,60 +72,6 @@ pub(super) const PUT_EVENT: &str = "INSERT OR REPLACE INTO events
 
 pub(super) const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals
  (namespace,file_id,seq,k,o,t,at,n,v) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8)";
-
-const PRICING_FILE_SCHEMA: &str = "
-CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
- WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
- WHEN NEW.codex_native_usage IS NOT NULL BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
-
-// Same core family with composite meta. Pricing's target is a store-wide
-// interpretation setting, unlike per-source progress/completion cursors.
-const PRICING_FILE_SCHEMA_META: &str = "
-CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
- WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
- WHEN NEW.codex_native_usage IS NOT NULL BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
-
-pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
-    if meta_composite {
-        PRICING_FILE_SCHEMA_META
-    } else {
-        PRICING_FILE_SCHEMA
-    }
-}
 
 #[derive(Default)]
 struct WriterShapeMeasurements {
@@ -1617,7 +1562,7 @@ mod tests {
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
-        db.execute_batch(semantic_stage::metadata_indexes(true))
+        db.execute_batch(semantic_stage::metadata_indexes())
             .unwrap();
         let bind = |db: &Connection, namespace: &str| {
             bind_metadata_scope(db, namespace).unwrap();
@@ -4771,7 +4716,7 @@ mod tests {
         ] {
             db.execute_batch(&format!("DROP INDEX {index};")).unwrap();
         }
-        db.execute_batch(semantic_stage::schema(true)).unwrap();
+        db.execute_batch(semantic_stage::schema()).unwrap();
         drop(db);
         f
     }
