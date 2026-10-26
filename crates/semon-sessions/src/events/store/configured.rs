@@ -2828,6 +2828,18 @@ mod tests {
         writer.export_reported_runs(|| Ok(()), |stamp| { exported_stamp = stamp.cloned(); Ok(()) }, |run| { exported.push(run); Ok(()) }).unwrap();
         assert_eq!(exported, expected);
         assert_eq!(exported_stamp, Some(before.clone()));
+        let mut replacement = expected[0].clone();
+        replacement.capture_at += 1000;
+        let advanced_stamp = ReportedFileStamp { size: before.size.wrapping_add(1), ..before.clone() };
+        let mut old_snapshot = Vec::new();
+        writer.export_reported_runs(|| Ok(()), |stamp| {
+            assert_eq!(stamp, Some(&before));
+            writer.save_reported_runs(std::slice::from_ref(&replacement), &advanced_stamp, Some(&selected))?;
+            Ok(())
+        }, |run| { old_snapshot.push(run); Ok(()) }).unwrap();
+        assert_eq!(old_snapshot, expected);
+        assert_eq!(writer.reported_stamp().unwrap(), Some(advanced_stamp));
+        assert_eq!(writer.save_reported_runs(&expected, &before, Some(&selected)).unwrap(), expected);
         let mut checks = 0;
         assert!(matches!(writer.export_reported_runs(|| { checks += 1; if checks >= 4 { Err(StorageError::Busy) } else { Ok(()) } }, |_| Ok(()), |_| Ok(())), Err(StorageError::Busy)));
         let changed = ReportedFileStamp {
