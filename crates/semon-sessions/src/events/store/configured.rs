@@ -571,7 +571,13 @@ impl NativeOwnership {
         .map_err(failed)?;
         crate::storage::sqlite::catalog_namespace::register(&db, &config.namespace)?;
         if transfer {
-            db.create_scalar_function("semon_transfer_writer", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, |_| Ok(1_i64)).map_err(failed)?;
+            db.create_scalar_function(
+                "semon_transfer_writer",
+                0,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .map_err(failed)?;
         }
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         let admission =
@@ -630,7 +636,9 @@ impl NativeOwnership {
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
         self.validate(db)?;
         let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [self.config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-        if incoming { return Err(StorageError::NamespaceUpgradePending); }
+        if incoming {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);

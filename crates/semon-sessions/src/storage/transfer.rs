@@ -549,7 +549,8 @@ pub(crate) fn page_tx(
         .ok_or(StorageError::ScopeChanged)?;
     let page: TransferPage =
         serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-    if page.sequence != sequence || page.snapshot != manifest.identity() || page.encoded()? != bytes {
+    if page.sequence != sequence || page.snapshot != manifest.identity() || page.encoded()? != bytes
+    {
         return Err(StorageError::ScopeChanged);
     }
     Ok(page)
