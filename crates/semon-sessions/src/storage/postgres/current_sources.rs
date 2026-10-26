@@ -118,12 +118,18 @@ pub(super) fn prepare(
     // published header. Each SQL operation is at most 64 members / 1 MiB.
     for page in members.chunks(64) {
         let page_bytes = serde_json::to_vec(page).map_err(|_| StorageError::Unavailable)?;
-        let completed = [b"facts-current-page:".as_slice(), &Sha256::digest(&page_bytes)].concat();
+        let completed = [
+            b"facts-current-page:".as_slice(),
+            &Sha256::digest(&page_bytes),
+        ]
+        .concat();
         if page
             .iter()
             .map(|key| key.len() + stamp.len())
             .sum::<usize>()
-            + completed.len() + stamp.len() > 1024 * 1024
+            + completed.len()
+            + stamp.len()
+            > 1024 * 1024
         {
             return Err(StorageError::Busy);
         }

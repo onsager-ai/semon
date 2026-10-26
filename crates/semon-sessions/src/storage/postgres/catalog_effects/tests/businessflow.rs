@@ -625,6 +625,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
+    // Capture the ordinary Query's post-withdrawal membership independently,
+    // before the process-wide Guard. Keep the original PG count assertion.
+    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
+    fs::rename(&copilot, &copilot_parked).unwrap();
+    let mut withdrawal_options = options.clone();
+    withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
+    let withdrawal_oracle = crate::Query::new(withdrawal_options)
+        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .expect("SQLite ordinary withdrawal cohort");
+    fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
     // PG must match the same observation, including all proof fields.
@@ -1727,7 +1737,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(
         current["total"].as_u64(),
-        Some((continued.rows.len() - 1) as u64)
+        Some((continued.rows.len() - 1) as u64),
+        "PG ids={:?}; SQLite withdrawal total={} ids={:?}; owner keys={:?}",
+        current["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
+        withdrawal_oracle["total"],
+        withdrawal_oracle["sessions"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
+        continued.rows.iter().map(|row| &row.key).collect::<Vec<_>>()
     );
     let removed_key = continued
         .rows
@@ -2187,15 +2202,70 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(list, bound_list);
     assert!(list.to_string().contains("source-write-after158"));
+    let metadata = config.clone().open().unwrap();
+    let mut hints = metadata.read_snapshot(&namespace).unwrap();
+    for scope in [
+        crate::CatalogReadScope::Current,
+        crate::CatalogReadScope::RetainedHistory,
+    ] {
+        let page = hints
+            .catalog_changes(
+                &namespace,
+                crate::storage::CatalogChangesRequest {
+                    scope,
+                    stream_epoch: config.expected_stream_epoch.as_deref(),
+                    after: 0,
+                    limit: 256,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.source_generation, facts_generation);
+        assert!(page.caught_up);
+        assert!(!page.changes.is_empty());
+        assert!(
+            facts_rows
+                .iter()
+                .all(|row| page.changes.iter().any(|hint| hint.catalog_key == row.key))
+        );
+        assert!(
+            page.changes
+                .windows(2)
+                .all(|pair| pair[0].revision < pair[1].revision)
+        );
+        let compacted = metadata
+            .compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256)
+            .unwrap();
+        assert!(compacted.removed > 0);
+        assert!(
+            hints
+                .catalog_changes(
+                    &namespace,
+                    crate::storage::CatalogChangesRequest {
+                        scope,
+                        stream_epoch: Some(&page.stream_epoch),
+                        after: 0,
+                        limit: 256,
+                    }
+                )
+                .is_err(),
+            "compaction invalidates an old cursor"
+        );
+        let repeated = metadata
+            .compact_catalog_changes(&namespace, scope, &page.stream_epoch, page.head, 256)
+            .unwrap();
+        assert_eq!(repeated.removed, 0);
+        assert_eq!(repeated.compacted_through, compacted.compacted_through);
+    }
     let facts_host = body_host(&facts_options, &facts_rows);
     let factory_options = facts_options.clone();
     let factory_rows = facts_rows.clone();
     let factory_namespace = namespace.clone();
-    let facts_readers = move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
-        assert_eq!(source, factory_namespace.as_str());
-        assert!(factory_rows.iter().any(|row| row.key == key));
-        Ok(Box::new(body_host(&factory_options, &factory_rows)))
-    };
+    let facts_readers =
+        move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+            assert_eq!(source, factory_namespace.as_str());
+            assert!(factory_rows.iter().any(|row| row.key == key));
+            Ok(Box::new(body_host(&factory_options, &factory_rows)))
+        };
     for row in &facts_rows {
         for tool in ["read_transcript", "get_session"] {
             let args = serde_json::json!({"id":row.key});
@@ -2224,10 +2294,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "configured ordinary Facts selected {tool} {}",
                 row.key
             );
-            assert_eq!(facts_query.call_catalog_at(
-                tool, &args, Some(&facts_readers),
-                crate::SessionSourceReadMode::LocalThenProvider, 1790812805000,
-            ).unwrap(), expected, "ordinary host-routed {tool} {}", row.key);
+            assert_eq!(
+                facts_query
+                    .call_catalog_at(
+                        tool,
+                        &args,
+                        Some(&facts_readers),
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        1790812805000,
+                    )
+                    .unwrap(),
+                expected,
+                "ordinary host-routed {tool} {}",
+                row.key
+            );
         }
     }
 

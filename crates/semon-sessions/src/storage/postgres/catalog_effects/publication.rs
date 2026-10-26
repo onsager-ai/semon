@@ -255,6 +255,20 @@ fn publish_operation(
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_stage(namespace,singleton,stage_epoch,runtime,generation) VALUES($1,true,$2,$3,$4) ON CONFLICT(namespace_digest,singleton) DO UPDATE SET stage_epoch=excluded.stage_epoch,runtime=excluded.runtime,generation=excluded.generation WHERE semon_pg_native_catalog_stage.namespace=excluded.namespace AND semon_pg_native_catalog_stage.stage_epoch=$5", &[&ns, &epoch, &bound.as_bytes(), &generation.as_bytes(), &old_epoch.unwrap_or(0)]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns, &operation, &payload, &generation.as_bytes(), &epoch]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_changes(namespace,generation,previous,stage_epoch) VALUES($1,$2,$3,$4)", &[&ns, &generation.as_bytes(), &expected.map(str::as_bytes), &epoch]).map_err(sqlstate::error)?;
+    let withdrawn_keys = if let Some(previous) = expected {
+        tx.driver.query("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[])", &[&ns, &previous.as_bytes(), &leaving]).map_err(sqlstate::error)?
+            .iter().map(|row| String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    super::super::changes::publish(
+        tx,
+        publication
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .chain(withdrawn_keys.iter().map(String::as_str)),
+    )?;
     tx.check()?;
     Ok((Outcome::Written, Some(generation)))
 }
