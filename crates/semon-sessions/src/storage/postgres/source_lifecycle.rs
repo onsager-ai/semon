@@ -86,7 +86,7 @@ struct Lookup<'t, 'c> {
 
 impl Lookup<'_, '_> {
     fn keys(&self, sql: &str, value: &[u8], extra: &[u8]) -> io::Result<Vec<String>> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let rows = tx
@@ -116,7 +116,7 @@ impl LifecycleStore for Lookup<'_, '_> {
         self.keys("SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND $4::bytea IS NOT NULL ORDER BY session_key LIMIT 65", path.as_bytes(), b"")
     }
     fn owner(&self, key: &str) -> io::Result<CatalogRow> {
-        let mut tx = self.tx.borrow_mut();
+        let tx = self.tx.borrow_mut();
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let rows = tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error).map_err(io::Error::other)?;
