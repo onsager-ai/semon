@@ -311,12 +311,14 @@ impl IndexStore for NativeIndex {
         .map_err(err)
     }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
-        self.pool.transaction(
-            &self.namespace,
-            TxnKind::ReadSnapshot,
-            &self.control,
-            native_reader::file_ledgers,
-        ).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                native_reader::file_ledgers,
+            )
+            .map_err(err)
     }
     fn remove_files(&mut self, _: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
         pending()
@@ -413,9 +415,18 @@ mod tests {
 
     #[test]
     fn pg_native126_tree_read_preserves_typed_storage_errors() {
-        for expected in [StorageError::Busy, StorageError::Unavailable, StorageError::ScopeChanged] {
-            assert!(matches!(read_error(std::io::Error::other(expected)), StoreError::Configured(actual) if actual == expected));
+        for expected in [
+            StorageError::Busy,
+            StorageError::Unavailable,
+            StorageError::ScopeChanged,
+        ] {
+            assert!(
+                matches!(read_error(std::io::Error::other(expected)), StoreError::Configured(actual) if actual == expected)
+            );
         }
-        assert!(matches!(read_error(std::io::ErrorKind::WouldBlock.into()), StoreError::Configured(StorageError::Busy)));
+        assert!(matches!(
+            read_error(std::io::ErrorKind::WouldBlock.into()),
+            StoreError::Configured(StorageError::Busy)
+        ));
     }
 }

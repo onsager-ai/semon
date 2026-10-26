@@ -98,7 +98,10 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             ([body.as_slice(), b"\n{"].concat(), false),
             (body.clone(), true),
             (body[..first_line].to_vec(), false),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if replace {
                 let replacement = root.join("replace130.jsonl");
                 std::fs::write(&replacement, &bytes).unwrap();
@@ -106,7 +109,9 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             } else {
                 std::fs::write(&path, &bytes).unwrap();
             }
-            let receipt = sqlite.ingest(&format!("{:064x}", step + 16), &path, harness).unwrap();
+            let receipt = sqlite
+                .ingest(&format!("{:064x}", step + 16), &path, harness)
+                .unwrap();
             let index = crate::events::scan_file(&path, harness, &mut sqlite, &mut false).unwrap();
             lifecycle.push((bytes, replace, fingerprint(&index), receipt.consumed_bytes));
         }
@@ -151,7 +156,9 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         // Metadata-only enumeration and discovery must not acquire a SQLite
         // coordinate. The process-wide hook remains active on every thread.
         restarted.begin_full_scan().unwrap();
-        restarted.discover_catalog_sources(&crate::Options::default(), &[], false).unwrap();
+        restarted
+            .discover_catalog_sources(&crate::Options::default(), &[], false)
+            .unwrap();
         for (step, (bytes, replace, oracle, consumed)) in case.lifecycle.iter().enumerate() {
             if *replace {
                 let replacement = case.root.join("replace130.jsonl");
@@ -160,10 +167,18 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
             } else {
                 std::fs::write(&case.path, bytes).unwrap();
             }
-            let receipt = restarted.ingest(&format!("{:064x}", step + 16), &case.path, case.harness).unwrap();
+            let receipt = restarted
+                .ingest(&format!("{:064x}", step + 16), &case.path, case.harness)
+                .unwrap();
             assert_eq!(receipt.consumed_bytes, *consumed);
-            let index = crate::events::scan_file(&case.path, case.harness, &mut restarted, &mut false).unwrap();
-            assert!(fingerprint(&index) == *oracle, "native lifecycle step {step} for {}", case.harness);
+            let index =
+                crate::events::scan_file(&case.path, case.harness, &mut restarted, &mut false)
+                    .unwrap();
+            assert!(
+                fingerprint(&index) == *oracle,
+                "native lifecycle step {step} for {}",
+                case.harness
+            );
         }
         assert!(restarted.ingest(&id, &case.path, "invalid").is_err());
         assert!(

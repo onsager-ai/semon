@@ -23,7 +23,8 @@ fn bad(_: decode::DecodeError) -> StorageError {
 }
 
 /// The SQL size probe precedes payload decoding, including wide opaque keys.
-/// Selected file reads are bounded; unsupported larger work refuses explicitly.
+/// Keyset pages are charged before payload decoding. The selected-read scope
+/// owns the aggregate budget; family length is not a separate format limit.
 pub(super) fn rows(
     tx: &mut PgTxn<'_>,
     table: &str,
@@ -55,36 +56,71 @@ pub(super) fn rows(
         })
         .collect::<Vec<_>>()
         .join("+");
-    let probe =
-        format!("SELECT {sizes}+128 FROM semon_pg_native_{table} WHERE {predicate} LIMIT 65537");
-    let sizes = tx.driver.query(&probe, params).map_err(sqlstate::error)?;
-    if sizes.len() > 65536 {
-        return Err(StorageError::Busy);
+    let keys: &[&str] = match table {
+        "files" => &["file_id"],
+        "events" | "signals" | "codex_usage" => &["seq"],
+        "usage" => &["message_id"],
+        "usage_dimensions" => &["kind", "dimension"],
+        _ => return Err(StorageError::InvalidArguments),
+    };
+    let predicate = predicate.rsplit_once(" ORDER BY ").map_or(predicate, |(base, _)| base);
+    let mut cursor: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+    let mut decoded = Vec::new();
+    loop {
+    let mut binds = params.to_vec();
+    binds.extend(cursor.iter().map(|v| &**v as &(dyn ToSql + Sync)));
+    let after = if cursor.is_empty() {
+        String::new()
+    } else {
+        let slots = (1..=keys.len()).map(|i| format!("${}", params.len() + i)).collect::<Vec<_>>().join(",");
+        format!(" AND ({}) > ({slots})", keys.join(","))
+    };
+    let suffix = format!("WHERE {predicate}{after} ORDER BY {}", keys.join(","));
+    let probe = format!("SELECT {sizes}+128 FROM semon_pg_native_{table} {suffix} LIMIT 64");
+    let sizes = tx.driver.query(&probe, &binds).map_err(sqlstate::error)?;
+    if sizes.is_empty() {
+        return Ok(decoded);
     }
     let mut total = 0usize;
+    let mut count = 0usize;
     for row in &sizes {
-        total = total
+        let next = total
             .checked_add(
                 usize::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?,
             )
             .ok_or(StorageError::Busy)?;
-        if total > 1024 * 1024 {
-            return Err(StorageError::Busy);
+        if next > 1024 * 1024 {
+            break;
         }
+        total = next;
+        count += 1;
     }
-    crate::selected_read::charge(sizes.len() * 128, total).map_err(|_| StorageError::Busy)?;
+    if count == 0 {
+        return Err(StorageError::Busy);
+    }
+    crate::selected_read::charge(count * 128, total).map_err(|_| StorageError::Busy)?;
     tx.check()?;
     let raw = tx
         .driver
         .query(
-            &format!("SELECT {select} FROM semon_pg_native_{table} WHERE {predicate} LIMIT 65537"),
-            params,
+            &format!("SELECT {select} FROM semon_pg_native_{table} {suffix} LIMIT {count}"),
+            &binds,
         )
         .map_err(sqlstate::error)?;
-    if raw.len() != sizes.len() {
+    if raw.len() != count {
         return Err(StorageError::ScopeChanged);
     }
-    raw.into_iter()
+    let last = raw.last().ok_or(StorageError::ScopeChanged)?;
+    let mut next: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+    for key in keys {
+        let at = names.iter().position(|name| name.split(':').next() == Some(*key)).ok_or(StorageError::ScopeChanged)?;
+        if *last.columns()[at].type_() == Type::BYTEA {
+            next.push(Box::new(last.try_get::<_, Vec<u8>>(at).map_err(|_| StorageError::ScopeChanged)?));
+        } else {
+            next.push(Box::new(last.try_get::<_, i64>(at).map_err(|_| StorageError::ScopeChanged)?));
+        }
+    }
+    let page = raw.into_iter()
         .map(|r| {
             let mut values = Vec::with_capacity(names.len());
             for (i, name) in names.iter().enumerate() {
@@ -135,7 +171,10 @@ pub(super) fn rows(
             }
             Ok(Values(values))
         })
-        .collect()
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    decoded.extend(page);
+    cursor = next;
+    }
 }
 
 pub(super) fn ledger(
@@ -467,4 +506,31 @@ pub(super) fn tree_parts(
     let pinned = super::native_pages::current(tx, path, &ledger)?;
     let calls = pinned.launch(tx)?;
     Ok(Some((ledger, marker.index, calls)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::postgres::{PgCancellation, tests::{fixture, ns}, txn::TxnKind};
+
+    #[test]
+    fn pg_native126_selected_family_keysets_across_one_mib() {
+        let (pool, _factory) = fixture(|_| {});
+        let namespace = ns("native130-reader-pages");
+        let control = PgCancellation::default();
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let ns = tx.namespace.as_str().as_bytes();
+            tx.driver.execute("INSERT INTO semon_pg_native_signals(namespace,file_id,seq,k,o,at) SELECT $1,1,s,convert_to(repeat('x',8192),'UTF8'),s,s FROM generate_series(0,256) s", &[&ns]).map_err(sqlstate::error)?;
+            Ok(())
+        }).unwrap();
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let loaded = rows(tx, "signals", "seq,k", "namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 ORDER BY seq", &[&tx.namespace.as_str().as_bytes(), &1i64])?;
+            assert_eq!(loaded.len(), 257);
+            for (i, row) in loaded.iter().enumerate() {
+                assert_eq!(row.get::<i64>(0).map_err(bad)?, i as i64);
+                assert_eq!(row.get::<String>(1).map_err(bad)?, "x".repeat(8192));
+            }
+            Ok(())
+        }).unwrap();
+    }
 }
