@@ -995,21 +995,33 @@ impl Writer {
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
         if self.owner.is_none() {
-            return Err(StoreError::Configured(StorageError::NamespaceUpgradePending));
+            return Err(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ));
         }
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
         let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
         let mut store = super::SqliteStore {
-            connection, discovery, path: database.clone(), selected_runs: None, semantic_rejection: None,
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
             #[cfg(test)]
             traversal_observation: None,
         };
         super::relocation::reuse(&mut store, path, stat, id, file, measurements, Some(self))
     }
 
-    pub(crate) fn advance_tree_repair(&self, options: &crate::Options) -> std::io::Result<(bool, Option<String>)> {
-        let owner = self.owner.as_ref().ok_or_else(|| std::io::Error::other(StorageError::NamespaceUpgradePending))?;
+    pub(crate) fn advance_tree_repair(
+        &self,
+        options: &crate::Options,
+    ) -> std::io::Result<(bool, Option<String>)> {
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other(StorageError::NamespaceUpgradePending))?;
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
@@ -1026,10 +1038,14 @@ impl Writer {
             traversal_observation: None,
         };
         let (pending, changed) = native_usage::advance(&mut store, options, Some(owner))?;
-        let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(std::io::Error::other)?;
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
         owner.validate_ready(&tx).map_err(std::io::Error::other)?;
         let cleanup = tree_state::cleanup_work_tx(&tx).map_err(std::io::Error::other)?;
-        tx.commit().map_err(|_| std::io::Error::other(StorageError::CommitUncertain))?;
+        tx.commit()
+            .map_err(|_| std::io::Error::other(StorageError::CommitUncertain))?;
         Ok((pending || cleanup, changed))
     }
 
@@ -3398,9 +3414,16 @@ mod tests {
             foreign_claim
         );
         let repair_options = crate::Options {
-            source: source.clone(), cache: cache_path.clone(), ..Default::default()
+            source: source.clone(),
+            cache: cache_path.clone(),
+            ..Default::default()
         };
-        restarted.store.as_mut().unwrap().advance_tree_repair(&repair_options).unwrap();
+        restarted
+            .store
+            .as_mut()
+            .unwrap()
+            .advance_tree_repair(&repair_options)
+            .unwrap();
         let state: String = db.query_row("SELECT state FROM native_tree_repairs WHERE namespace='source-a' AND source_path=?1", [&key], |r| r.get(0)).unwrap();
         assert_eq!(state, "done");
         assert_eq!(

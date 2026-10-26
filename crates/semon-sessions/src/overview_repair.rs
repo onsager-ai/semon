@@ -290,10 +290,15 @@ fn connection(options: &Options) -> io::Result<Connection> {
     Ok(db)
 }
 
-fn transaction<'a>(db: &'a mut Connection, options: &Options) -> io::Result<rusqlite::Transaction<'a>> {
+fn transaction<'a>(
+    db: &'a mut Connection,
+    options: &Options,
+) -> io::Result<rusqlite::Transaction<'a>> {
     let tx = db.transaction().map_err(failure)?;
     let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
-    binding.validate(&tx, &binding.config().namespace).map_err(failure)?;
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(failure)?;
     Ok(tx)
 }
 
