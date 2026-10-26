@@ -7,6 +7,7 @@ mod catalog_effects;
 mod native_bundle;
 mod native_commit;
 mod native_core;
+mod native_keys;
 mod native_pages;
 mod native_usage;
 mod native_usage_identity;

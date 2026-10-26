@@ -140,7 +140,7 @@ fn stage_inner(
     let receipt = header_ledger(ledger);
     // Only fixed-size physical IDs cross this query. Match the complete file
     // ledger and current usage generation/readiness in SQL before any effect.
-    let files = tx.driver.query("SELECT f.file_id FROM semon_pg_native_files f JOIN semon_pg_native_usage_current c ON c.namespace=f.namespace AND c.source_path=f.path JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE f.namespace=$1 AND f.path=$2 AND c.source_id=$3 AND s.parser_version=$4 AND s.receipt=$5 AND ((s.usage_ready AND s.checkpoint=$6::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.resume_at=$6::text::numeric AND f.dev=$7::text::numeric AND f.ino=$8::text::numeric AND f.size=$9::text::numeric AND f.mtime_ns=$10 AND f.ctime_ns IS NOT DISTINCT FROM $11 AND f.head_sha256=$12 AND f.tail_sha256=$13", &[&ns,&path.as_bytes(),&expected_source,&i64::from(CACHE_VERSION),&receipt.as_bytes(),&ledger.offset.to_string(),&ledger.stat.dev.to_string(),&ledger.stat.ino.to_string(),&ledger.stat.size.to_string(),&ledger.stat.modified_ns.to_be_bytes().as_slice(),&ledger.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&ledger.prefix.as_slice(),&ledger.tail.as_slice()]).map_err(sqlstate::error)?;
+    let files = tx.driver.query("SELECT f.file_id FROM semon_pg_native_files f JOIN semon_pg_native_usage_current c ON c.namespace=f.namespace AND c.source_path=f.path JOIN semon_pg_native_usage_sources s ON s.namespace=c.namespace AND s.source_id=c.source_id AND s.source_path=c.source_path WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(f.path,f.path_digest,$2) AND c.source_id=$3 AND s.parser_version=$4 AND s.receipt=$5 AND ((s.usage_ready AND s.checkpoint=$6::text::numeric) OR (NOT s.usage_ready AND s.checkpoint=0 AND f.codex_native_usage IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_native_usage_facts z WHERE z.namespace=s.namespace AND z.source_id=s.source_id))) AND f.resume_at=$6::text::numeric AND f.dev=$7::text::numeric AND f.ino=$8::text::numeric AND f.size=$9::text::numeric AND f.mtime_ns=$10 AND f.ctime_ns IS NOT DISTINCT FROM $11 AND f.head_sha256=$12 AND f.tail_sha256=$13", &[&ns,&path.as_bytes(),&expected_source,&i64::from(CACHE_VERSION),&receipt.as_bytes(),&ledger.offset.to_string(),&ledger.stat.dev.to_string(),&ledger.stat.ino.to_string(),&ledger.stat.size.to_string(),&ledger.stat.modified_ns.to_be_bytes().as_slice(),&ledger.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&ledger.prefix.as_slice(),&ledger.tail.as_slice()]).map_err(sqlstate::error)?;
     if files.len() != 1 {
         return Err(StorageError::Conflict);
     }
@@ -221,7 +221,7 @@ pub(super) fn publish(
     if authority.len() != 1 || authority[0].get::<_, bool>(0) != normalized_usage {
         return Err(StorageError::Conflict);
     }
-    let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
+    let fingerprint_rows = tx.driver.query("SELECT octet_length(codex_pricing_fingerprint)::bigint FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     if fingerprint_rows.len() != 1 {
         return Err(StorageError::Conflict);
     }
@@ -230,7 +230,7 @@ pub(super) fn publish(
         return Err(StorageError::ScopeChanged);
     }
     selected_read::charge(64, bytes.unwrap_or(0) as usize).map_err(|_| StorageError::Busy)?;
-    let fingerprint:Option<Vec<u8>>=tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace=$1 AND path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let fingerprint:Option<Vec<u8>>=tx.driver.query_one("SELECT codex_pricing_fingerprint FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?.get(0);
     let fingerprint = fingerprint
         .map(String::from_utf8)
         .transpose()
@@ -261,10 +261,10 @@ pub(super) fn publish(
     );
     let encoded = serde_json::to_vec(&record).map_err(|_| StorageError::Unavailable)?;
     let mut writer = Writer { tx };
-    let put = "INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key) DO UPDATE SET value=excluded.value";
     let failure = format!("native_tree_failure:{path}");
     if encoded.len() > 1048576 {
-        writer.effect(put, &[&ns, &failure.as_bytes(), &receipt.as_bytes()])?;
+        super::native_keys::put_meta(writer.tx, failure.as_bytes(), receipt.as_bytes())?;
+        writer.boundary()?;
         // Generation remains incomplete and cannot be returned by readers.
         let changed=writer.tx.driver.execute("UPDATE semon_pg_native_tree_repairs SET state=$3 WHERE namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes(),&b"blocked_metadata".as_slice()]).map_err(sqlstate::error)?;
         if changed > 1 {
@@ -274,47 +274,21 @@ pub(super) fn publish(
         return Ok(false);
     }
     let key = format!("native_tree_summary:{path}");
-    writer.effect(put, &[&ns, &key.as_bytes(), &encoded])?;
-    let changed = writer
-        .tx
-        .driver
-        .execute(
-            "DELETE FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2",
-            &[&ns, &failure.as_bytes()],
-        )
-        .map_err(sqlstate::error)?;
-    if changed > 1 {
-        return Err(StorageError::Conflict);
-    }
+    super::native_keys::put_meta(writer.tx, key.as_bytes(), &encoded)?;
+    writer.boundary()?;
+    super::native_keys::delete_meta(writer.tx, failure.as_bytes())?;
     writer.boundary()?;
     // SourceState is still locked and the exact file/Usage fences were matched
     // before the first generation effect. Publish header last in this txn.
     writer.effect("UPDATE semon_pg_native_tree_generations SET complete=true,work_pending=false WHERE namespace=$1 AND projection_id=$2 AND source_id=$3 AND receipt=$4 AND version=3 AND NOT complete AND work_pending", &[&ns,&projection,&expected_source,&receipt.as_bytes()])?;
-    writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace=$1 AND path=$2 ON CONFLICT(namespace_digest,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
+    writer.effect("INSERT INTO semon_pg_native_tree_headers(namespace,source_path,file_id,projection_id,ledger) SELECT $1,$2,file_id,$3,$4 FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger", &[&ns,&path.as_bytes(),&projection,&receipt.as_bytes()])?;
     Ok(true)
 }
 
 pub(super) fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>, StorageError> {
-    let ns = tx.namespace.as_str().as_bytes();
-    let rows=tx.driver.query("SELECT octet_length(value)::bigint FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1", &[&ns,&key]).map_err(sqlstate::error)?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    let bytes: i64 = row.get(0);
-    if !(0..=1048576).contains(&bytes) {
-        return Err(StorageError::ScopeChanged);
-    }
-    selected_read::charge(64, bytes as usize).map_err(|_| StorageError::Busy)?;
-    let value: Vec<u8> = tx
-        .driver
-        .query_one(
-            "SELECT value FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2 LIMIT 1",
-            &[&ns, &key],
-        )
-        .map_err(sqlstate::error)?
-        .get(0);
-    String::from_utf8(value)
-        .map(Some)
+    super::native_keys::read_meta(tx, key, 1048576)?
+        .map(String::from_utf8)
+        .transpose()
         .map_err(|_| StorageError::ScopeChanged)
 }
 
