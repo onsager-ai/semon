@@ -2035,21 +2035,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap(), qualified);
-    // A second never-retained session leaves Current in the same catch-up, so
-    // its custody needs more than the one bounded advance of an attempt.
-    let second = bulk[69].full_path(&facts_options);
-    let second_path = second.to_str().unwrap().to_owned();
-    let second_removal = vec![(second_path.clone(), store.ledger(&second_path).unwrap())];
-    fs::rename(&second, oracle.root.join("retained-bulk169-069.jsonl")).unwrap();
-    assert_eq!(
-        store.remove_files(&second_removal).unwrap(),
-        crate::events::Outcome::Written
-    );
-    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
-    // The ordinary semantic catch-up claims the `removed` invalidations and
-    // republishes the connected parent without the withdrawn Sources.
+    // The ordinary semantic catch-up claims the `removed` invalidation and
+    // republishes the connected parent without the withdrawn Source.
     let mut catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    // An unconnected session withdrawal takes the isolated path and advances
+    // at once, so the second new custody in this catch-up is a replacement of
+    // a never-retained session; both share the one-advance bound of an attempt.
+    writeln!(fs::OpenOptions::new().append(true).open(bulk[68].full_path(&facts_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-068","uuid":"bulk-68b","parentUuid":"bulk-68","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:03Z","message":{"role":"user","content":"sanitized catch-up replacement"}})).unwrap();
+    catchup
+        .ingest(
+            &format!("{:064x}", 1200),
+            &bulk[68].full_path(&facts_options),
+            "claude",
+        )
+        .unwrap();
     let connected = [
         crate::Input {
             root: crate::InputRoot::Claude,
@@ -2059,7 +2059,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             root: crate::InputRoot::Claude,
             path: "projects/project/one/subagents/agent-related154.jsonl".into(),
         },
-        bulk[69].clone(),
+        bulk[68].clone(),
     ];
     let (caught, _, _, deferred) = stage_publish(&mut catchup, &connected, 1790812809000);
     assert!(deferred >= 1, "two new custodies need more than one attempt");
