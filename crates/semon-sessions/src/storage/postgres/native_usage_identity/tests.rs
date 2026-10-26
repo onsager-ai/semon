@@ -281,10 +281,19 @@ fn pg_native_tree_witness_bytea_rows_match_real_parser_sqlite_oracle() {
     assert!(tools.iter().any(|t| t.0 == "toolu\0🦀"));
     // Independent oracle: the original SQLite json_array witness bytes.
     let mut oracle = Sha256::new();
-    for (marker,sql) in [
-        ("semon.tree.witness.4.labels", "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label"),
-        ("semon.tree.witness.4.models", "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest"),
-        ("semon.tree.witness.4.tools", "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest"),
+    for (marker, sql) in [
+        (
+            "semon.tree.witness.4.labels",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+        ),
+        (
+            "semon.tree.witness.4.models",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+        ),
+        (
+            "semon.tree.witness.4.tools",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
+        ),
     ] {
         oracle.update(marker.as_bytes());
         for row in strings(sql, 1) {

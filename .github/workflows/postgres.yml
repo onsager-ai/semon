@@ -109,7 +109,14 @@ jobs:
           if-no-files-found: error
       - name: Ordinary PG model producer without SQLite fallback
         shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-vertical140.log"
+      - name: Retain ordinary PG model diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-vertical140-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-vertical140.log
+          if-no-files-found: error
       - name: Catalog native proof binding before physical effects
         shell: bash
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog135 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog135.log"
