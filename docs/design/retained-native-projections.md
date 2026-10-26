@@ -138,6 +138,12 @@ readers refuse unsupported existing state without reset under the
 Retained references, recipes, proofs, reported facts and archive custody remain
 untouched, including when original native bytes are absent. Fresh empty stores
 initialize; current stores reopen without repair DDL.
+Selected handoff recipes capture both endpoints' observed field descriptors
+before publication. Retaining one endpoint therefore does not depend on the
+other endpoint continuing to publish that relationship. Each descriptor binds
+its exact consumed source witness; a later Current source cannot silently
+replace that witness during rendering. Existing selected context, host, proof
+and byte budgets still apply.
 Physical-corruption recovery is unchanged. Unsupported individual recipe versions
 in a current store remain explicitly unavailable; they are never interpreted as
 current versions.

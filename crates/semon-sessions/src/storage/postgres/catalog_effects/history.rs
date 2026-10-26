@@ -196,9 +196,8 @@ impl OriginalHistoryStore for History<'_, '_> {
     }
     fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {
         let previous = self.metadata("semon_pg_native_catalog_rows", self.previous, &row.key)?;
-        // Match the ordinary SQLite custody contract: any changed owner
-        // observation preserves its original recipe, including a same-harness
-        // relationship change after a connected Source disappears.
+        // Same-harness source withdrawal composes retained sources; only a
+        // different native harness replaces the original owner.
         if previous.as_deref()
             == Some(
                 serde_json::to_string(row)
@@ -213,7 +212,7 @@ impl OriginalHistoryStore for History<'_, '_> {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|_| StorageError::ScopeChanged)?;
-        Ok(old)
+        Ok(old.filter(|old| old.harness != row.harness))
     }
     fn header(&self, key: &str) -> Result<Option<OriginalHeader>, StorageError> {
         Ok(self

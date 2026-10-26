@@ -565,7 +565,9 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::transfer::reported::tests::selected_receipts::{originals, selected_receipts};
+    use crate::storage::transfer::reported::tests::selected_receipts::{
+        originals, selected_receipts,
+    };
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
 
     #[test]
