@@ -1579,6 +1579,7 @@ impl Writer {
             .map(|(_, l)| l)
             != expected
         {
+            super::super::trace("begin_ledger_conflict");
             return Err(StorageError::Conflict);
         }
         let revision = crate::storage::sqlite::source_journal::claims(
@@ -1627,6 +1628,7 @@ impl Writer {
         // records and proofs on its open handle; no Raw I/O runs in the DB tx.
         for (path, _, _, ledger, _) in files {
             if Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat) {
+                super::super::trace("commit_raw_conflict");
                 return Err(StorageError::Conflict);
             }
         }
@@ -1659,6 +1661,7 @@ impl Writer {
                 .map(|(_, l)| l)
                 != *expected
             {
+                super::super::trace("commit_ledger_conflict");
                 return Err(StorageError::Conflict);
             }
             let revision = crate::storage::sqlite::source_journal::claims(
@@ -1669,6 +1672,7 @@ impl Writer {
             .map_err(failed)?[0]
                 .1;
             if revision != intent.revision {
+                super::super::trace("commit_revision_conflict");
                 return Err(StorageError::Conflict);
             }
             work.push(true);
