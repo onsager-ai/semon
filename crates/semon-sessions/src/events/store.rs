@@ -12866,8 +12866,15 @@ mod tests {
                 rows.models.iter().map(String::as_str),
                 rows.tools
                     .iter()
-                    .filter(|(id, _)| !rows.closed_tools.contains(*id))
-                    .map(|(id, name)| (id.as_str(), name.as_str())),
+                    .map(|(id, name)| {
+                        (id.as_str(), Some(name.as_str()), rows.closed_tools.contains(id))
+                    })
+                    .chain(
+                        rows.closed_tools
+                            .iter()
+                            .filter(|id| !rows.tools.contains_key(*id))
+                            .map(|id| (id.as_str(), None, true)),
+                    ),
             );
             assert_eq!(
                 tree_state::witness(&store.connection, &path, &ledger).unwrap(),
