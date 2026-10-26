@@ -1,32 +1,32 @@
 //! Native proof binding before Catalog effects, in the caller's transaction.
 //! This is a prerequisite, NOT Source/runtime admission or a publication ACK.
 use super::{MAX, catalog, encoded, path};
-use crate::storage::{StorageError, proof_lifetime::ProofGenerationId};
 use crate::storage::postgres::{native_pages, native_reader, sqlstate, txn::PgTxn};
+use crate::storage::{StorageError, proof_lifetime::ProofGenerationId};
 use std::collections::BTreeMap;
 
 /// No constructor, serialization or successful publication conversion. The
 /// full Ledger stays inside the native adapter; a caller cannot supply a hash
 /// and have it accepted as native authority or as a selected ReaderLease.
-pub(super) struct NativeReference {
-    pub(super) path: String,
-    pub(super) usage_generation: i64,
+pub(in crate::storage::postgres) struct NativeReference {
+    pub(in crate::storage::postgres) path: String,
+    pub(in crate::storage::postgres) usage_generation: i64,
     /// Native usage availability is a fact, not generic publication readiness.
     /// Claude may have no native Usage observations in an otherwise valid file.
-    pub(super) usage_ready: bool,
-    pub(super) pages: ProofGenerationId,
+    pub(in crate::storage::postgres) usage_ready: bool,
+    pub(in crate::storage::postgres) pages: ProofGenerationId,
 }
 
 /// Captured from actual database state before model construction. This does
 /// not claim runtime/epoch ownership, which has no PG port yet.
-pub(super) struct Fence {
+pub(in crate::storage::postgres) struct Fence {
     namespace: String,
     revision: i64,
     head: Option<String>,
     claims: BTreeMap<String, Option<i64>>,
 }
 
-pub(super) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, StorageError> {
+pub(in crate::storage::postgres) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, StorageError> {
     tx.check()?;
     if paths.len() > 64 || paths.iter().map(String::len).sum::<usize>() > MAX {
         return Err(StorageError::Busy);
@@ -40,7 +40,10 @@ pub(super) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, Sto
     if head.is_none() && !row.get::<_, bool>(2) {
         return Err(StorageError::ScopeChanged);
     }
-    if head.as_ref().is_some_and(|head| head.len() != 64 || !head.bytes().all(|b| b.is_ascii_hexdigit())) {
+    if head
+        .as_ref()
+        .is_some_and(|head| head.len() != 64 || !head.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
         return Err(StorageError::ScopeChanged);
     }
     let mut claims = BTreeMap::new();
@@ -55,7 +58,12 @@ pub(super) fn capture(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<Fence, Sto
         }
         tx.check()?;
     }
-    Ok(Fence { namespace: tx.namespace.as_str().to_owned(), revision: row.get(0), head, claims })
+    Ok(Fence {
+        namespace: tx.namespace.as_str().to_owned(),
+        revision: row.get(0),
+        head,
+        claims,
+    })
 }
 
 /// Validate the entire source cohort before the first Catalog effect. The
@@ -72,7 +80,9 @@ fn bind(
     let mut sources = BTreeMap::new();
     let mut bytes = 0usize;
     for row in publication.rows {
-        bytes = bytes.checked_add(encoded(row)?.len()).ok_or(StorageError::Busy)?;
+        bytes = bytes
+            .checked_add(encoded(row)?.len())
+            .ok_or(StorageError::Busy)?;
         if bytes > MAX {
             return Err(StorageError::Busy);
         }
@@ -101,7 +111,12 @@ fn bind(
         if sizes.len() != 1 {
             return Err(StorageError::ScopeChanged);
         }
-        bytes = bytes.checked_add(usize::try_from(sizes[0].get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?).ok_or(StorageError::Busy)?;
+        bytes = bytes
+            .checked_add(
+                usize::try_from(sizes[0].get::<_, i64>(0))
+                    .map_err(|_| StorageError::ScopeChanged)?,
+            )
+            .ok_or(StorageError::Busy)?;
         if bytes > MAX {
             return Err(StorageError::Busy);
         }
@@ -127,7 +142,12 @@ fn bind(
         if usage_generation <= 0 {
             return Err(StorageError::ScopeChanged);
         }
-        refs.push(NativeReference { path: path.to_owned(), usage_generation, usage_ready: rows[0].get(1), pages: pinned.id });
+        refs.push(NativeReference {
+            path: path.to_owned(),
+            usage_generation,
+            usage_ready: rows[0].get(1),
+            pages: pinned.id,
+        });
         tx.check()?;
     }
     Ok(refs)
@@ -137,7 +157,7 @@ fn bind(
 /// ingestion; missing state refuses without creating it. Bind every source
 /// BEFORE stage writes any metadata. Returning references is deliberately not
 /// an admitted head/claim ACK, durable ownership, page availability or Raw grant.
-pub(super) fn stage_bound(
+pub(in crate::storage::postgres) fn stage_bound(
     tx: &mut PgTxn<'_>,
     generation: &str,
     publication: &crate::slot_projection::Publication<'_>,
@@ -155,16 +175,26 @@ pub(super) fn stage_bound(
         return Err(StorageError::ScopeChanged);
     }
     let actual = capture(tx, &fence.claims.keys().cloned().collect::<Vec<_>>())?;
-    if actual.revision != fence.revision || actual.head != fence.head || actual.claims != fence.claims {
+    if actual.revision != fence.revision
+        || actual.head != fence.head
+        || actual.claims != fence.claims
+    {
         return Err(StorageError::Conflict);
     }
-    if publication.rows.iter().flat_map(|row| &row.sources).any(|source| {
-        source.path.to_str().is_none_or(|path| !fence.claims.contains_key(path))
-    }) {
+    if publication
+        .rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .any(|source| {
+            source
+                .path
+                .to_str()
+                .is_none_or(|path| !fence.claims.contains_key(path))
+        })
+    {
         return Err(StorageError::ScopeChanged);
     }
     let refs = bind(tx, publication)?;
     super::stage(tx, generation, publication)?;
     Ok(refs)
 }
-

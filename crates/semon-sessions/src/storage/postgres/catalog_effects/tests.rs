@@ -19,19 +19,34 @@ const L2: &str = "22222222222222222222222222222222222222222222222222222222222222
 fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     fn whole_database(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageError> {
         let names = tx.driver.query("SELECT relname::text FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r' AND relname LIKE 'semon_pg_%' ORDER BY relname", &[]).map_err(sqlstate::error)?;
-        names.iter().map(|row| {
-            let name: String = row.get(0);
-            let values = tx.driver.query(&format!("SELECT to_jsonb(t)::text FROM \"{name}\" t ORDER BY to_jsonb(t)::text"), &[]).map_err(sqlstate::error)?;
-            Ok((name, values.iter().map(|row| row.get(0)).collect()))
-        }).collect()
+        names
+            .iter()
+            .map(|row| {
+                let name: String = row.get(0);
+                let values = tx
+                    .driver
+                    .query(
+                        &format!(
+                            "SELECT to_jsonb(t)::text FROM \"{name}\" t ORDER BY to_jsonb(t)::text"
+                        ),
+                        &[],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok((name, values.iter().map(|row| row.get(0)).collect()))
+            })
+            .collect()
     }
     const NAME: &str = "storage::postgres::catalog_effects::tests::pg_catalog135_real_native_binding_before_effects_and_atomic_refusal";
     const CHILD: &str = "SEMON_CATALOG135_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        assert!(std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture"])
-            .env(CHILD, "1")
-            .status().unwrap().success());
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(CHILD, "1")
+                .status()
+                .unwrap()
+                .success()
+        );
         return;
     }
     // Actual parser/model and ordinary SQLite producers finish FIRST. Keep only
@@ -51,48 +66,88 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
-            unsafe { rusqlite::ffi::sqlite3_cancel_auto_extension(Some(deny_sqlite)); }
+            unsafe {
+                rusqlite::ffi::sqlite3_cancel_auto_extension(Some(deny_sqlite));
+            }
             assert_eq!(OPENS.load(Ordering::SeqCst), 0);
         }
     }
-    assert_eq!(unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(deny_sqlite)) }, rusqlite::ffi::SQLITE_OK);
-    std::thread::spawn(|| assert!(rusqlite::Connection::open_in_memory().is_err())).join().unwrap();
+    assert_eq!(
+        unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(deny_sqlite)) },
+        rusqlite::ffi::SQLITE_OK
+    );
+    std::thread::spawn(|| assert!(rusqlite::Connection::open_in_memory().is_err()))
+        .join()
+        .unwrap();
     assert_eq!(OPENS.swap(0, Ordering::SeqCst), 1);
     let _guard = Guard;
     let (pool, _) = fixture(|_| {});
     let namespace = ns("catalog135\0🦀");
     let control = PgCancellation::default();
-    let mut pg = crate::events::EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let mut pg =
+        crate::events::EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
+            .unwrap();
     for (at, source) in data.rows.iter().flat_map(|row| &row.sources).enumerate() {
-        let receipt = pg.ingest(&format!("{:064x}", at + 1), &source.path, "claude").unwrap();
+        let receipt = pg
+            .ingest(&format!("{:064x}", at + 1), &source.path, "claude")
+            .unwrap();
         assert_eq!(receipt.consumed_bytes, source.offset);
     }
     drop(pg);
-    let paths = data.rows.iter().flat_map(|row| &row.sources)
-        .map(|source| source.path.to_str().unwrap().to_owned()).collect::<Vec<_>>();
-    let fence = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-        super::admission::capture(tx, &paths)
-    }).unwrap();
-    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap();
+    let paths = data
+        .rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .map(|source| source.path.to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let fence = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            super::admission::capture(tx, &paths)
+        })
+        .unwrap();
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+        .unwrap();
     let mut bad = data.rows.clone();
     bad[0].sources[0].prefix_sha256[0] ^= 1;
-    let wrong = crate::slot_projection::Publication { rows: &bad, transcripts: Some(&data.projections) };
-    assert_eq!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        super::admission::stage_bound(tx, L1, &wrong, &fence).map(|_| ())
-    }).err(), Some(StorageError::ScopeChanged));
-    assert!(before == pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap());
-    let refs = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        super::admission::stage_bound(tx, L1, &data.publication(), &fence)
-    }).unwrap();
+    let wrong = crate::slot_projection::Publication {
+        rows: &bad,
+        transcripts: Some(&data.projections),
+    };
+    assert_eq!(
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            super::admission::stage_bound(tx, L1, &wrong, &fence).map(|_| ())
+        })
+        .err(),
+        Some(StorageError::ScopeChanged)
+    );
+    assert!(
+        before
+            == pool
+                .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+                .unwrap()
+    );
+    let refs = pool
+        .transaction(&namespace, TxnKind::Write, &control, |tx| {
+            super::admission::stage_bound(tx, L1, &data.publication(), &fence)
+        })
+        .unwrap();
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].path, data.rows[0].sources[0].path.to_str().unwrap());
     assert!(refs[0].usage_generation > 0);
-    assert!(!refs[0].usage_ready, "Claude has no native Usage observations");
+    assert!(
+        !refs[0].usage_ready,
+        "Claude has no native Usage observations"
+    );
     assert_eq!(refs[0].pages.0.len(), 64);
     super::snapshot::with_generation(&pool, &namespace, &control, L1, |view| {
-        assert_eq!(serde_json::to_vec(&view.catalog(&data.rows[0].key, false)?.unwrap()).unwrap(), data.metadata[0]);
+        assert_eq!(
+            serde_json::to_vec(&view.catalog(&data.rows[0].key, false)?.unwrap()).unwrap(),
+            data.metadata[0]
+        );
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     // No head, ACK or readiness is fabricated by proof binding.
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let row = tx.driver.query_one("SELECT catalog_generation IS NULL, EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
@@ -102,24 +157,38 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     }).unwrap();
     // Every measured Catalog boundary rolls back within this same connected
     // native-proof flow; compare all Catalog table rows, not just row counts.
-    let before = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap();
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+        .unwrap();
     BOUNDARIES.with(|n| n.set(0));
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         super::admission::stage_bound(tx, L2, &data.publication(), &fence).map(|_| ())
-    }).unwrap();
+    })
+    .unwrap();
     let count = BOUNDARIES.with(|n| n.get());
     assert!(count > 0);
     // Use another generation: the successful L2 calibration remains immutable.
-    let after = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap();
+    let after = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+        .unwrap();
     assert!(before != after);
     let l3 = "3".repeat(64);
     for at in 1..=count {
         FAIL_AFTER.with(|n| n.set(Some(at)));
-        assert_eq!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
-        }).err(), Some(StorageError::Unavailable));
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
+            })
+            .err(),
+            Some(StorageError::Unavailable)
+        );
         FAIL_AFTER.with(|n| n.set(None));
-        assert!(after == pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap());
+        assert!(
+            after
+                == pool
+                    .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+                    .unwrap()
+        );
     }
     // Missing/current Usage authority and corrupt native header both refuse
     // before effects. Test-only mutations roll back together with the attempt.
@@ -128,11 +197,22 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
         "UPDATE semon_pg_native_page_generations SET chunks_header=convert_to('corrupt','UTF8') WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
         "DELETE FROM semon_pg_native_page_current WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
     ] {
-        assert_eq!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            tx.driver.execute(sql, &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
-            super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
-        }).err(), Some(StorageError::ScopeChanged));
-        assert!(after == pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap());
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver
+                    .execute(sql, &[&namespace.as_str().as_bytes()])
+                    .map_err(sqlstate::error)?;
+                super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
+            })
+            .err(),
+            Some(StorageError::ScopeChanged)
+        );
+        assert!(
+            after
+                == pool
+                    .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+                    .unwrap()
+        );
     }
     for sql in [
         "UPDATE semon_pg_source_state SET catalog_generation=repeat('4',64) WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
@@ -140,21 +220,40 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
         "UPDATE semon_pg_source_invalidations SET revision=revision+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
     ] {
         BOUNDARIES.with(|n| n.set(0));
-        assert_eq!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            tx.driver.execute(sql, &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
-            super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
-        }).err(), Some(StorageError::Conflict));
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver
+                    .execute(sql, &[&namespace.as_str().as_bytes()])
+                    .map_err(sqlstate::error)?;
+                super::admission::stage_bound(tx, &l3, &data.publication(), &fence).map(|_| ())
+            })
+            .err(),
+            Some(StorageError::Conflict)
+        );
         assert_eq!(BOUNDARIES.with(|n| n.get()), 0);
-        assert!(after == pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database).unwrap());
+        assert!(
+            after
+                == pool
+                    .transaction(&namespace, TxnKind::ReadSnapshot, &control, whole_database)
+                    .unwrap()
+        );
     }
-    assert_eq!(pool.transaction(&ns("foreign135"), TxnKind::Write, &control, |tx| {
-        super::admission::stage_bound(tx, L1, &data.publication(), &fence).map(|_| ())
-    }).err(), Some(StorageError::ScopeChanged));
+    assert_eq!(
+        pool.transaction(&ns("foreign135"), TxnKind::Write, &control, |tx| {
+            super::admission::stage_bound(tx, L1, &data.publication(), &fence).map(|_| ())
+        })
+        .err(),
+        Some(StorageError::ScopeChanged)
+    );
     let cancelled = PgCancellation::default();
     cancelled.cancel();
-    assert_eq!(pool.transaction(&namespace, TxnKind::Write, &cancelled, |tx| {
-        super::admission::stage_bound(tx, L1, &data.publication(), &fence).map(|_| ())
-    }).err(), Some(StorageError::Busy));
+    assert_eq!(
+        pool.transaction(&namespace, TxnKind::Write, &cancelled, |tx| {
+            super::admission::stage_bound(tx, L1, &data.publication(), &fence).map(|_| ())
+        })
+        .err(),
+        Some(StorageError::Busy)
+    );
     fs::remove_dir_all(&data.root).unwrap();
 }
 
@@ -476,7 +575,10 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                     let retained = view
                         .catalog(&current.key, true)?
                         .ok_or(StorageError::ScopeChanged)?;
-                    assert_eq!(serde_json::to_vec(&retained).unwrap(), data.composite[index]);
+                    assert_eq!(
+                        serde_json::to_vec(&retained).unwrap(),
+                        data.composite[index]
+                    );
                     let (_, slots) = view
                         .recipe(&current.key, true, 0, 64)?
                         .ok_or(StorageError::ScopeChanged)?;

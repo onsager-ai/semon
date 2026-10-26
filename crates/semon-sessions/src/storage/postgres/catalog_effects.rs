@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use tokio_postgres::types::ToSql;
 
+pub(super) mod admission;
 pub(super) mod snapshot;
-mod admission;
 
 const MAX: usize = 1024 * 1024;
 
