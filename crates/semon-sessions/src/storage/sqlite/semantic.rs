@@ -1767,6 +1767,14 @@ impl Stage {
             [ns],
         )
         .map_err(error)?;
+        // A repair stage temporarily publishes a partial head. Once its exact
+        // claims are acknowledged, preserve an already completed discovery;
+        // otherwise the observer starts recovery and rediscovers unchanged
+        // sources solely because this representation was repaired.
+        tx.execute(
+            "UPDATE main.meta SET value='complete' WHERE namespace=?1 AND key='catalog_completeness' AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) AND EXISTS(SELECT 1 FROM main.storage_source_journal WHERE namespace=?1 AND backfill_state='complete')",
+            [ns],
+        ).map_err(error)?;
         tx.commit().map_err(error)?;
         self.epoch = None;
         Ok(Outcome::Written)

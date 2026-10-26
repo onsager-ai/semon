@@ -1357,18 +1357,32 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
         transcript["relationship_context"]["turns"][0]["id"],
         transcript["entries"][0]["turn"]
     );
-    let db = fixture.db();
-    db.execute(
-        "UPDATE session_catalog SET lifecycle='retained' WHERE session_key='session-00000'",
-        [],
-    )
-    .unwrap();
+    // Let the ordinary observer withdraw the disappeared source and retain its
+    // published metadata, rather than bypassing the guarded Catalog writer.
+    fs::remove_file(fixture.options.claude_home.join("projects/project/session-00000.jsonl")).unwrap();
+    fixture.publish_existing();
     assert_eq!(
         fixture.body("sid=session-00000&scope=retained_history").1["items"][0]["details"]["live_observation"],
         false,
         "retained metadata cannot claim current activity"
     );
-    db.execute("UPDATE session_trace_headers SET source_generation='superseded' WHERE session_key='session-00000'", []).unwrap();
+    // Publish changed provenance without a replacement trace. The existing
+    // trace must not supply details for this new source cohort.
+    let db = fixture.db();
+    let mut row: crate::model::summary::CatalogRow = serde_json::from_str(
+        &db.query_row("SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() AND session_key='session-00000'", [], |r| r.get::<_, String>(0)).unwrap(),
+    ).unwrap();
+    row.sources.clear();
+    row.trace = None;
+    let config = fixture.options.source.config(&fixture.options.cache.with_extension("sqlite3")).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+    let writer = crate::events::store::configured::Writer::owned(owner);
+    let generation = writer.catalog_generation().unwrap();
+    let rows = [row];
+    assert_eq!(writer.publish_catalog(
+        &crate::slot_projection::Publication { rows: &rows, transcripts: None },
+        generation.as_deref(), None, false,
+    ).unwrap().unwrap().0, crate::events::Outcome::Written);
     let (status, changed) = fixture.body("sid=session-00000&scope=retained_history");
     assert_eq!(status, 200);
     assert!(
