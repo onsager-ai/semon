@@ -597,16 +597,10 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
     file.read_to_end(&mut bytes)?;
     let facts = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    // This legacy/full observation already reads all facts. It may repair a
-    // missing derived index; focused reads never use it as a fallback.
-    if let Some(identity) = before
-        && source_authority::Identity::of(&file.metadata()?)
-            .ok()
-            .as_ref()
-            == Some(&identity)
-        && source_authority::CurrentSources::open(path).is_err()
-    {
-        let _ = source_authority::publish(path, &facts, &identity);
+    // Reading canonical Facts is backend-neutral. Derived source authority is
+    // published explicitly by write_facts; a read must never repair SQLite.
+    if before.is_some() && source_authority::Identity::of(&file.metadata()?).ok()!=before {
+        return Err(io::Error::other("Facts changed during observation"));
     }
     Ok(facts)
 }
