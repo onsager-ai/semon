@@ -22,7 +22,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             "catalog_generation" => Some(self.generation.clone()),
             "catalog_version" => Some(crate::model::summary::CATALOG_VERSION.to_string()),
             // Completeness is not inferred from successful metadata staging.
-            "catalog_completeness" => Some("provisional".into()),
+            "catalog_completeness" => Some("partial".into()),
             _ => None,
         })
     }
