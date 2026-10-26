@@ -480,7 +480,9 @@ pub(super) fn select(
                 .context
                 .endpoints
                 .values()
-                .filter(|e| e.row.harness == harness && e.row.native_ids.iter().any(|n| n == native))
+                .filter(|e| {
+                    e.row.harness == harness && e.row.native_ids.iter().any(|n| n == native)
+                })
                 .collect::<Vec<_>>();
             Ok(Selection {
                 count: 1,

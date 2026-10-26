@@ -292,6 +292,118 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "limit=50",
         ))
     );
+    // P3 oracle: the same connected withdrawal (both subagent Sources
+    // disappear) through the ordinary SQLite Query refresh. Retained-only
+    // rows, keyset pages and the harness filter are saved before the
+    // no-SQLite phase; the Sources are restored byte-identical for PG ingest.
+    let stable = |item: &serde_json::Value| {
+        let mut picked = serde_json::Map::new();
+        for field in [
+            "key",
+            "harness",
+            "kind",
+            "lifecycle",
+            "name",
+            "native_ids",
+            "parent",
+            "root",
+            "repo",
+            "branch",
+            "model",
+            "first",
+            "last",
+        ] {
+            picked.insert(field.into(), item[field].clone());
+        }
+        serde_json::Value::Object(picked)
+    };
+    let mut withdraw_options = history_options.clone();
+    withdraw_options.cache = oracle.root.join("oracle-withdraw201");
+    let refresh = |options: &Options| {
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(recent_machine.into(), options.clone())],
+        )))
+        .call_at("list_sessions", &serde_json::json!({}), recent_now)
+        .expect("SQLite withdrawal oracle list")
+    };
+    let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
+    let parked = [
+        (claude_agent.clone(), oracle.root.join("parked-agent180.jsonl")),
+        (claude_agent191.clone(), oracle.root.join("parked-agent191.jsonl")),
+    ];
+    for (from, to) in &parked {
+        fs::rename(from, to).unwrap();
+    }
+    let after_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
+    assert!(
+        after_withdrawal < before_withdrawal,
+        "SQLite withdrawal {before_withdrawal} -> {after_withdrawal}"
+    );
+    let sqlite_scoped = |scope: &str, limit: usize| {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let query = match &cursor {
+                Some(cursor) => format!(
+                    "{scope}limit={limit}&cursor={}",
+                    crate::viewer::percent_encode(cursor)
+                ),
+                None => format!("{scope}limit={limit}"),
+            };
+            let reply =
+                crate::catalog::session_catalog_page(&withdraw_options, recent_machine, &query);
+            assert_eq!(reply.status, 200, "{query}");
+            let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            items.extend(page["items"].as_array().unwrap().iter().cloned());
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break items,
+            }
+        }
+    };
+    let sqlite_retained = sqlite_scoped("scope=retained_history&", 50);
+    // Keyset pages over equal timestamps continue without gap or overlap.
+    assert_eq!(
+        sqlite_scoped("scope=retained_history&", 3)
+            .iter()
+            .map(stable)
+            .collect::<Vec<_>>(),
+        sqlite_retained.iter().map(stable).collect::<Vec<_>>()
+    );
+    let sqlite_current = sqlite_scoped("", 50)
+        .iter()
+        .map(|item| item["key"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let oracle_withdrawn = sqlite_retained
+        .iter()
+        .filter(|item| item["lifecycle"] == "retained")
+        .map(stable)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oracle_withdrawn.len() as u64,
+        before_withdrawal - after_withdrawal,
+        "SQLite retained-only rows"
+    );
+    assert!(
+        oracle_withdrawn
+            .iter()
+            .all(|item| !sqlite_current.contains(item["key"].as_str().unwrap()))
+    );
+    let oracle_withdrawn_claude = sqlite_scoped("scope=retained_history&harness=claude&", 50)
+        .iter()
+        .filter(|item| item["lifecycle"] == "retained")
+        .map(|item| item["key"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oracle_withdrawn_claude,
+        oracle_withdrawn
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    );
+    for (from, to) in &parked {
+        fs::rename(to, from).unwrap();
+    }
     oracle.rows = expected.rows;
     oracle.projections = expected.transcripts;
     drop(sqlite);
@@ -2178,7 +2290,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // session the withdrawal removed, served from the owner headers as
     // Retained. Whole scopes follow the viewer keyset cursor (bulk169 made
     // the generation larger than one page).
-    let scoped = |generation: &str, scope: &str| {
+    let scoped_items = |generation: &str, scope: &str| {
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -2207,17 +2319,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap();
             assert_eq!(reply.status, 200);
             let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-            for item in page["items"].as_array().unwrap() {
-                items.push((
-                    item["key"].as_str().unwrap().to_owned(),
-                    item["lifecycle"] == "retained",
-                ));
-            }
+            items.extend(page["items"].as_array().unwrap().iter().cloned());
             match page["next_cursor"].as_str() {
                 Some(next) => cursor = Some(next.to_owned()),
                 None => break items,
             }
         }
+    };
+    let scoped = |generation: &str, scope: &str| {
+        let mut items = Vec::new();
+        for item in scoped_items(generation, scope) {
+            items.push((
+                item["key"].as_str().unwrap().to_owned(),
+                item["lifecycle"] == "retained",
+            ));
+        }
+        items
     };
     let before = scoped(qualified.as_deref().unwrap(), "");
     let current = scoped(&caught, "");
@@ -2257,6 +2374,24 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert!(codex.iter().all(|(other, _)| other != key));
     }
     assert!(claude.len() + codex.len() <= retained.len());
+    // The SQLite pre-Guard replay of the same withdrawal: retained-only rows
+    // in keyset order and under the harness filter are exactly the oracle's.
+    assert_eq!(
+        scoped_items(&caught, "scope=retained_history&")
+            .iter()
+            .filter(|item| item["lifecycle"] == "retained")
+            .map(stable)
+            .collect::<Vec<_>>(),
+        oracle_withdrawn
+    );
+    assert_eq!(
+        claude
+            .iter()
+            .filter(|(_, retained)| *retained)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>(),
+        oracle_withdrawn_claude
+    );
     // P3 search: metadata search over the published PG projection. A key
     // query finds its Current session; a removed key is absent from the
     // successor's Current search but found in the qualified generation.
