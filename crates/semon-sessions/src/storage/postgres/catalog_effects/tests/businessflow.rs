@@ -776,6 +776,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let model = pg
             .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000)
             .unwrap();
+        let current_binding = pg.query_runtime_binding().unwrap().unwrap();
+        assert_eq!(current_binding.namespace, binding.namespace);
+        assert_eq!(current_binding.admission, binding.admission);
+        assert_eq!(current_binding.stream_epoch, binding.stream_epoch);
+        let current_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+        assert_eq!(current_runtime, stage_runtime, "staged runtime changed");
+        let expected_runtime = current_binding.witness(&current_runtime).unwrap();
+        for row in &model.prepared().rows {
+            assert!(
+                row.query.as_ref().is_some_and(
+                    |query| query["runtime"].as_str() == Some(expected_runtime.as_str())
+                ),
+                "staged row runtime differs: phase={:?}",
+                batch.phase
+            );
+        }
         if batch.phase == crate::model::relation_stage::Phase::Relations {
             use crate::model::relation_stage::Selector;
             let selected = pg
@@ -1218,9 +1234,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         stage_runtime,
         "the selected fixture's runtime changed after its publication"
     );
+    let body_read_pass = std::cell::Cell::new(0usize);
     let read_bodies = |query: &mut crate::Query,
                        store: &super::super::snapshot::query::QueryCatalog,
                        host: &BodyHost| {
+        let pass = body_read_pass.get() + 1;
+        body_read_pass.set(pass);
+        let read_binding = store
+            .pool
+            .transaction(
+                &store.namespace,
+                TxnKind::ReadSnapshot,
+                &store.control,
+                super::super::super::model_cache::binding,
+            )
+            .unwrap();
+        let read_runtime =
+            crate::native_evidence::query_runtime_generation(&store.options).unwrap();
+        eprintln!(
+            "pg_body_read_pass={pass} namespace_same={} admission_same={} epoch_same={} raw_runtime_same={}",
+            read_binding.namespace == binding.namespace,
+            read_binding.admission == binding.admission,
+            read_binding.stream_epoch == binding.stream_epoch,
+            read_runtime == stage_runtime
+        );
         prepared
             .rows
             .iter()
@@ -1233,7 +1270,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         store,
                         host,
                     )
-                    .unwrap_or_else(|error| panic!("PG selected body {}: {error:?}", row.key));
+                    .unwrap_or_else(|error| panic!("PG selected body pass={pass}: {error:?}"));
                 let fields = query
                     .call_bound_selected_at(
                         "get_session",
@@ -2132,6 +2169,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         root: crate::InputRoot::Claude,
         path: "sessions/4242.json".into(),
     };
+    assert!(
+        crate::native_evidence::query_runtime_generation(&options).unwrap() == stage_runtime,
+        "the local runtime changed before the recorded PID mutation"
+    );
     fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
     let pid_write = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -2151,6 +2192,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .sync_all()
         .unwrap();
     pid_write.complete(pid_bytes.len() as u64).unwrap();
+    assert!(
+        crate::native_evidence::query_runtime_generation(&options).unwrap() != stage_runtime,
+        "the shared PID mutation must invalidate the old local runtime witness"
+    );
+    assert_eq!(
+        read_selected(),
+        expected_field,
+        "the retained native field proof survives an independent runtime mutation"
+    );
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
     let facts_writer = crate::SessionFactsWrite::begin(&facts_options, &recorded).unwrap();
