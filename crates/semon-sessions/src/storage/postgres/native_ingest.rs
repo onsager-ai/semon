@@ -70,17 +70,26 @@ pub(super) fn begin(
     expected: Option<&Ledger>,
 ) -> Result<Intent, StorageError> {
     let digest = request(namespace, path, harness, id)?;
-    pool.transaction(namespace,TxnKind::Write,control,|tx|{
-        super::native_core::qualify(tx,path,expected)?;
-        let intent=Intent { id:id.to_owned(),path:path.to_owned(),harness:harness.to_owned(),request:digest,base:expected.map(header_ledger).unwrap_or_default(),revision:claim(tx,path)? };
-        if let Some(prior)=stored(tx,id)? {
-            if prior!=intent { return Err(StorageError::Conflict); }
+    pool.transaction(namespace, TxnKind::Write, control, |tx| {
+        super::native_core::qualify(tx, path, expected)?;
+        let intent = Intent {
+            id: id.to_owned(),
+            path: path.to_owned(),
+            harness: harness.to_owned(),
+            request: digest,
+            base: expected.map(header_ledger).unwrap_or_default(),
+            revision: claim(tx, path)?,
+        };
+        if let Some(prior) = stored(tx, id)? {
+            if prior != intent {
+                return Err(StorageError::Conflict);
+            }
         } else {
-            let key=format!("native_event_intent:{id}");
-            let value=serde_json::to_vec(&intent).map_err(|_|StorageError::Unavailable)?;
+            let key = format!("native_event_intent:{id}");
+            let value = serde_json::to_vec(&intent).map_err(|_| StorageError::Unavailable)?;
             // qualify() holds SourceState through COMMIT, so the exact prior
             // intent check above and this collision-checked write are atomic.
-            super::native_keys::put_meta(tx,key.as_bytes(),&value)?;
+            super::native_keys::put_meta(tx, key.as_bytes(), &value)?;
         }
         Ok(intent)
     })
