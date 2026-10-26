@@ -1778,23 +1778,31 @@ mod tests {
                             key,
                             "replacement",
                         );
-                        let query = selected.as_ref().ok().and_then(|row| row.as_ref()).map(
-                            |row| {
-                                crate::overview_repair::local_query_target(
-                                    view.options(),
-                                    &row.catalog_key,
-                                    crate::model::now_ms(),
-                                )
-                                .map(|target| target.is_some())
-                                .map_err(|error| error.kind())
-                            },
-                        );
+                        let query =
+                            selected
+                                .as_ref()
+                                .ok()
+                                .and_then(|row| row.as_ref())
+                                .map(|row| {
+                                    crate::overview_repair::local_query_target(
+                                        view.options(),
+                                        &row.catalog_key,
+                                        crate::model::now_ms(),
+                                    )
+                                    .map(|target| target.is_some())
+                                    .map_err(|error| error.kind())
+                                });
                         let identity = match selected {
                             Ok(Some(_)) => "present",
                             Ok(None) => "absent",
                             Err(_) => "unavailable",
                         };
-                        (key.clone(), view.catalog_observation_pending(), identity, query)
+                        (
+                            key.clone(),
+                            view.catalog_observation_pending(),
+                            identity,
+                            query,
+                        )
                     })
                     .collect::<Vec<_>>()
             );
