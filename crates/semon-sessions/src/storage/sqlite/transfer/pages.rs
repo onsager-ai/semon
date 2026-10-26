@@ -61,7 +61,12 @@ pub(super) fn capture(
         };
         let prefix = prefix(&path, kind);
         let after = state.native_key.as_ref().map(|k| format!("{prefix}{k}"));
-        let rows=tx.0.prepare("SELECT key,CASE WHEN octet_length(value)<=1048576 THEN value END FROM meta WHERE namespace=?1 AND key>=?2 AND key<?3 AND key<>?4 AND (?5 IS NULL OR key>?5) ORDER BY key LIMIT 64").map_err(failed)?.query_map(params![tx.1,prefix,format!("{prefix}~"),format!("{prefix}header"),after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        let suffix="FROM meta WHERE namespace=?1 AND key>=?2 AND key<?3 AND key<>?4 AND (?5 IS NULL OR key>?5) ORDER BY key";
+        let sizes=tx.0.prepare(&format!("SELECT octet_length(value) {suffix} LIMIT 64")).map_err(failed)?.query_map(params![tx.1,prefix,format!("{prefix}~"),format!("{prefix}header"),after],|r|r.get::<_,i64>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        let mut count=0;let mut bytes=0usize;
+        for size in &sizes {let size=usize::try_from(*size).map_err(|_|StorageError::ScopeChanged)?;if bytes.checked_add(size).is_none_or(|n|n>transfer::MAX_PAGE_BYTES){break;}bytes+=size;count+=1;}
+        if count==0 && !sizes.is_empty(){return Err(StorageError::Busy);}
+        let rows=tx.0.prepare(&format!("SELECT key,value {suffix} LIMIT {count}")).map_err(failed)?.query_map(params![tx.1,prefix,format!("{prefix}~"),format!("{prefix}header"),after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
         if rows.is_empty() {
             state.native_family += 1;
             state.native_key = None;

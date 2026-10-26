@@ -63,7 +63,12 @@ pub(super) fn capture(
             _ => NativePageKind::Tree,
         };
         let cursor = state.native_key.as_ref().map(|s| s.as_bytes());
-        let rows=tx.0.driver.query("SELECT r.page_key,CASE WHEN octet_length(b.payload)<=1048576 THEN b.payload END FROM semon_pg_native_page_current c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key LIMIT 64",&[&ns,&path.as_bytes(),&kind(page_kind),&cursor]).map_err(sqlstate::error)?;
+        let suffix="FROM semon_pg_native_page_current c JOIN semon_pg_native_page_refs r USING(namespace_digest,namespace,generation) JOIN semon_pg_native_page_blobs b USING(namespace_digest,namespace,digest) WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.path_digest=sha256($2::bytea) AND c.source_path=$2 AND r.kind=$3 AND ($4::bytea IS NULL OR r.page_key>$4) ORDER BY r.page_key";
+        let sizes=tx.0.driver.query(&format!("SELECT octet_length(b.payload) {suffix} LIMIT 64"),&[&ns,&path.as_bytes(),&kind(page_kind),&cursor]).map_err(sqlstate::error)?;
+        let mut count=0;let mut bytes=0usize;
+        for row in &sizes {let size=usize::try_from(row.get::<_,i32>(0)).map_err(|_|StorageError::ScopeChanged)?;if bytes.checked_add(size).is_none_or(|n|n>transfer::MAX_PAGE_BYTES){break;}bytes+=size;count+=1;}
+        if count==0 && !sizes.is_empty(){return Err(StorageError::Busy);}
+        let rows=tx.0.driver.query(&format!("SELECT r.page_key,b.payload {suffix} LIMIT {count}"),&[&ns,&path.as_bytes(),&kind(page_kind),&cursor]).map_err(sqlstate::error)?;
         if rows.is_empty() {
             state.native_family += 1;
             state.native_key = None;
@@ -76,7 +81,7 @@ pub(super) fn capture(
                         kind: page_kind,
                         key: String::from_utf8(r.get(0)).map_err(|_| StorageError::ScopeChanged)?,
                         payload: String::from_utf8(
-                            r.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?,
+                            r.get::<_, Vec<u8>>(1),
                         )
                         .map_err(|_| StorageError::ScopeChanged)?,
                     })
