@@ -565,7 +565,9 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::transfer::reported::tests::selected_receipts::{originals, selected_receipts};
+    use crate::storage::transfer::reported::tests::selected_receipts::{
+        originals, selected_receipts,
+    };
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
 
     #[test]
@@ -622,18 +624,34 @@ mod tests {
         let (options, initial) = seed_catalog(&source, &root);
         let mut host = crate::storage::transfer::reported::tests::selected_receipts::AuthorizedOriginals::default();
         originals(&source, &options, &mut host);
-        let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
-        let runtime = crate::storage::NativeReaderBinding::Semantic(owner).reader_runtime().unwrap();
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
+        let runtime = crate::storage::NativeReaderBinding::Semantic(owner)
+            .reader_runtime()
+            .unwrap();
         let original_id = runtime.current_generation(&initial[0].key).unwrap();
-        let mut original_lease = runtime.selected_generation(&initial[0].key, &original_id, &"f".repeat(64), 30_000).unwrap();
+        let mut original_lease = runtime
+            .selected_generation(&initial[0].key, &original_id, &"f".repeat(64), 30_000)
+            .unwrap();
         let expected =
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
         originals(&source, &options, &mut host);
-        let original_page = original_lease.transcript_records(&options, Some((&host, crate::SessionSourceReadMode::ProviderOnly)), 0, 1, &crate::SelectedReadControl::default()).unwrap();
+        let original_page = original_lease
+            .transcript_records(
+                &options,
+                Some((&host, crate::SessionSourceReadMode::ProviderOnly)),
+                0,
+                1,
+                &crate::SelectedReadControl::default(),
+            )
+            .unwrap();
         assert_eq!(original_page.snapshot.proof_generation.0, original_id.0);
-        assert_eq!(original_page.records[0].1.as_ref().unwrap()["message"]["content"], "sanitized 0");
+        assert_eq!(
+            original_page.records[0].1.as_ref().unwrap()["message"]["content"],
+            "sanitized 0"
+        );
         original_lease.release().unwrap();
         let original_selected = selected_receipts(&source, &options, &host);
         // Capturing the SQLite source performs no PG work. Discard an idle
