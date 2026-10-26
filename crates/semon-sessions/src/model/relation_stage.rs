@@ -141,7 +141,7 @@ impl LifecycleAuthority {
         let options = Options {
             facts: Some(self.facts.clone()),
             claude_home: self.claude_home.clone(),
-            ..Default::default()
+            ..Options::from_host()?
         };
         let current = crate::native_evidence::query_runtime_generation(&options)? == self.runtime
             && identity()? == self.identity;

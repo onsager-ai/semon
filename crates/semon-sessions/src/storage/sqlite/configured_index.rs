@@ -112,116 +112,101 @@ impl IndexStore for ConfiguredIndex {
     }
     fn session_description(
         &self,
-        _key: &str,
-        _version: u32,
-        _inputs: &str,
+        key: &str,
+        version: u32,
+        inputs: &str,
     ) -> Result<Option<String>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .session_description(key, version, inputs)
+            .map_err(StoreError::Configured)
     }
     fn save_session_descriptions(
         &mut self,
-        _descriptions: &[(String, u32, String, String)],
+        descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .save_session_descriptions(descriptions)
+            .map_err(StoreError::Configured)
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
-        if let Some(stage) = &self.semantic {
-            return stage.generation();
-        }
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.catalog_generation()
     }
     fn session_slots(
         &self,
-        _row: &crate::model::summary::CatalogRow,
-        _expected_generation: Option<&str>,
-        _max: usize,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.slots(row, expected_generation, max)
     }
     fn publish_session_catalog_fenced(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .publish_catalog(publication, expected_generation, None, false)
+            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))
     }
     fn publish_partial_catalog(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
-        _claims: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .publish_catalog(publication, expected_generation, Some(claims), false)
+            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))
     }
     fn publish_closed_catalog_fenced(
         &mut self,
-        _publication: &crate::slot_projection::Publication<'_>,
-        _expected_generation: Option<&str>,
-        _claims: &[(String, Option<i64>)],
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .publish_catalog(publication, expected_generation, Some(claims), true)
     }
     fn resolve_catalog_input(
         &mut self,
-        _path: &str,
-        _revision: i64,
-        _native: Option<(&str, &str)>,
-        _log: Option<&str>,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .resolve_catalog_input(path, revision, native, log)
     }
     fn relocate_codex(
         &mut self,
-        _path: &str,
-        _stat: &Stat,
-        _id: &str,
-        _file: &mut LogFile,
-        _measurements: &mut crate::native_timing::Measurements,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut LogFile,
+        measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        // Cross-path relocation admission is unported; ordinary parsing still
-        // commits its relocation advance/dependency effects atomically.
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .relocate_codex(path, stat, id, file, measurements)
     }
     fn append_evidence(
         &self,
-        _path: &str,
+        path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .append_evidence(path)
+            .map_err(StoreError::Configured)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.qualified_catalog()
     }
     fn catalog_component_paths(
         &self,
-        _paths: &[String],
-        _keys: &[String],
-        _native_parents: &[(String, String)],
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .catalog_component_paths(paths, keys, native_parents)
     }
     fn begin_semantic_stage(
         &mut self,
@@ -329,26 +314,15 @@ impl IndexStore for ConfiguredIndex {
     }
     fn advance_tree_repair(
         &mut self,
-        _options: &crate::Options,
+        options: &crate::Options,
     ) -> io::Result<(bool, Option<String>)> {
-        Err(io::Error::other(
-            StorageError::NamespaceUpgradePending.to_string(),
-        ))
+        self.native.advance_tree_repair(options)
     }
     fn tree_repair_pending(&self) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.tree_repair_pending()
     }
-    fn queue_tree_repair(
-        &mut self,
-        _path: &str,
-        _ledger: &Ledger,
-        _harness: &str,
-    ) -> io::Result<()> {
-        Err(io::Error::other(
-            StorageError::NamespaceUpgradePending.to_string(),
-        ))
+    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, _harness: &str) -> io::Result<()> {
+        self.native.queue_tree_repair(path, ledger)
     }
     fn load_tree(
         &self,
@@ -398,14 +372,10 @@ impl IndexStore for ConfiguredIndex {
         Ok(runs)
     }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native.file_ledgers()
     }
-    fn remove_files(&mut self, _files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        self.native.remove_files(files)
     }
     fn save_runs(
         &mut self,

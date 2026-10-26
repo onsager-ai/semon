@@ -8,8 +8,7 @@ use std::collections::BTreeSet;
 
 const CORE_TABLES: &[&str] = &["files", "events", "signals"];
 
-// Authored separately from the transitional Options schema. There are no
-// namespace defaults, views, SQL rewriting, or implicit namespace row adoption.
+// The canonical core has no namespace defaults or implicit row adoption.
 pub(super) const CORE_SCHEMA: &str = "
 CREATE TABLE files (
  namespace TEXT NOT NULL, file_id INTEGER NOT NULL, path TEXT NOT NULL,
@@ -74,60 +73,6 @@ pub(super) const PUT_EVENT: &str = "INSERT OR REPLACE INTO events
 pub(super) const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals
  (namespace,file_id,seq,k,o,t,at,n,v) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8)";
 
-const PRICING_FILE_SCHEMA: &str = "
-CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
- WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
- WHEN NEW.codex_native_usage IS NOT NULL BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
-
-// Same core family with composite meta. Pricing's target is a store-wide
-// interpretation setting, unlike per-source progress/completion cursors.
-const PRICING_FILE_SCHEMA_META: &str = "
-CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
- WHERE codex_native_usage IS NOT NULL;
-CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
- WHEN NEW.codex_native_usage IS NOT NULL BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
- UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
- WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
- INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
- SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-";
-
-pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
-    if meta_composite {
-        PRICING_FILE_SCHEMA_META
-    } else {
-        PRICING_FILE_SCHEMA
-    }
-}
-
 #[derive(Default)]
 struct WriterShapeMeasurements {
     core_calls: usize,
@@ -141,7 +86,7 @@ thread_local! {
 }
 
 // Observation only. In particular, this guard caches no shape result: every
-// existing selector still executes its complete qualification query.
+// entry qualification executes its complete physical checks.
 pub(super) struct WriterShapeProbe(Option<WriterShapeMeasurements>);
 
 impl WriterShapeProbe {
@@ -196,33 +141,37 @@ impl Drop for WriterShapeProbe {
     }
 }
 
-/// Select an authored statement for the physical family shape, never rewrite
-/// SQL or retry errors against another schema. Singleton stores still support
-/// read-only admission/assignment; configured writes require validate_core.
+/// Statement selection has one current contract. Physical checks belong to
+/// the admitted open and transaction-writer boundaries, never each statement.
 pub(super) fn sql<'a>(
-    db: &Connection,
-    legacy: &'a str,
+    _db: &Connection,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let started = WriterShapeProbe::start("core_shape_calls");
-    let composite = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get::<_, bool>(0));
-    WriterShapeProbe::finish("core_shape_query", started);
-    let composite = composite?;
-    Ok(if composite { scoped } else { legacy })
+    Ok(scoped)
 }
 
 pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
     sql(db, "", "namespace=semon_namespace() AND ")
 }
 
-/// Meta is qualified separately from the core rows. Until all store-global
-/// owners are ported, a composite files table must not imply composite meta.
-/// Select authored statements only; never retry or rewrite SQL on failure.
 pub(crate) fn metadata_sql<'a>(
-    db: &Connection,
-    legacy: &'a str,
+    _db: &Connection,
+    _legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
+    Ok(scoped)
+}
+
+/// Entry qualification retained by current open/admission and WriterLayout.
+/// Its schema-cookie guard detects controlled DDL after writer construction.
+pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()> {
+    let started = WriterShapeProbe::start("core_shape_calls");
+    let core: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)")?.query_row([], |row| row.get(0))?;
+    WriterShapeProbe::finish("core_shape_query", started);
+    if !core {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let started = WriterShapeProbe::start("meta_shape_calls");
     crate::native_timing::discovery_count(|counts| {
         counts.schema_probes += 1;
@@ -230,15 +179,12 @@ pub(crate) fn metadata_sql<'a>(
     });
     let shape = db.prepare_cached(
         "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
-    )?.query_row([], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?,r.get::<_, i64>(2)?,r.get::<_, i64>(3)?)));
+    )?.query_row([], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?,row.get::<_, i64>(3)?)))?;
     WriterShapeProbe::finish("meta_shape_query", started);
-    let (columns, namespace, key, values) = shape?;
-    let composite = match (columns, namespace, key, values) {
-        (2, 0, 1, 1) => false,
-        (3, 1, 2, 1) => true,
-        _ => return Err(rusqlite::Error::InvalidQuery),
-    };
-    Ok(if composite { scoped } else { legacy })
+    if shape != (3, 1, 2, 1) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
 }
 
 // Empty is reserved for store metadata: LogicalSourceNamespace refuses it.
@@ -264,8 +210,6 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
 ];
 const STORE_METADATA_KEYS: &[&str] = &[
     "cache_version",
-    "catalog_version",
-    "search_version",
     "catalog_changes_epoch",
     "native_tree_repair_clock",
     "pricing_recompute_target",
@@ -273,6 +217,8 @@ const STORE_METADATA_KEYS: &[&str] = &[
 // These describe completed/ongoing work for one logical source, rather than
 // the shared SQL schema or physical-store incarnation.
 const SOURCE_METADATA_KEYS: &[&str] = &[
+    "catalog_version",
+    "search_version",
     "catalog_semantic_recipe",
     "catalog_generation",
     "catalog_source_revision",
@@ -328,7 +274,11 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
             let key = context.get::<String>(0)?;
             metadata_namespace(&namespace, &key)
                 .map(str::to_owned)
-                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                .map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("native tree metadata_scope=unclassified_key");
+                    rusqlite::Error::UserFunctionError(Box::new(error))
+                })
         },
     )
 }
@@ -336,11 +286,11 @@ pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite:
 /// Create a new physical store only. Existing files, even empty ones, refuse.
 /// Enrollment and bounded Catalog assignment remain separate explicit steps.
 pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
-    create_with_layout(config, PhysicalLayout::CONFIGURED)
+    create_current(config)
 }
 
-fn create_with_layout(config: &StoreConfig, layout: PhysicalLayout) -> Result<(), StorageError> {
-    let ddl = authored_storage_ddl(layout).map_err(|_| StorageError::InvalidArguments)?;
+fn create_current(config: &StoreConfig) -> Result<(), StorageError> {
+    let ddl = authored_storage_ddl();
     let epoch = config
         .expected_stream_epoch
         .as_deref()
@@ -408,6 +358,7 @@ fn create_with_layout(config: &StoreConfig, layout: PhysicalLayout) -> Result<()
 // have composite row keys; the other 22 families remain singleton and fenced.
 // A public second namespace must still be refused before any operation.
 const TABLES: &[&str] = &[
+    "session_descriptions",
     "reported_runs",
     "files",
     "events",
@@ -479,7 +430,73 @@ pub(crate) fn effect(name: &'static str) -> rusqlite::Result<()> {
     })
 }
 
+#[track_caller]
 fn failed(error: rusqlite::Error) -> StorageError {
+    #[cfg(test)]
+    eprintln!(
+        "configured SQL failure at {}: code={:?}",
+        std::panic::Location::caller(),
+        error.sqlite_error_code()
+    );
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
+        if (message.starts_with("no such ") || message.starts_with("private native"))
+            && message.len() < 160
+            && message
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b" _:.()".contains(&byte))
+        {
+            eprintln!("configured SQL contract failure: {message}");
+        }
+    }
+    #[cfg(test)]
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
+        let kind = if message.contains("ON CONFLICT clause does not match") {
+            "conflict_target"
+        } else if message.contains("view") {
+            "view_effect"
+        } else if message.contains("no such column") {
+            "missing_column"
+        } else if message.contains("no such function") {
+            "missing_function"
+        } else if message.contains("has no column named") {
+            "insert_column"
+        } else if message.contains("function") {
+            "function_contract"
+        } else if message.contains("unknown function") {
+            "unregistered_function"
+        } else if message.contains("no query solution") {
+            "query_plan"
+        } else if message.contains("integer overflow") {
+            "integer_overflow"
+        } else if message.contains("foreign key mismatch") {
+            "foreign_key_contract"
+        } else if message.contains("ambiguous column") {
+            "ambiguous_column"
+        } else if message.contains("syntax error") {
+            "syntax_error"
+        } else if message.contains("unsafe use") {
+            "unsafe_function"
+        } else if message.contains("no such savepoint") {
+            "savepoint"
+        } else if message.contains("cannot ") {
+            "invalid_effect"
+        } else if message.contains("constraint failed") {
+            "constraint"
+        } else {
+            "other_sql_contract"
+        };
+        eprintln!("configured SQL failure category={kind}");
+    }
+    #[cfg(test)]
+    match &error {
+        rusqlite::Error::QueryReturnedNoRows => eprintln!("configured SQL value=no_rows"),
+        rusqlite::Error::InvalidColumnType(_, _, kind) => {
+            eprintln!("configured SQL value=column_type kind={kind:?}");
+        }
+        rusqlite::Error::InvalidQuery => eprintln!("configured SQL value=invalid_query"),
+        _ => {}
+    }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,
@@ -532,6 +549,29 @@ pub(crate) struct NativeOwnership {
 }
 
 impl NativeOwnership {
+    /// Restore the exact admitted capability for a reader without enrollment,
+    /// schema mutation or a retry through another namespace.
+    pub(crate) fn restore(config: &StoreConfig) -> Result<Self, StorageError> {
+        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let db = Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(failed)?;
+        crate::storage::sqlite::catalog_namespace::register(&db, &config.namespace)?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
+        let admission =
+            crate::storage::sqlite::namespace::require_semantic_admitted(&db, &config.namespace)?;
+        let owner = Self {
+            config: config.clone(),
+            admission: i64::try_from(admission.generation)
+                .map_err(|_| StorageError::ScopeChanged)?,
+        };
+        owner.validate_ready(&db)?;
+        Ok(owner)
+    }
     pub(crate) fn config(&self) -> &StoreConfig {
         &self.config
     }
@@ -541,6 +581,7 @@ impl NativeOwnership {
 
     fn validate_physical(db: &Connection) -> Result<(), StorageError> {
         validate_core(db)?;
+        validate_statement_layout(db).map_err(failed)?;
         crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
         if metadata_sql(db, "singleton", "composite").map_err(failed)? != "composite"
@@ -713,6 +754,9 @@ impl NativeOwnership {
                         "session_catalog_invalidations",
                         "catalog_backfill_sources",
                         "pricing_recompute_pending",
+                        // prepare_owned installs their namespace/writer guards.
+                        "source_observation_intents",
+                        "source_observation_receipts",
                     ]
                     .contains(&table.as_str())
                 {
@@ -735,6 +779,7 @@ impl NativeOwnership {
                         "session_search_documents",
                         "session_search_memberships",
                         "session_search_counts",
+                        "session_overview",
                         "session_trace_headers",
                         "session_trace_turns",
                         "session_trace_edges",
@@ -778,21 +823,7 @@ impl NativeOwnership {
 
 #[allow(dead_code)]
 pub(crate) fn create_semantic_store(config: &StoreConfig) -> Result<(), StorageError> {
-    create_with_layout(
-        config,
-        PhysicalLayout {
-            core: true,
-            metadata: true,
-            catalog: true,
-            trace: true,
-            copied_usage: true,
-            native_usage: true,
-            tree: true,
-            pricing_queue: true,
-            semantic_support: true,
-            semantic_stage: true,
-        },
-    )
+    create(config)
 }
 
 fn prepare_owned(owner: &NativeOwnership) -> Result<(), StorageError> {
@@ -823,12 +854,14 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
             ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
         ] {
             let metadata = if table == "meta" {
+                // The fenced SourceJournal backfill completion owns its two
+                // completion keys; other Catalog keys stay publisher-only.
                 let rows: &[&str] = match operation {
                     "UPDATE" => &["OLD", "NEW"],
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key='claude_json_stamp' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -901,8 +934,7 @@ fn validate_core(db: &Connection) -> Result<(), StorageError> {
 }
 
 fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
-    // Event preparation qualifies only the core. Metadata remains the authored
-    // singleton family until its complete writer/consumer boundary is qualified.
+    // Every Event writer uses the single current namespace metadata contract.
     let composite_meta: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta','main') WHERE name='namespace')",
@@ -910,11 +942,11 @@ fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
             |r| r.get(0),
         )
         .map_err(failed)?;
-    if composite_meta {
-        Err(StorageError::NamespaceUpgradePending)
-    } else {
-        Ok(())
+    if !composite_meta {
+        return Err(StorageError::NamespaceUpgradePending);
     }
+    validate_statement_layout(db).map_err(failed)?;
+    Ok(())
 }
 
 /// Constant-size preparation of a fresh composite core. Existing singleton
@@ -923,8 +955,6 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
     SourceJournal(config.clone()).validate(&db)?;
     validate_core(&db)?;
-    let composite_support =
-        semantic_stage::support_sql(&db, "", "namespace").map_err(failed)? == "namespace";
     validate_event_metadata(&db)?;
     SourceJournal(config.clone()).prepare()?;
     let tx = db
@@ -977,33 +1007,22 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
         )
         .map_err(failed)?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
-            let record = if operation == "DELETE" { "OLD" } else { "NEW" };
             let metadata = if *table == "meta" {
-                // Native helpers may change source/proof metadata only. Catalog
-                // epochs, publication markers and custody records stay fenced.
-                // The enclosing guard binds this singleton family to its sole
-                // enrolled Source via storage_event_tables and rejects every
-                // unbound/wrong-Source writer. Do not manufacture a namespace
-                // column without the composite metadata primary key.
-                format!(
-                    " OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
-                )
-            } else if CORE_TABLES.contains(table)
-                || (composite_support
-                    && [
-                        "catalog_relocation_candidates",
-                        "catalog_native_dependencies",
-                        "session_source_mutations",
-                    ]
-                    .contains(table))
-            {
+                // Native source metadata and the admitted SourceJournal's
+                // backfill/recovery cursor belong to the Event writer.
+                // Validate both rows on UPDATE, including the source scope.
+                let rows: &[&str] = match operation {
+                    "UPDATE" => &["OLD", "NEW"],
+                    "DELETE" => &["OLD"],
+                    _ => &["NEW"],
+                };
+                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+            } else {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
                     "DELETE" => " OR OLD.namespace IS NOT semon_namespace()".to_owned(),
                     _ => " OR NEW.namespace IS NOT semon_namespace()".to_owned(),
                 }
-            } else {
-                String::new()
             };
             tx.execute_batch(&format!("CREATE TRIGGER storage_event_guard_{table}_{operation} BEFORE {operation} ON \"{table}\" WHEN semon_event_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='{table}' AND qualification IN(0,1)){metadata} BEGIN SELECT RAISE(ABORT,'configured event writer refused'); END;")).map_err(failed)?;
         }
@@ -1047,6 +1066,253 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    pub(crate) fn catalog_generation(&self) -> Result<Option<String>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+            [self.config.namespace.as_str()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(failure)
+    }
+
+    pub(crate) fn publish_catalog(
+        &self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        closed: bool,
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
+        let owner = self.owner.as_ref().ok_or(StoreError::Configured(
+            StorageError::NamespaceUpgradePending,
+        ))?;
+        let connection = connection(&self.config).map_err(StoreError::Configured)?;
+        connection
+            .create_scalar_function(
+                "semon_semantic_publisher",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1i64),
+            )
+            .map_err(failure)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        let result = store.publish_catalog_owned(
+            publication,
+            expected,
+            claims,
+            closed,
+            None,
+            super::CatalogWriter::Auto,
+            Some(owner),
+        )?;
+        Ok(
+            if closed && store.semantic_rejection == Some("closed_scope") {
+                None
+            } else {
+                Some(result)
+            },
+        )
+    }
+
+    pub(crate) fn relocate_codex(
+        &self,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut crate::sealed::LogFile,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Result<Option<String>, StoreError> {
+        if self.owner.is_none() {
+            return Err(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ));
+        }
+        let connection = connection(&self.config).map_err(StoreError::Configured)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(failure)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        super::relocation::reuse(&mut store, path, stat, id, file, measurements, Some(self))
+    }
+
+    pub(crate) fn advance_tree_repair(
+        &self,
+        options: &crate::Options,
+    ) -> std::io::Result<(bool, Option<String>)> {
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other(StorageError::NamespaceUpgradePending))?;
+        if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let connection = connection(&self.config).map_err(std::io::Error::other)?;
+        let discovery = super::DiscoveryState::new(&connection).map_err(std::io::Error::other)?;
+        let crate::storage::StoreBackend::Sqlite { database } = &self.config.backend;
+        let mut store = super::SqliteStore {
+            connection,
+            discovery,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        let (pending, changed) = native_usage::advance(&mut store, options, Some(owner))?;
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
+        owner.validate_ready(&tx).map_err(std::io::Error::other)?;
+        let cleanup = tree_state::cleanup_work_tx(&tx).map_err(std::io::Error::other)?;
+        tx.commit()
+            .map_err(|_| std::io::Error::other(StorageError::CommitUncertain))?;
+        Ok((pending || cleanup, changed))
+    }
+
+    pub(crate) fn resolve_catalog_input(
+        &self,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
+    ) -> Result<Outcome, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        let outcome = super::resolve_catalog_input_tx(&tx, path, revision, native, log)?;
+        if outcome != Outcome::Written {
+            return Ok(outcome);
+        }
+        tx.commit()
+            .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn tree_repair_pending(&self) -> Result<bool, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        Ok(native_usage::repair_pending(&db).map_err(failure)?
+            || tree_state::work_pending(&db).map_err(failure)?)
+    }
+
+    pub(crate) fn queue_tree_repair(&self, path: &str, ledger: &Ledger) -> std::io::Result<()> {
+        let mut db = connection(&self.config).map_err(std::io::Error::other)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
+        self.validate(&tx).map_err(std::io::Error::other)?;
+        super::queue_tree_repair_tx(&tx, path, ledger)?;
+        tx.commit()
+            .map_err(|_| std::io::Error::other(StorageError::CommitUncertain))
+    }
+
+    pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        let ready = super::qualify_catalog_tx(&tx, Some(self.config.namespace.as_str()))?;
+        tx.commit()
+            .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(ready)
+    }
+    pub(crate) fn catalog_component_paths(
+        &self,
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        crate::storage::sqlite::catalog_namespace::scope_readers(&db)
+            .map_err(StoreError::Configured)?;
+        super::read_catalog_component_paths(&db, paths, keys, native_parents)
+    }
+    pub(crate) fn slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        match expected {
+            Some(expected) => super::read_session_slots(&db, row, expected, max),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
+        let db = self.snapshot().map_err(StoreError::Configured)?;
+        super::read_file_ledgers(&db)
+    }
+
+    pub(crate) fn remove_files(
+        &self,
+        files: &[(String, Option<Ledger>)],
+    ) -> Result<Outcome, StoreError> {
+        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        self.validate(&tx).map_err(StoreError::Configured)?;
+        super::remove_files_tx(&tx, files, Some(self.config.namespace.as_str()))
+            .map_err(failure)?;
+        tx.commit()
+            .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
+        Ok(Outcome::Written)
+    }
+
+    pub(crate) fn append_evidence(
+        &self,
+        path: &str,
+    ) -> Result<Option<crate::source_change::AppendEvidence>, StorageError> {
+        super::read_append_evidence(&self.snapshot()?, path).map_err(failed)
+    }
+
+    pub(crate) fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let db = self.snapshot()?;
+        super::read_session_description(&db, key, version, inputs).map_err(failed)
+    }
+
+    pub(crate) fn save_session_descriptions(
+        &self,
+        descriptions: &[(String, u32, String, String)],
+    ) -> Result<Outcome, StorageError> {
+        let mut db = connection(&self.config)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
+        self.validate(&tx)?;
+        super::write_session_descriptions(&tx, descriptions).map_err(failed)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Ok(Outcome::Written)
+    }
     pub(crate) fn new(config: &StoreConfig) -> Self {
         Self {
             config: config.clone(),
@@ -1063,7 +1329,7 @@ impl Writer {
         }
     }
 
-    fn validate(&self, db: &Connection) -> Result<(), StorageError> {
+    pub(super) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
             owner.validate_ready(db)
         } else {
@@ -1428,7 +1694,7 @@ impl Writer {
                 &mut crate::native_timing::Measurements::default(),
                 Some(self.config.namespace.as_str()),
             )
-            .map_err(failed)?;
+            .map_err(|error| failed(error))?;
             let intent = &self.intents[*path];
             tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }
@@ -1494,12 +1760,12 @@ mod tests {
     #[test]
     fn private_composite_metadata_recipe_epochs_and_pricing_have_explicit_owners() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch("CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL); INSERT INTO storage_source_journal VALUES('a',11),('b',22);
             CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,codex_native_usage TEXT,codex_pricing_fingerprint TEXT,PRIMARY KEY(namespace,file_id));
-            CREATE TABLE native_usage_sources(source_path TEXT,usage_ready INTEGER);
-            CREATE TABLE pricing_recompute_pending(owner_kind TEXT,owner_key TEXT,PRIMARY KEY(owner_kind,owner_key));").unwrap();
-        db.execute_batch(PRICING_FILE_SCHEMA_META).unwrap();
+            CREATE TABLE native_usage_sources(namespace TEXT NOT NULL,source_path TEXT,usage_ready INTEGER);
+            CREATE TABLE pricing_recompute_pending(namespace TEXT NOT NULL,owner_kind TEXT,owner_key TEXT,PRIMARY KEY(namespace,owner_kind,owner_key));").unwrap();
+        db.execute_batch(reprice::file_schema()).unwrap();
         let bind = |db: &Connection, namespace: &str| {
             bind_metadata_scope(db, namespace).unwrap();
             let namespace = namespace.to_owned();
@@ -1644,10 +1910,10 @@ mod tests {
         // Only the metadata/proof family is under test. Catalog ownership,
         // public enrollment and the complete native writer remain unqualified.
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
-        db.execute_batch(semantic_stage::metadata_indexes(true))
+        db.execute_batch(semantic_stage::metadata_indexes())
             .unwrap();
         let bind = |db: &Connection, namespace: &str| {
             bind_metadata_scope(db, namespace).unwrap();
@@ -1945,8 +2211,8 @@ mod tests {
             if !CORE_TABLES.contains(table) {
                 let namespace_pk: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND pk=1)", [table], |r| r.get(0)).unwrap();
                 assert!(
-                    !namespace_pk,
-                    "unported family claimed composite keys: {table}"
+                    namespace_pk,
+                    "current family lacks namespace-leading keys: {table}"
                 );
             }
         }
@@ -1958,10 +2224,10 @@ mod tests {
         // The rest of the native writer is still unqualified for two sources.
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
-        db.execute_batch(metadata_schema(false)).unwrap();
+        db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
-        db.execute_batch(copied_usage_schema(false)).unwrap();
-        db.execute_batch(tree_state::SCHEMA).unwrap();
+        db.execute_batch(copied_usage_schema()).unwrap();
+        db.execute_batch(tree_state::schema()).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
         )
@@ -2156,7 +2422,7 @@ mod tests {
             Err(StorageError::Unavailable)
         );
         let legacy = f.root.join("legacy.json");
-        drop(EventCache::open_scoped(&legacy).unwrap());
+        drop(EventCache::open_scoped(&legacy, &crate::Options::default().source).unwrap());
         let mut config = f.config.clone();
         config.backend = StoreBackend::Sqlite {
             database: EventCache::path(&legacy),
@@ -2261,12 +2527,6 @@ mod tests {
         let f = Fixture::new();
         let binding = crate::storage::NativeReaderBinding::Admitted(f.config.clone());
         assert!(binding.proof_snapshot().is_ok());
-        let transitional =
-            crate::storage::NativeReaderBinding::TransitionalUnboundLocal(f.config.clone());
-        assert!(matches!(
-            transitional.proof_snapshot(),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
@@ -2299,18 +2559,21 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            Self::with_layout(PhysicalLayout::CONFIGURED)
+            Self::with_setup(|_, _| {})
         }
-        fn with_layout(layout: PhysicalLayout) -> Self {
-            Self::with_setup(layout, |_, _| {})
+        fn with_setup(setup: impl FnOnce(&Connection, &Path)) -> Self {
+            Self::with_named_setup("configured-events", setup)
         }
-        fn with_setup(layout: PhysicalLayout, setup: impl FnOnce(&Connection, &Path)) -> Self {
-            Self::with_named_setup("configured-events", layout, setup)
+        fn with_named_setup(namespace: &str, setup: impl FnOnce(&Connection, &Path)) -> Self {
+            Self::with_admission(namespace, setup, false)
         }
-        fn with_named_setup(
+        fn current(namespace: &str) -> Self {
+            Self::with_admission(namespace, |_, _| {}, true)
+        }
+        fn with_admission(
             namespace: &str,
-            layout: PhysicalLayout,
             setup: impl FnOnce(&Connection, &Path),
+            current: bool,
         ) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
@@ -2326,25 +2589,25 @@ mod tests {
                 namespace: LogicalSourceNamespace::new(namespace).unwrap(),
                 expected_stream_epoch: Some("a".repeat(64)),
             };
-            if layout.semantic_support {
-                create_with_layout(&config, layout).unwrap();
-            } else {
-                config.create_native_store().unwrap();
-            }
+            config.create_native_store().unwrap();
             let StoreBackend::Sqlite { database } = &config.backend;
             let db = Connection::open(database).unwrap();
             let raw = root.join("native.jsonl");
             setup(&db, &raw);
             db.execute(
-                "INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')",
+                "INSERT INTO meta(namespace,key,value) VALUES('','original-custody','preserve-verbatim')",
                 [],
             )
             .unwrap();
             drop(db);
-            config.admit_namespace().unwrap();
-            for _ in 0..128 {
-                if config.assign_catalog_namespace(64).unwrap().complete {
-                    break;
+            if current {
+                NativeOwnership::admit(&config).unwrap();
+            } else {
+                config.admit_namespace().unwrap();
+                for _ in 0..128 {
+                    if config.assign_catalog_namespace(64).unwrap().complete {
+                        break;
+                    }
                 }
             }
             fs::write(&raw, concat!(
@@ -2395,24 +2658,22 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
-        let f = Fixture::with_setup(
-            PhysicalLayout {
-                semantic_support: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            |db, raw| {
-                let path = raw.to_string_lossy();
-                db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
-                db.execute(
-                    "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
-                    [path.as_ref()],
-                )
-                .unwrap();
-                db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
-                db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
-                db.execute("INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')", []).unwrap();
-            },
-        );
+        let f = Fixture::with_setup(|db, raw| {
+            let path = raw.to_string_lossy();
+            db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
+            db.execute(
+                "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
+                [path.as_ref()],
+            )
+            .unwrap();
+            db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
+            db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
+            db.execute(
+                "INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')",
+                [],
+            )
+            .unwrap();
+        });
         let foreign = |db: &Connection| -> Vec<(String, String)> {
             db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
@@ -2480,13 +2741,7 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_mixed_family_refuses_before_ingest() {
-        let f = Fixture::with_setup(
-            PhysicalLayout {
-                semantic_support: true,
-                ..PhysicalLayout::CONFIGURED
-            },
-            |_, _| {},
-        );
+        let f = Fixture::with_setup(|_, _| {});
         // Establish valid current admission before injecting physical drift.
         // The production factory must still refuse it before ingestion.
         f.db().execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
@@ -2510,18 +2765,7 @@ mod tests {
         })
         .unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        for ddl in authored_storage_ddl(PhysicalLayout {
-            core: true,
-            metadata: true,
-            catalog: true,
-            native_usage: true,
-            pricing_queue: true,
-            semantic_support: true,
-            semantic_stage: true,
-            ..PhysicalLayout::default()
-        })
-        .unwrap()
-        {
+        for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
         for table in [
@@ -2587,13 +2831,7 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(matches!(
-            authored_storage_ddl(PhysicalLayout {
-                semantic_stage: true,
-                ..PhysicalLayout::CONFIGURED
-            }),
-            Err(DdlProfileError::UnsupportedFamilyCombination)
-        ));
+        assert_eq!(authored_storage_ddl().len(), 22);
     }
 
     #[test]
@@ -3038,7 +3276,7 @@ mod tests {
 
     fn same_db_sources() -> (Fixture, StoreConfig, PathBuf) {
         use crate::storage::native_events::NativeEventStore;
-        let mut a = Fixture::new();
+        let mut a = Fixture::current("source-a");
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
         a.config.backend = StoreBackend::Sqlite {
             database: a.root.join("composite.sqlite3"),
@@ -3196,8 +3434,398 @@ mod tests {
         panic!("real model did not reach publication")
     }
 
+    #[test]
+    fn current_source_recovery_replays_terminal_done_and_keeps_other_sources() {
+        use crate::storage::source_observations::{
+            SourceIntent, SourceObservationStore, SourceOperation,
+        };
+        let (a, b, _) = same_db_sources();
+        let mut journal = SourceJournal::owned(NativeOwnership::admit(&a.config).unwrap());
+        let mut other = SourceJournal::owned(NativeOwnership::admit(&b).unwrap());
+        assert!(!journal.recovery_is_current().unwrap());
+        let cursor = journal.recovery_cursor().unwrap();
+        let operation = SourceOperation::capture(
+            a.config.namespace.as_str(),
+            "recover",
+            &serde_json::to_vec(&cursor).unwrap(),
+        );
+        let intent = SourceIntent::Recover {
+            operation: operation.clone(),
+            cursor,
+        };
+        journal.persist_intent(&intent).unwrap();
+        assert_eq!(
+            journal.recover(&operation, None).unwrap(),
+            (
+                crate::storage::source_observations::SourceMutationReceipt::Applied,
+                true
+            )
+        );
+        assert!(journal.pending_intents().unwrap().is_empty());
+        // A lost ACK must return its original Done after restart, even if a
+        // later recovery request has installed a different durable cursor.
+        let db = connection(&a.config).unwrap();
+        db.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'catalog_recovery_after','')", []).unwrap();
+        drop(journal);
+        let mut journal = SourceJournal::owned(NativeOwnership::restore(&a.config).unwrap());
+        journal.persist_intent(&intent).unwrap();
+        assert_eq!(
+            journal.recover(&operation, None).unwrap(),
+            (
+                crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied,
+                true
+            )
+        );
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+        assert!(journal.pending_intents().unwrap().is_empty());
+        assert!(other.recover(&operation, None).is_err());
+        assert_eq!(other.recovery_cursor().unwrap(), None);
+        let conflict = SourceOperation::capture(
+            a.config.namespace.as_str(),
+            "recover",
+            &serde_json::to_vec(&Option::<String>::None).unwrap(),
+        );
+        journal
+            .persist_intent(&SourceIntent::Recover {
+                operation: conflict.clone(),
+                cursor: None,
+            })
+            .unwrap();
+        assert_eq!(
+            journal.recover(&conflict, None).unwrap(),
+            (
+                crate::storage::source_observations::SourceMutationReceipt::Conflict,
+                false
+            )
+        );
+        assert!(journal.pending_intents().unwrap().is_empty());
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+    }
+
+    fn ordinary_catalog_publication_lifecycle() {
+        let f = Fixture::current("ordinary-publication");
+        let source =
+            crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
+        let options = crate::Options {
+            source: source.clone(),
+            cache: f.root.join("index.json"),
+            codex_home: f.root.join("codex"),
+            claude_home: f.root.join("claude"),
+            claude_json: f.root.join("claude.json"),
+            copilot_home: f.root.join("copilot"),
+            proc_root: f.root.join("proc"),
+            all: true,
+            ..Default::default()
+        };
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        let relative = "sessions/2026/10/26/rollout-native.jsonl";
+        let raw = options.codex_home.join(relative);
+        fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        fs::copy(&f.raw, &raw).unwrap();
+        let input = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: relative.to_owned(),
+        };
+        let mut cache = EventCache::open_scoped(&options.cache, &source).unwrap();
+        let prepared = crate::model::prepare_sources(
+            &options,
+            &mut cache,
+            &[input.clone()],
+            1_790_000_000_000,
+        )
+        .unwrap();
+        assert!(!prepared.rows.is_empty());
+        let native = cache
+            .store
+            .as_ref()
+            .unwrap()
+            .ledger(raw.to_str().unwrap())
+            .unwrap();
+        let publication = crate::slot_projection::Publication {
+            rows: &prepared.rows,
+            transcripts: Some(&prepared.transcripts),
+        };
+        let (outcome, partial) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert_eq!(outcome, Outcome::Written);
+        let full = cache
+            .publish_catalog_projection_fenced(&publication, partial.as_deref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cache
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(raw.to_str().unwrap())
+                .unwrap(),
+            native
+        );
+        let claims = cache
+            .catalog_claims(&[raw.to_string_lossy().into_owned()])
+            .unwrap();
+        let closed = cache
+            .store
+            .as_mut()
+            .unwrap()
+            .publish_closed_catalog_fenced(&publication, Some(&full), &claims)
+            .unwrap()
+            .expect("ordinary closed publication");
+        assert_eq!(closed.0, Outcome::Written);
+        // A stale publisher remains a conflict, with the admitted native ledger intact.
+        assert_eq!(
+            cache
+                .store
+                .as_mut()
+                .unwrap()
+                .publish_partial_catalog(&publication, None, &claims)
+                .unwrap()
+                .0,
+            Outcome::Conflict
+        );
+        drop(cache);
+        let restored = EventCache::open_scoped(&options.cache, &source).unwrap();
+        assert_eq!(restored.session_catalog_generation(), closed.1);
+        assert_eq!(
+            restored
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(raw.to_str().unwrap())
+                .unwrap(),
+            native
+        );
+        let db = connection(&f.config).unwrap();
+        let current: i64 = db.query_row("SELECT count(*) FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current'", [f.config.namespace.as_str()], |r|r.get(0)).unwrap();
+        assert_eq!(current, prepared.rows.len() as i64);
+        assert!(prepared.rows.iter().any(|row| row.overview.is_some()));
+    }
+
+    #[test]
+    fn default_current_source_admission_preserves_restart_replay_and_isolation() {
+        ordinary_catalog_publication_lifecycle();
+        use crate::storage::native_events::NativeEventStore;
+        let f = Fixture::current("source-a");
+        let source =
+            crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
+        let cache_path = f.root.join("index.json");
+        let mut cache = EventCache::open_scoped(&cache_path, &source).unwrap();
+        let receipt = cache.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(receipt.consumed_bytes > 0);
+        drop(cache);
+        let mut restarted = EventCache::open_scoped(&cache_path, &source).unwrap();
+        let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
+        let other = crate::storage::HostSource::new(
+            LogicalSourceNamespace::new("source-b").unwrap(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let mut isolated = EventCache::open_scoped(&cache_path, &other).unwrap();
+        assert!(
+            isolated
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(f.raw.to_str().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .ledger(f.raw.to_str().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        // Ordinary callers supply no OpID. Their admitted writer must still
+        // persist real completions and qualify loaded Sources after restart.
+        for cache in [&mut restarted, &mut isolated] {
+            let index = crate::events::scan_file(&f.raw, "codex", cache, &mut false).unwrap();
+            assert!(index.codex_header.is_some());
+            assert_eq!(
+                cache.store.as_ref().unwrap().file_ledgers().unwrap().len(),
+                1
+            );
+            let receipt = cache
+                .store
+                .as_ref()
+                .unwrap()
+                .event_receipt(f.raw.to_str().unwrap())
+                .unwrap();
+            assert_eq!(receipt.operation_id.len(), 64);
+            assert!(receipt.consumed_bytes > 0);
+        }
+        let db = Connection::open(EventCache::path(&cache_path)).unwrap();
+        for ns in ["source-a", "source-b"] {
+            let completed: i64 = db.query_row("SELECT count(*) FROM storage_event_operations WHERE namespace=?1 AND state='complete'", [ns], |row| row.get(0)).unwrap();
+            assert!(completed > 0);
+        }
+        let key = f.raw.to_string_lossy().into_owned();
+        let expected = restarted.store.as_ref().unwrap().ledger(&key).unwrap();
+        restarted
+            .store
+            .as_mut()
+            .unwrap()
+            .queue_tree_repair(&key, expected.as_ref().unwrap(), "codex")
+            .unwrap();
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .tree_repair_pending()
+                .unwrap()
+        );
+        let repair_sources: Vec<String> = db
+            .prepare(
+                "SELECT namespace FROM native_tree_repairs WHERE source_path=?1 ORDER BY namespace",
+            )
+            .unwrap()
+            .query_map([&key], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(repair_sources, ["source-a"]);
+        let revision = restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+            .1
+            .unwrap();
+        let foreign_claim = isolated.catalog_claims(&[key.clone()]).unwrap();
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .resolve_catalog_input(&key, revision + 1, None, None)
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            Some(revision)
+        );
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .resolve_catalog_input(&key, revision, None, None)
+                .unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(restarted.catalog_claims(&[key.clone()]).unwrap()[0].1, None);
+        assert_eq!(
+            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            foreign_claim
+        );
+        let repair_options = crate::Options {
+            source: source.clone(),
+            cache: cache_path.clone(),
+            ..Default::default()
+        };
+        let foreign_options = crate::Options {
+            source: other.clone(),
+            ..repair_options.clone()
+        };
+        assert!(!super::super::catalog_work_pending(&repair_options).unwrap());
+        assert!(super::super::catalog_work_pending(&foreign_options).unwrap());
+        assert!(
+            super::super::catalog_dependents(&repair_options, &[])
+                .unwrap()
+                .is_empty()
+        );
+        let ledger = expected.as_ref().unwrap();
+        assert!(
+            super::super::verify_relocation_prefix(
+                &repair_options,
+                &f.raw,
+                &ledger.stat,
+                ledger.offset,
+                &format!(
+                    "{:x}",
+                    sha2::digest::generic_array::GenericArray::from(ledger.prefix)
+                ),
+            )
+            .unwrap()
+        );
+        let write_options = crate::Options {
+            codex_home: f.root.clone(),
+            ..repair_options.clone()
+        };
+        let input = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: f.raw.file_name().unwrap().to_str().unwrap().to_owned(),
+        };
+        let (write_revision, _) = super::super::begin_source_write(&write_options, &input).unwrap();
+        assert_eq!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0].1,
+            Some(write_revision)
+        );
+        super::super::complete_source_write(&write_options, &input, write_revision, None).unwrap();
+        assert!(
+            restarted.catalog_claims(&[key.clone()]).unwrap()[0]
+                .1
+                .unwrap()
+                > write_revision
+        );
+        assert_eq!(
+            isolated.catalog_claims(&[key.clone()]).unwrap(),
+            foreign_claim
+        );
+        restarted
+            .store
+            .as_mut()
+            .unwrap()
+            .advance_tree_repair(&repair_options)
+            .unwrap();
+        let state: String = db.query_row("SELECT state FROM native_tree_repairs WHERE namespace='source-a' AND source_path=?1", [&key], |r| r.get(0)).unwrap();
+        assert_eq!(state, "done");
+        assert_eq!(
+            restarted
+                .store
+                .as_mut()
+                .unwrap()
+                .remove_files(&[(key.clone(), expected)])
+                .unwrap(),
+            Outcome::Written
+        );
+        assert!(
+            restarted
+                .store
+                .as_ref()
+                .unwrap()
+                .file_ledgers()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            isolated
+                .store
+                .as_ref()
+                .unwrap()
+                .file_ledgers()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(isolated);
+        let other_restart = EventCache::open_scoped(&cache_path, &other).unwrap();
+        assert!(
+            other_restart
+                .store
+                .as_ref()
+                .unwrap()
+                .load_file(&key)
+                .unwrap()
+                .is_some()
+        );
+    }
+
     fn model_sources() -> (Fixture, StoreConfig, [crate::Options; 2], [crate::Input; 2]) {
-        let mut a = Fixture::new();
+        let mut a = Fixture::current("source-a");
         a.config.namespace = LogicalSourceNamespace::new("source-a").unwrap();
         a.config.backend = StoreBackend::Sqlite {
             database: a.root.join("model.sqlite3"),
@@ -3230,6 +3858,15 @@ mod tests {
             )
             .unwrap();
             let options = crate::Options {
+                source: crate::storage::HostSource::new(
+                    if i == 0 {
+                        a.config.namespace.clone()
+                    } else {
+                        b.namespace.clone()
+                    },
+                    a.config.expected_stream_epoch.clone().unwrap(),
+                )
+                .unwrap(),
                 claude_home: home.join("claude"),
                 claude_json: home.join("claude.json"),
                 codex_home: home.join("codex"),
@@ -3414,7 +4051,8 @@ mod tests {
             // Same production derivation, using the existing unbound producer
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
-            let mut original = EventCache::open_scoped(&options[i].cache).unwrap();
+            let mut original =
+                EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
             let mut original = crate::model::prepare_sources(
                 &options[i],
                 &mut original,
@@ -4811,7 +5449,7 @@ mod tests {
     }
 
     fn semantic_fixture(namespace: &str) -> Fixture {
-        let f = Fixture::with_named_setup(namespace, PhysicalLayout::CONFIGURED, |_, _| {});
+        let f = Fixture::with_named_setup(namespace, |_, _| {});
         f.config
             .native_events()
             .unwrap()
@@ -4837,7 +5475,7 @@ mod tests {
         ] {
             db.execute_batch(&format!("DROP INDEX {index};")).unwrap();
         }
-        db.execute_batch(semantic_stage::schema(true)).unwrap();
+        db.execute_batch(semantic_stage::schema()).unwrap();
         drop(db);
         f
     }
@@ -4879,24 +5517,10 @@ mod tests {
 
     #[test]
     fn configured_semantic_stage_validates_every_authored_shape_and_cookie_rollback() {
-        for composite in [false, true] {
+        for composite in [true] {
             let mut db = Connection::open_in_memory().unwrap();
             tree_state::register(&db).unwrap();
-            let layout = if composite {
-                PhysicalLayout {
-                    core: true,
-                    metadata: true,
-                    catalog: true,
-                    native_usage: true,
-                    pricing_queue: true,
-                    semantic_support: true,
-                    semantic_stage: true,
-                    ..PhysicalLayout::default()
-                }
-            } else {
-                PhysicalLayout::CONFIGURED
-            };
-            for ddl in authored_storage_ddl(layout).unwrap() {
+            for ddl in authored_storage_ddl() {
                 db.execute_batch(ddl).unwrap();
             }
             assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
@@ -4978,7 +5602,7 @@ mod tests {
     fn configured_semantic_support_cache_rejects_transient_and_corrupt_layouts() {
         let mut db = Connection::open_in_memory().unwrap();
         tree_state::register(&db).unwrap();
-        for ddl in authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap() {
+        for ddl in authored_storage_ddl() {
             db.execute_batch(ddl).unwrap();
         }
         assert_eq!(
@@ -5616,7 +6240,7 @@ mod tests {
             // Keep the reference producer independent of the admitted
             // configured store, but give it the ordinary scoped cache that
             // the native producer requires for its source observations.
-            let mut unbound = EventCache::open_scoped(&options.cache).unwrap();
+            let mut unbound = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let mut expected =
                 crate::model::prepare_sources(options, &mut unbound, inputs, 1_790_000_000_000)
                     .unwrap();
@@ -6898,7 +7522,7 @@ mod tests {
             inputs: &[crate::Input],
             prepared: &crate::model::PreparedSources,
         ) {
-            let mut reference = EventCache::open_scoped(&options.cache).unwrap();
+            let mut reference = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let mut expected =
                 crate::model::prepare_sources(options, &mut reference, inputs, 1_790_000_000_000)
                     .unwrap();
@@ -6930,6 +7554,24 @@ mod tests {
                 serde_json::to_value(&expected.relationships.relations).unwrap(),
                 "every relation field"
             );
+            // The native reference has its own publication history. The repair
+            // bit describes optional reuse in THIS source's Current baseline,
+            // not native transcript content. Derive that bit independently from
+            // the qualified baseline; all native slots remain reference values.
+            for projection in &mut expected.transcripts {
+                projection.repair = expected
+                    .rows
+                    .iter()
+                    .find(|row| row.key == projection.key)
+                    .and_then(|row| {
+                        cache.session_slots(
+                            row,
+                            prepared.base_generation.as_deref(),
+                            projection.slots.len(),
+                        )
+                    })
+                    .is_none();
+            }
             assert_eq!(
                 serde_json::to_value(
                     prepared
@@ -7904,7 +8546,8 @@ mod tests {
                 let inputs = selector_inputs(options, duplicate);
                 let mut admitted = open(&f.config);
                 let (batch, model) = selector_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let (reference, _) = selector_ready(&mut ordinary, options, &inputs);
                 let task = if duplicate { "shared" } else { "child-1" };
                 let target = if duplicate {
@@ -8088,7 +8731,8 @@ mod tests {
                 let inputs = named_claude_inputs(options, copies);
                 let mut cache = open(&f.config);
                 let (batch, model) = claude_ready(&mut cache, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let before = shared_state(&f);
                 for (name, count) in [("worker", copies), ("absent", 0)] {
@@ -8574,7 +9218,7 @@ mod tests {
             let mut cache = open(&f.config);
             let (fresh, fresh_model) = claude_ready(&mut cache, options, &inputs);
             assert_ne!(fresh.epoch, old.epoch);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 1);
@@ -8743,7 +9387,7 @@ mod tests {
                 "restart does not duplicate native history"
             );
             assert_ne!(fresh.epoch, old.epoch);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 2, "ambiguity is bounded to two candidates");
@@ -8794,7 +9438,7 @@ mod tests {
             let inputs = claude_inputs(options, 65, 0);
             // The ordinary budget counts frontier observations, including empty
             // tasks and already-enrolled paths; it does not promise 64 new rows.
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             claude_ingest(&mut ordinary, options, &inputs);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             ordinary
@@ -8957,8 +9601,20 @@ mod tests {
             options: &crate::Options,
             inputs: &[crate::Input],
         ) -> Batch {
-            assert!(!cache.explicit_store);
-            claude_ingest(cache, options, inputs);
+            assert_eq!(
+                cache.observation_namespace,
+                options.source.namespace().unwrap().as_str()
+            );
+            assert!(cache.host_source.is_some());
+            for input in inputs {
+                let path = input.full_path(options);
+                crate::events::scan_file(&path, "claude", cache, &mut false).unwrap();
+                let key = path.to_string_lossy();
+                let store = cache.store.as_ref().unwrap();
+                let receipt = store.event_receipt(&key).unwrap();
+                assert_eq!(receipt.operation_id.len(), 64);
+                assert!(store.load_file(&key).unwrap().is_some());
+            }
             let paths = inputs
                 .iter()
                 .map(|i| i.full_path(options).to_string_lossy().into_owned())
@@ -9142,7 +9798,8 @@ mod tests {
                 let inputs = claude_inputs(options, copies, 1);
                 let mut admitted = open(&f.config);
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let ordinary_db =
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
@@ -9352,7 +10009,7 @@ mod tests {
             fs::write(old, raw).unwrap();
             let mut admitted = open(&f.config);
             let (batch, model) = claude_ready(&mut admitted, options, &inputs);
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let db = f.db();
             let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
@@ -9423,7 +10080,8 @@ mod tests {
                 if known {
                     assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND value='claude72-1.jsonl' AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap(), "target must be discovered by the native filename frontier");
                 }
-                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+                let mut ordinary =
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap();
                 ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let reference = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 assert_eq!(
@@ -9584,7 +10242,7 @@ mod tests {
                     .unwrap(),
                 0
             );
-            let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
             claude_ingest(&mut ordinary, options, &inputs);
             ordinary
                 .begin_semantic_stage_with_journal(&[seed], &runtime, true)

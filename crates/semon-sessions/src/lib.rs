@@ -140,6 +140,9 @@ pub use viewer::{
 
 #[derive(Clone, Debug)]
 pub struct Options {
+    /// Host-owned logical Source and stream admission context. Hosted callers
+    /// supply their MachineSourceUUID; standalone configuration persists it.
+    pub source: storage::HostSource,
     pub claude_home: PathBuf,
     /// Claude Code's sibling state file. Only allowlisted last-run fields
     /// are read; the default is the `.claude.json` beside `claude_home`.
@@ -206,8 +209,9 @@ fn native_homes(
     (claude, settings, codex)
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    /// Load the host-owned Source binding, propagating invalid configuration.
+    pub fn from_host() -> io::Result<Self> {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -217,7 +221,10 @@ impl Default for Options {
             env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
             env::var_os("CODEX_HOME").as_deref(),
         );
-        Self {
+        Ok(Self {
+            source: storage::HostSource::load_or_create(
+                &default_state_dir(&home).join("source.json"),
+            )?,
             claude_home,
             claude_json,
             codex_home,
@@ -232,7 +239,14 @@ impl Default for Options {
             session: None,
             facts: None,
             scan_window: false,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+impl Default for Options {
+    fn default() -> Self {
+        Self::from_host().unwrap()
     }
 }
 
@@ -752,7 +766,8 @@ fn has_live_process(node: &Node) -> bool {
 
 /// Collects a read-only, metadata-only session tree and writes the metadata cache.
 pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
-    let mut cache = events::EventCache::open_scoped(&options.cache).map_err(io::Error::other)?;
+    let mut cache = events::EventCache::open_scoped(&options.cache, &options.source)
+        .map_err(io::Error::other)?;
     collect_with_index(options, &mut cache)
 }
 

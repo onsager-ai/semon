@@ -58,6 +58,16 @@ pub(crate) struct AdmittedSource {
 }
 
 impl AdmittedSource {
+    /// Restore the existing native capability for the ordinary publisher. The
+    /// publication transaction still validates this capability before effects.
+    pub(crate) fn native(owner: crate::events::store::configured::NativeOwnership) -> Self {
+        Self {
+            config: owner.config().clone(),
+            admission: owner.admission(),
+            owner: Some(owner),
+            generation: None,
+        }
+    }
     pub(super) fn namespace(&self) -> &str {
         self.config.namespace.as_str()
     }
@@ -671,7 +681,9 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         )
         .unwrap();
         if family == "metadata" {
-            crate::events::store::configured::metadata_sql(c, "", "namespace").unwrap();
+            // Shape work now belongs to entry, while metadata_sql selects
+            // only the authored current statement. Charge the real entry check.
+            crate::events::store::configured::validate_statement_layout(c).unwrap();
         } else {
             crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
         }
@@ -2053,8 +2065,7 @@ impl Stage {
     }
 
     pub(crate) fn begin(&mut self, paths: &[String], runtime: &str) -> Result<Outcome, StoreError> {
-        if paths.is_empty()
-            || paths.len() > 64
+        if paths.len() > 64
             || runtime.len() > 65536
             || paths.iter().any(|p| p.is_empty() || p.len() > 4096)
             || paths
@@ -2111,6 +2122,12 @@ impl Stage {
             )
             .optional()
             .map_err(error)?;
+        // The ordinary producer probes for resumable work with no new seeds.
+        // Retain every runtime/epoch/generation fence when resuming, and do
+        // not create an empty stage in place of an ordinary publication.
+        if paths.is_empty() && existing.is_none() {
+            return Ok(Outcome::Conflict);
+        }
         if let Some((_, generation)) = &existing
             && generation != &self.source.generation
         {

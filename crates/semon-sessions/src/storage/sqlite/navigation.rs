@@ -35,15 +35,7 @@ impl NativeNavigationStore for SqliteNavigation {
         scope: CatalogReadScope,
         expected_generation: Option<&str>,
     ) -> Result<NativeResolutionObservation, StorageError> {
-        let db = match self.0.snapshot(&self.0.config().namespace) {
-            Ok(db) => db,
-            Err(StorageError::Unavailable)
-                if matches!(self.0, NativeReaderBinding::TransitionalUnboundLocal(_)) =>
-            {
-                return Ok(NativeResolutionObservation::default());
-            }
-            Err(error) => return Err(error),
-        };
+        let db = self.0.snapshot(&self.0.config().namespace)?;
         let observation = read_observation(
             &db,
             db.qualified(),
@@ -106,7 +98,7 @@ fn read_observation(
     }
     let sql = match qualified {
         true => {
-            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
         }
         false => {
             "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
@@ -124,7 +116,7 @@ fn read_observation(
     let current = !observation.keys.is_empty();
     if !current && scope == CatalogReadScope::RetainedHistory {
         observation.keys = lookup(if qualified {
-            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
         } else {
             "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
         })?;

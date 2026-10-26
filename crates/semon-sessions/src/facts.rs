@@ -165,7 +165,7 @@ impl FactsSource {
     pub fn new(options: &crate::Options) -> Self {
         Self {
             options: options.clone(),
-            cache: EventCache::open(&options.cache),
+            cache: EventCache::open(&options.cache, &options.source),
             dirty: false,
         }
     }
@@ -750,6 +750,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -785,6 +786,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -847,6 +849,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

@@ -126,18 +126,12 @@ fn read_range(
     mut args: Vec<SqlValue>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
-    let (table, index, namespace_filter) = if qualified {
-        (
-            "main.session_catalog",
-            if index == "sqlite_autoindex_session_catalog_1" {
-                "storage_ns_catalog_identity".to_owned()
-            } else {
-                format!("storage_ns_{index}")
-            },
-            "namespace=semon_namespace() AND ",
-        )
+    // The current namespace schema leads every Catalog index with namespace,
+    // including the (namespace,session_key) primary key autoindex.
+    let (table, namespace_filter) = if qualified {
+        ("main.session_catalog", "namespace=semon_namespace() AND ")
     } else {
-        ("session_catalog", index.to_owned(), "")
+        ("session_catalog", "")
     };
     let sql = format!(
         "SELECT metadata,session_key,last_ms,harness,repo FROM {table} INDEXED BY {index} WHERE {namespace_filter}{filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
@@ -229,7 +223,7 @@ pub(crate) fn source_proof_observation(
     let transaction = connection.transaction()?;
     let qualified = binding.validate(&transaction, &binding.config().namespace)?;
     let sql = if qualified {
-        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY storage_ns_session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
+        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
     } else {
         "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
     };
@@ -326,7 +320,7 @@ impl CatalogSnapshot for Transaction<'_> {
         crate::history_projection::catalog(self, key).map_err(io::Error::other)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        crate::history_projection::qualified(self, row).map_err(io::Error::other)
+        crate::history_projection::qualified(self, row, false).map_err(io::Error::other)
     }
     fn selected_details(
         &self,
@@ -343,12 +337,24 @@ impl CatalogSnapshot for Transaction<'_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self, key, generation, history)
+        crate::transcript_range::observation(self, key, generation, history, false)
             .map_err(io::Error::other)
     }
 }
 
-struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+pub(crate) struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+
+/// Bound Home/Query readers select through the same admitted snapshot as
+/// Catalog pages. Only the current namespace schema is readable.
+pub(crate) fn admitted_snapshot<'a, 'b>(
+    binding: &crate::storage::NativeReaderBinding,
+    transaction: &'a Transaction<'b>,
+) -> Result<AdmittedSnapshot<'a, 'b>, crate::storage::StorageError> {
+    if !binding.validate(transaction, &binding.config().namespace)? {
+        return Err(crate::storage::StorageError::NamespaceUpgradePending);
+    }
+    Ok(AdmittedSnapshot(transaction, true))
+}
 
 fn require_ported_helper(qualified: bool) -> io::Result<()> {
     if qualified {
@@ -363,7 +369,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         Ok(())
     }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
-        self.0.publication_value(key)
+        if !self.1 {
+            return self.0.publication_value(key);
+        }
+        let sql = "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1";
+        let tx = self.0;
+        tx.query_row(sql, [key], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         rows(self.0, request, self.1).map_err(io::Error::other)
@@ -376,14 +389,32 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         self.0.search(query)
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
-        self.0.has_history(key)
+        if !self.1 {
+            return self.0.has_history(key);
+        }
+        let sql = "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)";
+        let tx = self.0;
+        tx.query_row(sql, [key], |row| row.get(0))
+            .map_err(io::Error::other)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        self.0.history_catalog(key)
+        if !self.1 {
+            return self.0.history_catalog(key);
+        }
+        let sql = "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1";
+        let tx = self.0;
+        let encoded: Option<Option<String>> = tx
+            .query_row(sql, [key], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)?;
+        match encoded {
+            Some(None) => Err(io::Error::other("history metadata bound")),
+            Some(Some(metadata)) => Ok(Some(metadata)),
+            None => Ok(None),
+        }
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        require_ported_helper(self.1)?;
-        self.0.history_qualified(row)
+        crate::history_projection::qualified(self.0, row, self.1).map_err(io::Error::other)
     }
     fn selected_details(
         &self,
@@ -391,8 +422,16 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         sources: &[CatalogSource],
         status: &mut dyn FnMut(&CatalogRow) -> Value,
     ) -> io::Result<Option<Value>> {
-        require_ported_helper(self.1)?;
-        self.0.selected_details(key, sources, status)
+        if !self.1 {
+            return self.0.selected_details(key, sources, status);
+        }
+        // The owned lookup scopes every selected table to this namespace.
+        crate::storage::selected::selected_details(
+            &super::selected::Context::owned(self.0),
+            key,
+            sources,
+            &mut |row| status(row),
+        )
     }
     fn transcript_observation(
         &self,
@@ -400,8 +439,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
-        require_ported_helper(self.1)?;
-        self.0.transcript_observation(key, generation, history)
+        crate::transcript_range::observation(self.0, key, generation, history, self.1)
+            .map_err(io::Error::other)
     }
 }
 
@@ -411,14 +450,24 @@ mod namespace_reader_tests {
 
     #[test]
     fn unported_indexed_reader_refuses_with_typed_storage_error_before_sql() {
-        // No native tables exist: reaching a legacy helper would be an SQL
-        // error, rather than the required typed namespace refusal.
+        // No native tables exist: an unported search must refuse through its
+        // real adapter entry before a legacy query can reach SQLite.
         let mut db = Connection::open_in_memory().unwrap();
         let tx = db.transaction().unwrap();
         let snapshot = AdmittedSnapshot(&tx, true);
         let error = snapshot
-            .transcript_observation("same", "generation", true)
-            .unwrap_err();
+            .search(crate::catalog_search::Query {
+                scope: crate::CatalogReadScope::Current,
+                query: "missing",
+                harness: None,
+                repo: None,
+                model: None,
+                after: None,
+                limit: 1,
+                index_complete: false,
+            })
+            .err()
+            .expect("typed refusal before SQL");
         assert_eq!(
             error
                 .get_ref()

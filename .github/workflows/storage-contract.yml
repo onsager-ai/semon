@@ -59,17 +59,55 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Production host API callers compile
+        id: production
+        run: cargo check --locked --workspace --all-targets
+      - name: Capture bounded native-tree append diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          cargo test --locked -p semon-sessions --lib configured_semantic_domain94_receipt_order_ties_append_and_restart_oracle -- --nocapture > "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
+          cargo test --locked -p semon-sessions --lib default_local_viewer_advertises_a_nonempty_stable_catalog_source -- --nocapture >> "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
+          python3 - <<'PYSAFE'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          lines = []
+          for line in (root / 'native-tree-test.log').open():
+              line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
+              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source-journal phase=', 'native diagnostic route=', 'storage_sqlite_failure ', 'test result:')):
+                  lines.append(line)
+              elif match := re.search(r'panicked at (crates/[A-Za-z0-9_./-]+:\d+:\d+):', line):
+                  lines.append('native diagnostic panic=' + match.group(1))
+          (root / 'native-tree-diagnostic.txt').write_text('\n'.join(lines[:30]))
+          PYSAFE
+      - name: Retain bounded native-tree diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-tree-diagnostic
+          path: ${{ runner.temp }}/native-tree-diagnostic.txt
+      - name: Default admitted current Source restart and isolation
+        run: |
+          cargo test --locked -p semon-sessions --lib default_current_source_admission_preserves_restart_replay_and_isolation -- --nocapture
+          cargo test --locked -p semon-sessions --lib current_source_recovery_replays_terminal_done_and_keeps_other_sources -- --nocapture
+      - name: Canonical namespace factory structure and drift refusal
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
+      - name: Native Claude name and owned member replay qualification
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: Native frontier physical-work qualification
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
       - name: Current native store admission and nonmutation
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib events::store::tests::unsupported_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::current_reopen_keeps_wal_reader_and_concurrent_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_initialization_holds_its_lock_through_the_first_wal_switch -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_open_rechecks_a_concurrent_version_change_before_writes -- --exact --nocapture
-      - name: Native Claude name and owned member replay qualification
-        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture
@@ -133,11 +171,13 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::tests::configured_ -- --nocapture
       - name: Native Catalog and Query fixture contracts through adapter
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
       - name: Reported facts persistence after typed error propagation
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           cargo test --locked -p semon-sessions --lib events::store::tests::scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib facts::tests::reported_runs -- --nocapture

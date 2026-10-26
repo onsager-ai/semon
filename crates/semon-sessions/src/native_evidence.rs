@@ -324,13 +324,16 @@ impl NativeEvidence {
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
-            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
-                Ok(cache) => cache,
-                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                    return Err(io::Error::other(error));
-                }
-                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
-            });
+            work.events = Some(
+                match EventCache::open_scoped(&self.options.cache, &self.options.source) {
+                    Ok(cache) => cache,
+                    Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
+                        return Err(io::Error::other(error));
+                    }
+                    Err(_) => EventCache::open(&self.options.cache, &self.options.source)
+                        .map_err(io::Error::other)?,
+                },
+            );
         }
         let cache = work.events.as_mut().expect("event cache initialized");
         // The index commits each file's change as it reads it: nothing is
@@ -353,7 +356,10 @@ impl NativeEvidence {
         let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_total");
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        let state = cache.backfill_state()?;
+        let state = cache.backfill_state().inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=backfill_state");
+        })?;
         if !cache.is_scoped() {
             work.cold_catalog = None;
             return Ok(CatalogPreparation::Reconcile);
@@ -377,7 +383,10 @@ impl NativeEvidence {
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
-                cache.discover_recovery_sources()?
+                cache.discover_recovery_sources().inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=recovery_page");
+                })?
             };
             let page = {
                 let _timing =
@@ -389,11 +398,16 @@ impl NativeEvidence {
             {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "discovery_publication");
-                cache.discover_catalog_sources(
-                    &self.options,
-                    &page.inputs,
-                    page.complete && recovery_complete,
-                )?;
+                cache
+                    .discover_catalog_sources(
+                        &self.options,
+                        &page.inputs,
+                        page.complete && recovery_complete,
+                    )
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("native catalog phase=discovery_publication");
+                    })?;
             }
             for input in page.inputs {
                 if !input.path.ends_with(".jsonl") {
@@ -420,7 +434,10 @@ impl NativeEvidence {
                 return Ok(CatalogPreparation::Pending);
             }
         }
-        let pending_inputs = cache.pending_catalog_sources(64)?;
+        let pending_inputs = cache.pending_catalog_sources(64).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=pending_sources");
+        })?;
         if let Some(path) = pending_inputs.iter().find(|path| path.ends_with(".json")) {
             cache.resolve_catalog_input(&self.options, path)?;
             return Ok(CatalogPreparation::Pending);
@@ -453,7 +470,10 @@ impl NativeEvidence {
                 cache.scan_byte_budget = Some(4 * 1024 * 1024);
                 let prepared = self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
                 cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
+                if let Some(prepared) = prepared.inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=cold_component");
+                })? {
                     prepared
                 } else {
                     let paths = seeds
@@ -483,7 +503,12 @@ impl NativeEvidence {
                 }
             };
             discovery.pids.extend(prepared.pids.iter().copied());
-            let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
+            let (outcome, _) = cache
+                .publish_partial_catalog_fenced(&prepared)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=cold_partial_publication");
+                })?;
             if outcome == crate::events::Outcome::Deferred {
                 cache.end_scan();
                 cache.release_published_indexes();
@@ -754,8 +779,12 @@ impl NativeEvidence {
         let prepared = loop {
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
-            let component =
-                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?;
+            let component = cache
+                .catalog_component_paths(&selected, &keys, &native_parents, &self.options)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=component_lookup_before");
+                })?;
             measurements.record("lookup_before", started, selected.len());
             let Some(component) = component else {
                 break None;
@@ -766,7 +795,11 @@ impl NativeEvidence {
             }
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
-            let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+            let prepared =
+                model::prepare_sources(&options, cache, &selected, now).inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=component_prepare");
+                })?;
             measurements.record("model_prepare_inclusive", started, selected.len());
             let dependencies: BTreeSet<_> = prepared
                 .rows
@@ -929,13 +962,26 @@ impl NativeEvidence {
             .transpose()?;
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
-        self.prepare_events(work, now)?;
+        self.prepare_events(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=prepare_events");
+        })?;
         work.tree_repair_pending = work
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_tree_repair(&self.options)?;
-        if self.advance_semantic_stage(work, now, &mut before_build)? {
+            .advance_tree_repair(&self.options)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=tree_repair");
+            })?;
+        if self
+            .advance_semantic_stage(work, now, &mut before_build)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=stage_resume");
+            })?
+        {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
                 if let Some(discovery) = work.cold_catalog.take() {
@@ -1251,7 +1297,10 @@ impl NativeEvidence {
             work.pending_sources = true;
             return Ok(false);
         }
-        match self.prepare_catalog(work, now)? {
+        match self.prepare_catalog(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=cold_prepare");
+        })? {
             CatalogPreparation::Pending => return Ok(false),
             CatalogPreparation::PublishedPending => {
                 before_build()?;
@@ -1266,7 +1315,14 @@ impl NativeEvidence {
                     before_build()?;
                 }
                 let cache = work.events.as_mut().expect("event cache initialized");
-                if cache.finish_catalog_backfill(&generation)? != crate::events::Outcome::Written {
+                if cache
+                    .finish_catalog_backfill(&generation)
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("native catalog phase=finish_backfill table=meta");
+                    })?
+                    != crate::events::Outcome::Written
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "backfill completion changed",
@@ -2033,7 +2089,7 @@ mod catalog_owner_tests {
     fn semantic_conflict_diagnostics_are_bounded_and_do_not_include_native_inputs() {
         let (root, options, input) = audit_fixture();
         let evidence = NativeEvidence::new(options.clone());
-        let cache = EventCache::open_scoped(&options.cache).unwrap();
+        let cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let mut batch = model::relation_stage::Batch {
             epoch: 7,
             phase: model::relation_stage::Phase::Indexing,
@@ -2173,8 +2229,8 @@ mod catalog_owner_tests {
                 .unwrap_err();
             assert!(error.to_string().contains("unsupported semantic recipe"));
             assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
-            assert!(EventCache::open_scoped(&options.cache).is_err());
-            assert!(EventCache::open(&options.cache).is_err());
+            assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
+            assert!(EventCache::open(&options.cache, &options.source).is_err());
             assert_eq!(
                 crate::native_timing::cleanup_tests::snapshot(&db),
                 before,

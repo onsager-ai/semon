@@ -25,6 +25,7 @@ impl Fixture {
         fs::create_dir_all(root.join("proc")).unwrap();
         fs::write(root.join("proc/locks"), "").unwrap();
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -117,7 +118,8 @@ fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
     let paths = (0..40)
         .map(|n| fixture.source(&format!("history-{n:03}")))
         .collect::<Vec<_>>();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     for path in &paths {
         crate::events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
     }
@@ -334,7 +336,8 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
 
         // Persist, release every Index, and reopen before unchanged repair.
         {
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             let index = crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, count * 10);
         }
@@ -349,7 +352,8 @@ fn native_usage_history_restart_converges_without_repair_revision_churn() {
         };
         let before = revision();
         for _ in 0..3 {
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             let index = crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
             assert_eq!(index.tokens("codex").input, count * 10);
             assert_eq!(
@@ -1209,7 +1213,7 @@ fn archived_event_index_requires_decodable_rows_and_supported_parser() {
         crate::retain_source_event_index(&fixture.options, &proof, &ready),
         Err(CatalogIdentityError::Unavailable)
     );
-    assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+    assert!(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).is_err());
     assert_eq!(
         crate::native_timing::cleanup_tests::snapshot(&connection),
         unsupported
@@ -1552,7 +1556,9 @@ fn home_native_previews_preserve_question_answers_and_archive_generation_without
     )
     .unwrap();
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
-    let migrated = crate::events::EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let migrated =
+        crate::events::EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+            .unwrap();
     drop(migrated);
     assert!(
         crate::overview_repair_candidates(&fixture.options, 8)
@@ -1668,7 +1674,7 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
     fs::remove_file(&path).unwrap();
     let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
-    drop(EventCache::open_scoped(&fixture.options.cache).unwrap());
+    drop(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
     let refs = crate::overview_repair_sources(&fixture.options, "large-original")
         .unwrap()
         .unwrap();
@@ -1707,7 +1713,7 @@ fn large_families_repair_one_owner_without_replacing_related_publications() {
     let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
     db.execute("UPDATE session_catalog SET parent_key='root',metadata=json_set(metadata,'$.parent','root') WHERE session_key LIKE 'run-%'",[]).unwrap();
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
-    drop(EventCache::open_scoped(&fixture.options.cache).unwrap());
+    drop(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
     let refs = crate::overview_repair_sources(&fixture.options, "root")
         .unwrap()
         .unwrap();
@@ -3391,7 +3397,7 @@ fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
         )
         .unwrap();
     let before = crate::native_timing::cleanup_tests::snapshot(&connection);
-    let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     assert!(cache.qualified_catalog().unwrap());
     let unavailable = crate::session_transcript_range(
         &fixture.options,
@@ -3468,6 +3474,15 @@ fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
         ),
     ] {
         let reply = core.respond("GET", path, query, None);
+        if reply.status != 200 {
+            let code = serde_json::from_slice::<Value>(&reply.body)
+                .ok()
+                .and_then(|body| body["error"]["code"].as_str().map(str::to_owned));
+            eprintln!(
+                "native diagnostic route={path} status={} code={code:?}",
+                reply.status
+            );
+        }
         assert_eq!(
             reply.status,
             200,
@@ -3992,7 +4007,8 @@ fn local_only_codex_fixture() -> (Fixture, PathBuf) {
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
     crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -4143,7 +4159,8 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
                 json!({"type":"synthetic_append","iteration":append})
             )
             .unwrap();
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
             // Commit Index/proofs and deliberately defer Catalog publication.
             let _prepared = crate::model::prepare_sources(
                 &fixture.options,
@@ -4533,7 +4550,9 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
             // Match a provisional selected owner while complete discovery
             // is still pending, with real source-qualified paged recipes.
             {
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache =
+                    EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+                        .unwrap();
                 let prepared = crate::model::prepare_sources(
                     &fixture.options,
                     &mut cache,
@@ -5657,7 +5676,8 @@ fn successive_scoped_batches_preserve_unrelated_durable_source_membership() {
             }
         })
         .collect();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let first = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -5698,7 +5718,8 @@ fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
         root: crate::inputs::InputRoot::Claude,
         path: "projects/project/selected.jsonl".into(),
     };
-    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
         &fixture.options,
         &mut cache,
@@ -6825,7 +6846,8 @@ fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
         for n in 0..unrelated {
             fixture.source(&format!("unrelated-{n:05}"));
         }
-        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut cache =
+            EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         assert_eq!(cache.paths().count(), 0);
         assert!(
             crate::model::prepare_sources(
@@ -6887,7 +6909,8 @@ fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
             serde_json::to_vec(&body).unwrap().len()
         );
         // A fresh lazy producer restores no global file indexes or runs.
-        let reopened = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let reopened =
+            EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
         assert_eq!(reopened.paths().count(), 0);
     }
 }
@@ -6935,7 +6958,7 @@ fn selected_native_index_preserves_membership_and_native_semantics() {
     );
     let full = crate::model::build_query(
         &fixture.options,
-        &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap(),
         &mut false,
         &mut crate::model::Texts::default(),
         now,

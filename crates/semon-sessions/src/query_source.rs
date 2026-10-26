@@ -113,7 +113,9 @@ impl Sources {
                 ProofChunks::Complete(chunks)
             } else {
                 if db.is_none() {
-                    let c = crate::events::store::focused_connection(&cache_path)?;
+                    let binding = crate::storage::local_navigation_binding(options, "")
+                        .map_err(io::Error::other)?;
+                    let c = crate::events::store::focused_connection(&binding)?;
                     c.busy_timeout(std::time::Duration::from_millis(100))
                         .map_err(io::Error::other)?;
                     db = Some(crate::events::store::chunk_proofs::Snapshot::new(c));
@@ -227,12 +229,13 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db = crate::events::store::focused_connection(&cache_path).map_err(|error| {
-            for source in sources.iter().take(16) {
-                note_focused_source_interest(&cache_path, source);
-            }
-            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
-        })?;
+        let db =
+            crate::events::store::focused_unbound_connection(&cache_path).map_err(|error| {
+                for source in sources.iter().take(16) {
+                    note_focused_source_interest(&cache_path, source);
+                }
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
+            })?;
         db.busy_timeout(std::time::Duration::from_millis(100))
             .map_err(|error| {
                 crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
@@ -1327,7 +1330,8 @@ mod tests {
             cache: fixture.root.join("index.json"),
             ..Options::default()
         };
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         let selected = cache.source(&fixture.path, "lead").unwrap();
         let l1_offset = selected.offset;
@@ -1386,7 +1390,8 @@ mod tests {
             cache: fixture.root.join("index.json"),
             ..Options::default()
         };
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         let selected = cache.source(&fixture.path, "lead").unwrap();
         let selected_digest =
@@ -1443,7 +1448,8 @@ mod tests {
             cache: fixture.root.join("index.json"),
             ..Options::default()
         };
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         let selected = cache.source(&fixture.path, "lead").unwrap();
         let ledger = crate::source_carrier::ledger(&selected);
@@ -1469,7 +1475,7 @@ mod tests {
             crate::source_carrier::FailureStage::of(&mcp_error),
             Some(crate::source_carrier::FailureStage::HeaderVersion)
         );
-        let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
+        let result = crate::events::store::chunk_proofs::Focused::open_unbound_with_raw(
             &crate::events::EventCache::path(&options.cache),
             fixture.path.to_str().unwrap(),
             &ledger,
@@ -1498,7 +1504,7 @@ mod tests {
         // a second upgrade for the same failure transition.
         assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_err());
         assert!(
-            crate::events::store::chunk_proofs::Focused::open_with_raw(
+            crate::events::store::chunk_proofs::Focused::open_unbound_with_raw(
                 &crate::events::EventCache::path(&options.cache),
                 fixture.path.to_str().unwrap(),
                 &ledger,
@@ -1650,6 +1656,7 @@ mod tests {
             tail_sha256: proof.ledger.tail,
         };
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: fixture.root.clone(),
             claude_json: fixture.root.join(".claude.json"),
             codex_home: fixture.root.join("codex"),
@@ -1708,8 +1715,11 @@ mod tests {
                 format!("{record}{}", if eof { "" } else { "\n" }),
             )
             .unwrap();
-            let mut cache =
-                crate::events::EventCache::open_scoped(&fixture.root.join("index.json")).unwrap();
+            let mut cache = crate::events::EventCache::open_scoped(
+                &fixture.root.join("index.json"),
+                &crate::Options::default().source,
+            )
+            .unwrap();
             let index =
                 crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
             let consumed = cache.revision(&fixture.path).unwrap().2;
@@ -1759,9 +1769,11 @@ mod tests {
                     format!("{record}{}", if eof { "" } else { "\n" }),
                 )
                 .unwrap();
-                let mut cache =
-                    crate::events::EventCache::open_scoped(&fixture.root.join("index.json"))
-                        .unwrap();
+                let mut cache = crate::events::EventCache::open_scoped(
+                    &fixture.root.join("index.json"),
+                    &crate::Options::default().source,
+                )
+                .unwrap();
                 let index =
                     crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false)
                         .unwrap();
@@ -1792,8 +1804,11 @@ mod tests {
         let bytes = value.to_string();
         let split = bytes.len() / 2;
         fs::write(&fixture.path, &bytes[..split]).unwrap();
-        let mut cache =
-            crate::events::EventCache::open_scoped(&fixture.root.join("index.json")).unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(
+            &fixture.root.join("index.json"),
+            &crate::Options::default().source,
+        )
+        .unwrap();
         let scan = |cache: &mut crate::events::EventCache| {
             crate::events::scan_file(&fixture.path, "claude", cache, &mut false).unwrap()
         };
@@ -1856,7 +1871,9 @@ mod tests {
         let original = format!("{prefix}{record}\n");
         fs::write(&fixture.path, &original).unwrap();
         let cache_path = fixture.root.join("index.json");
-        let mut cache = crate::events::EventCache::open_scoped(&cache_path).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&cache_path, &crate::Options::default().source)
+                .unwrap();
         let initial =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(initial.handoff_index.as_ref().unwrap().calls().len(), 1);
@@ -1870,7 +1887,9 @@ mod tests {
                 [],
             )
             .unwrap();
-        let mut cache = crate::events::EventCache::open_scoped(&cache_path).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&cache_path, &crate::Options::default().source)
+                .unwrap();
         let repaired =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(repaired.handoff_index, initial.handoff_index);
