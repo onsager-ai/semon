@@ -620,7 +620,19 @@ mod tests {
         let (options, _) = seed_catalog(&source, &root);
         let expected =
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
-        let (pool, _) = super::super::super::tests::fixture(|_| {});
+        // The supported SQLite proof contract predates the optional physical
+        // source-ID hint. Its original ledger/header/root remain authoritative.
+        {
+            let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
+            let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+            let removed = db.execute("DELETE FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*:source'", [source.namespace.as_str()]).unwrap();
+            assert!(removed > 0);
+        }
+        // Capturing the SQLite source performs no PG work. Discard an idle
+        // fixture connection before the server's ten-second idle-session cap.
+        let (pool, _) = super::super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
         let control = PgCancellation::default();
         let config = StoreConfig {
             backend: crate::storage::StoreBackend::Postgres {
