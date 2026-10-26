@@ -1,3 +1,4 @@
+    use crate::facts::ReportedRunSnapshot;
     use super::*;
     use std::{
         collections::BTreeSet,
