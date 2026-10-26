@@ -3349,11 +3349,11 @@ pub(crate) fn scan_file(
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
+        let mut recorded = cache.recorded(&key)?;
         let started = cache.scan_measurements.start();
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;
         cache.scan_measurements.record("open_stat", started, 1);
-        let mut recorded = cache.recorded(&key)?;
         if recorded.is_none()
             && harness == "codex"
             && let Some(id) = crate_id_for_relocation(path)
@@ -10534,6 +10534,7 @@ mod tests {
                     let mut cache =
                         EventCache::open(&v1, &crate::Options::default().source).unwrap();
                     assert!(cache.store.is_some());
+                    let mut scans = 0usize;
                     for round in 0..20 {
                         let id = format!("t{writer}-{round}");
                         append_lines(
@@ -10557,15 +10558,17 @@ mod tests {
                                     "{error:?}: {:?}",
                                     ledger_trace()
                                 );
+                            } else {
+                                scans += 1;
                             }
                         }
                     }
+                    scans
                 })
             })
             .collect();
-        for writer in writers {
-            writer.join().unwrap();
-        }
+        let scans: usize = writers.into_iter().map(|writer| writer.join().unwrap()).sum();
+        assert!(scans > 0, "concurrent scans must make progress before catch-up");
         // A fresh process resumes from committed rows. Any row written twice
         // or lost under the concurrent writers shows in the persisted oracle.
         let mut last = EventCache::open(&v1, &crate::Options::default().source).unwrap();
