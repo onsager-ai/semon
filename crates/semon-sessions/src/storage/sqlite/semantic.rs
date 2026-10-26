@@ -152,7 +152,7 @@ impl SemanticStaging {
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
         let owner = crate::events::store::configured::NativeOwnership::admit(config)?;
         let db = SourceJournal::owned(owner.clone()).connection()?;
-        db.execute_batch("BEGIN IMMEDIATE").map_err(failed)?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         owner.validate_ready(&db)?;
         let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [], |r|r.get(0)).map_err(failed)?;
         if !composite {
