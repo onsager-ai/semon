@@ -2013,13 +2013,6 @@ impl Stage {
         })
     }
 
-    pub(crate) fn generation(&self) -> Result<Option<String>, StoreError> {
-        self.source
-            .validate(&self.db)
-            .map_err(StoreError::Configured)?;
-        head(&self.db).map_err(error)
-    }
-
     pub(crate) fn runtime_binding(
         &self,
     ) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {
