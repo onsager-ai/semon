@@ -237,10 +237,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
-    let component = pg.catalog_component_paths(
-        &[inputs.iter().find(|input| input.full_path(&options)==codex).unwrap().clone()],
-        &[], &[("codex".into(), codex_id.into())], &options,
-    ).unwrap().unwrap().into_iter().map(|input|input.full_path(&options)).collect::<Vec<_>>();
+    let component = pg
+        .catalog_component_paths(
+            &[inputs
+                .iter()
+                .find(|input| input.full_path(&options) == codex)
+                .unwrap()
+                .clone()],
+            &[],
+            &[("codex".into(), codex_id.into())],
+            &options,
+        )
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|input| input.full_path(&options))
+        .collect::<Vec<_>>();
     assert!(component.contains(&codex));
     assert!(component.contains(&child));
     // A lost response retries the identical full request, even though its
@@ -679,6 +691,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         control.clone(),
     )
     .unwrap();
+    let input_path = options.claude_home.join("projects/p/source.meta.json").to_string_lossy().into_owned();
+    let input_revision = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        super::super::super::source_journal::invalidate(tx,&input_path)?;
+        Ok(tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&namespace.as_str().as_bytes(),&input_path.as_bytes()]).map_err(sqlstate::error)?.get::<_,i64>(0))
+    }).unwrap();
+    assert_eq!(cache.resolve_catalog_input(&input_path,input_revision+1,None,None).unwrap(),crate::events::Outcome::Conflict);
+    assert_eq!(cache.resolve_catalog_input(&input_path,input_revision,Some(("codex",codex_id)),Some(codex.to_str().unwrap())).unwrap(),crate::events::Outcome::Written);
+    assert_eq!(cache.resolve_catalog_input(&input_path,input_revision,Some(("codex",codex_id)),Some(codex.to_str().unwrap())).unwrap(),crate::events::Outcome::Written,"exact lost-ACK replay");
+    assert_eq!(cache.resolve_catalog_input(&input_path,input_revision,Some(("codex",child_id)),None).unwrap(),crate::events::Outcome::Conflict,"a changed full request cannot replay the ACK");
     let key = "opaque\0🦀".repeat(512);
     cache
         .save_session_descriptions(&[(key.clone(), 1, "inputs".into(), "metadata".into())])
