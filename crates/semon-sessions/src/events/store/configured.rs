@@ -3002,12 +3002,20 @@ mod tests {
                 .unwrap();
             // Inject stored corruption outside the writer, then restore every
             // authored guard before testing refusal by the warm production API.
-            let table = poison.split_whitespace().nth(if poison.starts_with("UPDATE") { 1 } else { 2 }).unwrap();
+            let table = poison
+                .split_whitespace()
+                .nth(if poison.starts_with("UPDATE") { 1 } else { 2 })
+                .unwrap();
             let db = connection(&a.config).unwrap();
-            let guards = db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 ORDER BY name").unwrap().query_map([table], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            for (name, _) in &guards { db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\""))).unwrap(); }
+            let guards = db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 ORDER BY name").unwrap().query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            for (name, _) in &guards {
+                db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+                    .unwrap();
+            }
             db.execute_batch(poison).unwrap();
-            for (_, ddl) in guards { db.execute_batch(&ddl).unwrap(); }
+            for (_, ddl) in guards {
+                db.execute_batch(&ddl).unwrap();
+            }
             let before = shared_state(&a);
             assert!(
                 writer
