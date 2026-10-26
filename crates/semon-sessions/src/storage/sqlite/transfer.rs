@@ -2,12 +2,12 @@
 mod native;
 mod pages;
 mod rows;
-use native::{capture_native, apply_native};
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,
     transfer::{self, InboxTransaction, SnapshotManifest, TransferCheckpoint, TransferPage},
 };
+use native::{apply_native, capture_native};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::time::{Duration, Instant};
 
@@ -181,7 +181,9 @@ pub(crate) fn capture(
         {
             return Err(StorageError::ScopeChanged);
         }
-        if state.native && !state.done { return capture_native(tx, &mut state); }
+        if state.native && !state.done {
+            return capture_native(tx, &mut state);
+        }
         if state.done {
             return Ok(state.progress());
         }
@@ -291,8 +293,11 @@ pub(crate) fn apply(
                     tx.put(key, value.as_bytes())?
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
-                transfer::TransferRecord::NativeSource(_) | transfer::TransferRecord::NativePage { .. } | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx,record)?,
-                transfer::TransferRecord::NativeFile { .. } | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
+                transfer::TransferRecord::NativeSource(_)
+                | transfer::TransferRecord::NativePage { .. }
+                | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,
+                transfer::TransferRecord::NativeFile { .. }
+                | transfer::TransferRecord::NativeEvent { .. } => apply_native(tx, record)?,
                 _ => return Err(StorageError::Conflict),
             }
         }

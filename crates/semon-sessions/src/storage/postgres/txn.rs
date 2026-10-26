@@ -126,7 +126,10 @@ impl PgPool {
                     *schema_binding = Some(binding);
                 }
                 super::store_metadata::lock_state(&mut tx, exclusive_admission)?;
-                if matches!(kind, TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer) {
+                if matches!(
+                    kind,
+                    TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer
+                ) {
                     super::store_metadata::lock_publication(&mut tx)?;
                 }
                 if matches!(kind, TxnKind::ReadSnapshot) {
