@@ -9,6 +9,9 @@ use tokio_postgres::types::{ToSql, Type};
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
     use CatalogRowKind::*;
     match kind {
+        Dependency => ("semon_pg_native_catalog_dependencies", "source_path,harness,native_id"),
+        Description => ("semon_pg_native_descriptions", "session_key,version,inputs,metadata"),
+        HistoryProgress => (HISTORY_PROGRESS, "session_key,metadata"),
         Current => ("semon_pg_native_catalog_rows", "session_key,metadata"),
         Recipe => (
             "semon_pg_native_catalog_recipe_headers",
@@ -53,6 +56,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
 }
 const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.metadata,h.recipe_generation,coalesce(h.source_generation,''::bytea) AS source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key) AS history";
 const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,s.session_key,s.slot,s.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_slots s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key) AS history_slots";
+const HISTORY_PROGRESS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,p.session_key,p.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_progress p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.owner_generation AND p.key_digest=o.key_digest AND p.session_key=o.session_key) AS history_progress";
 const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.original_header FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE h.original_header IS NOT NULL) AS history_original";
 
 pub(super) fn capture(
@@ -124,8 +128,10 @@ pub(super) fn capture(
         .iter()
         .map(|v| &**v as &(dyn ToSql + Sync))
         .collect::<Vec<_>>();
+    // Descriptions are namespace-owned rather than publication-generation rows.
+    let generation_filter = if kind == CatalogRowKind::Description { " AND $2::bytea IS NOT NULL" } else { " AND generation=$2" };
     let suffix = format!(
-        "FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2{after} ORDER BY {keys}"
+        "FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1{generation_filter}{after} ORDER BY {keys}"
     );
     let size = names
         .iter()
@@ -250,6 +256,9 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         return Ok(());
     }
     let (table, columns) = match kind {
+        Dependency => ("catalog_dependencies", "source_path,harness,native_id"),
+        Description => ("descriptions", "session_key,version,inputs,metadata"),
+        HistoryProgress => ("catalog_history_progress", "session_key,metadata"),
         Recipe => (
             "catalog_recipe_headers",
             "session_key,recipe_generation,source_generation,version,total",
@@ -277,6 +286,11 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     let mut slots = vec!["$1".to_owned(), "$2".to_owned()];
     let mut binds: Vec<Box<dyn ToSql + Sync>> =
         vec![Box::new(ns), Box::new(generation.as_bytes().to_vec())];
+    if *kind == Description {
+        names.pop();
+        slots.pop();
+        binds.pop();
+    }
     for (name, value) in columns.split(',').zip(values) {
         names.push(name);
         slots.push(format!("${}", binds.len() + 1));
@@ -291,6 +305,9 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         binds.push(bind);
         let digest = match name {
             "session_key" => Some("key_digest"),
+            "source_path" => Some("path_digest"),
+            "harness" => Some("harness_digest"),
+            "native_id" => Some("native_digest"),
             "turn_id" => Some("turn_digest"),
             "edge_id" => Some("edge_digest"),
             "target" => Some("target_digest"),
@@ -343,6 +360,7 @@ mod tests {
         let manifest = stage(&source, &config, &[120; 32]);
         std::fs::remove_dir_all(&options.claude_home).unwrap();
         apply(&config, &manifest);
+        assert_eq!(crate::storage::transfer::reported::tests::cache(&config).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
         pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
             let ns = config.namespace.as_str().as_bytes();
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY session_key", &[&ns]).map_err(sqlstate::error)?;
@@ -375,6 +393,7 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        assert_eq!(crate::storage::transfer::reported::tests::cache(&reverse).session_description(&expected[0].key, 1, "transfer-inputs").as_deref(), Some("sanitized transfer description"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

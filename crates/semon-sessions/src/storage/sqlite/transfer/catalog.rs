@@ -45,6 +45,13 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
             &[3],
         ),
         SearchCount => ("session_search_counts", "read_scope,gram,members", &[]),
+        Dependency => ("catalog_native_dependencies", "source_path,harness,native_id", &[]),
+        Description => ("session_descriptions", "session_key,version,inputs,description", &[]),
+        HistoryProgress => (
+            "(SELECT namespace,substr(key,18) AS session_key,value AS metadata FROM main.meta WHERE key>='history_transfer:' AND key<'history_transfer;')",
+            "session_key,metadata",
+            &[],
+        ),
     }
 }
 
@@ -200,10 +207,11 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         return Err(StorageError::InvalidArguments);
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
-    if *kind == CatalogRowKind::HistoryOriginal {
+    if matches!(kind, CatalogRowKind::HistoryOriginal | CatalogRowKind::HistoryProgress) {
         return tx.put(
             &format!(
-                "history_original_header:{}",
+                "{}{}",
+                if *kind == CatalogRowKind::HistoryOriginal { "history_original_header:" } else { "history_transfer:" },
                 values[0].as_str().ok_or(StorageError::ScopeChanged)?
             ),
             values[1]
