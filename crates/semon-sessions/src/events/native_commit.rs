@@ -54,9 +54,21 @@ pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(),
 /// Physical families have one order in both adapters. Their effects remain
 /// private to the caller's transaction; none publishes a complete ingest.
 #[derive(Clone, Copy)]
-pub(crate) enum Auxiliary { Header, Sidecar, Chunks, Parent, Launch }
+pub(crate) enum Auxiliary {
+    Header,
+    Sidecar,
+    Chunks,
+    Parent,
+    Launch,
+}
 
-pub(crate) const AUXILIARY_ORDER: [Auxiliary; 5] = [Auxiliary::Header, Auxiliary::Sidecar, Auxiliary::Chunks, Auxiliary::Parent, Auxiliary::Launch];
+pub(crate) const AUXILIARY_ORDER: [Auxiliary; 5] = [
+    Auxiliary::Header,
+    Auxiliary::Sidecar,
+    Auxiliary::Chunks,
+    Auxiliary::Parent,
+    Auxiliary::Launch,
+];
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,10 +84,15 @@ pub(crate) struct CatalogRelocation {
 /// Advance only evidence already qualified by the relocation producer. This
 /// does not qualify a move, read Raw, or infer identity from a path/inode.
 pub(crate) fn advance_relocation(
-    encoded: Option<&str>, expected: Option<&Ledger>, next: &Ledger, append: bool,
+    encoded: Option<&str>,
+    expected: Option<&Ledger>,
+    next: &Ledger,
+    append: bool,
 ) -> serde_json::Result<Option<String>> {
     let proof = encoded.and_then(|value| serde_json::from_str::<CatalogRelocation>(value).ok());
-    let Some(mut proof) = proof.filter(|proof| proof.version == 1 && append && Some(&proof.after) == expected) else {
+    let Some(mut proof) =
+        proof.filter(|proof| proof.version == 1 && append && Some(&proof.after) == expected)
+    else {
         return Ok(None);
     };
     proof.after = next.clone();

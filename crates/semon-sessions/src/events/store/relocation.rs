@@ -151,7 +151,14 @@ pub(super) fn advance(
     for old in olds {
         let proof = catalog_evidence(connection, &old)?;
         let encoded = proof.as_ref().map(json).transpose()?;
-        if let Some(encoded) = crate::events::native_commit::advance_relocation(encoded.as_deref(), expected, next, append).map_err(|_| rusqlite::Error::InvalidQuery)? {
+        if let Some(encoded) = crate::events::native_commit::advance_relocation(
+            encoded.as_deref(),
+            expected,
+            next,
+            append,
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+        {
             connection.execute(
                 configured::metadata_sql(connection, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)")?,
                 params![catalog_key(&old), encoded],

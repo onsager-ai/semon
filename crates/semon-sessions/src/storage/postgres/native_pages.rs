@@ -118,7 +118,12 @@ pub(super) fn write_chunks(
     }
     effect(tx)?;
     write_plan(tx, &id, 0, &prepared.chunks)?;
-    Ok(Pending { id, launch: prepared.launch, path: path.to_owned(), namespace: tx.namespace.as_str().to_owned() })
+    Ok(Pending {
+        id,
+        launch: prepared.launch,
+        path: path.to_owned(),
+        namespace: tx.namespace.as_str().to_owned(),
+    })
 }
 
 pub(super) struct Pending {
@@ -128,23 +133,43 @@ pub(super) struct Pending {
     namespace: String,
 }
 
-fn write_plan(tx: &mut PgTxn<'_>, id: &ProofGenerationId, kind: i16, plan: &Plan) -> Result<(), StorageError> {
+fn write_plan(
+    tx: &mut PgTxn<'_>,
+    id: &ProofGenerationId,
+    kind: i16,
+    plan: &Plan,
+) -> Result<(), StorageError> {
     for (at, payload) in plan.pages.iter().enumerate() {
         put(tx, id.0.as_bytes(), kind, &format!("{at:010}"), payload)?;
     }
     for (level, nodes) in plan.tree.iter().enumerate() {
         for (at, node) in nodes.iter().enumerate() {
-            put(tx, id.0.as_bytes(), 2, &format!("{level:03}:{at:010}"), node)?;
+            put(
+                tx,
+                id.0.as_bytes(),
+                2,
+                &format!("{level:03}:{at:010}"),
+                node,
+            )?;
         }
     }
     Ok(())
 }
 
-pub(super) fn write_launch(tx: &mut PgTxn<'_>, pending: Pending) -> Result<ProofGenerationId, StorageError> {
+pub(super) fn write_launch(
+    tx: &mut PgTxn<'_>,
+    pending: Pending,
+) -> Result<ProofGenerationId, StorageError> {
     tx.check()?;
-    if pending.namespace != tx.namespace.as_str() { return Err(StorageError::ScopeChanged); }
-    let Pending { id, launch, path, .. } = pending;
-    if let Some(plan) = launch { write_plan(tx, &id, 1, &plan)?; }
+    if pending.namespace != tx.namespace.as_str() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let Pending {
+        id, launch, path, ..
+    } = pending;
+    if let Some(plan) = launch {
+        write_plan(tx, &id, 1, &plan)?;
+    }
     let ns = tx.namespace.as_str().as_bytes();
     let path_digest: Vec<u8> = Sha256::digest(path.as_bytes()).to_vec();
     let changed = tx.driver.execute("INSERT INTO semon_pg_native_page_current(namespace,path_digest,source_path,generation) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,path_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_page_current.source_path=excluded.source_path", &[&ns,&path_digest,&path.as_bytes(),&id.0.as_bytes()]).map_err(sqlstate::error)?;
@@ -156,7 +181,11 @@ pub(super) fn write_launch(tx: &mut PgTxn<'_>, pending: Pending) -> Result<Proof
 }
 
 pub(super) fn write(
-    tx: &mut PgTxn<'_>, source: i64, path: &str, ledger: &Ledger, prepared: Prepared,
+    tx: &mut PgTxn<'_>,
+    source: i64,
+    path: &str,
+    ledger: &Ledger,
+    prepared: Prepared,
 ) -> Result<ProofGenerationId, StorageError> {
     let pending = write_chunks(tx, source, path, ledger, prepared)?;
     write_launch(tx, pending)
