@@ -50,7 +50,9 @@ pub(in crate::storage::postgres) fn remove(
     }
     for (path, expected) in files {
         let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
-        if pending { return Ok(Outcome::Conflict); }
+        if pending {
+            return Ok(Outcome::Conflict);
+        }
         if super::super::native_reader::ledger(tx, path)?
             .map(|(_, l)| l)
             .as_ref()

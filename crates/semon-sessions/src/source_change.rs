@@ -39,7 +39,7 @@ pub(crate) struct AppendContinuation {
     pub(crate) proof: String,
     pub(crate) state: crate::source_chunks::PrefixState,
     pub(crate) offset: u64,
-    pub(crate) prefix: [u8;32],
+    pub(crate) prefix: [u8; 32],
 }
 
 /// Exact content-free request retained across Raw/SQL commit domains.
@@ -52,7 +52,7 @@ pub(crate) struct WriteIntent {
     pub(crate) generation: Option<String>,
     pub(crate) from: u64,
     pub(crate) before: Option<Stat>,
-    pub(crate) before_hash: Option<[u8;32]>,
+    pub(crate) before_hash: Option<[u8; 32]>,
     pub(crate) continuation: Option<AppendContinuation>,
     pub(crate) head: Option<String>,
     pub(crate) ledger: Option<crate::events::Ledger>,
@@ -62,7 +62,7 @@ pub(crate) struct WriteIntent {
 pub(crate) struct WriteCompletion {
     pub(crate) to: u64,
     pub(crate) after: Stat,
-    pub(crate) hash: [u8;32],
+    pub(crate) hash: [u8; 32],
     pub(crate) evidence: Option<AppendEvidence>,
     pub(crate) runtime: String,
     pub(crate) facts: Option<String>,
@@ -73,21 +73,43 @@ thread_local! { pub(crate) static SOURCE_SQL_LOCK:std::cell::Cell<bool>=const {s
 #[cfg(test)]
 pub(crate) struct SqlLockScope;
 #[cfg(test)]
-impl SqlLockScope {pub(crate) fn enter()->Self {SOURCE_SQL_LOCK.with(|v|assert!(!v.replace(true)));Self}}
+impl SqlLockScope {
+    pub(crate) fn enter() -> Self {
+        SOURCE_SQL_LOCK.with(|v| assert!(!v.replace(true)));
+        Self
+    }
+}
 #[cfg(test)]
-impl Drop for SqlLockScope {fn drop(&mut self) {SOURCE_SQL_LOCK.with(|v|v.set(false));}}
-pub(crate) fn bytes_hash(path: &std::path::Path, length:u64, mut check:impl FnMut()->io::Result<()>) -> io::Result<[u8;32]> {
-    #[cfg(test)] SOURCE_SQL_LOCK.with(|v|assert!(!v.get(),"history I/O under SourceState lock"));
+impl Drop for SqlLockScope {
+    fn drop(&mut self) {
+        SOURCE_SQL_LOCK.with(|v| v.set(false));
+    }
+}
+pub(crate) fn bytes_hash(
+    path: &std::path::Path,
+    length: u64,
+    mut check: impl FnMut() -> io::Result<()>,
+) -> io::Result<[u8; 32]> {
+    #[cfg(test)]
+    SOURCE_SQL_LOCK.with(|v| assert!(!v.get(), "history I/O under SourceState lock"));
+    use sha2::{Digest, Sha256};
     use std::io::Read;
-    use sha2::{Digest,Sha256};
-    let mut file=crate::sealed::LogFile::open(path)?;
-    let mut hash=Sha256::new();let mut left=length;let mut buffer=[0u8;65536];
-    while left>0 {
+    let mut file = crate::sealed::LogFile::open(path)?;
+    let mut hash = Sha256::new();
+    let mut left = length;
+    let mut buffer = [0u8; 65536];
+    while left > 0 {
         check()?;
         crate::selected_read::check()?;
-        let size=(left.min(buffer.len() as u64)) as usize;
-        file.read_exact(&mut buffer[..size])?;hash.update(&buffer[..size]);left-=size as u64;
-        #[cfg(test)] {crate::events::SOURCE_READ_BYTES.with(|n|n.set(n.get()+size as u64));crate::events::SOURCE_HASHED_BYTES.with(|n|n.set(n.get()+size as u64));}
+        let size = (left.min(buffer.len() as u64)) as usize;
+        file.read_exact(&mut buffer[..size])?;
+        hash.update(&buffer[..size]);
+        left -= size as u64;
+        #[cfg(test)]
+        {
+            crate::events::SOURCE_READ_BYTES.with(|n| n.set(n.get() + size as u64));
+            crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(n.get() + size as u64));
+        }
     }
     Ok(hash.finalize().into())
 }
@@ -117,30 +139,79 @@ impl SessionSourceWrite {
         generation: Option<&str>,
         from: u64,
     ) -> io::Result<Self> {
-        if !crate::is_input_path(input.root.as_str(),&input.path) {return Err(io::Error::other("write intent outside native allowlist"));}
-        let store=crate::events::store::source_write_store(options)?;
-        Self::begin_with_store(options,input,generation,from,store,None)
+        if !crate::is_input_path(input.root.as_str(), &input.path) {
+            return Err(io::Error::other("write intent outside native allowlist"));
+        }
+        let store = crate::events::store::source_write_store(options)?;
+        Self::begin_with_store(options, input, generation, from, store, None)
     }
 
-    pub(crate) fn begin_with_store(options:&Options,input:&Input,generation:Option<&str>,from:u64,mut store:Box<dyn crate::events::IndexStore>,resume:Option<WriteIntent>) -> io::Result<Self> {
-        if !crate::is_input_path(input.root.as_str(),&input.path) {return Err(io::Error::other("write intent outside native allowlist"));}
-        let source_lock=SourceLock::acquire(options,&lock_key(options,input),true)?;
-        let resumed=resume.is_some();
-        let mut intent=if let Some(intent)=resume {intent} else {
-            let before=match Stat::of(&input.full_path(options)) {Ok(stat)=>Some(stat),Err(e) if e.kind()==io::ErrorKind::NotFound=>None,Err(e)=>return Err(e)};
-            let before_hash=None;
+    pub(crate) fn begin_with_store(
+        options: &Options,
+        input: &Input,
+        generation: Option<&str>,
+        from: u64,
+        mut store: Box<dyn crate::events::IndexStore>,
+        resume: Option<WriteIntent>,
+    ) -> io::Result<Self> {
+        if !crate::is_input_path(input.root.as_str(), &input.path) {
+            return Err(io::Error::other("write intent outside native allowlist"));
+        }
+        let source_lock = SourceLock::acquire(options, &lock_key(options, input), true)?;
+        let resumed = resume.is_some();
+        let mut intent = if let Some(intent) = resume {
+            intent
+        } else {
+            let before = match Stat::of(&input.full_path(options)) {
+                Ok(stat) => Some(stat),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            let before_hash = None;
             WriteIntent {
-                operation:crate::storage::source_observations::SourceOperation::capture("source-write","raw",input.path.as_bytes()).id,
-                root:input.root.as_str().into(),path:input.full_path(options).to_string_lossy().into_owned(),
-                generation:generation.filter(|v|input.path.ends_with(".jsonl") && v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit())).map(str::to_owned),from,before,before_hash,continuation:None,
-                head:store.session_catalog_generation().map_err(|e|io::Error::other(e.to_string()))?,
-                ledger:store.ledger(input.full_path(options).to_string_lossy().as_ref()).map_err(|e|io::Error::other(e.to_string()))?,
+                operation: crate::storage::source_observations::SourceOperation::capture(
+                    "source-write",
+                    "raw",
+                    input.path.as_bytes(),
+                )
+                .id,
+                root: input.root.as_str().into(),
+                path: input.full_path(options).to_string_lossy().into_owned(),
+                generation: generation
+                    .filter(|v| {
+                        input.path.ends_with(".jsonl")
+                            && v.len() == 32
+                            && v.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                    .map(str::to_owned),
+                from,
+                before,
+                before_hash,
+                continuation: None,
+                head: store
+                    .session_catalog_generation()
+                    .map_err(|e| io::Error::other(e.to_string()))?,
+                ledger: store
+                    .ledger(input.full_path(options).to_string_lossy().as_ref())
+                    .map_err(|e| io::Error::other(e.to_string()))?,
             }
         };
-        if intent.path!=input.full_path(options).to_string_lossy() || intent.root!=input.root.as_str() {return Err(io::Error::other("source request binding changed"));}
-        if !resumed {store.source_write_prepare(options,input,&mut intent).map_err(|e|io::Error::other(e.to_string()))?;}
-        let (revision,previous)=store.source_write_begin(options,input,&intent).map_err(|e|io::Error::other(e.to_string()))?;
-        let before=intent.before;let generation=intent.generation.clone();let from=intent.from;
+        if intent.path != input.full_path(options).to_string_lossy()
+            || intent.root != input.root.as_str()
+        {
+            return Err(io::Error::other("source request binding changed"));
+        }
+        if !resumed {
+            store
+                .source_write_prepare(options, input, &mut intent)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+        let (revision, previous) = store
+            .source_write_begin(options, input, &intent)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let before = intent.before;
+        let generation = intent.generation.clone();
+        let from = intent.from;
         Ok(Self {
             _lock: source_lock,
             store,
@@ -156,45 +227,83 @@ impl SessionSourceWrite {
     }
 
     #[cfg(test)]
-    pub(crate) fn intent(&self) -> WriteIntent { self.intent.clone() }
+    pub(crate) fn intent(&self) -> WriteIntent {
+        self.intent.clone()
+    }
 
     pub fn complete(mut self, to: u64) -> io::Result<()> {
         let after = Stat::of(&self.input.full_path(&self.options))?;
-        let evidence=append_plan(self.generation,self.before,self.previous,self.from,after,to);
-        let completion=WriteCompletion {
-            to,after,hash:[0;32],evidence,
-            runtime:if self.store.source_write_proofs() {crate::native_evidence::query_runtime_generation(&self.options)?} else {String::new()},
-            facts:self.options.facts.as_ref().filter(|_|self.store.source_write_proofs()).map(|path| {
-                use sha2::{Digest,Sha256};
-                let facts=crate::read_facts(path)?;
-                Ok::<_,io::Error>(format!("{:x}",Sha256::digest(serde_json::to_vec(&facts).map_err(io::Error::other)?)))
-            }).transpose()?,
+        let evidence = append_plan(
+            self.generation,
+            self.before,
+            self.previous,
+            self.from,
+            after,
+            to,
+        );
+        let completion = WriteCompletion {
+            to,
+            after,
+            hash: [0; 32],
+            evidence,
+            runtime: if self.store.source_write_proofs() {
+                crate::native_evidence::query_runtime_generation(&self.options)?
+            } else {
+                String::new()
+            },
+            facts: self
+                .options
+                .facts
+                .as_ref()
+                .filter(|_| self.store.source_write_proofs())
+                .map(|path| {
+                    use sha2::{Digest, Sha256};
+                    let facts = crate::read_facts(path)?;
+                    Ok::<_, io::Error>(format!(
+                        "{:x}",
+                        Sha256::digest(serde_json::to_vec(&facts).map_err(io::Error::other)?)
+                    ))
+                })
+                .transpose()?,
         };
-        self.store.source_write_complete(&self.options,&self.input,&self.intent,self.revision,&completion).map_err(|e|io::Error::other(e.to_string()))
+        self.store
+            .source_write_complete(
+                &self.options,
+                &self.input,
+                &self.intent,
+                self.revision,
+                &completion,
+            )
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 }
 
-pub(crate) fn append_plan(generation:Option<String>,before:Option<Stat>,previous:Option<AppendEvidence>,from:u64,after:Stat,to:u64)->Option<AppendEvidence> {
+pub(crate) fn append_plan(
+    generation: Option<String>,
+    before: Option<Stat>,
+    previous: Option<AppendEvidence>,
+    from: u64,
+    after: Stat,
+    to: u64,
+) -> Option<AppendEvidence> {
     match (generation, before) {
-            (Some(generation), Some(before))
-                if before.size == from
-                    && after.size == to
-                    && before.dev == after.dev
-                    && before.ino == after.ino
-                    && to >= from =>
-            {
-                let base = previous
-                    .filter(|previous| {
-                        previous.generation == generation && previous.after == before
-                    })
-                    .map_or(before, |previous| previous.before);
-                Some(AppendEvidence {
-                    generation,
-                    before: base,
-                    after,
-                })
-            }
-            _ => None,
+        (Some(generation), Some(before))
+            if before.size == from
+                && after.size == to
+                && before.dev == after.dev
+                && before.ino == after.ino
+                && to >= from =>
+        {
+            let base = previous
+                .filter(|previous| previous.generation == generation && previous.after == before)
+                .map_or(before, |previous| previous.before);
+            Some(AppendEvidence {
+                generation,
+                before: base,
+                after,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -279,19 +388,19 @@ impl Drop for SourceLock {
 
 /// A facts update holds the same durable intent and OS-fence contract as Raw.
 /// The producer processes only changed native/runtime dependency selectors.
-#[derive(Clone,Debug,Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FactsIntent {
-    pub(crate) operation:String,
-    pub(crate) path:String,
-    pub(crate) head:Option<String>,
-    pub(crate) before:crate::Facts,
-    pub(crate) wanted:crate::Facts,
-    pub(crate) push_driven:bool,
+    pub(crate) operation: String,
+    pub(crate) path: String,
+    pub(crate) head: Option<String>,
+    pub(crate) before: crate::Facts,
+    pub(crate) wanted: crate::Facts,
+    pub(crate) push_driven: bool,
 }
 pub struct SessionFactsWrite {
-    store:Box<dyn crate::events::IndexStore>,
-    intent:FactsIntent,
+    store: Box<dyn crate::events::IndexStore>,
+    intent: FactsIntent,
     options: Options,
     _lock: SourceLock,
 }
@@ -309,25 +418,71 @@ impl SessionFactsWrite {
         wanted: &crate::Facts,
         push_driven: bool,
     ) -> io::Result<Self> {
-        let store=crate::events::store::source_write_store(options)?;
-        Self::begin_with_store(options,wanted,push_driven,store,None)
+        let store = crate::events::store::source_write_store(options)?;
+        Self::begin_with_store(options, wanted, push_driven, store, None)
     }
-    pub(crate) fn begin_with_store(options:&Options,wanted:&crate::Facts,push_driven:bool,mut store:Box<dyn crate::events::IndexStore>,resume:Option<FactsIntent>)->io::Result<Self> {
-        #[cfg(feature="test-hooks")] crate::test_hooks::run(options,"facts_write_wait");
-        let source_lock=SourceLock::acquire(options,"facts",true)?;
-        let path=options.facts.as_ref().ok_or_else(||io::Error::other("Facts path missing"))?;
-        let intent=if let Some(intent)=resume {intent} else {
-            let before=match crate::read_facts(path) {Ok(f)=>f,Err(e) if e.kind()==io::ErrorKind::NotFound=>crate::Facts::default(),Err(e)=>return Err(e)};
-            FactsIntent {operation:crate::storage::source_observations::SourceOperation::capture("facts-write","raw",path.to_string_lossy().as_bytes()).id,path:path.to_string_lossy().into_owned(),head:store.session_catalog_generation().map_err(|e|io::Error::other(e.to_string()))?,before,wanted:wanted.clone(),push_driven}
+    pub(crate) fn begin_with_store(
+        options: &Options,
+        wanted: &crate::Facts,
+        push_driven: bool,
+        mut store: Box<dyn crate::events::IndexStore>,
+        resume: Option<FactsIntent>,
+    ) -> io::Result<Self> {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run(options, "facts_write_wait");
+        let source_lock = SourceLock::acquire(options, "facts", true)?;
+        let path = options
+            .facts
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Facts path missing"))?;
+        let intent = if let Some(intent) = resume {
+            intent
+        } else {
+            let before = match crate::read_facts(path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => crate::Facts::default(),
+                Err(e) => return Err(e),
+            };
+            FactsIntent {
+                operation: crate::storage::source_observations::SourceOperation::capture(
+                    "facts-write",
+                    "raw",
+                    path.to_string_lossy().as_bytes(),
+                )
+                .id,
+                path: path.to_string_lossy().into_owned(),
+                head: store
+                    .session_catalog_generation()
+                    .map_err(|e| io::Error::other(e.to_string()))?,
+                before,
+                wanted: wanted.clone(),
+                push_driven,
+            }
         };
-        if intent.path!=path.to_string_lossy() || intent.wanted!=*wanted || intent.push_driven!=push_driven {return Err(io::Error::other("Facts request binding changed"));}
-        store.facts_write_begin(options,&intent).map_err(|e|io::Error::other(e.to_string()))?;
-        Ok(Self {store,intent,options:options.clone(),_lock:source_lock})
+        if intent.path != path.to_string_lossy()
+            || intent.wanted != *wanted
+            || intent.push_driven != push_driven
+        {
+            return Err(io::Error::other("Facts request binding changed"));
+        }
+        store
+            .facts_write_begin(options, &intent)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(Self {
+            store,
+            intent,
+            options: options.clone(),
+            _lock: source_lock,
+        })
     }
     #[cfg(test)]
-    pub(crate) fn intent(&self)->FactsIntent {self.intent.clone()}
-    pub fn complete(mut self)->io::Result<()> {
-        self.store.facts_write_complete(&self.options,&self.intent).map_err(|e|io::Error::other(e.to_string()))
+    pub(crate) fn intent(&self) -> FactsIntent {
+        self.intent.clone()
+    }
+    pub fn complete(mut self) -> io::Result<()> {
+        self.store
+            .facts_write_complete(&self.options, &self.intent)
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 }
 

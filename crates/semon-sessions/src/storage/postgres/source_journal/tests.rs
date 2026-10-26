@@ -526,7 +526,10 @@ fn pg_source_recovery_refuses_before_any_namespace_write() {
     );
     // No recovery intent was admitted, so execution must reject that missing
     // durable authorization before attempting any recovery effects.
-    assert_eq!(store.recover(&operation, Some("")), Err(StorageError::Conflict));
+    assert_eq!(
+        store.recover(&operation, Some("")),
+        Err(StorageError::Conflict)
+    );
     assert_eq!(intent.apply(&mut store), Err(StorageError::Conflict));
     assert_eq!(store.apply(&intent), Err(StorageError::Conflict));
     let counts = factory.client().query_one(

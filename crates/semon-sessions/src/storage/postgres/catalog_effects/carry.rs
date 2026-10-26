@@ -15,10 +15,7 @@ const OWNED: &[(&str, &str)] = &[
         "catalog_sources",
         "key_digest,session_key,path_digest,source_path,metadata,native_digest",
     ),
-    (
-        "catalog_links",
-        "key_digest,session_key,peer_digest,peer",
-    ),
+    ("catalog_links", "key_digest,session_key,peer_digest,peer"),
     (
         "catalog_recipe_headers",
         "key_digest,session_key,recipe_generation,source_generation,version,total",
