@@ -26,7 +26,7 @@ impl NativeNavigationStore for SqliteNavigation {
             return Err(StorageError::InvalidArguments);
         }
         let db = self.0.snapshot(&self.0.config().namespace)?;
-        bookmark_keys(&db, db.qualified(), target)
+        bookmark_keys(&db, target)
     }
     fn native_resolution(
         &self,
@@ -38,7 +38,6 @@ impl NativeNavigationStore for SqliteNavigation {
         let db = self.0.snapshot(&self.0.config().namespace)?;
         let observation = read_observation(
             &db,
-            db.qualified(),
             harness,
             native_id,
             scope,
@@ -54,14 +53,9 @@ impl NativeNavigationStore for SqliteNavigation {
 }
 fn bookmark_keys(
     db: &Connection,
-    qualified: bool,
     target: &str,
 ) -> Result<Vec<String>, StorageError> {
-    let sql = if qualified {
-        "SELECT DISTINCT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?1 ORDER BY session_key LIMIT 3"
-    } else {
-        "SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE target=?1 ORDER BY session_key LIMIT 3"
-    };
+    let sql = "SELECT DISTINCT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?1 ORDER BY session_key LIMIT 3";
     db.prepare(sql)
         .map_err(failed)?
         .query_map([target], |row| row.get(0))
@@ -71,7 +65,6 @@ fn bookmark_keys(
 }
 fn read_observation(
     db: &Connection,
-    qualified: bool,
     harness: &str,
     native: &str,
     scope: CatalogReadScope,
@@ -96,14 +89,7 @@ fn read_observation(
     if observation.qualified_head().is_none() {
         return Ok(observation);
     }
-    let sql = match qualified {
-        true => {
-            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        }
-        false => {
-            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        }
-    };
+    let sql = "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2";
     let lookup = |sql: &str| {
         db.prepare(sql)
             .map_err(failed)?
@@ -115,20 +101,11 @@ fn read_observation(
     observation.keys = lookup(sql)?;
     let current = !observation.keys.is_empty();
     if !current && scope == CatalogReadScope::RetainedHistory {
-        observation.keys = lookup(if qualified {
-            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        } else {
-            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        })?;
+        observation.keys = lookup("SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2")?;
     }
     if let [key] = observation.keys.as_slice() {
         let metadata = |table: &str| -> Result<Option<Option<String>>, StorageError> {
-            let predicate = if qualified {
-                "namespace=semon_namespace() AND "
-            } else {
-                ""
-            };
-            db.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE {predicate}session_key=?1"), [key], |row| row.get(0)).optional().map_err(failed)
+            db.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"), [key], |row| row.get(0)).optional().map_err(failed)
         };
         observation.metadata = if current {
             metadata("session_catalog")?
@@ -157,7 +134,6 @@ mod tests {
         let tx = db.transaction().map_err(failed)?;
         let observation = read_observation(
             &tx,
-            false,
             &result.harness,
             &result.native_id,
             result.read_scope,
@@ -167,19 +143,22 @@ mod tests {
             .map_err(|_| StorageError::Unavailable)?;
         tx.commit().map_err(failed)
     }
+    fn fixture() -> Connection {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!("semon-navigation-current-{}-{}.sqlite3", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        crate::events::store::current_search_test_connection(&path, &crate::storage::LogicalSourceNamespace::new("navigation-current").unwrap())
+    }
     use serde_json::json;
     #[test]
     fn generation_refusal_precedes_binding_sql_and_does_not_mutate() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
-            .unwrap();
+        let db = fixture();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_version',?1)",
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_version'),'catalog_version',?1)",
             [CATALOG_VERSION.to_string()],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_generation',?1)",
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_generation'),'catalog_generation',?1)",
             ["a".repeat(64)],
         )
         .unwrap();
@@ -187,8 +166,7 @@ mod tests {
         assert!(matches!(
             read_observation(
                 &db,
-                false,
-                "codex",
+                    "codex",
                 "native",
                 CatalogReadScope::Current,
                 Some(&"b".repeat(64))
@@ -199,56 +177,54 @@ mod tests {
     }
 
     #[test]
-    fn bookmarked_targets_are_distinct_ordered_and_bounded_for_unbound_store() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE session_trace_bookmarks(target TEXT,session_key TEXT,edge_id TEXT);",
-        )
-        .unwrap();
+    fn bookmarked_targets_are_distinct_ordered_and_bounded_for_current_store() {
+        let db = fixture();
         for (key, edge) in [("d", "1"), ("b", "1"), ("a", "1"), ("c", "1"), ("a", "2")] {
             db.execute(
-                "INSERT INTO session_trace_bookmarks VALUES('target',?1,?2)",
+                "INSERT INTO main.session_trace_bookmarks VALUES(semon_namespace(),'target',?1,?2)",
                 (key, edge),
             )
             .unwrap();
         }
         assert_eq!(
-            bookmark_keys(&db, false, "target").unwrap(),
+            bookmark_keys(&db, "target").unwrap(),
             ["a", "b", "c"]
         );
-        assert!(bookmark_keys(&db, false, "missing").unwrap().is_empty());
+        assert!(bookmark_keys(&db, "missing").unwrap().is_empty());
     }
 
     #[test]
     fn native_alias_is_exact_bounded_and_preserves_ambiguity_and_provisional_reads() {
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE session_catalog_sources(session_key TEXT,harness TEXT,native_id TEXT,lifecycle TEXT);CREATE INDEX session_catalog_native ON session_catalog_sources(harness,native_id,session_key);CREATE INDEX session_catalog_current_native ON session_catalog_sources(lifecycle,harness,native_id,session_key);CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
+        let mut db = fixture();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_version',?1)",
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_version'),'catalog_version',?1)",
             [CATALOG_VERSION.to_string()],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_generation',?1)",
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_generation'),'catalog_generation',?1)",
             ["a".repeat(64)],
         )
         .unwrap();
         let metadata=json!({"key":"canonical","name":"example","harness":"codex","kind":"session","native_ids":["native"],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":"","effort":null,"start":null,"last":null,"tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[],"split_unknown_messages":0,"by_model":{},"by_day":{}},"sources":[{"path":"missing.jsonl","native_id":"native","dev":1,"ino":1,"size":0,"modified_ns":0,"offset":0,"prefix_sha256":vec![0;32],"tail_sha256":vec![0;32]}]}).to_string();
         db.execute(
-            "INSERT INTO session_catalog VALUES('canonical',?1)",
+            "INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),'canonical',0,'codex',?1)",
             [&metadata],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO session_history_catalog VALUES('canonical',?1)",
+            "INSERT INTO main.session_history_catalog VALUES(semon_namespace(),'canonical',?1)",
             [&metadata],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO session_catalog_sources VALUES('canonical','codex','native','current')",
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,harness,native_id,lifecycle,source_path) VALUES(semon_namespace(),'canonical','codex','native','current','fixture/canonical')",
             [],
         )
         .unwrap();
+        for key in ["old-owner", "other"] {
+            db.execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,0,'codex','{}')", [key]).unwrap();
+        }
         let mut r = CatalogNativeResolution {
             state: CatalogNativeResolutionState::Unavailable,
             source_key: "exact-source".into(),
@@ -261,34 +237,34 @@ mod tests {
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
         assert_eq!(r.catalog_key.as_deref(), Some("canonical"));
-        db.execute("DELETE FROM session_history_catalog", [])
+        db.execute("DELETE FROM main.session_history_catalog", [])
             .unwrap();
         r.read_scope = CatalogReadScope::RetainedHistory;
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
         assert_eq!(r.catalog_key.as_deref(), Some("canonical"));
         db.execute(
-            "INSERT INTO session_catalog_sources VALUES('old-owner','codex','native','retained')",
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,harness,native_id,lifecycle,source_path) VALUES(semon_namespace(),'old-owner','codex','native','retained','fixture/old-owner')",
             [],
         )
         .unwrap();
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
         db.execute(
-            "DELETE FROM session_catalog_sources WHERE session_key='old-owner'",
+            "DELETE FROM main.session_catalog_sources WHERE session_key='old-owner'",
             [],
         )
         .unwrap();
         r.read_scope = CatalogReadScope::Current;
         db.execute(
-            "INSERT INTO meta VALUES('catalog_completeness','partial')",
+            "INSERT OR REPLACE INTO main.meta VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial')",
             [],
         )
         .unwrap();
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Provisional);
         db.execute(
-            "INSERT INTO session_catalog_sources VALUES('other','codex','native','current')",
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,harness,native_id,lifecycle,source_path) VALUES(semon_namespace(),'other','codex','native','current','fixture/other')",
             [],
         )
         .unwrap();
@@ -300,12 +276,12 @@ mod tests {
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Pending);
         db.execute(
-            "DELETE FROM session_catalog_sources WHERE session_key='other'",
+            "DELETE FROM main.session_catalog_sources WHERE session_key='other'",
             [],
         )
         .unwrap();
         db.execute(
-            "UPDATE session_catalog_sources SET lifecycle='retained'",
+            "UPDATE main.session_catalog_sources SET lifecycle='retained'",
             [],
         )
         .unwrap();
@@ -315,7 +291,7 @@ mod tests {
         r.read_scope = CatalogReadScope::RetainedHistory;
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Provisional);
-        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness='codex' AND native_id='native' ORDER BY session_key LIMIT 2",[],|row|row.get(3)).unwrap();
+        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='native' ORDER BY session_key LIMIT 2",[],|row|row.get(3)).unwrap();
         assert!(plan.contains("COVERING INDEX"), "{plan}");
     }
 }
