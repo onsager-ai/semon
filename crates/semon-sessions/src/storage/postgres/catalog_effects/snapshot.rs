@@ -7,6 +7,7 @@ use crate::storage::{
 };
 
 mod admitted;
+mod context;
 
 /// Lease acquisition checks an acknowledged publication, never just a physical
 /// metadata address. Immutable proof refs survive newer heads; no GC is exposed.
