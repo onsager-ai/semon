@@ -213,10 +213,10 @@ fn claims(
             .map(|(path, _)| path)
             .collect::<std::collections::BTreeSet<_>>()
             != batch.paths.iter().collect()
-        || !prepared.withdrawals.is_empty()
     {
         return Err(StorageError::Conflict);
     }
+    withdrawals(batch, prepared)?;
     if prepared.rows.iter().any(|row| {
         row.sources.len() > 64
             || row.sources.iter().any(|source| {
@@ -235,6 +235,58 @@ fn claims(
         }
     }
     Ok(())
+}
+
+/// The shared producer's Facts-authority withdrawals (a non-current Codex
+/// rollout). The staged model witness binds them from record to publication;
+/// publication claims the path, so its owners leave Current under the same
+/// generation CAS while native rows, history and older proofs stay retained.
+fn withdrawals(batch: &Batch, prepared: &PreparedSources) -> Result<(), StorageError> {
+    if prepared.withdrawals.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for negative in &prepared.withdrawals {
+        let authority = &prepared.withdrawals[0];
+        if !paths.insert(&negative.path)
+            || !batch.paths.contains(&negative.path)
+            || negative.runtime != batch.runtime
+            || negative.facts_path != authority.facts_path
+            || negative.facts_identity != authority.facts_identity
+            || prepared
+                .indexed_sources
+                .iter()
+                .any(|(_, source)| source.path == std::path::Path::new(&negative.path))
+            || prepared
+                .rows
+                .iter()
+                .flat_map(|row| &row.sources)
+                .any(|source| source.path == std::path::Path::new(&negative.path))
+            || !negative.current().unwrap_or(false)
+        {
+            return Err(StorageError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+fn absent(
+    tx: &mut PgTxn<'_>,
+    prepared: &PreparedSources,
+    path: &str,
+) -> Result<bool, StorageError> {
+    if prepared.withdrawals.iter().any(|w| w.path == path) {
+        return Ok(true);
+    }
+    match crate::events::Stat::of(std::path::Path::new(path)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Ok(false),
+    }
+    Ok(
+        super::native_keys::read_meta(tx, format!("source-retired:{path}").as_bytes(), 16384)?
+            .is_some()
+            || super::native_reader::ledger(tx, path)?.is_none(),
+    )
 }
 
 pub(super) fn record(
@@ -263,15 +315,23 @@ pub(super) fn record(
             .iter()
             .map(|(harness, source)| (harness.clone(), source.native_id.clone()))
             .collect::<std::collections::BTreeSet<_>>();
-        if prepared.indexed_sources.len() != batch.paths.len()
-            || prepared
-                .indexed_sources
-                .iter()
-                .map(|(_, source)| source.path.to_string_lossy().into_owned())
-                .collect::<std::collections::BTreeSet<_>>()
-                != batch.paths.iter().cloned().collect()
+        let indexed = prepared
+            .indexed_sources
+            .iter()
+            .map(|(_, source)| source.path.to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        if indexed.len() != prepared.indexed_sources.len()
+            || !indexed.iter().all(|path| batch.paths.contains(path))
         {
             return Err(StorageError::Conflict);
+        }
+        // The shared scan skips an absent Source, as the SQLite stage does.
+        // Only a producer withdrawal or a removed Source (retired or never
+        // ledgered) may be absent; its claim is still published under the CAS.
+        for path in batch.paths.iter().filter(|path| !indexed.contains(*path)) {
+            if !absent(tx, prepared, path)? {
+                return Err(StorageError::Conflict);
+            }
         }
         let mut keys = std::collections::BTreeSet::new();
         for (harness, native) in &observed {

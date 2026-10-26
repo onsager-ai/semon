@@ -116,6 +116,13 @@ impl History<'_, '_> {
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
         let original = original.map(|value| value.as_bytes().to_vec());
+        // Header columns mirror catalog_rows so retained history filters and
+        // keysets in SQL; the reader re-checks them against the metadata.
+        let row: CatalogRow =
+            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != key {
+            return Err(StorageError::ScopeChanged);
+        }
         self.effects.put(
             "semon_pg_native_catalog_history_headers",
             &[
@@ -128,6 +135,10 @@ impl History<'_, '_> {
                 "incomplete",
                 "metadata",
                 "original_header",
+                "last_ms",
+                "harness",
+                "repo",
+                "model",
             ],
             "key_digest",
             &[
@@ -140,6 +151,10 @@ impl History<'_, '_> {
                 &incomplete,
                 &metadata.as_bytes(),
                 &original,
+                &row.last.unwrap_or(0),
+                &row.harness.as_bytes(),
+                &row.repo.as_deref().unwrap_or("").as_bytes(),
+                &row.model.as_bytes(),
             ],
         )?;
         self.link(key, self.effects.generation, original.is_some())
@@ -436,14 +451,31 @@ pub(super) fn preserve(
     generation: &str,
     previous: &str,
     publication: &crate::slot_projection::Publication<'_>,
+    withdrawn: &[Vec<u8>],
 ) -> Result<bool, StorageError> {
     for generation in [generation, previous] {
         if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StorageError::InvalidArguments);
         }
     }
-    if generation == previous || publication.rows.len() > 64 {
+    if generation == previous || publication.rows.len() > 64 || withdrawn.len() > 64 {
         return Err(StorageError::InvalidArguments);
+    }
+    // Rows withdrawn from Current are read from the previous immutable
+    // generation; each digest must name exactly one bounded row.
+    let mut old = Vec::new();
+    for key_digest in withdrawn {
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &previous.as_bytes(), key_digest]).map_err(sqlstate::error)?;
+        let row = rows.first().ok_or(StorageError::ScopeChanged)?;
+        let key: Vec<u8> = row.get(0);
+        let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        let value: CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if digest(&key) != *key_digest || value.key.as_bytes() != key {
+            return Err(StorageError::ScopeChanged);
+        }
+        old.push(value);
     }
     let store = History {
         effects: Effects {
@@ -452,7 +484,7 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !catalog::preserve_replacement_rows(&store, publication.rows)? {
+    if !catalog::preserve_rows(&store, publication.rows, &old)? {
         return Ok(false);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
