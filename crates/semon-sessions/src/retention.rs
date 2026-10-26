@@ -63,8 +63,8 @@ pub fn source_projection_ready(
     if !index.exists() {
         return Ok(None);
     }
-    let binding = crate::storage::local_navigation_binding(options, root)
-        .map_err(|_| Unavailable)?;
+    let binding =
+        crate::storage::local_navigation_binding(options, root).map_err(|_| Unavailable)?;
     let connection = binding.connection().map_err(|_| Unavailable)?;
     connection
         .busy_timeout(Duration::ZERO)
@@ -285,8 +285,14 @@ pub fn retain_source_event_index(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Unavailable)?;
-    if !projection_ready(&transaction, &binding, &proof.source.root, &proof.source.path, full)?
-        .is_some_and(|ready| same_projection(&ready, projection))
+    if !projection_ready(
+        &transaction,
+        &binding,
+        &proof.source.root,
+        &proof.source.path,
+        full,
+    )?
+    .is_some_and(|ready| same_projection(&ready, projection))
         || !crate::events::retain_archive_index(&transaction, full, proof, projection)
             .map_err(|_| Unavailable)?
     {
@@ -325,10 +331,14 @@ pub fn source_event_index_retained(
     let transaction = connection
         .unchecked_transaction()
         .map_err(|_| Unavailable)?;
-    Ok(
-        projection_ready(&transaction, &binding, &proof.source.root, &proof.source.path, full)?
-            .is_some_and(|ready| same_projection(&ready, projection))
-            && crate::events::archive_index_retained(&transaction, full, proof, projection)
-                .map_err(|_| Unavailable)?,
-    )
+    Ok(projection_ready(
+        &transaction,
+        &binding,
+        &proof.source.root,
+        &proof.source.path,
+        full,
+    )?
+    .is_some_and(|ready| same_projection(&ready, projection))
+        && crate::events::archive_index_retained(&transaction, full, proof, projection)
+            .map_err(|_| Unavailable)?)
 }
