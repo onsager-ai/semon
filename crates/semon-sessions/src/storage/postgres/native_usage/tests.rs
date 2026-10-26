@@ -123,7 +123,7 @@ fn pg_native_usage_shared_parser_generation_dimensions_replay_restart_and_rollba
     let namespace = ns("usage\0🦀");
     let control = PgCancellation::default();
     let apply = |tx: &mut PgTxn<'_>| {
-        tx.driver.execute("INSERT INTO semon_pg_native_tree_repairs(namespace,source_path,receipt,source_id,cursor,projection_id,last_model,tree_root,state,last_attempt) VALUES($1,$2,$3,NULL,0,NULL,NULL,NULL,$4,0) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET state=excluded.state", &[&tx.namespace.as_str().as_bytes(),&source_path.as_bytes(),&b"old".as_slice(),&b"blocked_evidence".as_slice()]).map_err(sqlstate::error)?;
+        tx.driver.execute("INSERT INTO semon_pg_native_tree_repairs(namespace,source_path,receipt,source_id,cursor,projection_id,last_model,tree_root,state,last_attempt) VALUES($1,$2,$3,NULL,0,NULL,NULL,NULL,$4,0) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET state=excluded.state WHERE semon_pg_native_tree_repairs.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_repairs.source_path,sha256(excluded.source_path),excluded.source_path)", &[&tx.namespace.as_str().as_bytes(),&source_path.as_bytes(),&b"old".as_slice(),&b"blocked_evidence".as_slice()]).map_err(sqlstate::error)?;
         let mut effects = Usage::new(tx)?;
         let id = algorithm::begin(&mut effects, source_path, None, &first, false)?;
         algorithm::write(&mut effects, source_path, &first, &index)?;
