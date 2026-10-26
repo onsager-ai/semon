@@ -159,6 +159,15 @@ creating a separate reader-only placement. A backend error is returned without
 opening a different engine. Hosts supply their existing authorized PG pool;
 construction grants no Raw custody or reader authorization.
 
+Canonical Facts producers call
+`write_facts(path: &Path, facts: &Facts, source: &HostSource)` with that same
+Options Source between `SessionFactsWrite::begin` and `complete`. The SQLite
+producer keeps its identity-qualified `.sources.sqlite` projection; PG writes
+only canonical Raw here, and the ordinary PG producer prepares its bounded
+header/member projection. A caller must not discard the host selection by
+substituting a standalone Source. Both CatalogSnapshot and IndexStore require
+an explicit Facts authority implementation; neither chooses SQLite by default.
+
 PG Catalog rendering borrows the Facts header/member authority from its leased
 snapshot, so it neither opens `.sources.sqlite` nor acquires another pool slot.
 Generic PG Query body calls without a host reader refuse. Hosts read bodies

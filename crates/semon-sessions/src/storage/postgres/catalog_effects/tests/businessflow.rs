@@ -2161,6 +2161,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     crate::write_facts(&facts_path, &recorded, &facts_options.source).unwrap();
+    assert!(
+        !facts_path.with_extension("json.sources.sqlite").exists(),
+        "the public PG Facts writer must not create a SQLite projection"
+    );
     drop(facts_writer); // Bytes/no SQL completion.
     let facts_writer = crate::SessionFactsWrite::begin_with_store(
         &facts_options,

@@ -84,6 +84,8 @@ impl QueryCatalogStore for QueryCatalog {
                 )
                 .map_err(|_| StorageError::ScopeChanged)?
                 {
+                    #[cfg(test)]
+                    eprintln!("pg_selected_runtime_mismatch key={key:?} history={history} saved={:?} expected={expected:?}", row.query.as_ref().map(|q| &q["runtime"]));
                     return Err(StorageError::ScopeChanged);
                 }
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
@@ -233,7 +235,12 @@ impl QueryCatalogStore for QueryCatalog {
                     &page,
                 )
                 .map_err(|_| StorageError::Unavailable)?;
-                records.finish().map_err(|_| StorageError::ScopeChanged)?;
+                records.finish().map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("pg_selected_records_finish key={key:?}: {error}");
+                    let _ = error;
+                    StorageError::ScopeChanged
+                })?;
                 if runtime_observation
                     .generation(&self.options)
                     .map_err(|_| StorageError::Unavailable)?
