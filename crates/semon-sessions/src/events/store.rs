@@ -6128,24 +6128,24 @@ fn tree_reusable(
             r.get(0)
         })
         .optional()?;
-    let Some(record) = encoded
-        .flatten()
-        .and_then(|value| serde_json::from_str::<TreeSummaryRecord>(&value).ok())
-    else {
+    let Some(encoded) = encoded.flatten() else {
+        return Ok(false);
+    };
+    let projection = tree_state::witness(connection, path, ledger)?;
+    let interpretation = tree_interpretation(connection, path)?;
+    let Some(record) = TreeSummaryRecord::decode_current(
+        encoded.as_bytes(),
+        &header_ledger(ledger),
+        projection.as_deref(),
+        &interpretation,
+    ) else {
         return Ok(false);
     };
     let Some(summary) = index.tree_summary.as_ref() else {
         return Ok(false);
     };
-    if record.version != 3
-        || record.parser_version != CACHE_VERSION
-        || record.ledger != header_ledger(ledger)
-        || record.projection_witness.is_none()
-        || tree_state::witness(connection, path, ledger)? != record.projection_witness
-        || record.interpretation_witness.as_deref()
-            != Some(tree_interpretation(connection, path)?.as_str())
-        || json(&record.summary)?
-            != json(&summary.compact(index.native_usage_observations.is_some()))?
+    if json(&record.summary)?
+        != json(&summary.compact(index.native_usage_observations.is_some()))?
     {
         return Ok(false);
     }
@@ -6166,6 +6166,15 @@ fn read_tree_summary(
     path: &str,
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let failed: Option<Option<String>> = statement
+        .query_row([format!("native_tree_failure:{path}")], |row| {
+            crate::selected_read::row(row, 64)?;
+            row.get(0)
+        })
+        .optional()?;
+    if failed.is_some() {
+        return Ok(None);
+    }
     let encoded: Option<Option<String>> = statement
         .query_row([tree_summary_key(path)], |row| {
             crate::selected_read::row(row, 512)?;
