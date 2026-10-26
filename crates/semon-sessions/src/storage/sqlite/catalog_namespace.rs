@@ -102,7 +102,8 @@ fn guards(table: &str) -> [(String, String); 3] {
 
 pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
     for (_, sql) in guards(table) {
-        db.execute_batch(&sql.replacen("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1)).map_err(failed)?;
+        db.execute_batch(&sql.replacen("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1))
+            .map_err(failed)?;
     }
     validate_guard(db, table)
 }
