@@ -174,7 +174,7 @@ impl SemanticStaging {
             .map(|owner| SourceJournal::owned(owner.clone()))
             .unwrap_or_else(|| SourceJournal(self.config.clone()))
     }
-    pub(super) fn writer(&self) -> crate::events::store::configured::Writer {
+    pub(super) fn writer(&self) -> Result<crate::events::store::configured::Writer, StorageError> {
         self.owner
             .as_ref()
             .map(|owner| crate::events::store::configured::Writer::owned(owner.clone()))
@@ -188,7 +188,7 @@ impl SemanticStaging {
         let Some(owner) = &self.owner else {
             return Ok(None);
         };
-        crate::events::store::configured::Writer::owned(owner.clone()).reported_stamp()
+        crate::events::store::configured::Writer::owned(owner.clone())?.reported_stamp()
     }
     pub(crate) fn validate(config: &StoreConfig) -> Result<Self, StorageError> {
         crate::events::store::configured::validate_semantic_schema(config)?;

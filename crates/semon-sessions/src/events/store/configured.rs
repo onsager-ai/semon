@@ -1137,6 +1137,7 @@ fn read_reported_stamp(db: &Connection) -> Result<Option<ReportedFileStamp>, Sto
 pub(crate) struct Writer {
     config: StoreConfig,
     owner: Option<NativeOwnership>,
+    connection: Connection,
     intents: BTreeMap<String, Intent>,
 }
 
@@ -1146,9 +1147,8 @@ impl Writer {
         expected: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
-        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
         let ready = super::note_catalog_audit_tx(&tx, expected, now).map_err(failure)?;
@@ -1304,9 +1304,8 @@ impl Writer {
         native: Option<(&str, &str)>,
         log: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
         let outcome = super::resolve_catalog_input_tx(&tx, path, revision, native, log)?;
@@ -1325,9 +1324,8 @@ impl Writer {
     }
 
     pub(crate) fn queue_tree_repair(&self, path: &str, ledger: &Ledger) -> std::io::Result<()> {
-        let mut db = connection(&self.config).map_err(std::io::Error::other)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection).map_err(std::io::Error::other)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(std::io::Error::other)?;
         self.validate(&tx).map_err(std::io::Error::other)?;
         super::queue_tree_repair_tx(&tx, path, ledger)?;
@@ -1336,9 +1334,8 @@ impl Writer {
     }
 
     pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
         let ready = super::qualify_catalog_tx(&tx, self.config.namespace.as_str())?;
@@ -1379,9 +1376,8 @@ impl Writer {
         &self,
         files: &[(String, Option<Ledger>)],
     ) -> Result<Outcome, StoreError> {
-        let mut db = connection(&self.config).map_err(StoreError::Configured)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
         super::remove_files_tx(&tx, files, self.config.namespace.as_str()).map_err(failure)?;
@@ -1411,29 +1407,30 @@ impl Writer {
         &self,
         descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StorageError> {
-        let mut db = connection(&self.config)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
         super::write_session_descriptions(&tx, descriptions).map_err(failed)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(Outcome::Written)
     }
-    pub(crate) fn new(config: &StoreConfig) -> Self {
-        Self {
+    pub(crate) fn new(config: &StoreConfig) -> Result<Self, StorageError> {
+        Ok(Self {
             config: config.clone(),
             owner: None,
+            connection: connection(config)?,
             intents: BTreeMap::new(),
-        }
+        })
     }
 
-    pub(crate) fn owned(owner: NativeOwnership) -> Self {
-        Self {
+    pub(crate) fn owned(owner: NativeOwnership) -> Result<Self, StorageError> {
+        Ok(Self {
             config: owner.config.clone(),
+            connection: connection(&owner.config)?,
             owner: Some(owner),
             intents: BTreeMap::new(),
-        }
+        })
     }
 
     pub(super) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
@@ -1461,11 +1458,14 @@ impl Writer {
         Ok(format!("{:x}", digest.finalize()))
     }
 
-    fn snapshot(&self) -> Result<Connection, StorageError> {
-        let db = connection(&self.config)?;
-        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        self.validate(&db)?;
-        Ok(db)
+    fn snapshot(&self) -> Result<Transaction<'_>, StorageError> {
+        // Keep the committed layout cache on this writer's connection. Each
+        // snapshot still pins and validates its own mutable admission/epoch.
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(failed)?;
+        self.validate(&tx)?;
+        Ok(tx)
     }
 
     pub(crate) fn ledger(&self, path: &str) -> Result<Option<Ledger>, StorageError> {
@@ -1547,9 +1547,8 @@ impl Writer {
         let stamp = super::super::reported_rows::encode_stamp(stamp)
             .map_err(|_| StorageError::InvalidArguments)?;
         let stamp = String::from_utf8(stamp).map_err(|_| StorageError::InvalidArguments)?;
-        let mut db = connection(&self.config)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
         validate_prior_reported(&tx, &rows).map_err(failed)?;
@@ -1670,9 +1669,8 @@ impl Writer {
         {
             return Err(StorageError::InvalidArguments);
         }
-        let mut db = connection(&self.config)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
         #[cfg(test)]
         let _sql_lock = crate::source_change::SqlLockScope::enter();
@@ -1750,9 +1748,8 @@ impl Writer {
                 return Err(StorageError::Conflict);
             }
         }
-        let mut db = connection(&self.config)?;
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
         #[cfg(test)]
         let _sql_lock = crate::source_change::SqlLockScope::enter();
@@ -3183,7 +3180,7 @@ mod tests {
         assert_eq!(expected.len(), 2);
         fs::remove_file(&input).unwrap();
         let owner = NativeOwnership::admit(&a.config).unwrap();
-        let writer = Writer::owned(owner);
+        let writer = Writer::owned(owner).unwrap();
         assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
         let before = writer.reported_stamp().unwrap().unwrap();
         let mut exported = Vec::new();
@@ -3301,7 +3298,7 @@ mod tests {
             .refresh_reported_runs(&input, 999, &mut false)
             .unwrap();
         assert_eq!(cache.reported_runs().cloned().collect::<Vec<_>>(), expected);
-        let other = Writer::owned(NativeOwnership::admit(&b).unwrap())
+        let other = Writer::owned(NativeOwnership::admit(&b).unwrap()).unwrap()
             .reported_runs(&selected)
             .unwrap();
         assert_eq!(other.len(), 1);
@@ -3330,7 +3327,7 @@ mod tests {
             "DELETE FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
         ] {
             let (a, _, _) = same_db_sources();
-            let writer = Writer::owned(NativeOwnership::admit(&a.config).unwrap());
+            let writer = Writer::owned(NativeOwnership::admit(&a.config).unwrap()).unwrap();
             let run = ReportedRunSnapshot {
                 last_session_id: "same\0原生".into(),
                 last_duration: Some(u64::MAX),
@@ -6145,7 +6142,7 @@ mod tests {
     fn configured_ledger_and_observation_cas_are_distinct_and_busy_is_typed() {
         let f = Fixture::new();
         drop(f.config.native_events().unwrap());
-        let mut writer = Writer::new(&f.config);
+        let mut writer = Writer::new(&f.config).unwrap();
         let path = f.raw.to_string_lossy().into_owned();
         writer.begin(&path, None, &"a".repeat(64), "codex").unwrap();
         let mut observations = f.config.source_observations().unwrap();

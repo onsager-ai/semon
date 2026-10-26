@@ -2275,7 +2275,7 @@ impl IndexStore for SqliteStore {
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError> {
-        let writer = configured::Writer::owned(self.owner.clone());
+        let writer = configured::Writer::owned(self.owner.clone()).map_err(StoreError::Configured)?;
         relocation::reuse(self, path, stat, id, file, measurements, &writer)
     }
 
