@@ -245,6 +245,7 @@ pub(crate) fn capture_append(
 /// Reuse a persisted native SHA continuation without rereading its old prefix.
 /// The receiver fence and exact old ledger authorize unchanged earlier blocks;
 /// the affected boundary is independently compared against the old full digest.
+#[cfg(feature = "postgres")]
 pub(crate) fn continue_prefix(
     file: &mut (impl Read + Seek),
     state: &PrefixState,
