@@ -425,9 +425,8 @@ fn build_oracle(keep_raw: bool) -> Input {
     // transitional unbound port whose conflict keys are deliberately absent
     // from the current schema.
     let config = options.source.config(&options.cache).unwrap();
-    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(
-        crate::events::store::configured::NativeOwnership::admit(&config).unwrap(),
-    );
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let admission = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
     let mut connection =
         rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
     let db = connection.transaction().unwrap();
@@ -439,7 +438,7 @@ fn build_oracle(keep_raw: bool) -> Input {
         catalog::publish_current_sources(&writer, row).unwrap();
         if let Some(trace) = &row.trace {
             crate::causal_trace::publish_with_store(
-                &crate::storage::sqlite::trace::TraceWriter::admitted(&db, &admission).unwrap(),
+                &crate::storage::sqlite::trace::TraceWriter::owned(&db, &owner).unwrap(),
                 row,
                 trace,
             )
