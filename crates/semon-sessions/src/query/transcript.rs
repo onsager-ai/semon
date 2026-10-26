@@ -40,13 +40,13 @@ fn unchanged(
     slot_generation: &str,
 ) -> Result<(), QueryError> {
     let current = if history {
-        crate::history_projection::catalog(db, key).map_err(unavailable)?
+        crate::history_projection::admitted_catalog(db, key).map_err(unavailable)?
     } else {
-        db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [key], |row|row.get::<_,Option<String>>(0)).optional().map_err(unavailable)?.flatten()
+        db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row|row.get::<_,Option<String>>(0)).optional().map_err(unavailable)?.flatten()
     };
     let current_slot: Option<String> = db
         .query_row(
-            &format!("SELECT generation FROM {headers} WHERE session_key=?1"),
+            &format!("SELECT generation FROM main.{headers} WHERE namespace=semon_namespace() AND session_key=?1"),
             [key],
             |row| row.get(0),
         )
@@ -72,7 +72,7 @@ fn edge(
     let mut brief_constant = None;
     let mut content = serde_json::Map::new();
     for owner in context {
-        let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1",params![format!("{}{}",crate::query_projection::prefix("edge",&crate::query_projection::identity(owner)),id)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
+        let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key=?1",params![format!("{}{}",crate::query_projection::prefix("edge",&crate::query_projection::identity(owner)),id)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
         let Some(encoded) = encoded else { continue };
         let saved: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
         if !saved["query"].is_object() {
@@ -199,7 +199,7 @@ fn edge(
 // The native producer's output-window closure: timed or live edges keep their
 // endpoints; retained turns keep their incoming/outgoing links even when old.
 fn edge_timed(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_edges WHERE edge_id=?1 AND (json_extract(metadata,'$.at')>=?2 OR json_extract(metadata,'$.done')>=?2 OR json_extract(metadata,'$.status') IN ('work','wait','new')))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_trace_edges WHERE namespace=semon_namespace() AND edge_id=?1 AND (json_extract(metadata,'$.at')>=?2 OR json_extract(metadata,'$.done')>=?2 OR json_extract(metadata,'$.status') IN ('work','wait','new')))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
 }
 fn turn_kept(db: &Connection, turn: &Value, cutoff: i64) -> Result<bool, QueryError> {
     Ok(turn["last"] == true
@@ -213,7 +213,7 @@ fn edge_kept(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError>
     if edge_timed(db, id, cutoff)? {
         return Ok(true);
     }
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_turns t JOIN session_catalog c ON c.session_key=t.session_key WHERE t.session_key IN (SELECT session_key FROM session_trace_edges WHERE edge_id=?1) AND (json_extract(c.metadata,'$.query.last')>=?2 OR json_extract(c.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM session_trace_edges live WHERE live.session_key=t.session_key AND (json_extract(live.metadata,'$.at')>=?2 OR json_extract(live.metadata,'$.done')>=?2 OR json_extract(live.metadata,'$.status') IN ('work','wait','new')))) AND (json_extract(t.metadata,'$.start')=?1 OR EXISTS(SELECT 1 FROM json_each(t.metadata,'$.sent') WHERE value=?1)) AND (json_extract(t.metadata,'$.last')=1 OR json_extract(t.metadata,'$.at')>=?2 OR EXISTS(SELECT 1 FROM session_trace_edges e WHERE e.edge_id=json_extract(t.metadata,'$.start') AND (json_extract(e.metadata,'$.at')>=?2 OR json_extract(e.metadata,'$.done')>=?2 OR json_extract(e.metadata,'$.status') IN ('work','wait','new')))))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_trace_turns t JOIN main.session_catalog c ON c.namespace=t.namespace AND c.session_key=t.session_key WHERE t.namespace=semon_namespace() AND t.session_key IN (SELECT session_key FROM main.session_trace_edges WHERE namespace=semon_namespace() AND edge_id=?1) AND (json_extract(c.metadata,'$.query.last')>=?2 OR json_extract(c.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM main.session_trace_edges live WHERE live.namespace=t.namespace AND live.session_key=t.session_key AND (json_extract(live.metadata,'$.at')>=?2 OR json_extract(live.metadata,'$.done')>=?2 OR json_extract(live.metadata,'$.status') IN ('work','wait','new')))) AND (json_extract(t.metadata,'$.start')=?1 OR EXISTS(SELECT 1 FROM json_each(t.metadata,'$.sent') WHERE value=?1)) AND (json_extract(t.metadata,'$.last')=1 OR json_extract(t.metadata,'$.at')>=?2 OR EXISTS(SELECT 1 FROM main.session_trace_edges e WHERE e.namespace=t.namespace AND e.edge_id=json_extract(t.metadata,'$.start') AND (json_extract(e.metadata,'$.at')>=?2 OR json_extract(e.metadata,'$.done')>=?2 OR json_extract(e.metadata,'$.status') IN ('work','wait','new')))))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
 }
 fn window_member(
     db: &Connection,
@@ -227,7 +227,7 @@ fn window_member(
         return Ok(true);
     }
     let mut statement = db
-        .prepare("SELECT edge_id FROM session_trace_edges WHERE session_key=?1 ORDER BY edge_id")
+        .prepare("SELECT edge_id FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY edge_id")
         .map_err(unavailable)?;
     for id in statement
         .query_map([key], |r| r.get::<_, String>(0))
@@ -242,7 +242,7 @@ fn window_member(
 
 fn generation(db: &Connection) -> Result<String, QueryError> {
     db.query_row(
-        "SELECT value FROM meta WHERE key='catalog_generation'",
+        "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
         [],
         |row| row.get(0),
     )
@@ -350,7 +350,7 @@ fn virtual_read(
             return Ok(None);
         }
         headers.push((identity.clone(), header));
-        let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1",[format!("{}{}",crate::query_projection::prefix("virtual",&identity),key)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
+        let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key=?1",[format!("{}{}",crate::query_projection::prefix("virtual",&identity),key)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
         if let Some(encoded) = encoded {
             // A shared virtual transcript is an aggregate, not the first
             // physical owner's recipe vector. Retain the native aggregate
@@ -427,7 +427,7 @@ fn virtual_read(
             ));
         }
         let mut statement = db
-                .prepare("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+                .prepare("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")
                 .map_err(unavailable)?;
         let mut metadata_bytes = 0usize;
         for encoded in statement
@@ -657,7 +657,7 @@ fn read_inner(
     let catalog_generation = generation(&tx)?;
     let projection_generation: Option<String> = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -666,10 +666,10 @@ fn read_inner(
     if projection_generation.as_deref() != Some(&catalog_generation) {
         return Ok(None);
     }
-    let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
+    let history = crate::history_projection::admitted_catalog(&tx, key).map_err(unavailable)?;
     let text = match history.as_ref() {
         Some(text) => Some(text.clone()),
-        None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [key], |row|row.get::<_,Option<String>>(0))
+        None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row|row.get::<_,Option<String>>(0))
             .optional().map_err(unavailable)?.flatten(),
     };
     let Some(text) = text else {
@@ -734,7 +734,7 @@ fn read_inner(
         ("session_slot_projections", "session_slots")
     };
     let header: Option<(String,u32,i64,Option<String>)> = tx.query_row(&format!(
-        "SELECT generation,version,total,source_generation FROM {headers} WHERE session_key=?1"
+        "SELECT generation,version,total,source_generation FROM main.{headers} WHERE namespace=semon_namespace() AND session_key=?1"
     ), [key], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(unavailable)?;
     let Some((slot_generation, version, total, source_generation)) = header else {
         return Ok(None);
@@ -767,7 +767,7 @@ fn read_inner(
                 "CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.turn') END"
             };
             let first: Option<i64> = tx.query_row(&format!(
-                "SELECT slot FROM {table} WHERE session_key=?1 AND {turn_column}=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"
+                "SELECT slot FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND {turn_column}=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"
             ), params![key,turn], |row|row.get(0)).optional().map_err(unavailable)?;
             (
                 true,
@@ -828,7 +828,7 @@ fn read_inner(
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
     let incomplete: bool = if history.is_some() {
         tx.query_row(
-            "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
+            "SELECT incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1",
             [key],
             |row| row.get(0),
         )
@@ -854,7 +854,7 @@ fn read_inner(
     if session {
         let session_key =
             crate::query_projection::prefix("session", &crate::query_projection::identity(&row));
-        let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1",[session_key],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
+        let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key=?1",[session_key],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
         let Some(encoded) = encoded else {
             return Ok(None);
         };
@@ -896,7 +896,7 @@ fn read_inner(
                 headers,
                 &slot_generation,
             )?;
-            let mut statement=snapshot.prepare("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key>?1 AND key<?2 ORDER BY key LIMIT 64").map_err(unavailable)?;
+            let mut statement=snapshot.prepare("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key>?1 AND key<?2 ORDER BY key LIMIT 64").map_err(unavailable)?;
             let texts = statement
                 .query_map(
                     params![
@@ -940,7 +940,7 @@ fn read_inner(
                     continue;
                 }
                 let recipe = if turn["query_text"] == true {
-                    let encoded:String=snapshot.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"),params![key,turn["id"].as_str()],|row|row.get(0)).map_err(unavailable)?;
+                    let encoded:String=snapshot.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND json_extract(metadata,'$.turn')=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"),params![key,turn["id"].as_str()],|row|row.get(0)).map_err(unavailable)?;
                     Some(serde_json::from_str::<SavedSlot>(&encoded).map_err(unavailable)?)
                 } else {
                     None
@@ -988,7 +988,7 @@ fn read_inner(
             let edge_prefix = crate::query_projection::prefix("edge", &own_identity);
             let mut statement = db
                 .prepare(
-                    "SELECT substr(key,?3) FROM meta WHERE key>?1 AND key<?2 ORDER BY key LIMIT 64",
+                    "SELECT substr(key,?3) FROM main.meta WHERE namespace=semon_namespace() AND key>?1 AND key<?2 ORDER BY key LIMIT 64",
                 )
                 .map_err(unavailable)?;
             let ids = statement
@@ -1097,7 +1097,7 @@ fn read_inner(
         let mut high = total;
         while high > 0 && !search.stopped() {
             if search.at_capacity() {
-                let eligible:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE session_key=?1 AND slot<?2 AND (?3 IS NULL OR json_extract(metadata,'$.t')>=?3))"),params![key,high as i64,search.since()],|r|r.get(0)).map_err(unavailable)?;
+                let eligible:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot<?2 AND (?3 IS NULL OR json_extract(metadata,'$.t')>=?3))"),params![key,high as i64,search.since()],|r|r.get(0)).map_err(unavailable)?;
                 if eligible {
                     search.stop();
                 }
@@ -1113,7 +1113,7 @@ fn read_inner(
                 headers,
                 &slot_generation,
             )?;
-            let mut statement = snapshot.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot")).map_err(unavailable)?;
+            let mut statement = snapshot.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot")).map_err(unavailable)?;
             let recipes = statement
                 .query_map(params![key, low as i64, high as i64], |row| {
                     row.get::<_, String>(0)
@@ -1235,7 +1235,7 @@ fn read_inner(
             &slot_generation,
         )?;
         let mut statement = snapshot.prepare(&format!(
-            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"
+            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"
         )).map_err(unavailable)?;
         let mut bytes = 0;
         let mut recipes = Vec::new();

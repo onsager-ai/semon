@@ -395,17 +395,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         if !self.1 {
             return self.0.history_catalog(key);
         }
-        let sql = "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1";
-        let tx = self.0;
-        let encoded: Option<Option<String>> = tx
-            .query_row(sql, [key], |row| row.get(0))
-            .optional()
-            .map_err(io::Error::other)?;
-        match encoded {
-            Some(None) => Err(io::Error::other("history metadata bound")),
-            Some(Some(metadata)) => Ok(Some(metadata)),
-            None => Ok(None),
-        }
+        crate::history_projection::admitted_catalog(self.0, key).map_err(io::Error::other)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
         crate::history_projection::qualified(self.0, row, self.1).map_err(io::Error::other)
