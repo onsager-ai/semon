@@ -3898,7 +3898,11 @@ fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
 #[cfg(test)]
 pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connection> {
     let store = current_test_store(path, &fixture_namespace());
-    Ok(store.connection)
+    Ok(crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection())
 }
 
 /// Bounded selected reads qualify the storage contract in their own snapshot.
@@ -6729,14 +6733,19 @@ mod tests {
         let selected = &rows[1];
         let path = selected.sources[0].path.to_string_lossy().into_owned();
         let cache_path = super::super::EventCache::path(&options.cache);
-        let db = Connection::open(&cache_path).unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute(
-            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            "UPDATE session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key=?1",
             [&selected.key],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
             params![
                 archive_index_key("/synthetic/unrelated.jsonl"),
                 r#"{"version":1}"#
@@ -6744,13 +6753,17 @@ mod tests {
         )
         .unwrap();
         db.execute(
-            "DELETE FROM session_catalog_invalidations WHERE source_path=?1",
+            "DELETE FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
             [&path],
         )
         .unwrap();
         drop(db);
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
-        let db = Connection::open(&cache_path).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let selected_meta = format!("slot_upgrade_selected:{path}");
         assert_eq!(
             db.query_row(
@@ -6771,7 +6784,7 @@ mod tests {
         );
 
         db.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
             params![archive_index_key(&path), r#"{"version":5}"#],
         )
         .unwrap();
@@ -9482,6 +9495,11 @@ mod tests {
     fn storage_selected_repair_ignores_unrelated_archive_markers_and_refuses_selected_damage() {
         let root = scratch("selected-archive-marker");
         let (mut store, _) = opened(&root.join("index.sqlite3"));
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let unrelated_key = archive_index_key("unrelated.jsonl");
         let selected_key = archive_index_key("selected.jsonl");
         store
@@ -9490,7 +9508,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
                 params![unrelated_key, r#"{"version":1}"#],
             )
             .unwrap();
@@ -9525,7 +9543,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
                 params![selected_key, r#"{"version":1}"#],
             )
             .unwrap();
@@ -10477,6 +10495,11 @@ mod tests {
         let root = scratch("concurrent-open-version");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         store.write_runs(&[run()], &stamp()).unwrap();
         drop(store);
         let original = fs::read(&path).unwrap();
@@ -10516,8 +10539,13 @@ mod tests {
     fn empty_current_storage_initializes_all_columns_and_restarts_without_reseeding() {
         let root = scratch("current-cold-start");
         let path = root.join("index.sqlite3");
-        fs::write(&path, []).unwrap();
+        assert!(!path.exists());
         let (mut store, loaded) = opened(&path);
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         assert!(loaded.files.is_empty() && loaded.reported_runs.is_empty());
         for (table, column) in [
             ("files", "codex_pricing_fingerprint"),
