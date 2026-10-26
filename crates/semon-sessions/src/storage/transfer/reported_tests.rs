@@ -77,9 +77,9 @@ pub(crate) fn stage(
     };
     let checkpoint = source.checkpoint(&manifest).unwrap();
     let target = target.transfer_inbox();
-    target.begin(&manifest).unwrap_or_else(|error| {
-        panic!("begin fixture {} failed: {error:?}", operation[0])
-    });
+    target
+        .begin(&manifest)
+        .unwrap_or_else(|error| panic!("begin fixture {} failed: {error:?}", operation[0]));
     for sequence in 1..=checkpoint.sequence {
         let page = source.staged_page(&manifest, sequence).unwrap();
         assert_eq!(
@@ -365,7 +365,10 @@ pub(crate) fn advance_catalog(
         path: "projects/sanitized/catalog.jsonl".into(),
     };
     let path = input.full_path(options);
-    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     writeln!(file, "{}", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})).unwrap();
     drop(file);
     let mut cache = cache(config);

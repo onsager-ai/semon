@@ -551,7 +551,8 @@ mod tests {
         let source = sqlite(&root, "pg-catalog-source");
         let reverse = sqlite(&root, "pg-catalog-reverse");
         let (options, _) = seed_catalog(&source, &root);
-        let expected = crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
+        let expected =
+            crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
         let (pool, _) = super::super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let config = StoreConfig {
@@ -605,10 +606,10 @@ mod tests {
                 }
                 if !checked_forgery
                     && let TransferRecord::CatalogRow {
-                    kind: CatalogRowKind::ProofGeneration,
-                    values,
-                    ..
-                } = &mut record
+                        kind: CatalogRowKind::ProofGeneration,
+                        values,
+                        ..
+                    } = &mut record
                 {
                     values[0] = Value::String("0".repeat(64));
                     assert!(matches!(
