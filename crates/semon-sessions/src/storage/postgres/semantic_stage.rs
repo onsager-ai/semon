@@ -396,6 +396,9 @@ pub(super) fn select(
     use crate::model::relation_stage::{self, Selection, SelectorEndpointRow, SelectorLookup};
     struct Lookup {
         context: Context,
+        events: Vec<crate::events::store::semantic_stage::ProjectedEvent>,
+        hints: Vec<(String,String)>,
+        replay: Vec<String>,
     }
     impl Lookup {
         fn keys(&self, predicate: impl Fn(&relation_stage::Endpoint) -> bool) -> Vec<String> {
@@ -416,17 +419,18 @@ pub(super) fn select(
         fn native_key(&self, _: &str, _: &str) -> Result<Selection, StorageError> {
             Err(StorageError::NamespaceUpgradePending)
         }
-        fn receipt_first(&self, _: &str) -> Result<Option<Option<String>>, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn receipt_first(&self,id:&str)->Result<Option<Option<String>>,StorageError> {
+            Ok(self.events.iter().find(|r|r.kind=="xsm" && r.msg.as_deref()==Some(id)).map(|r|Some(r.encoded.clone())))
         }
-        fn call_owners(&self, _: &str) -> Result<Vec<(String, String)>, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn call_owners(&self,id:&str)->Result<Vec<(String,String)>,StorageError> {
+            let mut owners=self.events.iter().filter(|r|r.kind=="call" && r.native.event.id.as_deref()==Some(id)).map(|r|(r.native.owner.clone(),r.key.clone())).collect::<Vec<_>>();
+            owners.sort(); owners.truncate(2); Ok(owners)
         }
-        fn event_metadata(&self, _: &str, _: &str) -> Result<Option<String>, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn event_metadata(&self,path:&str,key:&str)->Result<Option<String>,StorageError> {
+            self.events.iter().find(|r|r.native.owner==path && r.key==key).map(|r|Some(r.encoded.clone())).ok_or(StorageError::ScopeChanged)
         }
-        fn event_owner(&self, _: &str) -> Result<String, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn event_owner(&self,path:&str)->Result<String,StorageError> {
+            self.context.endpoints.values().find(|e|e.row.sources.iter().any(|s|s.path.to_str()==Some(path))).map(|e|e.row.key.clone()).ok_or(StorageError::ScopeChanged)
         }
         fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, StorageError> {
             let e = self
@@ -443,17 +447,24 @@ pub(super) fn select(
         fn root_alive(&self, key: &str) -> Result<bool, StorageError> {
             Ok(self.context.endpoints.get(key).is_some_and(|e| e.alive))
         }
-        // Claude names can also be established by qualified send/receipt
-        // pairs. Refuse until that native-event projection is connected;
-        // endpoint names alone cannot prove a negative selection.
-        fn name_candidates(&self, _: &str) -> Result<Vec<String>, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn name_candidates(&self,name:&str)->Result<Vec<String>,StorageError> {
+            let mut keys=self.context.endpoints.values().filter(|e|e.row.harness=="claude" && e.row.kind=="session" && e.names.iter().any(|n|n==name)).map(|e|e.row.key.clone()).collect::<std::collections::BTreeSet<_>>();
+            for sent in self.events.iter().filter(|r|r.kind=="send") {
+                let Some(msg)=&sent.msg else { continue; };
+                let Some(receipt)=self.events.iter().find(|r|r.kind=="xsm" && r.msg.as_ref()==Some(msg)) else { continue; };
+                if receipt.name.as_deref()!=Some(name) { continue; }
+                let owner=self.event_owner(&sent.native.owner)?;
+                let endpoint=self.context.endpoints.get(&owner).ok_or(StorageError::ScopeChanged)?;
+                if self.context.endpoints.get(&endpoint.root).is_some_and(|e|e.row.kind=="session") { keys.insert(endpoint.root.clone()); }
+            }
+            Ok(keys.into_iter().take(2).collect())
         }
-        fn name_hints(&self, _: &str) -> Result<Vec<String>, StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn name_hints(&self,name:&str)->Result<Vec<String>,StorageError> {
+            Ok(self.hints.iter().filter(|(_,n)|n==name).map(|(k,_)|k.clone()).collect())
         }
-        fn request_members_replay(&mut self, _: Vec<String>) -> Result<(), StorageError> {
-            Err(StorageError::NamespaceUpgradePending)
+        fn request_members_replay(&mut self,keys:Vec<String>)->Result<(),StorageError> {
+            relation_stage::replay_members_with(&keys,||StorageError::Busy,|_|Ok(()))?;
+            self.replay=keys; Ok(())
         }
         fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, StorageError> {
             for e in self.context.endpoints.values() {
@@ -500,8 +511,32 @@ pub(super) fn select(
             }))
         }
     }
-    let mut lookup = Lookup {
-        context: context(tx, epoch)?,
-    };
-    relation_stage::select_with(&mut lookup, selector)
+    lock(tx)?;
+    let context=context(tx,epoch)?;
+    let events=super::semantic_events::project(tx,&context)?;
+    let generation=model_cache::generation(tx)?;
+    let ns=tx.namespace.as_str().as_bytes();
+    let mut hints=Vec::new();
+    if let Some(generation)=generation {
+        let values=tx.driver.query("SELECT d.session_key,CASE WHEN octet_length(d.metadata)<=1048576 THEN d.metadata END FROM semon_pg_native_descriptions d JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=d.namespace_digest AND r.namespace=d.namespace AND r.session_key=d.session_key WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND r.generation=$2 LIMIT 65", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+        if values.len()>64 { return Err(StorageError::Busy); }
+        let mut bytes=0usize;
+        for value in values {
+            let key=String::from_utf8(value.get(0)).map_err(|_|StorageError::ScopeChanged)?;
+            if context.endpoints.contains_key(&key) { continue; }
+            let raw:Vec<u8>=value.get::<_,Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+            bytes=bytes.saturating_add(raw.len());if bytes>MAX { return Err(StorageError::Busy); }
+            let description:serde_json::Value=serde_json::from_slice(&raw).map_err(|_|StorageError::ScopeChanged)?;
+            if let Some(names)=description["names"].as_array() { for name in names.iter().filter_map(|n|n.as_str()) { hints.push((key.clone(),name.to_owned())); } }
+        }
+    }
+    let mut lookup=Lookup {context,events,hints,replay:Vec::new()};
+    let result=relation_stage::select_with(&mut lookup,selector);
+    if !lookup.replay.is_empty() {
+        let mut stage=load(tx,true)?.ok_or(StorageError::Conflict)?;
+        if stage.epoch!=epoch { return Err(StorageError::Conflict); }
+        stage.context.replay_owners.extend(lookup.replay);
+        stage.phase=Phase::Indexing;stage.model=None;save(tx,&stage,false)?;
+    }
+    result
 }

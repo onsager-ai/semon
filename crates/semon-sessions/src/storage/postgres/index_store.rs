@@ -165,7 +165,7 @@ impl IndexStore for NativeIndex {
         self.pool
             .transaction(
                 &self.namespace,
-                TxnKind::ReadSnapshot,
+                TxnKind::Write,
                 &self.control,
                 |tx| {
                     let context = super::semantic_stage::context(tx, epoch)?;
