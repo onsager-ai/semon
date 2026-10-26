@@ -3,6 +3,8 @@ use crate::events::{
     DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
 };
 use crate::sealed::LogFile;
+use crate::events::store::{enqueue_facts, resume_runtime_input, begin_source_write, enqueue_native, enqueue_pid, complete_source_write};
+use std::path::Path;
 use crate::storage::{StorageError, StoreConfig};
 use std::{collections::BTreeSet, io, sync::Arc};
 
@@ -56,6 +58,67 @@ pub(crate) fn open_semantic_with_stamp(
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn facts_write_begin(
+        &mut self,
+        options: &crate::Options,
+        intent: &crate::source_change::FactsIntent,
+    ) -> Result<(), StoreError> {
+        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
+            .map_err(|e| StoreError::Data(e.to_string()))
+    }
+    fn facts_write_complete(
+        &mut self,
+        options: &crate::Options,
+        intent: &crate::source_change::FactsIntent,
+    ) -> Result<(), StoreError> {
+        enqueue_facts(options, &intent.before, &intent.wanted, intent.push_driven)
+            .map_err(|e| StoreError::Data(e.to_string()))
+    }
+    fn source_write_begin(
+        &mut self,
+        options: &crate::Options,
+        input: &crate::Input,
+        _: &crate::source_change::WriteIntent,
+    ) -> Result<(i64, Option<crate::source_change::AppendEvidence>), StoreError> {
+        let path = input.full_path(options).to_string_lossy().into_owned();
+        resume_runtime_input(options, &path).map_err(|e| StoreError::Data(e.to_string()))?;
+        let state =
+            begin_source_write(options, input).map_err(|e| StoreError::Data(e.to_string()))?;
+        if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+            let id = crate::read_regular_at_most(&input.full_path(options), 65536)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| v["sessionId"].as_str().map(str::to_owned));
+            if let Some(id) = id {
+                enqueue_native(options, "claude", &id)
+                    .map_err(|e| StoreError::Data(e.to_string()))?;
+            }
+            if let Some(pid) = Path::new(&input.path)
+                .file_stem()
+                .and_then(|p| p.to_str())
+                .and_then(|p| p.parse::<u32>().ok())
+            {
+                enqueue_pid(options, pid).map_err(|e| StoreError::Data(e.to_string()))?;
+            }
+        }
+        Ok(state)
+    }
+    fn source_write_complete(
+        &mut self,
+        options: &crate::Options,
+        input: &crate::Input,
+        _: &crate::source_change::WriteIntent,
+        revision: i64,
+        completion: &crate::source_change::WriteCompletion,
+    ) -> Result<(), StoreError> {
+        complete_source_write(options, input, revision, completion.evidence.as_ref())
+            .map_err(|e| StoreError::Data(e.to_string()))
+    }
+
+    fn resume_runtime_input(&mut self, options: &crate::Options, path: &str) -> Result<(), StoreError> {
+        resume_runtime_input(options, path).map_err(|e| StoreError::Data(e.to_string()))
+    }
+
     fn source_observations(
         &self,
     ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
