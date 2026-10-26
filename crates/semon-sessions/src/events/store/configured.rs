@@ -2483,10 +2483,11 @@ mod tests {
                 semantic_support: true,
                 ..PhysicalLayout::CONFIGURED
             },
-            |db, _| {
-                db.execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
-            },
+            |_, _| {},
         );
+        // Establish valid current admission before injecting physical drift.
+        // The production factory must still refuse it before ingestion.
+        f.db().execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
         let before = f.state();
         assert!(!before.contains_key("storage_source_journal"));
         assert!(matches!(

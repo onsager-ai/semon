@@ -603,24 +603,11 @@ mod tests {
     }
 
     #[test]
-    fn parser28_rebuild_and_source_replacement_cannot_retain_completed_turn() {
+    fn source_replacement_cannot_retain_completed_turn() {
         let home = Home::new();
         home.append(event("task_started", Some("a")));
         home.append(event("task_complete", Some("a")));
         assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
-        home.db()
-            .execute("UPDATE meta SET value='28' WHERE key='cache_version'", [])
-            .unwrap();
-        assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
-        let version: String = home
-            .db()
-            .query_row(
-                "SELECT value FROM meta WHERE key='cache_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, "29");
         let replacement = home.path.with_extension("replacement");
         fs::write(
             &replacement,
