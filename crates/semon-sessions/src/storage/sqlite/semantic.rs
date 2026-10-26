@@ -402,9 +402,12 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
             || (!indexed && !withdrawn && !removed_source(c, ns, &path)?)
         {
             #[cfg(test)]
-            eprintln!("semantic_reduction_witness claim_changed={} ledger_changed={} negative_missing={}",
-                actual != claim, ledger != recorded,
-                !indexed && !withdrawn && !removed_source(c, ns, &path)?);
+            eprintln!(
+                "semantic_reduction_witness claim_changed={} ledger_changed={} negative_missing={}",
+                actual != claim,
+                ledger != recorded,
+                !indexed && !withdrawn && !removed_source(c, ns, &path)?
+            );
             return Ok(ReductionWitness::Changed);
         }
     }
@@ -2362,10 +2365,13 @@ impl Stage {
                 [ns], |r| r.get(0),
             ).map_err(error)?;
         if acknowledged {
-            let source_revision = tx.query_row(
-                "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
-                [ns], |r| r.get(0),
-            ).map_err(error)?;
+            let source_revision = tx
+                .query_row(
+                    "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
             tx.commit().map_err(error)?;
             return Ok(Some(Batch {
                 epoch,
