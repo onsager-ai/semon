@@ -2547,13 +2547,23 @@ impl SourceObservationStore for SqliteStore {
     }
 }
 
-pub(crate) fn read_session_description(db: &Connection, key: &str, version: u32, inputs: &str) -> rusqlite::Result<Option<String>> {
+pub(crate) fn read_session_description(
+    db: &Connection,
+    key: &str,
+    version: u32,
+    inputs: &str,
+) -> rusqlite::Result<Option<String>> {
     db.query_row("SELECT description FROM main.session_descriptions WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND inputs=?3", params![key,version,inputs], |row| row.get(0)).optional()
 }
 
-pub(crate) fn write_session_descriptions(tx: &Transaction<'_>, descriptions: &[(String,u32,String,String)]) -> rusqlite::Result<()> {
+pub(crate) fn write_session_descriptions(
+    tx: &Transaction<'_>,
+    descriptions: &[(String, u32, String, String)],
+) -> rusqlite::Result<()> {
     let mut put = tx.prepare("INSERT OR REPLACE INTO main.session_descriptions(namespace,session_key,version,inputs,description) VALUES(semon_namespace(),?1,?2,?3,?4)")?;
-    for (key,version,inputs,description) in descriptions { put.execute(params![key,version,inputs,description])?; }
+    for (key, version, inputs, description) in descriptions {
+        put.execute(params![key, version, inputs, description])?;
+    }
     Ok(())
 }
 

@@ -103,7 +103,8 @@ impl Query {
             // before creating another archive reader or decoding its evidence.
             if search.at_capacity() {
                 let namespace = source.options.source.namespace().map_err(unavailable)?;
-                if crate::storage::local_query_catalog(&source.options, namespace.clone()).map_err(unavailable)?
+                if crate::storage::local_query_catalog(&source.options, namespace.clone())
+                    .map_err(unavailable)?
                     .has_search_slots(&namespace, key, since)?
                 {
                     search.stop();
@@ -313,12 +314,17 @@ impl Query {
                     &self.sources.machines[index].0
                 })
                 .map_err(unavailable)?;
-            let namespace = if bound.is_none() { source.options.source.namespace().map_err(unavailable)? } else { namespace };
+            let namespace = if bound.is_none() {
+                source.options.source.namespace().map_err(unavailable)?
+            } else {
+                namespace
+            };
             let local;
             let store = if let Some(store) = bound {
                 store
             } else {
-                local = crate::storage::local_query_catalog(&source.options, namespace.clone()).map_err(unavailable)?;
+                local = crate::storage::local_query_catalog(&source.options, namespace.clone())
+                    .map_err(unavailable)?;
                 &*local
             };
             let part = store.read_cohort(&namespace, now, &mut bytes_left)?;
@@ -469,11 +475,16 @@ impl Query {
                 source_key
             })
             .map_err(unavailable)?;
-            let namespace = if bound.is_none() { source.options.source.namespace().map_err(unavailable)? } else { namespace };
+            let namespace = if bound.is_none() {
+                source.options.source.namespace().map_err(unavailable)?
+            } else {
+                namespace
+            };
             if let Some(store) = bound {
                 store.validate(&namespace, &part)?;
             } else {
-                crate::storage::local_query_catalog(&source.options, namespace.clone()).map_err(unavailable)?
+                crate::storage::local_query_catalog(&source.options, namespace.clone())
+                    .map_err(unavailable)?
                     .validate(&namespace, &part)?;
             }
         }

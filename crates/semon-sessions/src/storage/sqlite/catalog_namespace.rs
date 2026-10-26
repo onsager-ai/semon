@@ -87,7 +87,9 @@ pub(super) fn ready(db: &Connection) -> Result<bool, StorageError> {
 pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
     for table in QUALIFIED_CATALOG_TABLES {
         let current: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |row| row.get(0)).map_err(failed)?;
-        if !current { return Err(StorageError::NamespaceUpgradePending); }
+        if !current {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         // Preserve the native positional row layout. Namespace is an adapter
         // qualifier, not a new native payload column.
         let mut statement = db
