@@ -30,7 +30,11 @@ pub(in crate::storage::postgres) fn native_proof(
     if rows.is_empty() || rows.len() > 64 || rows.iter().any(|row| !row.get::<_, bool>(0)) {
         return Err(StorageError::ScopeChanged);
     }
-    let id = text(rows[0].get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?)?;
+    let id = text(
+        rows[0]
+            .get::<_, Option<Vec<u8>>>(1)
+            .ok_or(StorageError::ScopeChanged)?,
+    )?;
     native_pages::open(tx, path(source)?, &ledger, ProofGenerationId(id))
 }
 
@@ -85,10 +89,11 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
         let start = index as u64 * size as u64;
         let length = (self.source.offset - start).min(size as u64) as usize;
         let hash = (|| {
-            let mut borrowed = self.tx.lock().map_err(|_|StorageError::Unavailable)?;
+            let mut borrowed = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
             let tx = &mut **borrowed;
             native_proof(tx, self.generation, self.source)?.chunk_hash(tx, index)
-        })().map_err(io::Error::other)?;
+        })()
+        .map_err(io::Error::other)?;
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
         let part = self.host.read_range(reference, expected, start, length)?;

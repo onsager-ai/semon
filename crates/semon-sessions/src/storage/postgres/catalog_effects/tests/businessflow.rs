@@ -1225,7 +1225,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             prefix_sha256: source.prefix_sha256,
                             tail_sha256: source.tail_sha256,
                         };
-                        (reference, std::sync::Arc::from(fs::read(&source.path).unwrap()))
+                        (
+                            reference,
+                            std::sync::Arc::from(fs::read(&source.path).unwrap()),
+                        )
                     })
                 })
                 .collect(),
@@ -1367,12 +1370,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         source.path.clone()
                     } else {
                         assert_eq!(row.harness, "codex");
-                        options.codex_home.join("archived_sessions").join(source.path.file_name().unwrap())
+                        options
+                            .codex_home
+                            .join("archived_sessions")
+                            .join(source.path.file_name().unwrap())
                     };
                     let physical = crate::events::Stat::of(&physical_path).unwrap();
                     assert_eq!(
-                        (proof.dev, proof.ino, proof.size, proof.modified_ns, proof.changed_ns),
-                        (physical.dev, physical.ino, physical.size, physical.modified_ns, physical.changed_ns)
+                        (
+                            proof.dev,
+                            proof.ino,
+                            proof.size,
+                            proof.modified_ns,
+                            proof.changed_ns
+                        ),
+                        (
+                            physical.dev,
+                            physical.ino,
+                            physical.size,
+                            physical.modified_ns,
+                            physical.changed_ns
+                        )
                     );
                     let mut changed = reference;
                     changed.prefix_sha256[0] ^= 1;

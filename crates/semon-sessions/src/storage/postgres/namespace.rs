@@ -16,32 +16,55 @@ fn receipt_key(epoch: &str) -> Vec<u8> {
     format!("source-admission:{epoch}").into_bytes()
 }
 
-fn receipt(tx: &mut super::txn::PgTxn<'_>, epoch: &str, admission: &NamespaceAdmission, retired: bool) -> Result<(), StorageError> {
-    let bytes = serde_json::to_vec(&(admission.generation, admission.admitted_at, retired)).map_err(|_| StorageError::Unavailable)?;
+fn receipt(
+    tx: &mut super::txn::PgTxn<'_>,
+    epoch: &str,
+    admission: &NamespaceAdmission,
+    retired: bool,
+) -> Result<(), StorageError> {
+    let bytes = serde_json::to_vec(&(admission.generation, admission.admitted_at, retired))
+        .map_err(|_| StorageError::Unavailable)?;
     native_keys::put_meta(tx, &receipt_key(epoch), &bytes)
 }
 
-pub(crate) fn observe(config: &StoreConfig, pool: &PgPool, control: &PgCancellation) -> Result<Option<crate::storage::NamespaceAdmissionObservation>, StorageError> {
+pub(crate) fn observe(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<Option<crate::storage::NamespaceAdmissionObservation>, StorageError> {
     let expected = epoch(config)?;
     pool.transaction(&config.namespace, TxnKind::ReadSnapshot, control, |tx| {
         store_metadata::authorize(tx)?;
         let Some(bytes) = native_keys::read_meta(tx, &receipt_key(expected), 128)? else {
             return Ok(None);
         };
-        let (generation, admitted_at, retired): (u64, i64, bool) = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        let (generation, admitted_at, retired): (u64, i64, bool) =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         let binding = model_cache::raw_binding(tx)?;
-        if generation == 0 || generation > binding.admission || (!retired && (binding.admission != generation || binding.stream_epoch != expected)) {
+        if generation == 0
+            || generation > binding.admission
+            || (!retired && (binding.admission != generation || binding.stream_epoch != expected))
+        {
             return Err(StorageError::ScopeChanged);
         }
         if generation == binding.admission {
-            let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?.is_some_and(|value| !value.is_empty());
+            let revoked = native_keys::read_meta(tx, b"source-unenrolled", 1)?
+                .is_some_and(|value| !value.is_empty());
             let at = native_keys::read_meta(tx, b"source-admitted-at", 32)?;
-            if binding.stream_epoch != expected || retired != revoked || at.as_deref() != Some(admitted_at.to_string().as_bytes()) {
+            if binding.stream_epoch != expected
+                || retired != revoked
+                || at.as_deref() != Some(admitted_at.to_string().as_bytes())
+            {
                 return Err(StorageError::ScopeChanged);
             }
         }
         Ok(Some(crate::storage::NamespaceAdmissionObservation {
-            admission: NamespaceAdmission { namespace: config.namespace.clone(), generation, admitted_at }, retired,
+            admission: NamespaceAdmission {
+                namespace: config.namespace.clone(),
+                generation,
+                admitted_at,
+            },
+            retired,
         }))
     })
 }
@@ -137,7 +160,10 @@ mod tests {
         config.create_native_store().unwrap();
         assert_eq!(config.observe_namespace_admission().unwrap(), None);
         super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
-        assert_eq!(config.admit_namespace().unwrap_err(), StorageError::CommitUncertain);
+        assert_eq!(
+            config.admit_namespace().unwrap_err(),
+            StorageError::CommitUncertain
+        );
         let observed = config.observe_namespace_admission().unwrap().unwrap();
         assert!(!observed.retired);
         let admission = observed.admission;
@@ -157,7 +183,10 @@ mod tests {
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |_| Ok(()))
             .unwrap();
         super::super::tests::LOSE_ACK.with(|flag| flag.set(true));
-        assert_eq!(config.unenroll_namespace(&admission).unwrap_err(), StorageError::CommitUncertain);
+        assert_eq!(
+            config.unenroll_namespace(&admission).unwrap_err(),
+            StorageError::CommitUncertain
+        );
         let observed = config.observe_namespace_admission().unwrap().unwrap();
         assert!(observed.retired);
         assert_eq!(observed.admission, admission);
@@ -194,8 +223,21 @@ mod tests {
         assert_eq!(successor.observe_namespace_admission().unwrap(), None);
         let next = successor.admit_namespace().unwrap();
         assert_eq!(next.generation, admission.generation + 1);
-        assert_eq!(config.observe_namespace_admission().unwrap().unwrap().admission, admission);
-        assert!(config.observe_namespace_admission().unwrap().unwrap().retired);
+        assert_eq!(
+            config
+                .observe_namespace_admission()
+                .unwrap()
+                .unwrap()
+                .admission,
+            admission
+        );
+        assert!(
+            config
+                .observe_namespace_admission()
+                .unwrap()
+                .unwrap()
+                .retired
+        );
         let observed = successor.observe_namespace_admission().unwrap().unwrap();
         assert!(!observed.retired);
         assert_eq!(observed.admission, next);

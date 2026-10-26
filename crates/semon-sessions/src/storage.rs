@@ -416,7 +416,9 @@ impl StoreConfig {
     /// None means unknown, never permission to discard a pending host intent.
     /// This does not admit, revoke, or advance the namespace generation.
     #[cfg(feature = "postgres")]
-    pub fn observe_namespace_admission(&self) -> Result<Option<NamespaceAdmissionObservation>, StorageError> {
+    pub fn observe_namespace_admission(
+        &self,
+    ) -> Result<Option<NamespaceAdmissionObservation>, StorageError> {
         let StoreBackend::Postgres { pool, control } = &self.backend else {
             return Err(StorageError::InvalidArguments);
         };
