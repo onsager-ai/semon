@@ -9,6 +9,7 @@ pub(crate) mod current_sources;
 pub(crate) mod host;
 pub(crate) mod index_store;
 mod model_cache;
+pub(crate) mod namespace;
 mod native_bundle;
 mod native_commit;
 mod native_core;
@@ -42,6 +43,23 @@ pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLim
 pub use source_journal::PgSourceJournal;
 pub use store_metadata::PgStoreMetadata;
 
+impl PgPool {
+    pub(crate) fn bind_source(
+        &self,
+        namespace: &super::LogicalSourceNamespace,
+        expected_epoch: Option<&str>,
+        control: &PgCancellation,
+    ) -> Result<Self, super::StorageError> {
+        let binding = self.transaction(namespace, txn::TxnKind::ReadSnapshot, control, model_cache::binding)?;
+        if expected_epoch.is_some_and(|epoch| epoch != binding.stream_epoch) {
+            return Err(super::StorageError::ScopeChanged);
+        }
+        let mut pool = self.clone();
+        pool.source_binding = Some(binding);
+        Ok(pool)
+    }
+}
+
 /// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
 fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -71,6 +89,7 @@ pub(crate) fn configured_query_catalog(
     pool: PgPool,
     control: PgCancellation,
 ) -> Result<Box<dyn super::query::QueryCatalogStore>, super::StorageError> {
+    let pool = pool.bind_source(&config.namespace, config.expected_stream_epoch.as_deref(), &control)?;
     let generation = configured_generation(config, &pool, &control)?;
     Ok(Box::new(catalog_effects::snapshot::query::QueryCatalog {
         pool,

@@ -2248,7 +2248,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "the retained native field proof survives an independent runtime mutation"
     );
     for tool in ["read_transcript", "get_session"] {
-        assert_eq!(query.call_bound_selected_at(tool, &serde_json::json!({"id":prepared.rows[0].key}), 1790812802000, &query_store, &retained_host).unwrap_err().code, "unavailable", "a stale live runtime context must refuse");
+        assert_eq!(
+            query
+                .call_bound_selected_at(
+                    tool,
+                    &serde_json::json!({"id":prepared.rows[0].key}),
+                    1790812802000,
+                    &query_store,
+                    &retained_host
+                )
+                .unwrap_err()
+                .code,
+            "unavailable",
+            "a stale live runtime context must refuse"
+        );
     }
     assert_eq!(captured_bodies(&pool), expected_bodies);
     recorded.hostname = "source-write-after158".into();

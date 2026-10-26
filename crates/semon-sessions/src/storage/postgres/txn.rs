@@ -55,6 +55,9 @@ impl PgPool {
         if namespace.as_str().is_empty() || namespace.as_str().len() > 4096 {
             return Err(StorageError::InvalidArguments);
         }
+        if self.source_binding.as_ref().is_some_and(|binding| &binding.namespace != namespace) {
+            return Err(StorageError::NamespaceMismatch);
+        }
         let mut lease = self.acquire(control)?;
         let limits = self.inner.limits;
         let deadline = control.deadline(Instant::now() + limits.txn_deadline);
@@ -127,6 +130,12 @@ impl PgPool {
                 if matches!(kind, TxnKind::Write) {
                     let blocked:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key IN ('native_transfer_v1:source-freeze','native_transfer_v1:incoming') AND octet_length(value)>0)", &[&namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
                     if blocked { return Err(StorageError::ScopeChanged); }
+                }
+            }
+            if let Some(expected) = &self.source_binding {
+                let actual = super::model_cache::binding(&mut tx)?;
+                if actual.admission != expected.admission || actual.stream_epoch != expected.stream_epoch {
+                    return Err(StorageError::ScopeChanged);
                 }
             }
             let value = operation(&mut tx)?;

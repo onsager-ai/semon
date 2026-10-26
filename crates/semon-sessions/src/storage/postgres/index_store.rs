@@ -29,11 +29,6 @@ pub(crate) fn open(
     namespace: LogicalSourceNamespace,
     control: PgCancellation,
 ) -> Result<(Box<dyn IndexStore>, Option<ReportedFileStamp>), StorageError> {
-    let journal = PgSourceJournal {
-        pool: pool.clone(),
-        namespace: namespace.clone(),
-        control: control.clone(),
-    };
     // Create namespace coordination only, never an engine/cache-path fallback.
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         tx.driver
@@ -44,6 +39,12 @@ pub(crate) fn open(
             .map_err(sqlstate::error)?;
         super::model_cache::initialize(tx)
     })?;
+    let pool = pool.bind_source(&namespace, None, &control)?;
+    let journal = PgSourceJournal {
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+    };
     let stamp = reported_facts::load(&pool, &namespace, Some(&BTreeSet::new()), &control)?.stamp;
     Ok((
         Box::new(NativeIndex {
