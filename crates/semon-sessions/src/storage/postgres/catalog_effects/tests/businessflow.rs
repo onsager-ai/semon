@@ -801,7 +801,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         producer_rows(&semantic_model.prepared().rows),
         producer_rows(&oracle.rows)
     );
-    assert!(pg.note_catalog_audit(published.1.as_deref(), 1790812802000).unwrap(), "committed publication closed its active stage before the finish ACK");
+    assert!(
+        pg.note_catalog_audit(published.1.as_deref(), 1790812802000)
+            .unwrap(),
+        "committed publication closed its active stage before the finish ACK"
+    );
     assert_eq!(
         pg.finish_semantic_stage(semantic_batch.epoch).unwrap(),
         crate::events::Outcome::Written
@@ -809,7 +813,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
     assert!(!pg.note_catalog_audit(Some("stale"), 1790812802000).unwrap());
-    assert!(pg.note_catalog_audit(Some(&generation), 1790812802000).unwrap());
+    assert!(
+        pg.note_catalog_audit(Some(&generation), 1790812802000)
+            .unwrap()
+    );
     let component = pg
         .catalog_component_paths(
             &[inputs
