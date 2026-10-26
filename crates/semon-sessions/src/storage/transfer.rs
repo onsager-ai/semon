@@ -229,13 +229,25 @@ impl TransferRecord {
                 native_decode::ledger(&ledger).map_err(|_| StorageError::ScopeChanged)?;
                 let mut file = vec![0.into(), serde_json::Value::String(path.clone())];
                 file.extend(values.clone());
-                native_decode::file(&Values(file), native_decode::Children {
-                    events: Vec::new(), extras: Vec::new(), signals: Vec::new(),
-                    usage_by_id: Default::default(), codex_usage_events: Vec::new(),
-                    native_usage_observations: None, source_chunks: None, marker_index: None,
-                    tree_summary: None, handoff_index: None, codex_header: None,
-                    claude_sidecar: None, codex_native_usage: None,
-                }).map_err(|_| StorageError::ScopeChanged)?;
+                native_decode::file(
+                    &Values(file),
+                    native_decode::Children {
+                        events: Vec::new(),
+                        extras: Vec::new(),
+                        signals: Vec::new(),
+                        usage_by_id: Default::default(),
+                        codex_usage_events: Vec::new(),
+                        native_usage_observations: None,
+                        source_chunks: None,
+                        marker_index: None,
+                        tree_summary: None,
+                        handoff_index: None,
+                        codex_header: None,
+                        claude_sidecar: None,
+                        codex_native_usage: None,
+                    },
+                )
+                .map_err(|_| StorageError::ScopeChanged)?;
             }
             Self::NativeEvent { path, values } => {
                 if path.is_empty() || values.len() != 27 {

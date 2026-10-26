@@ -252,22 +252,36 @@ mod tests {
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
         use transfer::reported::tests::{apply, root, seed_native, sqlite, sqlite_core, stage};
         let root = root();
-        let source = sqlite(&root,"native-source");
-        let reverse = sqlite(&root,"native-reverse");
+        let source = sqlite(&root, "native-source");
+        let reverse = sqlite(&root, "native-reverse");
         let path = root.join("old.jsonl");
-        seed_native(&source,&path,130,'2');
-        let expected = sqlite_core(&source,&path);
+        seed_native(&source, &path, 130, '2');
+        let expected = sqlite_core(&source, &path);
         let (pool, _) = super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
-        let config = StoreConfig { backend: StoreBackend::Postgres { pool:pool.clone(), control:control.clone() }, namespace:source.namespace.clone(),expected_stream_epoch:source.expected_stream_epoch.clone() };
+        let config = StoreConfig {
+            backend: StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
         config.create_native_store().unwrap();
-        let manifest = stage(&source,&config,&[97;32]);
-        let pages = source.transfer_inbox().checkpoint(&manifest).unwrap().sequence;
-        apply(&config,&manifest);
+        let manifest = stage(&source, &config, &[97; 32]);
+        let pages = source
+            .transfer_inbox()
+            .checkpoint(&manifest)
+            .unwrap()
+            .sequence;
+        apply(&config, &manifest);
         // Compare every normalized native row against authoritative SQL through
         // the existing native decoder, rather than trusting the transfer inbox.
         for sequence in 1..=pages {
-            let page = source.transfer_inbox().staged_page(&manifest,sequence).unwrap();
+            let page = source
+                .transfer_inbox()
+                .staged_page(&manifest, sequence)
+                .unwrap();
             for record in page.records {
                 pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
                     use super::super::native_reader::{transfer_rows,FILE,EVENT};
@@ -288,13 +302,20 @@ mod tests {
                 }).unwrap();
             }
         }
-        let new_path=root.join("new.jsonl");
-        seed_native(&config,&new_path,3,'3');
+        let new_path = root.join("new.jsonl");
+        seed_native(&config, &new_path, 3, '3');
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(&new_path).unwrap();
-        let manifest=stage(&config,&reverse,&[98;32]);apply(&reverse,&manifest);
-        assert_eq!(sqlite_core(&reverse,&path),expected);
-        assert_eq!(sqlite_core(&reverse,&new_path)["events"].as_array().unwrap().len(),3);
+        let manifest = stage(&config, &reverse, &[98; 32]);
+        apply(&reverse, &manifest);
+        assert_eq!(sqlite_core(&reverse, &path), expected);
+        assert_eq!(
+            sqlite_core(&reverse, &new_path)["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
