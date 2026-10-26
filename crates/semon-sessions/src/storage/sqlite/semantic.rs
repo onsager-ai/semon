@@ -102,15 +102,12 @@ impl AdmittedSource {
     }
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
-            owner.validate_ready(db)?;
-        } else {
-            NativeReaderBinding::Admitted(self.config.clone())
-                .validate(db, &self.config.namespace)?;
-            crate::events::store::configured::validate_staging_owner(db, &self.config)?;
-            if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission
-            {
-                return Err(StorageError::ScopeChanged);
-            }
+            return owner.validate_ready(db);
+        }
+        NativeReaderBinding::Admitted(self.config.clone()).validate(db, &self.config.namespace)?;
+        crate::events::store::configured::validate_staging_owner(db, &self.config)?;
+        if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
+            return Err(StorageError::ScopeChanged);
         }
         let admission = i64::try_from(self.admission).map_err(|_| StorageError::ScopeChanged)?;
         let profile: bool = db.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![self.config.namespace.as_str(),admission,crate::events::store::configured::semantic_recipe()], |r|r.get(0)).map_err(failed)?;
@@ -908,7 +905,10 @@ fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
         return Err(refuse("semantic_native_key_component_budget"));
     }
     for (harness, native) in pairs {
-        let collision: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 AND harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND harness<>?3 AND lifecycle='current')",params![ns,native,harness],|r|r.get(0)).map_err(error)?;
+        // An outgoing source already observed in this epoch is replaced by
+        // the staged input cohort. Its old Current row is custody, not a live
+        // collision. The publication CAS still owns its history transfer.
+        let collision: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 AND harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources existing WHERE existing.namespace=?1 AND existing.native_id=?2 AND existing.harness<>?3 AND existing.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources observed WHERE observed.namespace=existing.namespace AND observed.source_path=existing.source_path AND observed.index_done=1))",params![ns,native,harness],|r|r.get(0)).map_err(error)?;
         if collision {
             return Err(refuse("semantic_cross_harness_native_key_pending"));
         }

@@ -54,7 +54,9 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![self.namespace,key], |r|r.get(0))
     }
     fn replacement(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
-        let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
+        // Same-harness source withdrawal composes its retained sources below;
+        // it must not freeze the old aggregate as a different native owner.
+        let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3 AND harness<>?4",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?,row.harness],|r|r.get(0)).optional()?;
         text.as_deref()
             .map(serde_json::from_str)
             .transpose()

@@ -101,6 +101,7 @@ impl CatalogRowKind {
         }
     }
 
+    #[cfg(feature = "postgres")]
     pub(crate) fn namespace_owned(self) -> bool {
         matches!(
             self,
