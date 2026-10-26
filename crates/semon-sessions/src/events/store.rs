@@ -10115,7 +10115,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(history.harness, "codex");
-            assert!(crate::history_projection::qualified(&store.connection, &history, false).unwrap());
+            assert!(
+                crate::history_projection::qualified(&store.connection, &history, false).unwrap()
+            );
             assert_eq!(
                 store
                     .connection
