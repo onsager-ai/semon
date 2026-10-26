@@ -324,7 +324,10 @@ impl StoreConfig {
                 }
             }
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { .. } => return Err(StorageError::NamespaceUpgradePending),
+            StoreBackend::Postgres { pool, control } => {
+                postgres::require_configured(&self, pool, control)?;
+                return Ok(Box::new(postgres::MetadataStore(self)));
+            }
         }
         Ok(Box::new(sqlite::SqliteMetadataStore::new(self)))
     }
