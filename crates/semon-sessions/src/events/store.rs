@@ -631,8 +631,12 @@ pub(super) fn open_scoped(
 pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool> {
     #[cfg(feature = "postgres")]
     if let Some(config) = options.source.selected_store() {
-        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
-            return crate::storage::postgres::host::catalog_work_pending(config).map_err(io::Error::other);
+        if matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        ) {
+            return crate::storage::postgres::host::catalog_work_pending(config)
+                .map_err(io::Error::other);
         }
     }
     let path = super::EventCache::path(&options.cache);
@@ -903,6 +907,17 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
+    #[cfg(feature = "postgres")]
+    if options.source.selected_store().is_some_and(|config| matches!(config.backend, crate::storage::StoreBackend::Postgres { .. })) {
+        let store = source_write_store(options)?;
+        if let Some(ledger) = store.ledger(&path.to_string_lossy()).map_err(io::Error::other)?
+            && ledger.stat == *stat && ledger.offset == length {
+            return Ok(format!("{:x}", sha2::digest::generic_array::GenericArray::from(ledger.prefix)) == expected);
+        }
+        let mut file = crate::sealed::LogFile::open(path)?;
+        let (prefix, _) = super::consumed_hashes(&mut file, length)?;
+        return Ok(format!("{:x}", sha2::digest::generic_array::GenericArray::from(prefix)) == expected);
+    }
     let binding =
         crate::storage::local_navigation_binding(options, "").map_err(io::Error::other)?;
     let db = binding.connection().map_err(io::Error::other)?;
@@ -934,8 +949,14 @@ pub(crate) fn complete_relocation(
 ) -> io::Result<()> {
     #[cfg(feature = "postgres")]
     if let Some(config) = options.source.selected_store() {
-        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
-            return crate::storage::postgres::host::complete_relocation(config, options, input, evidence).map_err(io::Error::other);
+        if matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        ) {
+            return crate::storage::postgres::host::complete_relocation(
+                config, options, input, evidence,
+            )
+            .map_err(io::Error::other);
         }
     }
     let journal = host_journal(options).map_err(io::Error::other)?;
@@ -1173,8 +1194,12 @@ pub(crate) fn enqueue_sources(
 ) -> io::Result<()> {
     #[cfg(feature = "postgres")]
     if let Some(config) = options.source.selected_store() {
-        if matches!(config.backend, crate::storage::StoreBackend::Postgres { .. }) {
-            return crate::storage::postgres::host::enqueue_sources(config, options, inputs).map_err(io::Error::other);
+        if matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        ) {
+            return crate::storage::postgres::host::enqueue_sources(config, options, inputs)
+                .map_err(io::Error::other);
         }
     }
     let (_, _, journal) = open_admitted(&super::EventCache::path(&options.cache), &options.source)

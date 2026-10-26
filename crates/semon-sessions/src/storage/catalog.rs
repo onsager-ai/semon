@@ -504,7 +504,9 @@ pub(crate) trait CatalogSnapshot {
         &'a self,
         path: &std::path::Path,
     ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
-        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(path)?))
+        Ok(Box::new(crate::facts::source_authority::Sources::sqlite(
+            path,
+        )?))
     }
     fn presentation_observations(
         &self,
