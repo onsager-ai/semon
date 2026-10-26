@@ -25,7 +25,8 @@ impl TransferInbox {
     }
 
     /// Materialize this complete bounded family into an empty destination Facts
-    /// region. Rows, stamp and exact snapshot receipt commit together. Other
+    /// region before any Native/Catalog data is present. Rows, stamp and exact
+    /// snapshot receipt commit together. Other
     /// Source families remain unqualified and grant no ownership authority.
     pub fn materialize_reported_facts(
         &self,
@@ -74,8 +75,11 @@ pub(crate) fn capture_reported(
     runs: Vec<ReportedRunSnapshot>,
     stamp: Option<ReportedFileStamp>,
 ) -> Result<SnapshotManifest, StorageError> {
-    if runs.len() > MAX_PAGE_ROWS || (stamp.is_none() && !runs.is_empty()) {
+    if runs.len() > MAX_PAGE_ROWS {
         return Err(StorageError::Busy);
+    }
+    if stamp.is_none() && !runs.is_empty() {
+        return Err(StorageError::ScopeChanged);
     }
     let facts = runs
         .into_iter()
@@ -321,10 +325,13 @@ pub(crate) mod tests {
     fn cache(config: &StoreConfig) -> crate::events::EventCache {
         match &config.backend {
             StoreBackend::Sqlite { .. } => crate::events::EventCache::open_semantic(
-                super::super::super::sqlite::semantic::SemanticStaging::admit(config).unwrap()
-            ).unwrap(),
+                super::super::super::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+            )
+            .unwrap(),
             #[cfg(feature = "postgres")]
-            StoreBackend::Postgres { .. } => crate::events::EventCache::open_configured(config).unwrap(),
+            StoreBackend::Postgres { .. } => {
+                crate::events::EventCache::open_configured(config).unwrap()
+            }
         }
     }
 
@@ -370,8 +377,14 @@ pub(crate) mod tests {
         let expected = read(&source);
         assert_eq!(expected.len(), 2);
         let manifest = stage(&source, &target, &[1; 32]);
-        let separate_capture = source.transfer_inbox().snapshot_reported_facts(&[5; 32]).unwrap();
-        assert_ne!(separate_capture.digest, manifest.digest, "equal source content must still retain distinct capture identities");
+        let separate_capture = source
+            .transfer_inbox()
+            .snapshot_reported_facts(&[5; 32])
+            .unwrap();
+        assert_ne!(
+            separate_capture.digest, manifest.digest,
+            "equal source content must still retain distinct capture identities"
+        );
         assert!(
             read(&target).is_empty(),
             "inbox alone must not materialize Facts"
@@ -386,9 +399,18 @@ pub(crate) mod tests {
         );
         let db = rusqlite::Connection::open(target.backend.sqlite_database().unwrap()).unwrap();
         db.execute_batch("CREATE TRIGGER transfer228_authority_fault BEFORE INSERT ON meta WHEN NEW.key GLOB 'native_transfer_v1:*:reported-materialized' BEGIN SELECT RAISE(ABORT,'injected authoritative commit fault'); END;").unwrap();
-        assert!(target.transfer_inbox().materialize_reported_facts(&manifest).is_err());
-        assert!(read(&target).is_empty(), "Facts rows and stamp must roll back with receipt failure");
-        db.execute_batch("DROP TRIGGER transfer228_authority_fault").unwrap();
+        assert!(
+            target
+                .transfer_inbox()
+                .materialize_reported_facts(&manifest)
+                .is_err()
+        );
+        assert!(
+            read(&target).is_empty(),
+            "Facts rows and stamp must roll back with receipt failure"
+        );
+        db.execute_batch("DROP TRIGGER transfer228_authority_fault")
+            .unwrap();
         drop(db);
         let checkpoint = target
             .transfer_inbox()
