@@ -232,21 +232,37 @@ impl Query {
             let id = args["id"].as_str().expect("validated focused id");
             let mut selected = None;
             for (source_key, source) in &self.sources.machines {
-                let key = if source_key.is_empty() { "local" } else { source_key };
-                if let Some(target) = source.local_query_target(id, now)
+                let key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                };
+                if let Some(target) = source
+                    .local_query_target(id, now)
                     .map_err(|error| QueryError::io(&error))?
                 {
                     if selected.is_some() {
-                        return Err(QueryError::new("id_conflict", format!("two machines both have {id}")));
+                        return Err(QueryError::new(
+                            "id_conflict",
+                            format!("two machines both have {id}"),
+                        ));
                     }
                     selected = Some((key.to_owned(), target));
                 }
             }
             let (source_key, target) = selected.ok_or_else(|| QueryError::unknown_session(id))?;
-            let reader = provider.map(|factory| factory(&source_key, &target))
-                .transpose().map_err(|error| QueryError::io(&error))?;
+            let reader = provider
+                .map(|factory| factory(&source_key, &target))
+                .transpose()
+                .map_err(|error| QueryError::io(&error))?;
             return self.execute_selected_at(
-                &source_key, &target, tool, args, reader.as_deref(), mode, now,
+                &source_key,
+                &target,
+                tool,
+                args,
+                reader.as_deref(),
+                mode,
+                now,
             );
         }
         self.execute_catalog_store_at(tool, args, provider, mode, now, None)
@@ -370,7 +386,8 @@ impl Query {
             .machines
             .iter()
             .map(|(_, source)| {
-                source.query_runtime()
+                source
+                    .query_runtime()
                     .map_err(|error| QueryError::io(&error))
             })
             .collect::<Result<_, _>>()?;

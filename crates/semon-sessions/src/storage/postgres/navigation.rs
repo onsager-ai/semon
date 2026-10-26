@@ -87,9 +87,16 @@ pub(crate) fn query_target(
         }
         let mut targets = std::collections::BTreeSet::new();
         for harness in ["claude", "codex", "copilot"] {
-            targets.extend(snapshot.native_resolution(
-                harness, key, crate::CatalogReadScope::RetainedHistory, Some(&generation),
-            )?.keys);
+            targets.extend(
+                snapshot
+                    .native_resolution(
+                        harness,
+                        key,
+                        crate::CatalogReadScope::RetainedHistory,
+                        Some(&generation),
+                    )?
+                    .keys,
+            );
         }
         if targets.len() > 1 {
             return Err(StorageError::Conflict);
