@@ -29,6 +29,7 @@ pub(crate) fn source_proof_observation(
         let bytes = found
             .get::<_, Option<Vec<u8>>>(1)
             .ok_or(StorageError::Busy)?;
+        crate::selected_read::charge(0, bytes.len()).map_err(|_| StorageError::Busy)?;
         let row: crate::model::summary::CatalogRow =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         if row.key != key || row.harness != root || row.sources.len() > 64 {
