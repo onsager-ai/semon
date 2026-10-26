@@ -1,3 +1,4 @@
+use crate::storage::native_events::NativeEventStore;
 use crate::facts::ReportedRunSnapshot;
 
 use super::*;
