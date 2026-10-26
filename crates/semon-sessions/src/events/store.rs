@@ -897,8 +897,11 @@ pub(super) fn open_scoped(
 
 /// Qualify an exact selected or recovery path without traversing unrelated
 /// archived markers. An existing database is never initialized or reset here.
-pub(crate) fn open_selected(path: &Path) -> Result<(), String> {
-    SqliteStore::attempt_selected(path)
+pub(crate) fn open_selected(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+) -> Result<(), String> {
+    SqliteStore::attempt_selected(path, namespace)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -1438,8 +1441,14 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let namespace = options
+        .source
+        .config(&options.cache)
+        .map_err(io::Error::other)?
+        .namespace;
+    let (store, _) =
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true, &namespace)
+            .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for input in inputs {
@@ -2141,6 +2150,12 @@ pub(crate) fn focused_unbound_connection(path: &Path) -> io::Result<Connection> 
     }
     read.commit().map_err(io::Error::other)?;
     Ok(db)
+}
+
+/// The single logical source bound by SqliteStore fixtures.
+#[cfg(test)]
+pub(crate) fn fixture_namespace() -> crate::storage::LogicalSourceNamespace {
+    crate::storage::LogicalSourceNamespace::new("fixture-source").unwrap()
 }
 
 #[cfg(test)]
@@ -4333,11 +4348,18 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn attempt(path: &Path) -> Result<(Self, Loaded), Unopened> {
-        Self::attempt_scoped(path, false)
+    fn attempt(
+        path: &Path,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<(Self, Loaded), Unopened> {
+        Self::attempt_scoped(path, false, namespace)
     }
 
-    fn attempt_scoped(path: &Path, scoped: bool) -> Result<(Self, Loaded), Unopened> {
+    fn attempt_scoped(
+        path: &Path,
+        scoped: bool,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -4378,6 +4400,9 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(classify)?;
+        // Every statement reads and writes through the bound namespace.
+        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
+            .map_err(|error| Unopened::Other(error.to_string()))?;
         match init(&mut connection).map_err(classify)? {
             Init::Ready => {}
             Init::NoWal => {
@@ -4418,10 +4443,13 @@ impl SqliteStore {
     /// Opens an existing current store for bounded selected or recovery work.
     /// Unlike producer opens, this does not initialize storage or inspect
     /// unrelated archived markers.
-    fn attempt_selected(path: &Path) -> Result<Self, Unopened> {
+    fn attempt_selected(
+        path: &Path,
+        namespace: &crate::storage::LogicalSourceNamespace,
+    ) -> Result<Self, Unopened> {
         crate::native_timing::discovery_count(|counts| counts.factory_opens += 1);
         if !path.exists() {
-            return Self::attempt_scoped(path, true).map(|(store, _)| store);
+            return Self::attempt_scoped(path, true, namespace).map(|(store, _)| store);
         }
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
@@ -4477,6 +4505,8 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(classify)?;
+        crate::storage::sqlite::catalog_namespace::register(&connection, namespace)
+            .map_err(|error| Unopened::Other(error.to_string()))?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
         copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
@@ -7291,10 +7321,10 @@ mod tests {
         let path = root.join("index.sqlite3");
         for selected in [false, true] {
             let mut store = if selected {
-                SqliteStore::attempt_selected(&path)
+                SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace())
                     .unwrap_or_else(|_| panic!("selected factory refused current store"))
             } else {
-                SqliteStore::attempt_scoped(&path, true)
+                SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace())
                     .unwrap_or_else(|_| panic!("producer factory refused current store"))
                     .0
             };
@@ -7535,7 +7565,7 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path) {
+        match SqliteStore::attempt(path, &crate::events::store::fixture_namespace()) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -10064,7 +10094,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, true) {
+                store = match SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()) {
                     Ok((store, _)) => store,
                     Err(error) => panic!("reopen transfer store: {error}"),
                 };
@@ -10230,7 +10260,7 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, true) {
+                match SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()) {
                     Ok((store, loaded)) => {
                         assert!(loaded.files.is_empty());
                         assert!(loaded.reported_runs.is_empty());
@@ -11866,7 +11896,7 @@ mod tests {
             ),
             (
                 "older-with-future-recipe",
-                "PRAGMA user_version=32; INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
+                "PRAGMA user_version=32; INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
                 "older schema",
             ),
             (
@@ -11916,27 +11946,27 @@ mod tests {
             ),
             (
                 "publication",
-                "INSERT INTO meta VALUES('catalog_version','4294967295')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_version','4294967295')",
                 "publication version",
             ),
             (
                 "search",
-                "INSERT INTO meta VALUES('search_version','4294967295')",
+                "INSERT INTO meta VALUES('fixture-source','search_version','4294967295')",
                 "publication version",
             ),
             (
                 "recipe-other-family",
-                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
                 "publication version",
             ),
             (
                 "recipe-older-current-family",
-                "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
+                "INSERT INTO meta VALUES('fixture-source','catalog_semantic_recipe','recorded-origin-turn-native-name-hints-v3')",
                 "publication version",
             ),
             (
                 "archive",
-                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":7}')",
+                "INSERT INTO meta VALUES('fixture-source','archive_event_index:original','{\"version\":7}')",
                 "archived marker version",
             ),
         ] {
@@ -11949,11 +11979,11 @@ mod tests {
                 .write_one("original", None, None, &ledger(1), &full())
                 .unwrap();
             // Custody is deliberately opaque to version classification.
-            store.connection.execute("INSERT INTO session_history_catalog VALUES('original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
+            store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES('archive-custody','original proof')",
+                    "INSERT INTO meta VALUES('fixture-source','archive-custody','original proof')",
                     [],
                 )
                 .unwrap();
@@ -11986,13 +12016,13 @@ mod tests {
                 }
                 _ => panic!("{name} must be explicitly unsupported"),
             };
-            fail(SqliteStore::attempt(&path));
+            fail(SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()));
             unchanged();
-            fail(SqliteStore::attempt_scoped(&path, true));
+            fail(SqliteStore::attempt_scoped(&path, true, &crate::events::store::fixture_namespace()));
             unchanged();
             if name != "archive" {
                 assert!(
-                    SqliteStore::attempt_selected(&path).is_err(),
+                    SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace()).is_err(),
                     "selected {name}"
                 );
                 assert!(focused_unbound_connection(&path).is_err(), "focused {name}");
@@ -12083,7 +12113,7 @@ mod tests {
             .collect::<Vec<_>>();
         for scoped in [false, true] {
             assert!(matches!(
-                SqliteStore::attempt_scoped(&path, scoped),
+                SqliteStore::attempt_scoped(&path, scoped, &crate::events::store::fixture_namespace()),
                 Err(Unopened::Unsupported(_))
             ));
             for (path, bytes) in paths.iter().zip(&before) {
@@ -12092,7 +12122,7 @@ mod tests {
                 assert_eq!(&actual, bytes);
             }
         }
-        assert!(SqliteStore::attempt_selected(&path).is_err());
+        assert!(SqliteStore::attempt_selected(&path, &crate::events::store::fixture_namespace()).is_err());
         assert!(focused_unbound_connection(&path).is_err());
         for (path, bytes) in paths.iter().zip(&before) {
             assert_eq!(&fs::read(path).unwrap(), bytes);
@@ -12241,7 +12271,7 @@ mod tests {
                 *live_writer.borrow_mut() = Some(db);
             }));
         });
-        match SqliteStore::attempt(&path) {
+        match SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()) {
             Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
             _ => panic!("the concurrently committed WAL version must be refused"),
         }
@@ -12791,7 +12821,7 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()).unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -12812,7 +12842,7 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (store, _) = SqliteStore::attempt(&path, &crate::events::store::fixture_namespace()).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")

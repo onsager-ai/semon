@@ -3084,7 +3084,7 @@ mod tests {
             prefix: sha2::Sha256::digest(b"").into(),
             tail: sha2::Sha256::digest(b"").into(),
         };
-        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"))
+        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"), &crate::events::store::fixture_namespace())
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
