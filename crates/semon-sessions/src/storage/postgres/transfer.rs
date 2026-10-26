@@ -296,7 +296,7 @@ mod tests {
             assert_eq!(serde_json::to_value(&native.extras).unwrap(),serde_json::to_value(&expected_native.extras).unwrap());
             assert_eq!(native.usage(),expected_native.usage());
             assert_eq!(native.native_usage_history_sizes(),expected_native.native_usage_history_sizes());
-            assert_eq!(serde_json::to_value(&native.signals).unwrap(),serde_json::to_value(&expected_native.signals).unwrap());
+            assert_eq!(native.signals,expected_native.signals);
             let chunks = native.source_chunks.as_ref().unwrap();
             assert_eq!(chunks.hashes,expected_chunks.hashes);
             assert_eq!(chunks.fingerprint(),expected_chunks.fingerprint());
