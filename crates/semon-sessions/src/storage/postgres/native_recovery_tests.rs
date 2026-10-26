@@ -194,4 +194,74 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         native_ingest_tests::batch_snapshot(&pool, &namespace, &control),
         baseline
     );
+    // A partial publication over the same >64 owner Current carries every
+    // unmentioned owner byte-identical by bounded pages. An unmentioned owner
+    // of a claimed Source is connected and refuses; its transaction rolls back.
+    let successor = "7".repeat(64);
+    let mentioned = vec![{
+        use sha2::Digest;
+        sha2::Sha256::digest(b"absent mentioned owner").to_vec()
+    }];
+    let claimed = prepared_rows[1].sources[0]
+        .path
+        .to_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,generation,path_digest,source_path,$3,0,false FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &"8".repeat(64).as_bytes()]).map_err(sqlstate::error)?;
+        Ok(())
+    })
+    .unwrap();
+    let refused = pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
+        super::catalog_effects::carry::unmentioned(
+            tx,
+            &successor,
+            &generation,
+            &mentioned,
+            std::slice::from_ref(&claimed),
+        )
+    });
+    assert!(matches!(refused, Err(StorageError::NamespaceUpgradePending)));
+    let carried = pool.transaction(&namespace, txn::TxnKind::Write, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        let carried = super::catalog_effects::carry::unmentioned(
+            tx,
+            &successor,
+            &generation,
+            &mentioned,
+            &[],
+        )?;
+        let mut differences = Vec::new();
+        for (table, columns) in [
+            (
+                "catalog_rows",
+                "key_digest,session_key,metadata,last_ms,harness,repo,model",
+            ),
+            (
+                "catalog_sources",
+                "key_digest,session_key,path_digest,source_path,metadata",
+            ),
+            (
+                "catalog_proofs",
+                "path_digest,source_path,page_generation,usage_generation,usage_ready",
+            ),
+        ] {
+            let count: i64 = tx.driver.query_one(&format!("SELECT count(*) FROM (((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3)) UNION ALL ((SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3) EXCEPT ALL (SELECT {columns} FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2))) d"), &[&ns, &generation.as_bytes(), &successor.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            differences.push((table, count));
+        }
+        Ok((carried, differences))
+    })
+    .unwrap();
+    assert_eq!(carried.0, prepared_rows.len() as u64);
+    assert!(carried.0 > 64);
+    assert_eq!(
+        carried.1,
+        vec![
+            ("catalog_rows", 0),
+            ("catalog_sources", 0),
+            ("catalog_proofs", 0),
+        ]
+    );
 }
