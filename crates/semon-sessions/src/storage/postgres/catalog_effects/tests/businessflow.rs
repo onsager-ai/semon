@@ -1431,10 +1431,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         &row.key,
                         &reference,
                     );
-                    if row.harness == "copilot" && !source.path.exists() {
-                        // This fixture's host independently retained the bytes
-                        // outside the input roots. It can authorize the body,
-                        // but Source cannot certify a vanished local carrier.
+                    let parked_agent = row.harness == "claude"
+                        && (source.path == claude_agent || source.path == claude_agent191);
+                    if !source.path.exists() && (row.harness == "copilot" || parked_agent) {
+                        // The fixture's host independently retained these
+                        // bytes outside the input roots. Source cannot certify
+                        // a vanished local carrier.
                         assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
                         continue;
                     }
