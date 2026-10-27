@@ -203,7 +203,18 @@ pub(crate) fn capture(
             return Err(StorageError::ScopeChanged);
         }
         if state.native && !state.done {
-            return capture_native(tx, &mut state);
+            return capture_native(tx, &mut state).map_err(|error| {
+                #[cfg(test)]
+                eprintln!(
+                    "transfer capture refused: family={} page={} cursor_bytes={} key_bytes={} retained={} error={error:?}",
+                    state.native_family,
+                    state.checkpoint.sequence,
+                    state.cursor.as_ref().map_or(0, |(key, _)| key.len()),
+                    state.native_key.as_ref().map_or(0, String::len),
+                    state.native_backing.is_some(),
+                );
+                error
+            });
         }
         if state.done {
             return Ok(state.progress());
