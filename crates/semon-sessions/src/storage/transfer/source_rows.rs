@@ -4,10 +4,22 @@ use super::*;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum SourceJournalRecord {
-    State { revision: i64, backfill: Option<String> },
-    Selected { value: String },
-    Claim { path: String, revision: i64, reason: String, observed_at: i64 },
-    Member { path: String },
+    State {
+        revision: i64,
+        backfill: Option<String>,
+    },
+    Selected {
+        value: String,
+    },
+    Claim {
+        path: String,
+        revision: i64,
+        reason: String,
+        observed_at: i64,
+    },
+    Member {
+        path: String,
+    },
 }
 
 impl SourceJournalRecord {
@@ -23,7 +35,11 @@ impl SourceJournalRecord {
     pub(crate) fn validate(&self) -> Result<(), StorageError> {
         match self {
             Self::State { revision, backfill } => {
-                if *revision < 0 || backfill.as_deref().is_some_and(|v| !["discovering", "draining", "complete"].contains(&v)) {
+                if *revision < 0
+                    || backfill
+                        .as_deref()
+                        .is_some_and(|v| !["discovering", "draining", "complete"].contains(&v))
+                {
                     return Err(StorageError::ScopeChanged);
                 }
             }

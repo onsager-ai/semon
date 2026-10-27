@@ -364,7 +364,9 @@ pub(crate) fn apply(
         }
         if page.first {
             let source_owned: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_source_journal WHERE namespace=?1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_backfill_sources WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='slot_upgrade_selected')", [tx.1], |r| r.get(0)).map_err(failed)?;
-            if source_owned { return Err(StorageError::Conflict); }
+            if source_owned {
+                return Err(StorageError::Conflict);
+            }
             let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp') OR EXISTS(SELECT 1 FROM files WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_history_catalog WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
             let published: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_generation','native_transfer_v1:catalog-content-generation') AND value<>'') OR EXISTS(SELECT 1 FROM main.storage_semantic_publications WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
             if occupied || published || catalog::occupied(tx)? {

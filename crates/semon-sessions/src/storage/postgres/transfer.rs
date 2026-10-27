@@ -260,7 +260,9 @@ pub(crate) fn apply(
         let ns = config.namespace.as_str().as_bytes();
         if page.first {
             let source_owned: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_source_members WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='slot_upgrade_selected')", &[&ns]).map_err(sqlstate::error)?.get(0);
-            if source_owned { return Err(StorageError::Conflict); }
+            if source_owned {
+                return Err(StorageError::Conflict);
+            }
             let occupied:bool=tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_reported_stamp WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1)", &[&ns]).map_err(sqlstate::error)?.get(0);
             let published:bool=tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NOT NULL) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='native_transfer_v1:catalog-content-generation')", &[&ns]).map_err(sqlstate::error)?.get(0);
             if occupied || published || catalog::occupied(tx)? {
@@ -301,45 +303,93 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_selected_pending_claims_resume_both_directions() {
-        use transfer::reported::tests::{apply, root, sqlite, stage};
         use crate::storage::source_observations::{SourceObservationStore, SourceOperation};
+        use transfer::reported::tests::{apply, root, sqlite, stage};
         fn observations(config: &StoreConfig) -> Box<dyn SourceObservationStore> {
             match &config.backend {
-                StoreBackend::Sqlite { .. } => Box::new(crate::storage::sqlite::source_journal::SourceJournal::owned(crate::events::store::configured::NativeOwnership::restore_transfer(config).unwrap())),
+                StoreBackend::Sqlite { .. } => Box::new(
+                    crate::storage::sqlite::source_journal::SourceJournal::owned(
+                        crate::events::store::configured::NativeOwnership::restore_transfer(config)
+                            .unwrap(),
+                    ),
+                ),
                 StoreBackend::Postgres { .. } => config.source_observations().unwrap(),
             }
         }
         let root = root();
         let source = sqlite(&root, "pending-source");
         let reverse = sqlite(&root, "pending-reverse");
-        let paths = (0..70).map(|n| format!("pending-{n:03}")).collect::<Vec<_>>();
-        let discover = SourceOperation::capture(source.namespace.as_str(), "discover", &serde_json::to_vec(&(&paths, true)).unwrap());
-        observations(&source).discover(&discover, &paths, true).unwrap();
-        let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
-        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+        let paths = (0..70)
+            .map(|n| format!("pending-{n:03}"))
+            .collect::<Vec<_>>();
+        let discover = SourceOperation::capture(
+            source.namespace.as_str(),
+            "discover",
+            &serde_json::to_vec(&(&paths, true)).unwrap(),
+        );
+        observations(&source)
+            .discover(&discover, &paths, true)
+            .unwrap();
+        let owner =
+            crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+            .connection()
+            .unwrap();
         let marker = serde_json::to_string(&vec![paths[69].clone()]).unwrap();
-        db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_upgrade_selected',?2)", rusqlite::params![source.namespace.as_str(),marker]).unwrap();
+        db.execute(
+            "INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_upgrade_selected',?2)",
+            rusqlite::params![source.namespace.as_str(), marker],
+        )
+        .unwrap();
         drop(db);
         let expected = observations(&source).claims(&paths).unwrap();
-        assert_eq!(observations(&source).pending(3).unwrap(), vec![paths[69].clone()]);
+        assert_eq!(
+            observations(&source).pending(3).unwrap(),
+            vec![paths[69].clone()]
+        );
         let (pool, _) = super::super::tests::fixture(|_| {});
-        let config = StoreConfig { backend: StoreBackend::Postgres { pool, control: PgCancellation::default() }, namespace: source.namespace.clone(), expected_stream_epoch: source.expected_stream_epoch.clone() };
+        let config = StoreConfig {
+            backend: StoreBackend::Postgres {
+                pool,
+                control: PgCancellation::default(),
+            },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
         config.create_native_store().unwrap();
         let manifest = stage(&source, &config, &[126; 32]);
         apply(&config, &manifest);
         assert_eq!(observations(&config).claims(&paths).unwrap(), expected);
-        assert_eq!(observations(&config).backfill_state().unwrap().as_deref(), Some("draining"));
-        assert_eq!(observations(&config).pending(3).unwrap(), vec![paths[69].clone()]);
+        assert_eq!(
+            observations(&config).backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
+        assert_eq!(
+            observations(&config).pending(3).unwrap(),
+            vec![paths[69].clone()]
+        );
         let selected = vec![expected[69].clone()];
-        let resume = SourceOperation::capture(config.namespace.as_str(), "invalidate", &serde_json::to_vec(&selected).unwrap());
-        observations(&config).invalidate(&resume, &selected).unwrap();
+        let resume = SourceOperation::capture(
+            config.namespace.as_str(),
+            "invalidate",
+            &serde_json::to_vec(&selected).unwrap(),
+        );
+        observations(&config)
+            .invalidate(&resume, &selected)
+            .unwrap();
         let resumed = observations(&config).claims(&paths).unwrap();
         assert_ne!(resumed[69], expected[69]);
         let backwards = stage(&config, &reverse, &[127; 32]);
         apply(&reverse, &backwards);
         assert_eq!(observations(&reverse).claims(&paths).unwrap(), resumed);
-        assert_eq!(observations(&reverse).pending(3).unwrap(), vec![paths[69].clone()]);
-        assert_eq!(observations(&reverse).backfill_state().unwrap().as_deref(), Some("draining"));
+        assert_eq!(
+            observations(&reverse).pending(3).unwrap(),
+            vec![paths[69].clone()]
+        );
+        assert_eq!(
+            observations(&reverse).backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

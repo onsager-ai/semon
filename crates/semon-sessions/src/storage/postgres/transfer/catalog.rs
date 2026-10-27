@@ -654,8 +654,12 @@ mod tests {
         crate::events::store::configured::NativeOwnership::admit(&prior).unwrap();
         let reverse = sqlite(&root, "pg-catalog-reverse");
         assert_ne!(
-            crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap().admission(),
-            crate::events::store::configured::NativeOwnership::restore_transfer(&reverse).unwrap().admission(),
+            crate::events::store::configured::NativeOwnership::restore_transfer(&source)
+                .unwrap()
+                .admission(),
+            crate::events::store::configured::NativeOwnership::restore_transfer(&reverse)
+                .unwrap()
+                .admission(),
         );
         use crate::storage::proof_lifetime::ProofReaderLease;
         let (options, initial) = seed_catalog(&source, &root);
@@ -978,7 +982,12 @@ mod tests {
         apply(&reverse, &backwards);
         let mut wrong_epoch = reverse.clone();
         wrong_epoch.expected_stream_epoch = Some("b".repeat(64));
-        assert!(wrong_epoch.transfer_inbox().admit_catalog_from(&config.transfer_inbox(), &backwards, &options).is_err());
+        assert!(
+            wrong_epoch
+                .transfer_inbox()
+                .admit_catalog_from(&config.transfer_inbox(), &backwards, &options)
+                .is_err()
+        );
         assert_eq!(
             reverse
                 .transfer_inbox()
