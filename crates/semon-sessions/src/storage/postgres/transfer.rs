@@ -347,7 +347,9 @@ mod tests {
             observations(&source).pending(3).unwrap(),
             vec![paths[69].clone()]
         );
-        let (pool, _) = super::super::tests::fixture(|_| {});
+        let (pool, _) = super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
         let config = StoreConfig {
             backend: StoreBackend::Postgres {
                 pool,

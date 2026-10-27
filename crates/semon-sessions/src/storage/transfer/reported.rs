@@ -381,6 +381,10 @@ pub(crate) fn prepare_apply(
                     && !matches!(
                         category.category,
                         Category::ReportedFacts
+                            | Category::SourceState
+                            | Category::StagedWork
+                            | Category::Claims
+                            | Category::SourceMembers
                             | Category::Metadata
                             | Category::Ledgers
                             | Category::Events
