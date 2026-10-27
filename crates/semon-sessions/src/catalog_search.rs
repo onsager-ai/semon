@@ -679,7 +679,10 @@ fn read_filtered(
                     [key],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )?;
-                eprintln!("catalog_search_metadata_state catalog={} current={} history={}", state.0, state.1, state.2);
+                eprintln!(
+                    "catalog_search_metadata_state catalog={} current={} history={}",
+                    state.0, state.1, state.2
+                );
             }
             record_steps(&metadata);
             Ok(found)
