@@ -415,7 +415,10 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             &serde_json::to_vec(&(&paths, true)).unwrap(),
         );
         journal.discover(&operation, &paths, true).unwrap();
-        assert_eq!(journal.backfill_state().unwrap().as_deref(), Some("draining"));
+        assert_eq!(
+            journal.backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
         db.execute_batch("UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='long'; INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         crate::invalidate_session_sources(
             &home.options,

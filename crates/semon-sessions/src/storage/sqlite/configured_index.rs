@@ -285,10 +285,14 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         paths: &[String],
         runtime: &str,
-        _journaled_runtime: bool,
+        journaled_runtime: bool,
     ) -> Result<Outcome, StoreError> {
         if let Some(stage) = &mut self.semantic {
-            return stage.begin(paths, runtime);
+            return if journaled_runtime {
+                stage.begin_with_journal(paths, runtime, true)
+            } else {
+                stage.begin(paths, runtime)
+            };
         }
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
