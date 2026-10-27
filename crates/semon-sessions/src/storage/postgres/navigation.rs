@@ -21,23 +21,44 @@ pub(crate) fn captured_source_proof(
     key: &str,
     reference: &crate::SessionSourceRef,
 ) -> Result<crate::SessionSourceProof, StorageError> {
+    macro_rules! stage {
+        ($name:literal, $result:expr) => {{
+            let result = $result;
+            #[cfg(test)]
+            if result.is_err() {
+                eprintln!("captured source proof stage={}", $name);
+            }
+            result
+        }};
+    }
+    macro_rules! refusal {
+        ($name:literal) => {{
+            stage!($name, Err(StorageError::ScopeChanged))
+        }};
+    }
     if key.is_empty() || key.len() > 4096 || !crate::is_input_path(&reference.root, &reference.path)
     {
         return Err(StorageError::InvalidArguments);
     }
-    super::require_configured(config, pool, control)?;
-    let pool = pool.bind_source(
-        &config.namespace,
-        config.expected_stream_epoch.as_deref(),
-        control,
+    stage!("configured", super::require_configured(config, pool, control))?;
+    let pool = stage!(
+        "binding",
+        pool.bind_source(
+            &config.namespace,
+            config.expected_stream_epoch.as_deref(),
+            control,
+        )
     )?;
-    snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
-        let history = snapshot.catalog(key, true)?.is_some();
-        let (row, header, _) = snapshot
-            .selected(key, history, 0, 1)?
-            .ok_or(StorageError::ScopeChanged)?;
+    let result = snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
+        let history = stage!("catalog", snapshot.catalog(key, true))?.is_some();
+        let (row, header, _) = stage!(
+            "selected",
+            snapshot.selected(key, history, 0, 1).and_then(|selected| {
+                selected.ok_or(StorageError::ScopeChanged)
+            })
+        )?;
         if header.1 != crate::slot_projection::VERSION {
-            return Err(StorageError::ScopeChanged);
+            return refusal!("recipe_version");
         }
         let source = row
             .sources
@@ -51,14 +72,21 @@ pub(crate) fn captured_source_proof(
                     && source.prefix_sha256 == reference.prefix_sha256
                     && source.tail_sha256 == reference.tail_sha256
             })
-            .ok_or(StorageError::ScopeChanged)?;
+            .ok_or_else(|| {
+                #[cfg(test)]
+                eprintln!("captured source proof stage=source_witness");
+                StorageError::ScopeChanged
+            })?;
         // Qualify the exact persisted prefix under this publication's lease.
         // A historical recipe's old descriptor clocks are not a witness for
         // today's covering file. The host separately verifies Native block
         // hashes while copying bytes using the returned current descriptor.
         let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
         let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
-        super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)?;
+        stage!(
+            "native_proof",
+            super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)
+        )?;
         tx.check()?;
         let ledger = crate::source_carrier::ledger(source);
         let relocation = super::native_keys::read_meta(
@@ -78,19 +106,22 @@ pub(crate) fn captured_source_proof(
                 || proof.native_id != reference.native_id
                 || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger))
             {
-                return Err(StorageError::ScopeChanged);
+                return refusal!("relocation_witness");
             }
             let path = std::path::Path::new(&proof.new_path);
             let mut covering = source.clone();
             covering.path = path.to_owned();
             if crate::catalog::source_relative(options, &row.harness, &covering).is_none() {
-                return Err(StorageError::ScopeChanged);
+                return refusal!("relocation_path");
             }
             (path, proof.after.stat)
         } else {
             (source.path.as_path(), ledger.stat)
         };
-        let file = crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+        let file = stage!(
+            "physical_open",
+            crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)
+        )?;
         let stat = crate::events::Stat::from_metadata(
             &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
         )
@@ -99,7 +130,7 @@ pub(crate) fn captured_source_proof(
             || stat.ino != physical_owner.ino
             || stat.size < source.offset
         {
-            return Err(StorageError::ScopeChanged);
+            return refusal!("physical_identity");
         }
         let named =
             std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
@@ -107,7 +138,7 @@ pub(crate) fn captured_source_proof(
             || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)?
                 != stat
         {
-            return Err(StorageError::ScopeChanged);
+            return refusal!("physical_named_identity");
         }
         tx.check()?;
         Ok(crate::SessionSourceProof {
@@ -121,7 +152,8 @@ pub(crate) fn captured_source_proof(
                 state: "retained".into(),
             },
         })
-    })
+    });
+    stage!("admitted_snapshot", result)
 }
 
 pub(crate) fn source_proof_observation(
