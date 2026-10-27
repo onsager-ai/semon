@@ -294,12 +294,12 @@ mod tests {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_version',?1)",
+            "INSERT INTO meta VALUES('','catalog_version',?1)",
             [CATALOG_VERSION.to_string()],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO meta VALUES('catalog_generation',?1)",
+            "INSERT INTO meta VALUES('','catalog_generation',?1)",
             ["a".repeat(64)],
         )
         .unwrap();
