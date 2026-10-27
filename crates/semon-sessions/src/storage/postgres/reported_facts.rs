@@ -469,7 +469,10 @@ mod tests {
                 .unwrap();
         }
         std::fs::remove_file(&input).unwrap();
-        let cache = EventCache::open(&cache_path, &source).unwrap();
+        let mut cache = EventCache::open(&cache_path, &source).unwrap();
+        cache
+            .select_reported_runs(&std::collections::BTreeSet::from(["原生\0id".into()]))
+            .unwrap();
         let runs = cache.reported_runs().cloned().collect::<Vec<_>>();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].last_duration, Some(u64::MAX));
