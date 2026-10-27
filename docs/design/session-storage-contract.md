@@ -178,6 +178,10 @@ completes an actually empty manifest. Current materialization includes reported
 Facts/stamps, native file/event/usage pages and Catalog content with original
 publication receipts, proof generations and presentations. These mappings remain
 partially qualified; physical row IDs are adapter-local.
+Source journal revision/backfill, exact selected-demand marker, invalidation
+claims and source membership now have fixed typed pages and authoritative target
+effects, independent of Catalog presence. This does not cover all pending state:
+Raw intents/completions, unfinished producer stages and feed floors remain gaps.
 The source freeze and incoming-target markers fence ordinary writes, including
 PG lifecycle writes. Core-row tests exercise pagination, absent-Raw SQLite
 reads and reverse transfer after new PG writes.
@@ -192,7 +196,11 @@ name the same logical namespace and stream. For PostgreSQL with canonical Facts,
 the existing ordinary producer prepares the Facts selection head outside SQL row
 locks before the final import transaction rechecks the target checkpoint. Original
 producer receipts remain unchanged. This Catalog-scoped operation and its ordinary
-reader path still require qualification; copied content alone is not an ACK.
+destination admission are separate: the import receipt records the target epoch,
+and imported publication bindings authorize local leases while their original
+producer coordinates and proof IDs remain immutable. Namespace/stream and the
+fully applied frozen-source checkpoint are still checked. This operation's
+reader path still requires qualification; copied content alone is not an ACK.
 Source quiesce,
 unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
 final qualification and qualified reverse transfer remain undelivered. The
@@ -320,6 +328,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
 | `storage/transfer/reported_tests.rs` | direct | Test-only admitted SQLite context for authoritative Facts round trips; production SQL stays in adapters. Full transfer qualification remains incomplete. |
+| `storage/postgres/transfer.rs` | direct | Test-only admitted SQLite seed for the exact selected pending marker; journal/claims are read and resumed through ordinary Source observation ports in both directions. Full pending-state transfer remains incomplete. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |

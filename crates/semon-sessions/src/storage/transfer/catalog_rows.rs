@@ -3,6 +3,36 @@
 use super::*;
 pub(crate) const IMPORTED_GENERATION: &str = "native_transfer_v1:catalog-content-generation";
 
+// Producer coordinates remain in the immutable receipt. These local records
+// bind that receipt to the destination import; application alone grants nothing.
+pub(crate) fn bind_imported_publication(
+    tx: &mut impl InboxTransaction,
+    generation: &str,
+    kind: CatalogRowKind,
+    values: &[serde_json::Value],
+) -> Result<(), StorageError> {
+    if kind == CatalogRowKind::PublicationReceipt {
+        let publication = values[0].as_str().ok_or(StorageError::ScopeChanged)?;
+        tx.put(
+            &format!("native_transfer_v1:publication:{publication}"),
+            generation.as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_imported_publications(
+    tx: &mut impl InboxTransaction,
+    generation: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<(), StorageError> {
+    tx.put(
+        &format!("native_transfer_v1:catalog-owner:{generation}"),
+        format!("{admission}:{stream}").as_bytes(),
+    )
+}
+
 pub(crate) fn bind_imported_generation(
     tx: &mut impl InboxTransaction,
     generation: &str,

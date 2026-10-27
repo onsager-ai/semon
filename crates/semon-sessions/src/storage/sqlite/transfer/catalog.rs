@@ -323,6 +323,7 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
     verify_authority(tx, *kind, values)?;
+    catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
     if matches!(
         kind,
         CatalogRowKind::HistoryOriginal | CatalogRowKind::HistoryProgress
