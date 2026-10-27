@@ -302,6 +302,175 @@ mod tests {
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
 
     #[test]
+    fn pg_current_transfer225_source_observations_roundtrip_preserves_pending_and_recovery() {
+        use crate::storage::source_observations::{
+            SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        };
+        use transfer::reported::tests::{apply, root, sqlite, stage};
+
+        fn observations(config: &StoreConfig) -> Box<dyn SourceObservationStore> {
+            match &config.backend {
+                StoreBackend::Sqlite { .. } => Box::new(
+                    crate::storage::sqlite::source_journal::SourceJournal::owned(
+                        crate::events::store::configured::NativeOwnership::restore_transfer(config)
+                            .unwrap(),
+                    ),
+                ),
+                StoreBackend::Postgres { .. } => config.source_observations().unwrap(),
+            }
+        }
+
+        let root = root();
+        let source = sqlite(&root, "observation-source");
+        let reverse = sqlite(&root, "observation-reverse");
+        let namespace = source.namespace.as_str();
+        let cursor: Option<String> = None;
+        let recovery_payload = serde_json::to_vec(&cursor).unwrap();
+        let recovery = SourceOperation::capture(namespace, "recover", &recovery_payload);
+        let pending_recovery = SourceOperation::capture(namespace, "recover", &recovery_payload);
+        let stale_cursor = Some("stale-cursor".to_owned());
+        let conflict_recovery = SourceOperation::capture(
+            namespace,
+            "recover",
+            &serde_json::to_vec(&stale_cursor).unwrap(),
+        );
+        let recovery_intent = SourceIntent::Recover {
+            operation: pending_recovery.clone(),
+            cursor: cursor.clone(),
+        };
+        let mut journal = observations(&source);
+        for operation in [&recovery, &pending_recovery] {
+            journal
+                .persist_intent(&SourceIntent::Recover {
+                    operation: operation.clone(),
+                    cursor: cursor.clone(),
+                })
+                .unwrap();
+            assert_eq!(
+                journal.recover(operation, None).unwrap(),
+                (SourceMutationReceipt::Applied, true)
+            );
+        }
+        journal
+            .persist_intent(&SourceIntent::Recover {
+                operation: conflict_recovery.clone(),
+                cursor: stale_cursor.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            journal
+                .recover(&conflict_recovery, stale_cursor.as_deref())
+                .unwrap(),
+            (SourceMutationReceipt::Conflict, false)
+        );
+        // A producer can recapture the same terminal operation after a lost ACK.
+        journal.persist_intent(&recovery_intent).unwrap();
+        let paths = vec!["pending-source-one".to_owned()];
+        let discover = SourceIntent::Discover {
+            operation: SourceOperation::capture(
+                namespace,
+                "discover",
+                &serde_json::to_vec(&(&paths, false)).unwrap(),
+            ),
+            paths,
+            complete: false,
+        };
+        let expected_claims = vec![("pending-source-two".to_owned(), None)];
+        let invalidate = SourceIntent::Invalidate {
+            operation: SourceOperation::capture(
+                namespace,
+                "invalidate",
+                &serde_json::to_vec(&expected_claims).unwrap(),
+            ),
+            expected: expected_claims,
+        };
+        journal.persist_intent(&discover).unwrap();
+        journal.persist_intent(&invalidate).unwrap();
+        drop(journal);
+        let expected = vec![
+            recovery_intent.clone(),
+            discover.clone(),
+            invalidate.clone(),
+        ];
+        assert_eq!(observations(&source).pending_intents().unwrap(), expected);
+
+        let (pool, _) = super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
+        let target = StoreConfig {
+            backend: StoreBackend::Postgres {
+                pool,
+                control: PgCancellation::default(),
+            },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        target.create_native_store().unwrap();
+        let forward = stage(&source, &target, &[152; 32]);
+        apply(&target, &forward);
+        let mut journal = observations(&target);
+        assert_eq!(journal.pending_intents().unwrap(), expected);
+        assert_eq!(
+            journal.recover(&recovery, None).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, true)
+        );
+        assert_eq!(
+            journal
+                .recover(&conflict_recovery, stale_cursor.as_deref())
+                .unwrap(),
+            (SourceMutationReceipt::Conflict, false)
+        );
+        let changed_paths = vec!["different-source".to_owned()];
+        let mut changed_operation = SourceOperation::capture(
+            namespace,
+            "discover",
+            &serde_json::to_vec(&(&changed_paths, false)).unwrap(),
+        );
+        changed_operation.id = discover.operation().id.clone();
+        let rebound = SourceIntent::Discover {
+            operation: changed_operation,
+            paths: changed_paths,
+            complete: false,
+        };
+        assert_eq!(
+            journal.persist_intent(&rebound),
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(journal.pending_intents().unwrap(), expected);
+        drop(journal);
+
+        let backwards = stage(&target, &reverse, &[153; 32]);
+        apply(&reverse, &backwards);
+        let mut journal = observations(&reverse);
+        assert_eq!(journal.pending_intents().unwrap(), expected);
+        assert_eq!(
+            journal.recover(&recovery, None).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, true)
+        );
+        assert_eq!(
+            journal
+                .recover(&conflict_recovery, stale_cursor.as_deref())
+                .unwrap(),
+            (SourceMutationReceipt::Conflict, false)
+        );
+        assert_eq!(
+            journal.persist_intent(&rebound),
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(journal.pending_intents().unwrap(), expected);
+        assert_eq!(
+            journal.recover(&pending_recovery, None).unwrap(),
+            (SourceMutationReceipt::AlreadyApplied, true)
+        );
+        assert_eq!(
+            journal.pending_intents().unwrap(),
+            vec![discover, invalidate]
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn pg_current_transfer225_refuses_existing_source_intent_or_receipt() {
         use transfer::reported::tests::{occupied_source_refuses, root, sqlite};
 
