@@ -143,57 +143,63 @@ impl History<'_, '_> {
             eprintln!("catalog custody stage=header_key");
             return Err(StorageError::ScopeChanged);
         }
-        custody_stage!("write_header", self.effects.put(
-            "semon_pg_native_catalog_history_headers",
-            &[
+        custody_stage!(
+            "write_header",
+            self.effects.put(
+                "semon_pg_native_catalog_history_headers",
+                &[
+                    "key_digest",
+                    "session_key",
+                    "recipe_generation",
+                    "source_generation",
+                    "version",
+                    "total",
+                    "incomplete",
+                    "metadata",
+                    "original_header",
+                    "last_ms",
+                    "harness",
+                    "repo",
+                    "model",
+                ],
                 "key_digest",
-                "session_key",
-                "recipe_generation",
-                "source_generation",
-                "version",
-                "total",
-                "incomplete",
-                "metadata",
-                "original_header",
-                "last_ms",
-                "harness",
-                "repo",
-                "model",
-            ],
-            "key_digest",
-            &[
-                &digest(key.as_bytes()),
-                &key.as_bytes(),
-                &recipe.as_bytes(),
-                &source,
-                &i64::from(*version),
-                total,
-                &incomplete,
-                &metadata.as_bytes(),
-                &original,
-                &row.last.unwrap_or(0),
-                &row.harness.as_bytes(),
-                &row.repo.as_deref().unwrap_or("").as_bytes(),
-                &row.model.as_bytes(),
-            ],
-        ))?;
+                &[
+                    &digest(key.as_bytes()),
+                    &key.as_bytes(),
+                    &recipe.as_bytes(),
+                    &source,
+                    &i64::from(*version),
+                    total,
+                    &incomplete,
+                    &metadata.as_bytes(),
+                    &original,
+                    &row.last.unwrap_or(0),
+                    &row.harness.as_bytes(),
+                    &row.repo.as_deref().unwrap_or("").as_bytes(),
+                    &row.model.as_bytes(),
+                ],
+            )
+        )?;
         self.link(key, self.effects.generation, original.is_some())
     }
     fn put_slot(&self, key: &str, slot: i64, metadata: &str) -> Result<(), StorageError> {
         if metadata.len() > MAX {
             return Err(StorageError::Busy);
         }
-        custody_stage!("put_slot", self.effects.put(
-            "semon_pg_native_catalog_history_slots",
-            &["key_digest", "session_key", "slot", "metadata"],
-            "key_digest,slot",
-            &[
-                &digest(key.as_bytes()),
-                &key.as_bytes(),
-                &slot,
-                &metadata.as_bytes(),
-            ],
-        ))
+        custody_stage!(
+            "put_slot",
+            self.effects.put(
+                "semon_pg_native_catalog_history_slots",
+                &["key_digest", "session_key", "slot", "metadata"],
+                "key_digest,slot",
+                &[
+                    &digest(key.as_bytes()),
+                    &key.as_bytes(),
+                    &slot,
+                    &metadata.as_bytes(),
+                ],
+            )
+        )
     }
 }
 
@@ -331,7 +337,10 @@ impl OriginalHistoryStore for History<'_, '_> {
         for source in &row.sources {
             self.retain_source(row, source)?;
         }
-        custody_stage!("complete_header", self.write_header(&row.key, metadata, header, !complete, Some(original_header)))
+        custody_stage!(
+            "complete_header",
+            self.write_header(&row.key, metadata, header, !complete, Some(original_header))
+        )
     }
 }
 
@@ -369,32 +378,37 @@ impl CompositeHistoryStore for History<'_, '_> {
                 #[cfg(test)]
                 {
                     let prior = tx.driver.query_one("SELECT count(*)>0,coalesce(bool_or(g.ledger=$4),false) FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3", &[&ns, &self.previous.as_bytes(), &path, &receipt.as_bytes()]).ok().map(|row| (row.get::<_, bool>(0), row.get::<_, bool>(1)));
-                    eprintln!("catalog custody stage=retain_proof prior_exists_and_matches={prior:?}");
+                    eprintln!(
+                        "catalog custody stage=retain_proof prior_exists_and_matches={prior:?}"
+                    );
                 }
                 return Err(StorageError::ScopeChanged);
             }
         }
         drop(tx);
-        custody_stage!("retain_source", self.effects.put(
-            "semon_pg_native_catalog_history_sources",
-            &[
-                "key_digest",
-                "session_key",
-                "path_digest",
-                "source_path",
-                "metadata",
-                "native_digest",
-            ],
-            "key_digest,path_digest",
-            &[
-                &digest(row.key.as_bytes()),
-                &row.key.as_bytes(),
-                &digest(path),
-                &path,
-                &encoded(source)?,
-                &digest(source.native_id.as_bytes()),
-            ],
-        ))
+        custody_stage!(
+            "retain_source",
+            self.effects.put(
+                "semon_pg_native_catalog_history_sources",
+                &[
+                    "key_digest",
+                    "session_key",
+                    "path_digest",
+                    "source_path",
+                    "metadata",
+                    "native_digest",
+                ],
+                "key_digest,path_digest",
+                &[
+                    &digest(row.key.as_bytes()),
+                    &row.key.as_bytes(),
+                    &digest(path),
+                    &path,
+                    &encoded(source)?,
+                    &digest(source.native_id.as_bytes()),
+                ],
+            )
+        )
     }
     fn relocated(
         &self,
@@ -547,9 +561,15 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !custody_stage!("preserve_rows", catalog::preserve_rows(&store, publication.rows, &old))? {
+    if !custody_stage!(
+        "preserve_rows",
+        catalog::preserve_rows(&store, publication.rows, &old)
+    )? {
         return Ok(false);
     }
-    custody_stage!("publish_history_rows", catalog::publish_history_rows(&store, publication.rows, publication.transcripts))?;
+    custody_stage!(
+        "publish_history_rows",
+        catalog::publish_history_rows(&store, publication.rows, publication.transcripts)
+    )?;
     Ok(true)
 }

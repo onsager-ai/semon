@@ -32,15 +32,16 @@ pub(crate) fn captured_source_proof(
         }};
     }
     macro_rules! refusal {
-        ($name:literal) => {{
-            stage!($name, Err(StorageError::ScopeChanged))
-        }};
+        ($name:literal) => {{ stage!($name, Err(StorageError::ScopeChanged)) }};
     }
     if key.is_empty() || key.len() > 4096 || !crate::is_input_path(&reference.root, &reference.path)
     {
         return Err(StorageError::InvalidArguments);
     }
-    stage!("configured", super::require_configured(config, pool, control))?;
+    stage!(
+        "configured",
+        super::require_configured(config, pool, control)
+    )?;
     let pool = stage!(
         "binding",
         pool.bind_source(
@@ -49,110 +50,117 @@ pub(crate) fn captured_source_proof(
             control,
         )
     )?;
-    let result = snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
-        let history = stage!("catalog", snapshot.catalog(key, true))?.is_some();
-        let (row, header, _) = stage!(
-            "selected",
-            snapshot.selected(key, history, 0, 1).and_then(|selected| {
-                selected.ok_or(StorageError::ScopeChanged)
-            })
-        )?;
-        if header.1 != crate::slot_projection::VERSION {
-            return refusal!("recipe_version");
-        }
-        let source = row
-            .sources
-            .iter()
-            .find(|source| {
-                row.harness == reference.root
-                    && crate::catalog::source_relative(options, &row.harness, source).as_deref()
-                        == Some(reference.path.as_str())
-                    && source.native_id == reference.native_id
-                    && source.offset == reference.offset
-                    && source.prefix_sha256 == reference.prefix_sha256
-                    && source.tail_sha256 == reference.tail_sha256
-            })
-            .ok_or_else(|| {
-                #[cfg(test)]
-                eprintln!("captured source proof stage=source_witness");
-                StorageError::ScopeChanged
-            })?;
-        // Qualify the exact persisted prefix under this publication's lease.
-        // A historical recipe's old descriptor clocks are not a witness for
-        // today's covering file. The host separately verifies Native block
-        // hashes while copying bytes using the returned current descriptor.
-        let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
-        let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
-        stage!(
-            "native_proof",
-            super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)
-        )?;
-        tx.check()?;
-        let ledger = crate::source_carrier::ledger(source);
-        let relocation = super::native_keys::read_meta(
-            &mut tx,
-            format!("native_catalog_relocation:{absolute}").as_bytes(),
-            1024 * 1024,
-        )?;
-        let relocated = relocation
-            .as_deref()
-            .map(|bytes| {
-                serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes)
-                    .map_err(|_| StorageError::ScopeChanged)
-            })
-            .transpose()?;
-        let (physical_path, physical_owner) = if let Some(proof) = &relocated {
-            if proof.version != 1
-                || proof.native_id != reference.native_id
-                || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger))
+    let result = snapshot::with_admitted_snapshot(
+        &pool,
+        &config.namespace,
+        control,
+        generation,
+        |snapshot| {
+            let history = stage!("catalog", snapshot.catalog(key, true))?.is_some();
+            let (row, header, _) = stage!(
+                "selected",
+                snapshot
+                    .selected(key, history, 0, 1)
+                    .and_then(|selected| { selected.ok_or(StorageError::ScopeChanged) })
+            )?;
+            if header.1 != crate::slot_projection::VERSION {
+                return refusal!("recipe_version");
+            }
+            let source = row
+                .sources
+                .iter()
+                .find(|source| {
+                    row.harness == reference.root
+                        && crate::catalog::source_relative(options, &row.harness, source).as_deref()
+                            == Some(reference.path.as_str())
+                        && source.native_id == reference.native_id
+                        && source.offset == reference.offset
+                        && source.prefix_sha256 == reference.prefix_sha256
+                        && source.tail_sha256 == reference.tail_sha256
+                })
+                .ok_or_else(|| {
+                    #[cfg(test)]
+                    eprintln!("captured source proof stage=source_witness");
+                    StorageError::ScopeChanged
+                })?;
+            // Qualify the exact persisted prefix under this publication's lease.
+            // A historical recipe's old descriptor clocks are not a witness for
+            // today's covering file. The host separately verifies Native block
+            // hashes while copying bytes using the returned current descriptor.
+            let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
+            stage!(
+                "native_proof",
+                super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)
+            )?;
+            tx.check()?;
+            let ledger = crate::source_carrier::ledger(source);
+            let relocation = super::native_keys::read_meta(
+                &mut tx,
+                format!("native_catalog_relocation:{absolute}").as_bytes(),
+                1024 * 1024,
+            )?;
+            let relocated = relocation
+                .as_deref()
+                .map(|bytes| {
+                    serde_json::from_slice::<crate::events::native_commit::CatalogRelocation>(bytes)
+                        .map_err(|_| StorageError::ScopeChanged)
+                })
+                .transpose()?;
+            let (physical_path, physical_owner) = if let Some(proof) = &relocated {
+                if proof.version != 1
+                    || proof.native_id != reference.native_id
+                    || (proof.prior != ledger && proof.catalog_before.as_ref() != Some(&ledger))
+                {
+                    return refusal!("relocation_witness");
+                }
+                let path = std::path::Path::new(&proof.new_path);
+                let mut covering = source.clone();
+                covering.path = path.to_owned();
+                if crate::catalog::source_relative(options, &row.harness, &covering).is_none() {
+                    return refusal!("relocation_path");
+                }
+                (path, proof.after.stat)
+            } else {
+                (source.path.as_path(), ledger.stat)
+            };
+            let file = stage!(
+                "physical_open",
+                crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)
+            )?;
+            let stat = crate::events::Stat::from_metadata(
+                &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
+            )
+            .map_err(|_| StorageError::ScopeChanged)?;
+            if stat.dev != physical_owner.dev
+                || stat.ino != physical_owner.ino
+                || stat.size < source.offset
             {
-                return refusal!("relocation_witness");
+                return refusal!("physical_identity");
             }
-            let path = std::path::Path::new(&proof.new_path);
-            let mut covering = source.clone();
-            covering.path = path.to_owned();
-            if crate::catalog::source_relative(options, &row.harness, &covering).is_none() {
-                return refusal!("relocation_path");
+            let named =
+                std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+            if !named.is_file()
+                || crate::events::Stat::from_metadata(&named)
+                    .map_err(|_| StorageError::ScopeChanged)?
+                    != stat
+            {
+                return refusal!("physical_named_identity");
             }
-            (path, proof.after.stat)
-        } else {
-            (source.path.as_path(), ledger.stat)
-        };
-        let file = stage!(
-            "physical_open",
-            crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)
-        )?;
-        let stat = crate::events::Stat::from_metadata(
-            &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
-        )
-        .map_err(|_| StorageError::ScopeChanged)?;
-        if stat.dev != physical_owner.dev
-            || stat.ino != physical_owner.ino
-            || stat.size < source.offset
-        {
-            return refusal!("physical_identity");
-        }
-        let named =
-            std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
-        if !named.is_file()
-            || crate::events::Stat::from_metadata(&named).map_err(|_| StorageError::ScopeChanged)?
-                != stat
-        {
-            return refusal!("physical_named_identity");
-        }
-        tx.check()?;
-        Ok(crate::SessionSourceProof {
-            source: reference.clone(),
-            dev: stat.dev,
-            ino: stat.ino,
-            size: stat.size,
-            modified_ns: stat.modified_ns,
-            changed_ns: stat.changed_ns,
-            freshness: crate::CatalogFreshness {
-                state: "retained".into(),
-            },
-        })
-    });
+            tx.check()?;
+            Ok(crate::SessionSourceProof {
+                source: reference.clone(),
+                dev: stat.dev,
+                ino: stat.ino,
+                size: stat.size,
+                modified_ns: stat.modified_ns,
+                changed_ns: stat.changed_ns,
+                freshness: crate::CatalogFreshness {
+                    state: "retained".into(),
+                },
+            })
+        },
+    );
     stage!("admitted_snapshot", result)
 }
 
