@@ -1395,7 +1395,9 @@ mod tests {
         let namespace = LogicalSourceNamespace::new("a").unwrap();
         let mut store = current_store(&database, &namespace);
         let config = StoreConfig {
-            backend: StoreBackend::Sqlite { database: database.clone() },
+            backend: StoreBackend::Sqlite {
+                database: database.clone(),
+            },
             namespace: namespace.clone(),
             expected_stream_epoch: Some("a".repeat(64)),
         };
@@ -1406,20 +1408,48 @@ mod tests {
         assert_eq!(warm.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         {
             let tx = store.connection.transaction().unwrap();
-            tx.execute("DELETE FROM main.meta WHERE namespace='a' AND key='catalog_changes_floor_current'", []).unwrap();
+            tx.execute(
+                "DELETE FROM main.meta WHERE namespace='a' AND key='catalog_changes_floor_current'",
+                [],
+            )
+            .unwrap();
             tx.execute("UPDATE main.meta SET value='corrupt' WHERE namespace='a' AND key='catalog_changes_floor_retained_history'", []).unwrap();
             // Validation must not install the first missing floor when the
             // second floor is malformed. Rollback restores both original floors.
-            assert_eq!(initialize_source_floors(&tx, &namespace), Err(StorageError::NamespaceUpgradePending));
+            assert_eq!(
+                initialize_source_floors(&tx, &namespace),
+                Err(StorageError::NamespaceUpgradePending)
+            );
             assert_eq!(tx.query_row("SELECT count(*) FROM main.meta WHERE namespace='a' AND key='catalog_changes_floor_current'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
             tx.rollback().unwrap();
         }
         assert_eq!(warm.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-        let other = StoreConfig { namespace: LogicalSourceNamespace::new("b").unwrap(), ..config.clone() };
-        assert_eq!(other.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
-        assert_eq!(warm.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        let other = StoreConfig {
+            namespace: LogicalSourceNamespace::new("b").unwrap(),
+            ..config.clone()
+        };
+        assert_eq!(
+            other.admit_namespace(),
+            Err(StorageError::MultiSourceUnqualified)
+        );
+        assert_eq!(
+            warm.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
         assert!(warm.execute("UPDATE meta SET value='99' WHERE namespace='a' AND key='catalog_changes_floor_current'", []).is_err());
-        assert_eq!(warm.query_row("SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, String>(0)).unwrap(), "a".repeat(64));
+        assert_eq!(
+            warm.query_row(
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "a".repeat(64)
+        );
         drop(warm);
         drop(store);
         fs::remove_dir_all(directory).unwrap();
