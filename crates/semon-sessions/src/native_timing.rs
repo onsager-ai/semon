@@ -795,7 +795,7 @@ impl Measurements {
         pages: impl FnOnce() -> usize,
         labels: &CleanupLabels,
     ) -> rusqlite::Result<usize> {
-        let cleanup_sql = "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')";
+        let cleanup_sql = "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')";
         #[cfg(test)]
         if self.uncached_cleanup_reference {
             let pages = pages();
