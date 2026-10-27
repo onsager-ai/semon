@@ -25,8 +25,10 @@ pub(in crate::storage::postgres) fn import(
     if super::super::model_cache::generation(tx)?.is_some() {
         return Err(StorageError::Conflict);
     }
-    let admission = i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
-    let revision = i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
+    let admission =
+        i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
+    let revision =
+        i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
     if super::super::model_cache::binding(tx)?.admission != import.manifest().binding_epoch {
         return Err(StorageError::ScopeChanged);
     }
