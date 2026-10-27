@@ -2696,26 +2696,40 @@ impl Stage {
         }
         let relation_cursor = if result_phase == Phase::Relations && !paths.is_empty() {
             let selected = paths[0].clone();
+            let cursor = relation_page(&tx, ns, &selected, &mut context).map_err(error)?;
             // Completed actors remain companions while another actor's event
             // page is matched: its parent turns and paired messages still need
             // the ordinary native parser, under the same source limit.
-            let companions = context
-                .endpoints
-                .values()
-                .flat_map(|endpoint| {
-                    endpoint
-                        .row
-                        .sources
-                        .iter()
-                        .map(|source| source.path.to_string_lossy().into_owned())
-                })
+            let mut companions = context
+                .matching_locations
+                .iter()
+                .flatten()
+                .map(|location| location.source.path.to_string_lossy().into_owned())
                 .collect::<std::collections::BTreeSet<_>>();
+            companions.insert(selected.clone());
+            let actors = companions.iter().cloned().collect::<Vec<_>>();
+            companions.extend(context.parent_paths(&actors));
+            for endpoint in context.endpoints.values() {
+                if endpoint.row.sources.iter().any(|source| {
+                    actors
+                        .iter()
+                        .any(|path| source.path == std::path::Path::new(path))
+                }) {
+                    companions.extend(
+                        endpoint
+                            .row
+                            .sources
+                            .iter()
+                            .map(|source| source.path.to_string_lossy().into_owned()),
+                    );
+                }
+            }
             paths = vec![selected.clone()];
             paths.extend(companions.into_iter().filter(|path| path != &selected));
             if paths.len() > 64 {
                 return Err(refuse("semantic_source_budget"));
             }
-            Some(relation_page(&tx, ns, &selected, &mut context).map_err(error)?)
+            Some(cursor)
         } else {
             None
         };
