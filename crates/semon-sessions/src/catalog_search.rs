@@ -672,18 +672,6 @@ fn read_filtered(
                     })
                 })
                 .optional()?;
-            #[cfg(test)]
-            if found.is_none() {
-                let state: (bool, bool, bool) = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1),EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'),EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)",
-                    [key],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
-                eprintln!(
-                    "catalog_search_metadata_state catalog={} current={} history={}",
-                    state.0, state.1, state.2
-                );
-            }
             record_steps(&metadata);
             Ok(found)
         },
