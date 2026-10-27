@@ -26,7 +26,10 @@ pub(crate) fn require_semantic_admitted(
     let Some((generation, admitted_at, version, qualification)) = row else {
         return Err(StorageError::ScopeChanged);
     };
-    if generation <= 0 || version != FORMAT_VERSION || qualification != 0 {
+    if generation <= 0
+        || version != FORMAT_VERSION
+        || qualification != WRITER_QUALIFICATION_VERSION
+    {
         return Err(StorageError::NamespaceUpgradePending);
     }
     Ok(NamespaceAdmission {
@@ -297,7 +300,7 @@ mod tests {
         let f = Fixture::new();
         f.config.admit_namespace().unwrap();
         let db = f.db();
-        let missing: i64 = db.query_row("SELECT count(*) FROM sqlite_schema s WHERE s.type='table' AND s.name NOT LIKE 'sqlite_%' AND s.name NOT IN ('storage_namespaces','storage_writer_inventory','storage_namespace_sequence') AND NOT EXISTS(SELECT 1 FROM storage_writer_inventory i WHERE i.table_name=s.name AND i.qualified_version=0)", [], |r| r.get(0)).unwrap();
+        let missing: i64 = db.query_row("SELECT count(*) FROM sqlite_schema s WHERE s.type='table' AND s.name NOT LIKE 'sqlite_%' AND s.name NOT LIKE 'storage_%' AND NOT EXISTS(SELECT 1 FROM storage_writer_inventory i WHERE i.table_name=s.name AND i.qualified_version=0)", [], |r| r.get(0)).unwrap();
         assert_eq!(missing, 0);
         let inventory: serde_json::Value =
             serde_json::from_str(include_str!("writer-inventory.json")).unwrap();
