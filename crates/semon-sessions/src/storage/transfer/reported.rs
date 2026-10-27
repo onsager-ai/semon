@@ -14,6 +14,33 @@ pub enum CaptureProgress {
 }
 
 impl TransferInbox {
+    /// Admit the imported Catalog from the actual host-authorized frozen source.
+    /// This publishes a Catalog operation, not a full-source ownership flip.
+    /// A caller-supplied manifest or an inbox alone cannot mint this authority.
+    pub fn admit_catalog_from(
+        &self,
+        source: &TransferInbox,
+        manifest: &SnapshotManifest,
+    ) -> Result<String, StorageError> {
+        manifest.bind(&self.0)?;
+        if source.capture(&manifest.snapshot_id)? != CaptureProgress::Ready(manifest.clone()) {
+            return Err(StorageError::Conflict);
+        }
+        let import = CatalogImport {
+            manifest: manifest.clone(),
+            generation: source.0.catalog_generation()?,
+        };
+        match &self.0.backend {
+            StoreBackend::Sqlite { .. } => {
+                super::super::sqlite::transfer::admit_catalog(&self.0, &import)
+            }
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => {
+                super::super::postgres::transfer::admit_catalog(&self.0, pool, control, &import)
+            }
+        }
+    }
+
     /// Freeze ordinary source writers and advance one bounded capture page.
     /// Retry the same identity after restart or an uncertain commit. Every page
     /// retains the 64-row/1-MiB limit; total history has no row/byte cap.
@@ -49,6 +76,66 @@ impl TransferInbox {
                 super::super::postgres::transfer::apply(&self.0, pool, control, manifest, sequence)
             }
         }
+    }
+}
+
+/// Constructed only after observing the exact completed capture on the source.
+/// It is neither deserializable nor constructible from transported page bytes.
+pub(crate) struct CatalogImport {
+    manifest: SnapshotManifest,
+    generation: String,
+}
+
+impl CatalogImport {
+    pub(crate) fn manifest(&self) -> &SnapshotManifest {
+        &self.manifest
+    }
+
+    pub(crate) fn generation(&self) -> &str {
+        &self.generation
+    }
+
+    pub(crate) fn payload(&self) -> Result<Vec<u8>, StorageError> {
+        encode_bounded(
+            &("catalog-import-v1", &self.manifest, &self.generation),
+            MAX_PAGE_BYTES,
+        )
+    }
+
+    pub(crate) fn require_applied(
+        &self,
+        tx: &mut impl InboxTransaction,
+    ) -> Result<(), StorageError> {
+        let staged = checkpoint_tx(tx, &self.manifest)?;
+        if staged
+            .rows
+            .iter()
+            .zip(&self.manifest.categories)
+            .any(|(rows, category)| *rows != category.rows)
+            || staged
+                .digests
+                .iter()
+                .zip(&self.manifest.categories)
+                .any(|(digest, category)| *digest != category.digest)
+            || tx
+                .get(
+                    &key(&self.manifest.identity(), "applied"),
+                    MAX_MANIFEST_BYTES,
+                )?
+                .map(|bytes| decode_checkpoint(&bytes, &self.manifest))
+                .transpose()?
+                != Some(staged)
+            || tx
+                .get(INCOMING, MAX_MANIFEST_BYTES)?
+                .is_some_and(|bytes| !bytes.is_empty())
+            || tx
+                .get(super::catalog_rows::IMPORTED_GENERATION, 64)?
+                .as_deref()
+                != Some(self.generation.as_bytes())
+        {
+            return Err(StorageError::Conflict);
+        }
+        Ok(())
     }
 }
 

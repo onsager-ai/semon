@@ -290,7 +290,10 @@ pub(super) fn capture(
         state.native_key = None;
     } else {
         for row in &rows {
-            verify_authority(tx, kind, &row.0)?;
+            verify_authority(tx, kind, &row.0).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("transfer capture graph refused: component={kind:?} error={_error:?}");
+            })?;
         }
         catalog_rows::append(
             tx,

@@ -3,6 +3,54 @@
 use super::*;
 use crate::{events::Outcome, storage::semantic_owner};
 
+/// A new destination operation over an already applied, source-authorized
+/// snapshot. Original producer receipts remain immutable; no claims are ACKed
+/// and no live source lease or unfinished producer stage is synthesized.
+pub(in crate::storage::postgres) fn import(
+    tx: &mut PgTxn<'_>,
+    import: &crate::storage::transfer::reported::CatalogImport,
+) -> Result<String, StorageError> {
+    tx.check()?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let payload = import.payload()?;
+    let operation = digest(&payload);
+    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let old = tx.driver.query("SELECT payload=$3 AND generation=$4 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns,&operation,&payload,&import.generation().as_bytes()]).map_err(sqlstate::error)?;
+    if let Some(row) = old.first() {
+        if !row.get::<_, bool>(0) {
+            return Err(StorageError::Conflict);
+        }
+        return Ok(import.generation().to_owned());
+    }
+    if super::super::model_cache::generation(tx)?.is_some() {
+        return Err(StorageError::Conflict);
+    }
+    let admission =
+        i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
+    let revision =
+        i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
+    if super::super::model_cache::binding(tx)?.admission != import.manifest().binding_epoch {
+        return Err(StorageError::ScopeChanged);
+    }
+    let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND admission=$3 AND source_revision<=$4 LIMIT 2", &[&ns,&import.generation().as_bytes(),&admission,&revision]).map_err(sqlstate::error)?;
+    if receipt.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let epoch: i64 = receipt[0].get(0);
+    let missing: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=c.namespace_digest AND r.namespace=c.namespace AND r.key_digest=c.key_digest AND r.session_key=c.session_key AND r.kind='current'::bytea)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners h WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=h.namespace_digest AND r.namespace=h.namespace AND r.key_digest=h.key_digest AND r.session_key=h.session_key AND r.kind='history'::bytea))", &[&ns,&import.generation().as_bytes()]).map_err(sqlstate::error)?.get(0);
+    if missing {
+        return Err(StorageError::ScopeChanged);
+    }
+    let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NULL", &[&ns,&import.generation()]).map_err(sqlstate::error)?;
+    if changed != 1 {
+        return Err(StorageError::Conflict);
+    }
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns,&operation,&payload,&import.generation().as_bytes(),&epoch]).map_err(sqlstate::error)?;
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_changes(namespace,generation,previous,stage_epoch) VALUES($1,$2,NULL,$3)", &[&ns,&import.generation().as_bytes(),&epoch]).map_err(sqlstate::error)?;
+    tx.check()?;
+    Ok(import.generation().to_owned())
+}
+
 /// The ordinary port has no caller supplied operation ID. Derive one from the
 /// complete request, including its base head and exact claims. Keep full bytes
 /// beside the digest so a collision never aliases two publication requests.

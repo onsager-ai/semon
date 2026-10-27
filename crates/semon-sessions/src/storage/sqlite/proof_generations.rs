@@ -199,6 +199,13 @@ pub(super) fn publish(
             .map_err(failed)?;
         }
     }
+    // Outgoing owners are absent from prepared.rows. Their original custody
+    // has completed above publication's CAS, so move their existing selected
+    // authority to history before collection can observe an unreferenced gap.
+    for row in &prepared.relationships.retired_owners {
+        tx.execute("INSERT INTO storage_proof_refs(namespace,session_key,kind,id) SELECT r.namespace,r.session_key,'history',r.id FROM storage_proof_refs r WHERE r.namespace=?1 AND r.session_key=?2 AND r.kind='current' AND EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=r.namespace AND h.session_key=r.session_key) ON CONFLICT DO NOTHING", params![namespace,row.key]).map_err(failed)?;
+        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+    }
     Ok(())
 }
 
