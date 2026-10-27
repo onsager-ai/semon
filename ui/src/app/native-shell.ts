@@ -227,7 +227,8 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     document,
     'close',
     (event) => {
-      if (event.target instanceof HTMLDialogElement) {
+      // close is queued: an earlier close must not release a reopened confirmation.
+      if (event.target instanceof HTMLDialogElement && !event.target.open) {
         waitingForms.delete(event.target);
         dialogs.delete(event.target);
       }

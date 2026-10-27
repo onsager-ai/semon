@@ -6,9 +6,9 @@
 //   SEMON_UI_OUT where reports, screenshots and diffs go (default: ./out)
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
+import { launchOptions } from './launch-options.mjs';
 
 export const ENV = {
   base: (process.env.SEMON_BASE ?? '').replace(/\/$/, ''),
@@ -24,34 +24,7 @@ export const ENV = {
 fs.mkdirSync(ENV.out, { recursive: true });
 
 export const launch = ({ baselineRaster = false } = {}) =>
-  chromium.launch({
-    args: [
-      '--disable-gpu',
-      '--font-render-hinting=none',
-      // Deterministic rendering stages, while Playwright keeps normal frame
-      // scheduling (enable-begin-frame-control requires a separate CDP driver).
-      ...(baselineRaster
-        ? [
-            '--disable-skia-runtime-opts',
-            '--run-all-compositor-stages-before-draw',
-            '--disable-new-content-rendering-timeout',
-            '--disable-threaded-animation',
-            '--disable-threaded-scrolling',
-            '--disable-checker-imaging',
-            '--disable-image-animation-resync',
-            '--disable-partial-raster',
-          ]
-        : []),
-    ],
-    ...(process.platform === 'linux'
-      ? {
-          env: {
-            ...process.env,
-            FONTCONFIG_FILE: fileURLToPath(new URL('./fontconfig.conf', import.meta.url)),
-          },
-        }
-      : {}),
-  });
+  chromium.launch(launchOptions({ baselineRaster }));
 
 // The three screens every check and comparison covers.
 export const VIEWPORTS = {
@@ -1169,29 +1142,39 @@ export async function closePage(page) {
 }
 
 // Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.
+const routeSegment = (value) =>
+  encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase(),
+  );
+
 export async function goto(page, route, D) {
   const sid = route.id ?? route.sid,
     session = D.SESS[sid],
-    machine = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
-    key = D.KEYS?.[sid] ?? sid,
+    source = session ? D.SOURCES?.[session.machine] : undefined,
+    key = D.KEYS?.[sid],
     machineKey = D.SOURCES?.[route.id] ?? route.id,
     paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
     destination =
       route.v === 'session'
-        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(key)
+        ? '/session/' + routeSegment(source ?? 'local') + '/' + routeSegment(key)
         : route.v === 'trace'
-          ? '/trace/' +
-            (session?.harness ?? 'native') +
+          ? '/session/' +
+            routeSegment(source ?? 'local') +
             '/' +
-            encodeURIComponent(key) +
-            '/' +
-            encodeURIComponent(route.turn)
+            routeSegment(key) +
+            '/trace/' +
+            routeSegment(route.turn)
           : route.v === 'machine'
             ? '/machines/' + encodeURIComponent(machineKey)
             : paths[route.v];
+  if (['session', 'trace'].includes(route.v)) {
+    if (!session) throw new Error(`Unknown session fixture: ${String(sid)}`);
+    if (!source) throw new Error(`Missing source mapping for session fixture: ${String(sid)}`);
+    if (!key) throw new Error(`Missing catalog-key mapping for session fixture: ${String(sid)}`);
+  }
   const url = new URL(destination, page.url());
-  if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
-  if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  if (route.v === 'session' && route.turn) url.hash = routeSegment(route.turn);
   const current = JSON.stringify(route);
   if (page.captureReadinessEnabled) {
     const previous = page.captureRouteKey;
@@ -1206,7 +1189,7 @@ export async function goto(page, route, D) {
       previousRoute = JSON.parse(previous);
     } catch {}
     const traceQuery = new URLSearchParams({
-      machine: machine ?? '',
+      machine: source ?? '',
       scope: 'retained_history',
       sid: key ?? '',
       turn: route.turn ?? '',
@@ -1215,7 +1198,7 @@ export async function goto(page, route, D) {
       page.captureRole === 'candidate' &&
       previousRoute?.v === 'trace' &&
       route.v === 'trace' &&
-      machine
+      source
         ? {
             from: previous,
             to: current,
