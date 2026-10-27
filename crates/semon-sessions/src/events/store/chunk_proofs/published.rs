@@ -103,7 +103,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         collected += 1;
         for namespace in namespaces(&retained) {
             tx.execute(
-                "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+                "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
                 params![&namespace, format!("{namespace}~")],
             )?;
         }
@@ -127,7 +127,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
             let source: i64 = tx.query_row("SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.receipt=?2", params![path,header.ledger], |r|r.get(0))?;
             for (from, to) in namespaces(&live).iter().zip(namespaces(&retained)) {
                 tx.execute(
-                    "INSERT INTO meta(namespace,key,value) SELECT semon_namespace(),?2 || substr(key,length(?1)+1),value FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?3",
+                    "INSERT INTO main.meta(namespace,key,value) SELECT semon_namespace(),?2 || substr(key,length(?1)+1),value FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?3",
                     params![from, to, format!("{from}~")],
                 )?;
             }
