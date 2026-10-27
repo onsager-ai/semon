@@ -218,8 +218,21 @@ pub(crate) fn operation_replay(
     kind: &str,
     payload: &[u8],
 ) -> Result<Option<SourceMutationReceipt>, StorageError> {
-    if operation.namespace != namespace.unwrap_or("") {
+    if !operation_identity_matches(operation, namespace)? {
         return Ok(Some(SourceMutationReceipt::Conflict));
+    }
+    if operation.payload_digest != SourceOperation::digest(kind, payload) {
+        return Ok(Some(SourceMutationReceipt::Conflict));
+    }
+    Ok(None)
+}
+
+pub(crate) fn operation_identity_matches(
+    operation: &SourceOperation,
+    namespace: Option<&str>,
+) -> Result<bool, StorageError> {
+    if operation.namespace != namespace.unwrap_or("") {
+        return Ok(false);
     }
     if operation.id.is_empty()
         || operation.id.len() > 256
@@ -237,7 +250,7 @@ pub(crate) fn operation_replay(
         SourceOperation::namespace_tag(namespace.unwrap_or(""))
     );
     let Some(suffix) = operation.id.strip_prefix(&prefix) else {
-        return Ok(Some(SourceMutationReceipt::Conflict));
+        return Ok(false);
     };
     let parts = suffix.split(':').collect::<Vec<_>>();
     if parts.len() != 3
@@ -247,10 +260,7 @@ pub(crate) fn operation_replay(
     {
         return Err(StorageError::InvalidArguments);
     }
-    if operation.payload_digest != SourceOperation::digest(kind, payload) {
-        return Ok(Some(SourceMutationReceipt::Conflict));
-    }
-    Ok(None)
+    Ok(true)
 }
 
 pub(crate) fn validate_intent(
