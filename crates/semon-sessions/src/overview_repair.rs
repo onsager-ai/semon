@@ -375,6 +375,14 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
 /// Demand an ordinary producer upgrade for an exact selected owner. This only
 /// schedules work; publication still requires the producer's source proofs.
 pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
+    options
+        .source
+        .config(&options.cache)
+        .map_err(failure)?
+        .request_projection_upgrade(options, key)
+}
+
+pub(crate) fn request_sqlite_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
     let mut db = connection(options)?;
     let tx = transaction(&mut db, options)?;
     let Some(row) = catalog(&tx, key)? else {
@@ -785,7 +793,7 @@ pub(crate) fn local_query_target(
     Ok(ready.then_some(key))
 }
 
-fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
+pub(crate) fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut selected = BTreeMap::new();
     for row in rows {
         let home = match row.harness.as_str() {

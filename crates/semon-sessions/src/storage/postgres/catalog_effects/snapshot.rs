@@ -197,7 +197,7 @@ impl Snapshot<'_, '_> {
         Ok(Some((row, header, slots)))
     }
 
-    fn owner(&self, key: &str) -> Result<Option<String>, StorageError> {
+    pub(in crate::storage::postgres) fn owner(&self, key: &str) -> Result<Option<String>, StorageError> {
         let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();

@@ -78,6 +78,12 @@ impl QueryCatalogStore for QueryCatalog {
                 // SQLite Query reader; Current membership remains independent.
                 // Bodies still come only from authorized Raw Source bytes.
                 let history = snapshot.owner(key)?.is_some();
+                // History metadata is frozen with its original lifecycle. Live
+                // runtime qualification follows this generation's membership,
+                // just as the SQLite reader uses session_catalog.lifecycle.
+                let current = snapshot.catalog(key, false)?.is_some_and(|row| {
+                    row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                });
                 let (row, header, _) = snapshot
                     .selected(key, history, 0, 1)
                     .inspect_err(|_error| {
@@ -96,7 +102,7 @@ impl QueryCatalogStore for QueryCatalog {
                 if !crate::model::summary::query_observation_matches(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
                     &row.sources,
-                    !self.captured,
+                    !self.captured && current,
                     expected.as_deref(),
                 )
                 .map_err(|_| StorageError::ScopeChanged)?
