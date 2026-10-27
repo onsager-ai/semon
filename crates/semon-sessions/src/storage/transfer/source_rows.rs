@@ -20,6 +20,14 @@ pub enum SourceJournalRecord {
     Member {
         path: String,
     },
+    Intent {
+        payload: String,
+    },
+    Receipt {
+        operation: super::super::source_observations::SourceOperation,
+        outcome: String,
+        recovery_done: Option<bool>,
+    },
 }
 
 impl SourceJournalRecord {
@@ -29,11 +37,27 @@ impl SourceJournalRecord {
             Self::Selected { .. } => Category::StagedWork,
             Self::Claim { .. } => Category::Claims,
             Self::Member { .. } => Category::SourceMembers,
+            Self::Intent { .. } => Category::SourceObservations,
+            Self::Receipt { .. } => Category::Receipts,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), StorageError> {
         match self {
+            Self::Intent { payload } => {
+                let intent: super::super::source_observations::SourceIntent =
+                    serde_json::from_str(payload).map_err(|_| StorageError::ScopeChanged)?;
+                super::super::source_observations::validate_intent(
+                    Some(&intent.operation().namespace), &intent,
+                )?;
+            }
+            Self::Receipt { operation, outcome, .. } => {
+                if !super::super::source_observations::operation_identity_matches(
+                    operation, Some(&operation.namespace),
+                )? || !["applied", "conflict"].contains(&outcome.as_str()) {
+                    return Err(StorageError::ScopeChanged);
+                }
+            }
             Self::State { revision, backfill } => {
                 if *revision < 0
                     || backfill
@@ -58,5 +82,19 @@ impl SourceJournalRecord {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_namespace(&self, namespace: &str) -> Result<(), StorageError> {
+        self.validate()?;
+        let valid = match self {
+            Self::Intent { payload } => {
+                let intent: super::super::source_observations::SourceIntent =
+                    serde_json::from_str(payload).map_err(|_| StorageError::ScopeChanged)?;
+                intent.operation().namespace == namespace
+            }
+            Self::Receipt { operation, .. } => operation.namespace == namespace,
+            _ => true,
+        };
+        if valid { Ok(()) } else { Err(StorageError::ScopeChanged) }
     }
 }

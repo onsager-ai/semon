@@ -385,6 +385,8 @@ pub(crate) fn prepare_apply(
                             | Category::StagedWork
                             | Category::Claims
                             | Category::SourceMembers
+                            | Category::SourceObservations
+                            | Category::Receipts
                             | Category::Metadata
                             | Category::Ledgers
                             | Category::Events

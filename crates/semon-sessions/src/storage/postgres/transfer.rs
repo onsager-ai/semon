@@ -169,7 +169,7 @@ pub(crate) fn capture(
         {
             return Err(StorageError::ScopeChanged);
         }
-        if state.source_phase < 4 && !state.done {
+        if state.source_phase < 6 && !state.done {
             return source::capture(tx, &mut state);
         }
         if state.native && !state.done {
