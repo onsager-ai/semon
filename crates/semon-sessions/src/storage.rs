@@ -327,8 +327,12 @@ impl StoreConfig {
             StoreBackend::Postgres { pool, control } => {
                 postgres::require_configured(self, pool, control).map_err(std::io::Error::other)?;
                 postgres::PgSourceJournal::configured(
-                    pool.bind_source(&self.namespace, self.expected_stream_epoch.as_deref(), control)
-                        .map_err(std::io::Error::other)?,
+                    pool.bind_source(
+                        &self.namespace,
+                        self.expected_stream_epoch.as_deref(),
+                        control,
+                    )
+                    .map_err(std::io::Error::other)?,
                     self.namespace.clone(),
                     control.clone(),
                 )

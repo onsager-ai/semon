@@ -793,7 +793,10 @@ pub(crate) fn local_query_target(
     Ok(ready.then_some(key))
 }
 
-pub(crate) fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
+pub(crate) fn source_refs(
+    options: &Options,
+    rows: &[CatalogRow],
+) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut selected = BTreeMap::new();
     for row in rows {
         let home = match row.harness.as_str() {
