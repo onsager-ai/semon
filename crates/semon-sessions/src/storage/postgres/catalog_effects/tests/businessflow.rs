@@ -3652,4 +3652,50 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         oracle_withdrawn.iter().all(|row| still.contains(row)),
         "withdrawn rows after zero-row publication"
     );
+
+    // The public selected-upgrade entry must reach PG without opening SQLite.
+    // These unchanged bulk owners have no retained composite to mask their
+    // current recipe version. Ordinary producer completion follows the same
+    // durable claims, while unrelated earlier work remains pending.
+    let selected_key = "bulk169-000";
+    super::super::snapshot::with_admitted_snapshot(
+        &pool, &namespace, &control, &retired, |snapshot| {
+            assert!(snapshot.owner(selected_key)?.is_none());
+            assert!(snapshot.catalog(selected_key, false)?.is_some());
+            Ok(())
+        },
+    ).unwrap();
+    let selected_path = bulk[0].full_path(&facts_options).to_string_lossy().into_owned();
+    let unrelated_path = bulk[1].full_path(&facts_options).to_string_lossy().into_owned();
+    let mut journal = config.source_observations().unwrap();
+    let empty: Vec<String> = Vec::new();
+    let discover = crate::storage::source_observations::SourceOperation::capture(
+        namespace.as_str(), "discover", &serde_json::to_vec(&(&empty, true)).unwrap(),
+    );
+    journal.discover(&discover, &empty, true).unwrap();
+    let paths = vec![unrelated_path.clone(), selected_path.clone()];
+    let expected_claims = journal.claims(&paths).unwrap();
+    let invalidate = crate::storage::source_observations::SourceOperation::capture(
+        namespace.as_str(), "invalidate", &serde_json::to_vec(&expected_claims).unwrap(),
+    );
+    journal.invalidate(&invalidate, &expected_claims).unwrap();
+    let revisions = journal.claims(&paths).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver.execute(
+            "UPDATE semon_pg_native_catalog_recipe_headers SET version=5 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+            &[&namespace.as_str().as_bytes(), &retired.as_bytes(), &selected_key.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        Ok(())
+    }).unwrap();
+    assert!(crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
+    assert_eq!(journal.pending(64).unwrap(), vec![selected_path.clone()]);
+    assert_eq!(journal.claims(&paths).unwrap(), revisions, "selection preserves producer CAS revisions");
+    // The existing ordinary semantic producer consumes the selected claim.
+    let (upgraded, _, _, _) = stage_publish(&mut reopened, &bulk[..1], 1790812811000);
+    assert_ne!(upgraded, retired);
+    assert!(!crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
+    assert_eq!(journal.pending(64).unwrap(), vec![unrelated_path]);
+    assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
+    assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
+    assert!(!options.cache.exists(), "PG public request cannot create a SQLite cache");
 }
