@@ -12,7 +12,7 @@ use native::{apply_native, capture_native};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::time::{Duration, Instant};
 
-struct Inbox<'a>(&'a Connection, &'a str);
+struct Inbox<'a>(&'a rusqlite::Transaction<'a>, &'a str);
 
 impl InboxTransaction for Inbox<'_> {
     fn get(&mut self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, StorageError> {
@@ -128,6 +128,14 @@ pub(crate) fn admit_catalog(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),
         )?;
+        if import.manifest().categories.iter().any(|category| {
+            category.category == transfer::Category::Recipes && category.rows > 0
+        }) {
+            tx.put(
+                "slot_projection_catalog_generation",
+                import.generation().as_bytes(),
+            )?;
+        }
         tx.put("catalog_completeness", b"partial")?;
         tx.put(receipt, &payload)?;
         Ok(import.generation().to_owned())

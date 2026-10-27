@@ -57,9 +57,13 @@ pub(super) fn verify_backing(
         &format!("{}header", prefix(path, NativePageKind::Chunks)),
     )?;
     let live_matches = current.as_deref().is_some_and(|encoded| {
-        serde_json::from_str::<crate::events::native_pages::chunks::Header>(encoded)
-            .is_ok_and(|header| header.ledger == receipt && header.version == 1
-                && header.parser_version == crate::events::CACHE_VERSION)
+        serde_json::from_str::<crate::events::native_pages::chunks::Header>(encoded).is_ok_and(
+            |header| {
+                header.ledger == receipt
+                    && header.version == 1
+                    && header.parser_version == crate::events::CACHE_VERSION
+            },
+        )
     });
     let backing = (!live_matches).then_some(digest);
     let encoded = metadata(

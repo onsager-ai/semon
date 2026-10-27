@@ -14,10 +14,19 @@ pub(super) fn capture_native(
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     if state.native_family == 16 {
         let path = state.native_path.as_ref().map(|path| path.as_bytes());
-        let ledger = state.native_backing.as_ref().map(|ledger| ledger.as_bytes());
+        let ledger = state
+            .native_backing
+            .as_ref()
+            .map(|ledger| ledger.as_bytes());
         let rows = tx.0.driver.query("SELECT CASE WHEN octet_length(s.path)<=1048576 THEN s.path END,CASE WHEN octet_length(s.ledger)=64 THEN s.ledger END FROM semon_pg_native_selected_sources s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND ($2::bytea IS NULL OR (s.path,s.ledger)>($2,$3)) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_files f WHERE f.namespace_digest=s.namespace_digest AND f.namespace=s.namespace AND semon_pg_native_key_matches(f.path,sha256(s.path),s.path)) AND EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.id=s.id AND r.key_digest=s.key_digest AND r.session_key=s.session_key) GROUP BY s.path,s.ledger ORDER BY s.path,s.ledger LIMIT 1", &[&ns,&path,&ledger]).map_err(sqlstate::error)?;
         if let Some(row) = rows.first() {
-            let text = |index| String::from_utf8(row.get::<_, Option<Vec<u8>>>(index).ok_or(StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged);
+            let text = |index: usize| {
+                String::from_utf8(
+                    row.get::<_, Option<Vec<u8>>>(index)
+                        .ok_or(StorageError::ScopeChanged)?,
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            };
             state.native_path = Some(text(0)?);
             state.native_backing = Some(text(1)?);
             state.native_family = 3;
