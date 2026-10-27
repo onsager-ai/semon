@@ -736,12 +736,12 @@ pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Resu
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
     transaction.execute(
-        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
     let namespace = format!("native_proof_tree:{prefix}:");
     transaction.execute(
-        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&namespace, format!("{namespace}~")],
     )?;
     Ok(())
@@ -783,7 +783,7 @@ pub(super) fn write_measured(
     published::preserve(transaction, path)?;
     measurements.record("chunks_prefix", started, 1);
     let started = measurements.start();
-    let mut put = transaction.prepare_cached("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    let mut put = transaction.prepare_cached("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("chunks_prepare", started, 1);
     let plan = crate::events::native_pages::chunks::plan(ledger, chunks)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
@@ -801,7 +801,7 @@ pub(super) fn write_measured(
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
         transaction.execute(
-            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
             params![
                 format!("{namespace}{:010}", nodes.len()),
                 format!("{namespace}~")
@@ -809,7 +809,7 @@ pub(super) fn write_measured(
         )?;
     }
     transaction.execute(
-        "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![
             format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()),
             format!("native_proof_tree:{prefix}:~")
