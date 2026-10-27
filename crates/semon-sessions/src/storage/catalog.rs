@@ -310,17 +310,8 @@ pub(crate) fn preserve_original<P: OriginalHistoryStore>(
     Ok(true)
 }
 
-/// Admission policy chooses a replacement; custody and its bounded progress are
-/// shared. At most one original owner advances per publication attempt.
-pub(crate) fn preserve_replacement_rows<P: OriginalHistoryStore>(
-    store: &P,
-    rows: &[CatalogRow],
-) -> Result<bool, P::Error> {
-    preserve_rows(store, rows, &[])
-}
-
 /// Sessions a publication withdraws from Current keep original custody the
-/// same way replaced rows do, under the same one-advance bound.
+/// same way replaced rows do. At most one original owner advances per attempt.
 pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
     store: &P,
     rows: &[CatalogRow],

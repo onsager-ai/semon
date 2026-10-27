@@ -224,7 +224,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             },
             |key, budget| {
                 let rows = run(
-                    "SELECT octet_length(fields)::bigint,CASE WHEN octet_length(fields)<=$5 THEN fields END FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND key_digest=sha256($4::bytea) AND session_key=$4 AND complete",
+                    "SELECT octet_length(fields)::bigint,CASE WHEN octet_length(fields)<=$5::bigint THEN fields END FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND key_digest=sha256($4::bytea) AND session_key=$4 AND complete",
                     &[&ns, &generation, &scope, &key.as_bytes(), &(budget as i64)],
                 )?;
                 let row = rows
@@ -260,7 +260,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         UNION ALL
                         SELECT metadata,last_ms,harness,repo,true FROM live
                         WHERE NOT EXISTS (SELECT 1 FROM retained)
-                     ) SELECT octet_length(metadata)::bigint,CASE WHEN octet_length(metadata)<=$4 THEN metadata END,
+                     ) SELECT octet_length(metadata)::bigint,CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END,
                          last_ms,harness,repo,is_live FROM chosen",
                     &[&ns, &generation, &key.as_bytes(), &(budget as i64), &history],
                 )?;

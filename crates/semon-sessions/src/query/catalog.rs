@@ -304,6 +304,7 @@ impl Query {
 
     /// Host authorization is explicit and separate from Catalog admission.
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_bound_selected_at(
         &mut self,
         tool: &str,
@@ -311,6 +312,7 @@ impl Query {
         now: i64,
         store: &dyn crate::storage::query::QueryCatalogStore,
         host: &dyn crate::SessionSourceReader,
+        machine: Option<&str>,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
         if self.sources.is_retired()
@@ -321,6 +323,9 @@ impl Query {
         }
         let mut selected_args = args.clone();
         selected_args["_session"] = serde_json::Value::Bool(tool == "get_session");
+        if let Some(machine) = machine {
+            selected_args["_machine_alias"] = json!(machine);
+        }
         let namespace = self.sources.machines[0]
             .1
             .options
