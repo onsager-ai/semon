@@ -746,7 +746,10 @@ mod tests {
         let id = "tool\0中é";
         let line = serde_json::json!({"type":"assistant","uuid":"u-1","timestamp":"2026-09-29T00:00:01Z","message":{"id":"m-1","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"fixture body stays in Raw"}}]}});
         std::fs::write(&path, format!("{line}\n")).unwrap();
-        let mut cache = EventCache::default();
+        let cache_path = path.with_extension("index.json");
+        let source = crate::storage::HostSource::new(ns("parser-fixture"), "a".repeat(64))
+            .unwrap();
+        let mut cache = EventCache::open(&cache_path, &source).unwrap();
         let index = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let tree = TreeRows::new(index.tree_summary.as_ref().unwrap()).unwrap();
         assert_eq!(tree.tools.get(id).map(String::as_str), Some("Bash"));
@@ -759,6 +762,8 @@ mod tests {
             assert_eq!(row.get::<_,Vec<u8>>(1),b"Bash");
             Ok(())
         }).unwrap();
+        drop(cache);
+        std::fs::remove_file(EventCache::path(&cache_path)).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 

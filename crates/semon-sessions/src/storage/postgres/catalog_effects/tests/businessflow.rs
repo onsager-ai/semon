@@ -575,9 +575,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     );
+    // Match the all-history request used by the PG retained-body comparison.
+    // The withdrawal listing above deliberately uses a finite window; its
+    // window_start envelope is not the envelope of this all-history read.
+    // Keep the same published withdrawal cache and real Raw custody.
+    let mut retained_options = withdraw_options.clone();
+    retained_options.all = options.all;
+    retained_options.since = options.since;
     let mut retained_query =
         crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-            vec![(recent_machine.into(), withdraw_options.clone())],
+            vec![(recent_machine.into(), retained_options)],
         )));
     let oracle_retained_reads = oracle_withdrawn
         .iter()
