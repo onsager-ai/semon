@@ -275,10 +275,7 @@ mod tests {
     fn current_admission_keeps_unowned_writers_fenced() {
         let f = Fixture::new();
         let warm = f.db();
-        warm.prepare_cached(
-            "UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'",
-        )
-        .unwrap();
+        assert!(warm.execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
         f.config.admit_namespace().unwrap();
         assert!(warm.execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
         assert!(is_bound(&warm).unwrap());

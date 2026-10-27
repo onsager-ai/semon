@@ -178,7 +178,13 @@ impl SessionMetadataStore for SqliteMetadataStore {
         {
             return Err(StorageError::ScopeChanged);
         }
-        let mut db = self.admit(namespace, true)?;
+        if namespace != &self.0.namespace {
+            return Err(StorageError::NamespaceMismatch);
+        }
+        // Compaction is an owned Catalog effect. A plain metadata connection
+        // cannot mutate the protected hints or their durable cursor floors.
+        let owner = crate::events::store::configured::NativeOwnership::restore(&self.0)?;
+        let mut db = semantic::pricing_connection(&owner)?;
         namespace::require_admitted(&db, namespace)?;
         catalog_namespace::register(&db, namespace)?;
         changes::compact(&mut db, scope, stream_epoch, acknowledged_through, limit)
