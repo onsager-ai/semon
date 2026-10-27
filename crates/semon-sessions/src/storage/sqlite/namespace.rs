@@ -108,7 +108,26 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
             &config.namespace,
             i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)?,
         )?;
-        super::changes::initialize_source_floors(&tx, &config.namespace)?;
+        for key in [
+            "catalog_changes_floor_current",
+            "catalog_changes_floor_retained_history",
+        ] {
+            let value: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
+                    (config.namespace.as_str(), key),
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(failed)?;
+            if !value.as_deref().is_some_and(|value| {
+                value
+                    .parse::<i64>()
+                    .is_ok_and(|n| n >= 0 && value == n.to_string())
+            }) {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         return Ok(admission);
     }

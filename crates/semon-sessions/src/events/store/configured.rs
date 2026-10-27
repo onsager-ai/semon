@@ -928,6 +928,7 @@ impl NativeOwnership {
             config: config.clone(),
             admission,
         };
+        crate::storage::sqlite::changes::initialize_source_floors(&tx, &config.namespace)?;
         owner.validate(&tx)?;
         prepare_owned(&tx, &owner)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
