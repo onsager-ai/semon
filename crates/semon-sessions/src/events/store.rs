@@ -1064,15 +1064,23 @@ pub(crate) fn prioritize_projection_sources(
         let path = source.path.to_string_lossy();
         let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
     }
-    let mut paths = sources.iter().map(|source| source.path.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let mut paths = sources
+        .iter()
+        .map(|source| source.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     let encoded = serde_json::to_string(&paths).map_err(io::Error::other)?;
-    crate::storage::source_observations::selected_projection_paths(encoded.as_bytes()).map_err(io::Error::other)?;
+    crate::storage::source_observations::selected_projection_paths(encoded.as_bytes())
+        .map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
-        params![crate::storage::source_observations::SELECTED_PROJECTION_KEY, encoded],
-    ).map_err(io::Error::other)?;
+        params![
+            crate::storage::source_observations::SELECTED_PROJECTION_KEY,
+            encoded
+        ],
+    )
+    .map_err(io::Error::other)?;
     for source in sources {
         let path = source.path.to_string_lossy();
         let pending: bool = tx
