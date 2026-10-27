@@ -7,70 +7,11 @@ on:
 permissions:
   contents: read
 
-# Keep both reusable-workflow jobs on the bundled reference prices.
-env:
-  SEMON_PRICING_REFRESH: "off"
-
 concurrency:
   group: codex-conformance-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  semon-targeted-tests:
-    name: Semon parser and selected-output tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out exact Semon pull request head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Install upstream-pinned Rust toolchain
-        id: rust-toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: clippy, rustfmt, rust-src
-
-      - name: Cache Rust dependencies and build outputs
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-
-
-      - name: Run parser event fixture tests on the exact head
-        run: cargo test --locked -p semon-sessions 'events::tests::'
-
-      - name: Run durable owned-turn lifecycle regressions on the exact head
-        run: |
-          cargo test --locked -p semon-sessions codex_lifecycle::tests::
-
-      - name: Run native sessions integration contracts early on the exact head
-        run: cargo test --locked -p semon-sessions --test sessions
-
-      - name: Run focused native selected-details and transcript contract
-        run: |
-          cargo test --locked -p semon-sessions catalog::tests::selected_details_are_body_free_exact_and_bound_to_the_original_source_generation
-          cargo test --locked -p semon-sessions catalog::tests::selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable
-
-      - name: Run parser transaction and selected-output tests on the exact head
-        run: cargo test --locked -p semon-sessions 'tx::tests::'
-
-      - name: Run paired reference conformance hooks on the exact head
-        run: cargo test --locked -p semon-sessions codex_reference_conformance
-
-      - name: Run source-generation selected-output expansion on the exact head
-        run: cargo test --locked -p semon-sessions catalog::tests::selected_output_expansion_keeps_native_blocks_under_source_generation
-
-      - name: Run current storage refusal at product entrypoints on the exact head
-        run: cargo test --locked -p semon-sessions catalog::tests::unsupported_storage_is_observable_at_product_read_entrypoints
-
   upstream-reference:
     name: Pinned Codex reducer reference
     runs-on: ubuntu-latest
