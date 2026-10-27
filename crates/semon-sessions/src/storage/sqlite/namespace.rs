@@ -156,8 +156,10 @@ mod tests {
             fs::create_dir(&root).unwrap();
             let cache = root.join("index.json");
             let source = crate::storage::HostSource::new(
-                LogicalSourceNamespace::new("source-A").unwrap(), "a".repeat(64),
-            ).unwrap();
+                LogicalSourceNamespace::new("source-A").unwrap(),
+                "a".repeat(64),
+            )
+            .unwrap();
             drop(EventCache::open_scoped(&cache, &source).unwrap());
             let database = EventCache::path(&cache);
             let epoch = Connection::open(&database)
@@ -204,28 +206,69 @@ mod tests {
     #[test]
     fn durable_admission_preserves_current_custody_and_rejects_second_namespace() {
         let f = Fixture::new();
-        let before: i64 = f.db().query_row("SELECT count(*) FROM meta", [], |r| r.get(0)).unwrap();
+        let before: i64 = f
+            .db()
+            .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+            .unwrap();
         let admission = f.config.admit_namespace().unwrap();
         assert_eq!(admission.generation, 1);
         assert_eq!(f.config.admit_namespace().unwrap(), admission);
-        assert_eq!(f.db().query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0)).unwrap(), before);
-        assert!(f.config.clone().open().unwrap().read_snapshot(&f.config.namespace).is_ok());
+        assert_eq!(
+            f.db()
+                .query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert!(
+            f.config
+                .clone()
+                .open()
+                .unwrap()
+                .read_snapshot(&f.config.namespace)
+                .is_ok()
+        );
         let mut other = f.config.clone();
         other.namespace = LogicalSourceNamespace::new("source-B").unwrap();
-        assert_eq!(other.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
-        assert!(matches!(other.open().unwrap().read_snapshot(&LogicalSourceNamespace::new("source-B").unwrap()), Err(StorageError::NamespaceMismatch)));
-        assert_eq!(f.db().query_row("SELECT count(*) FROM storage_namespaces", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            other.admit_namespace(),
+            Err(StorageError::MultiSourceUnqualified)
+        );
+        assert!(matches!(
+            other
+                .open()
+                .unwrap()
+                .read_snapshot(&LogicalSourceNamespace::new("source-B").unwrap()),
+            Err(StorageError::NamespaceMismatch)
+        ));
+        assert_eq!(
+            f.db()
+                .query_row("SELECT count(*) FROM storage_namespaces", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
     fn current_admission_keeps_unowned_writers_fenced() {
         let f = Fixture::new();
         let warm = f.db();
-        warm.prepare_cached("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'").unwrap();
+        warm.prepare_cached(
+            "UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'",
+        )
+        .unwrap();
         f.config.admit_namespace().unwrap();
         assert!(warm.execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
         assert!(is_bound(&warm).unwrap());
-        assert_eq!(warm.query_row("SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(), "a".repeat(64));
+        assert_eq!(
+            warm.query_row(
+                "SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "a".repeat(64)
+        );
     }
 
     #[test]
@@ -234,10 +277,16 @@ mod tests {
         let before = std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap();
         let mut config = f.config.clone();
         config.expected_stream_epoch = None;
-        assert_eq!(config.admit_namespace(), Err(StorageError::InvalidArguments));
+        assert_eq!(
+            config.admit_namespace(),
+            Err(StorageError::InvalidArguments)
+        );
         config.expected_stream_epoch = Some("0".repeat(64));
         assert_eq!(config.admit_namespace(), Err(StorageError::ScopeChanged));
-        assert_eq!(std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap(),
+            before
+        );
         assert!(is_bound(&f.db()).unwrap());
     }
 
@@ -248,13 +297,26 @@ mod tests {
         let db = f.db();
         let missing: i64 = db.query_row("SELECT count(*) FROM sqlite_schema s WHERE s.type='table' AND s.name NOT LIKE 'sqlite_%' AND s.name NOT IN ('storage_namespaces','storage_writer_inventory','storage_namespace_sequence') AND NOT EXISTS(SELECT 1 FROM storage_writer_inventory i WHERE i.table_name=s.name AND i.qualified_version=0)", [], |r| r.get(0)).unwrap();
         assert_eq!(missing, 0);
-        let inventory: serde_json::Value = serde_json::from_str(include_str!("writer-inventory.json")).unwrap();
-        assert_eq!(inventory["writer_qualification"], WRITER_QUALIFICATION_VERSION);
-        assert!(!inventory["unqualified_paths"].as_array().unwrap().is_empty());
-        db.execute("UPDATE storage_namespaces SET writer_qualification=999", []).unwrap();
+        let inventory: serde_json::Value =
+            serde_json::from_str(include_str!("writer-inventory.json")).unwrap();
+        assert_eq!(
+            inventory["writer_qualification"],
+            WRITER_QUALIFICATION_VERSION
+        );
+        assert!(
+            !inventory["unqualified_paths"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        db.execute("UPDATE storage_namespaces SET writer_qualification=999", [])
+            .unwrap();
         let mut other = f.config.clone();
         other.namespace = LogicalSourceNamespace::new("source-B").unwrap();
-        assert_eq!(other.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
+        assert_eq!(
+            other.admit_namespace(),
+            Err(StorageError::MultiSourceUnqualified)
+        );
     }
 
     #[test]
@@ -262,16 +324,34 @@ mod tests {
         let unbound = Fixture::new();
         // Corrupt current custody is a refusal fixture, never a supported
         // unbound runtime. No reader may recreate the removed registry.
-        unbound.db().execute_batch("DROP TABLE storage_namespaces").unwrap();
+        unbound
+            .db()
+            .execute_batch("DROP TABLE storage_namespaces")
+            .unwrap();
         let bound = Fixture::new();
-        let options = Options { cache: bound.root.join("decoy-does-not-exist.json"), ..Options::default() };
+        let options = Options {
+            cache: bound.root.join("decoy-does-not-exist.json"),
+            ..Options::default()
+        };
         let mut mismatch = bound.config.clone();
         mismatch.namespace = LogicalSourceNamespace::new("foreign-source").unwrap();
         let mut stale = bound.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
-        crate::storage::conformance::configured_native_read_refusals(&options, unbound.config.clone(), mismatch, stale);
+        crate::storage::conformance::configured_native_read_refusals(
+            &options,
+            unbound.config.clone(),
+            mismatch,
+            stale,
+        );
         assert!(!options.cache.with_extension("sqlite3").exists());
-        assert_eq!(bound.config.catalog_page(&options, "limit=1").unwrap().status, 200);
+        assert_eq!(
+            bound
+                .config
+                .catalog_page(&options, "limit=1")
+                .unwrap()
+                .status,
+            200
+        );
         assert!(!is_bound(&unbound.db()).unwrap());
     }
 
@@ -281,8 +361,14 @@ mod tests {
         let admitted = f.config.admit_namespace().unwrap();
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
-        assert_eq!(stale.unenroll_namespace(&admitted), Err(StorageError::ScopeChanged));
-        assert_eq!(f.config.unenroll_namespace(&admitted), Err(StorageError::NamespaceUpgradePending));
+        assert_eq!(
+            stale.unenroll_namespace(&admitted),
+            Err(StorageError::ScopeChanged)
+        );
+        assert_eq!(
+            f.config.unenroll_namespace(&admitted),
+            Err(StorageError::NamespaceUpgradePending)
+        );
         assert!(is_bound(&f.db()).unwrap());
         assert_eq!(f.config.admit_namespace().unwrap(), admitted);
         assert!(f.db().execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());

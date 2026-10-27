@@ -57,6 +57,10 @@ validates the actual current physical contract and owner. NativeOwnership and
 Semantic NativeReaderBinding carry the admitted namespace/epoch through private
 multi-source publication and reads. The restricted public admission gate remains
 subject to its actual qualification; private multi-source tests do not remove it.
+SQLite public admission validates existing current custody. It cannot adopt an
+unbound store or install the retired enrollment runtime. SQLite unenrollment
+refuses with `NamespaceUpgradePending` until current-format revocation is
+qualified; it never drops custody tables to restore unbound native writers.
 
 Catalog publication requires the current owner and expected generation. There is
 no unbound writer/history/search mode, transaction snapshot fallback or old Catalog
