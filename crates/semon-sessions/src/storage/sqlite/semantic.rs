@@ -13,6 +13,67 @@ use crate::model::{
 use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RelationCursor {
+    path: String,
+    after: String,
+    end: String,
+}
+
+fn relation_page(
+    db: &Connection,
+    ns: &str,
+    path: &str,
+    context: &mut Context,
+) -> rusqlite::Result<String> {
+    let after: String = db.query_row("SELECT relation_after FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get(0))?;
+    // A message can produce incident edges in both directions. Select a small
+    // event page, retaining the existing relation and metadata operation caps.
+    let mut query = db.prepare("SELECT event_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT 16")?;
+    let mut rows = query.query(params![ns,path,after])?;
+    let mut locations = Vec::new();
+    let mut used = 0usize;
+    let mut end = after.clone();
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let text: Option<String> = row.get(1)?;
+        let mut candidate_used = used;
+        let own: crate::model::relation_stage::NativeEvent = match crate::model::relation_stage::selector_metadata(text, &mut candidate_used) {
+            Ok(event) => event,
+            Err(_) if !locations.is_empty() => break,
+            Err(_) => return Err(rusqlite::Error::InvalidQuery),
+        };
+        let id = if own.event.k == crate::events::Kind::Xsm {
+            own.event.id.as_deref()
+        } else if own.event.n.as_deref() == Some("SendMessage") {
+            own.event.r.as_ref().and_then(|r| r.m.as_deref())
+        } else {
+            None
+        };
+        let mut selected = vec![own.at.clone()];
+        let mut overflow = false;
+        if let Some(id) = id {
+            for kind in ["send", "xsm"] {
+                let peer: Option<Option<String>> = db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind=?3 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",params![ns,id,kind],|r|r.get(0)).optional()?;
+                if let Some(text) = peer {
+                    match crate::model::relation_stage::selector_metadata::<crate::model::relation_stage::NativeEvent>(text, &mut candidate_used) {
+                        Ok(event) => selected.push(event.at),
+                        Err(_) if !locations.is_empty() => { overflow = true; break; }
+                        Err(_) => return Err(rusqlite::Error::InvalidQuery),
+                    }
+                }
+            }
+        }
+        if overflow { break; }
+        locations.extend(selected);
+        used = candidate_used;
+        end = key;
+    }
+    context.matching_locations = Some(locations);
+    serde_json::to_string(&RelationCursor { path: path.to_owned(), after, end })
+        .map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
 pub(crate) fn validate_owners(db: &Connection) -> Result<(), StorageError> {
     owners::validate(db)
 }
@@ -2620,6 +2681,11 @@ impl Stage {
             .affected(&staged_paths(&tx, ns)?)
             .map_err(|e| StoreError::Data(e.to_string()))?;
         }
+        let relation_cursor = if result_phase == Phase::Relations && !paths.is_empty() {
+            Some(relation_page(&tx, ns, &paths[0], &mut context).map_err(error)?)
+        } else {
+            None
+        };
         let source_revision = tx
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace=?1",
@@ -2638,7 +2704,7 @@ impl Stage {
             source_revision,
             runtime,
             context,
-            relation_cursor: None,
+            relation_cursor,
         }))
     }
 
@@ -2897,6 +2963,12 @@ impl Stage {
                 }
             }
             if batch.phase == Phase::Relations {
+                let cursor: RelationCursor = serde_json::from_str(batch.relation_cursor.as_deref().ok_or_else(|| refuse("semantic_relation_cursor"))?)
+                    .map_err(|e| StoreError::Data(e.to_string()))?;
+                let current: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND relation_after=?3 AND relation_done=0)",params![ns,cursor.path,cursor.after],|r|r.get(0)).map_err(error)?;
+                if batch.paths.first() != Some(&cursor.path) || !current {
+                    return Ok(Outcome::Conflict);
+                }
                 let effects = owners::Owners {
                     db: &tx,
                     namespace: ns,
@@ -2944,8 +3016,11 @@ impl Stage {
                 #[cfg(test)]
                 crate::events::store::configured::effect("semantic_record_relations")
                     .map_err(error)?;
+                let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",params![ns,cursor.path,cursor.end],|r|r.get(0)).map_err(error)?;
+                tx.execute("UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=?4 WHERE namespace=?1 AND source_path=?2",params![ns,cursor.path,cursor.end,!pending]).map_err(error)?;
             }
             for path in &batch.paths {
+                if batch.phase == Phase::Relations { continue; }
                 let sql = if batch.phase == Phase::Identity {
                     "UPDATE main.catalog_semantic_sources SET identity_done=1 WHERE namespace=?1 AND source_path=?2"
                 } else {
