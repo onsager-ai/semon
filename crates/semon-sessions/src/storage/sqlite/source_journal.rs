@@ -1210,9 +1210,11 @@ mod tests {
         let cookie: i64 = blocker
             .query_row("PRAGMA schema_version", [], |r| r.get(0))
             .unwrap();
-        let capability =
-            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
-        assert!(crate::storage::sqlite::semantic::Stage::open(capability).is_err());
+        assert!(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config)
+                .and_then(crate::storage::sqlite::semantic::Stage::open)
+                .is_err()
+        );
         let after: i64 = blocker
             .query_row("PRAGMA schema_version", [], |r| r.get(0))
             .unwrap();
@@ -1804,7 +1806,11 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert!(selected_plan.iter().all(|line| !line.contains("TEMP B-TREE")));
+        assert!(
+            selected_plan
+                .iter()
+                .all(|line| !line.contains("TEMP B-TREE"))
+        );
         assert!(selected_plan.iter().all(|line| !line.starts_with("SCAN ")));
         // Repeated discovery is idempotent, including its source claims.
         assert_eq!(

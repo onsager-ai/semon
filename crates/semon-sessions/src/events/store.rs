@@ -6720,6 +6720,11 @@ mod tests {
             upgraded,
             "ordinary producer must complete the selected upgrade"
         );
+        assert_eq!(
+            config.source_observations().unwrap().pending(64).unwrap(),
+            vec!["/unrelated/first.jsonl".to_owned()],
+            "completed selected demand must yield back to ordinary claims"
+        );
         eprintln!("slot_upgrade stage=producer selected_first=true version=6");
         drop(db);
         fs::remove_dir_all(root).unwrap();

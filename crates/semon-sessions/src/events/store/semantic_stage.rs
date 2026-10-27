@@ -3158,20 +3158,32 @@ mod tests {
         let path = input.full_path(&options);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"owner\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"replay owner\"}}\n").unwrap();
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
-        let prepared = crate::model::prepare_sources(&options, &mut cache, &[input], crate::model::now_ms()).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let prepared =
+            crate::model::prepare_sources(&options, &mut cache, &[input], crate::model::now_ms())
+                .unwrap();
         let endpoint = &prepared.relationships.endpoints["owner"];
         let config = options.source.config(&options.cache).unwrap();
         drop(cache);
         let mut stage = Stage::open(SemanticStaging::admit(&config).unwrap()).unwrap();
-        assert_eq!(stage.begin(&[path.to_string_lossy().into_owned()], "runtime").unwrap(), Outcome::Written);
+        assert_eq!(
+            stage
+                .begin(&[path.to_string_lossy().into_owned()], "runtime")
+                .unwrap(),
+            Outcome::Written
+        );
         let db = Stage::open(SemanticStaging::admit(&config).unwrap())
             .unwrap()
             .into_test_connection();
         db.execute("UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=semon_namespace()", [])
             .unwrap();
         let epoch: i64 = db
-            .query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()", [], |r| r.get(0))
+            .query_row(
+                "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         db.execute("INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,metadata) VALUES(semon_namespace(),'owner','claude',?1)", [json(endpoint).unwrap()]).unwrap();
         for n in 0..100 {
@@ -3205,15 +3217,13 @@ mod tests {
         writer.busy_timeout(std::time::Duration::ZERO).unwrap();
         writer
             .execute_batch(
-                "BEGIN IMMEDIATE; INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'replay_writer_probe','1')",
+                "BEGIN IMMEDIATE; INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','1')",
             )
             .unwrap();
         let mut after = String::new();
         let mut all = Vec::new();
         loop {
-            let page = stage
-                .replay(epoch, &["owner".into()], &after)
-                .unwrap();
+            let page = stage.replay(epoch, &["owner".into()], &after).unwrap();
             if page.relations.is_empty() {
                 break;
             }
