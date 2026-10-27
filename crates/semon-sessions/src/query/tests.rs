@@ -4787,16 +4787,21 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
     };
     // Missing excluded ledgers cannot force archive-body fallback. This reader
     // accepts only the child and panics if any excluded source is requested.
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     db.execute(
-        "DELETE FROM files WHERE path=?1",
-        [home
-            .options
-            .claude_home
-            .join("projects/-work-proj/parent.jsonl")
-            .to_str()
-            .unwrap()],
+        "DELETE FROM main.files WHERE namespace=?1 AND path=?2",
+        rusqlite::params![
+            config.namespace.as_str(),
+            home.options
+                .claude_home
+                .join("projects/-work-proj/parent.jsonl")
+                .to_str()
+                .unwrap()
+        ],
     )
     .unwrap();
     for tool in ["get_session", "read_transcript"] {
