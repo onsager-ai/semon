@@ -185,8 +185,15 @@ reads and reverse transfer after new PG writes.
 These partial manifests are not full-source completeness witnesses and cannot
 authorize an ownership flip. Complete current/retained graph export, pending work
 and the remaining authoritative families still need implementation and
-qualification. The ordinary Catalog/Query import admission is not connected;
-copied content is not a publication ACK. Source quiesce,
+qualification. `admit_catalog_from(source, manifest, options)` obtains typed
+authority from the completed frozen source and checks the exact fully applied
+target before executing a genuine Catalog import publication. Host Options must
+name the same logical namespace and stream. For PostgreSQL with canonical Facts,
+the existing ordinary producer prepares the Facts selection head outside SQL row
+locks before the final import transaction rechecks the target checkpoint. Original
+producer receipts remain unchanged. This Catalog-scoped operation and its ordinary
+reader path still require qualification; copied content alone is not an ACK.
+Source quiesce,
 unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
 final qualification and qualified reverse transfer remain undelivered. The
 physical inventory tests reject unclassified tables; classification alone does
