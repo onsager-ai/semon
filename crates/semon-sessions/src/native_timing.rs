@@ -1257,8 +1257,8 @@ mod tests {
         (root, connection)
     }
 
-    const PROBE_CATALOG_INSERT: &str = "INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES";
-    const PROBE_CATALOG_CONFLICT: &str = "ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
+    const PROBE_CATALOG_INSERT: &str = "INSERT INTO session_catalog (namespace, session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES";
+    const PROBE_CATALOG_CONFLICT: &str = "ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
 
     #[derive(Debug, PartialEq, Eq)]
     struct ProbeCatalogRecord {
@@ -1279,12 +1279,8 @@ mod tests {
 
     fn catalog_probe_connection(root: &Path, name: &str) -> rusqlite::Connection {
         let stem = root.join(name);
-        drop(
-            crate::events::EventCache::open_scoped(&stem, &crate::Options::default().source)
-                .unwrap(),
-        );
-        // Reuse the actual initializer: synchronous and statement-cache
-        // settings are connection-local, unlike the persisted WAL mode.
+        // The fixture initializer creates and restores the same owned Source;
+        // use its admitted semantic producer for both statement shapes.
         let connection =
             crate::events::store::catalog_probe_connection(&crate::events::EventCache::path(&stem))
                 .unwrap();
@@ -1382,7 +1378,7 @@ mod tests {
     ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
         assert_eq!(rows.len(), 64);
         let single_sql = format!(
-            "{PROBE_CATALOG_INSERT} (?1,'current',?2,?3,?4,?5,?6) {PROBE_CATALOG_CONFLICT}"
+            "{PROBE_CATALOG_INSERT} (semon_namespace(),?1,'current',?2,?3,?4,?5,?6) {PROBE_CATALOG_CONFLICT}"
         );
         let mut parameters: Vec<_> = rows.iter().map(catalog_probe_values).collect();
         if fail {
@@ -1396,7 +1392,7 @@ mod tests {
                 .map(|position| {
                     let first = position * 6 + 1;
                     format!(
-                        "(?{first},'current',?{},?{},?{},?{},?{})",
+                        "(semon_namespace(),?{first},'current',?{},?{},?{},?{},?{})",
                         first + 1,
                         first + 2,
                         first + 3,
@@ -1497,7 +1493,7 @@ mod tests {
         ] {
             if phase == "retained_promotion" {
                 for connection in [&single, &batch] {
-                    assert_eq!(connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained')",[]) .unwrap(),64);
+                    assert_eq!(connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE namespace=semon_namespace()",[]) .unwrap(),64);
                 }
                 assert_eq!(catalog_probe_state(&single), catalog_probe_state(&batch));
             }

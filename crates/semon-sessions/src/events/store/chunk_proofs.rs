@@ -1367,13 +1367,18 @@ mod tests {
         let root = cleanup_root();
         let path = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let (ledger, index) = cleanup_proof(1, 0);
         let retained =
             published::prefix("original", &crate::source_carrier::ledger_digest(&ledger));
         let tx = store.connection.transaction().unwrap();
         write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
         let live = format!("{}header", prefix("original"));
-        tx.execute("INSERT INTO meta(key,value) SELECT ?1,json_set(value,'$.parser_version',?2) FROM meta WHERE key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
+        tx.execute("INSERT INTO meta(namespace,key,value) SELECT semon_meta_scope(?1),?1,json_set(value,'$.parser_version',?2) FROM meta WHERE namespace=semon_namespace() AND key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
         tx.commit().unwrap();
         let reader = Focused::open(&path, "original", &ledger).unwrap();
         assert_eq!(reader.prefix, prefix("original"));

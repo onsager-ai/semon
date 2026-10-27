@@ -212,10 +212,10 @@ mod tests {
             // The current factory creates the store; the namespace is
             // admitted and written only through the current qualified writer.
             let cache = root.join("index.json");
-            drop(
-                crate::events::EventCache::open_scoped(&cache, &crate::Options::default().source)
-                    .unwrap(),
-            );
+            let namespace = LogicalSourceNamespace::new("authorized-source").unwrap();
+            let source =
+                crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
+            drop(crate::events::EventCache::open_scoped(&cache, &source).unwrap());
             let database = crate::events::EventCache::path(&cache);
             let epoch = Connection::open(&database)
                 .unwrap()
@@ -227,13 +227,12 @@ mod tests {
                 .unwrap();
             let config = StoreConfig {
                 backend: StoreBackend::Sqlite { database },
-                namespace: LogicalSourceNamespace::new("authorized-source").unwrap(),
+                namespace,
                 expected_stream_epoch: Some(epoch),
             };
-            config.admit_namespace().unwrap();
-            let db = source_journal::SourceJournal(config.clone())
-                .connection()
-                .unwrap();
+            let db = semantic::Stage::open(semantic::SemanticStaging::admit(&config).unwrap())
+                .unwrap()
+                .into_test_connection();
             for (key, value) in [
                 (
                     "catalog_version",
@@ -267,9 +266,10 @@ mod tests {
                 .unwrap();
         }
         fn restart(&mut self) {
-            self.db = source_journal::SourceJournal(self.config.clone())
-                .connection()
-                .unwrap();
+            self.db =
+                semantic::Stage::open(semantic::SemanticStaging::admit(&self.config).unwrap())
+                    .unwrap()
+                    .into_test_connection();
         }
     }
     #[test]
