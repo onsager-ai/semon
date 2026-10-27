@@ -648,12 +648,9 @@ fn bind_custody_fixture(
 ) {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
-    let mut cache = crate::events::EventCache::open_pg_native(
-        pool.clone(),
-        namespace.clone(),
-        control.clone(),
-    )
-    .unwrap();
+    let mut cache =
+        crate::events::EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
+            .unwrap();
     let mut paths = Vec::new();
     for (at, source) in rows.iter().flat_map(|row| &row.sources).enumerate() {
         let receipt = cache

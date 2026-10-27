@@ -1438,7 +1438,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
                         continue;
                     }
-                    let proof = proof.unwrap();
+                    let proof = proof.unwrap_or_else(|error| {
+                        panic!("captured source proof harness={}: {error:?}", row.harness)
+                    });
                     assert_eq!(proof.source, reference);
                     let physical_path = if source.path.exists() {
                         source.path.clone()
