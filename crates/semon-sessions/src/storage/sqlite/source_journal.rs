@@ -1804,7 +1804,11 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert!(selected_plan.iter().all(|line| !line.contains("TEMP B-TREE")));
+        assert!(
+            selected_plan
+                .iter()
+                .all(|line| !line.contains("TEMP B-TREE"))
+        );
         assert!(selected_plan.iter().all(|line| !line.starts_with("SCAN ")));
         // Repeated discovery is idempotent, including its source claims.
         assert_eq!(
