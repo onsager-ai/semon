@@ -43,7 +43,7 @@ pub(super) fn capture(
         match &row {
             Row::Claim { path, .. } | Row::Member { path } => state.source_after = path.clone(),
             Row::Receipt { operation, .. } => state.source_after = operation.id.clone(),
-            Row::Intent { .. } => {},
+            Row::Intent { .. } => {}
             _ => state.source_phase += 1,
         }
         transfer::reported::append_capture(
@@ -64,11 +64,16 @@ pub(super) fn apply(tx: &mut Inbox<'_>, row: &Row) -> Result<(), StorageError> {
     row.validate_namespace(tx.1)?;
     match row {
         Row::Intent { payload } => {
-            let intent: crate::storage::source_observations::SourceIntent = serde_json::from_str(payload).map_err(|_| StorageError::ScopeChanged)?;
+            let intent: crate::storage::source_observations::SourceIntent =
+                serde_json::from_str(payload).map_err(|_| StorageError::ScopeChanged)?;
             let op = intent.operation();
             tx.0.execute("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)", params![tx.1,op.id,op.payload_digest,payload]).map_err(failed)?;
         }
-        Row::Receipt { operation, outcome, recovery_done } => {
+        Row::Receipt {
+            operation,
+            outcome,
+            recovery_done,
+        } => {
             tx.0.execute("INSERT INTO source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES(?1,?2,?3,?4,?5)", params![tx.1,operation.id,operation.payload_digest,outcome,recovery_done]).map_err(failed)?;
         }
         Row::State { revision, backfill } => {

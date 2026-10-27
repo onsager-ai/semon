@@ -128,7 +128,9 @@ pub(crate) fn occupied_source_refuses(
     input: &Path,
     receipt: bool,
 ) -> SnapshotManifest {
-    use crate::storage::source_observations::{SourceIntent, SourceMutationReceipt, SourceOperation};
+    use crate::storage::source_observations::{
+        SourceIntent, SourceMutationReceipt, SourceOperation,
+    };
 
     let expected: Vec<(String, Option<i64>)> = Vec::new();
     let operation = SourceOperation::capture(
@@ -151,7 +153,10 @@ pub(crate) fn occupied_source_refuses(
     }
     drop(observations);
     let observations = target.source_observations().unwrap();
-    assert_eq!(observations.pending_intents().unwrap().len(), usize::from(!receipt));
+    assert_eq!(
+        observations.pending_intents().unwrap().len(),
+        usize::from(!receipt)
+    );
     drop(observations);
 
     observe(source, input, 100, 200);
@@ -163,7 +168,10 @@ pub(crate) fn occupied_source_refuses(
             target.transfer_inbox().apply_page(&manifest, 1),
             Err(StorageError::Conflict)
         ));
-        assert_eq!(target.transfer_inbox().checkpoint(&manifest).unwrap(), staged);
+        assert_eq!(
+            target.transfer_inbox().checkpoint(&manifest).unwrap(),
+            staged
+        );
     }
     let mut observations = target.source_observations().unwrap();
     if receipt {
