@@ -15,6 +15,7 @@ use std::time::Duration;
 pub(crate) const SOURCE_JOURNAL_QUALIFICATION_VERSION: u32 = 1;
 const MAX_PATHS: usize = 256;
 const PENDING_SQL: &str = "SELECT source_path FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision,source_path LIMIT ?2";
+const SELECTED_PENDING_SQL: &str = "SELECT i.source_path FROM main.meta AS m CROSS JOIN main.session_catalog_invalidations AS i WHERE m.namespace=?1 AND m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' AND i.namespace=?1 AND i.source_path=m.value AND EXISTS(SELECT 1 FROM main.storage_source_journal WHERE namespace=?1 AND backfill_state='draining') ORDER BY m.key LIMIT ?2";
 
 // Shared by the existing native transaction and the configured transaction.
 // The caller owns the transaction: invalidation never commits independently.
@@ -583,6 +584,20 @@ impl SourceObservationStore for SourceJournal {
         let mut connection = self.writer()?;
         let db = connection.transaction().map_err(failed)?;
         self.validate(&db)?;
+        // Selected demand shares the existing claims. Do not replace their
+        // revisions or drain unrelated work ahead of a selected upgrade.
+        let selected = db
+            .prepare(SELECTED_PENDING_SQL)
+            .map_err(failed)?
+            .query_map(params![self.config.namespace.as_str(), limit as i64], |r| {
+                r.get(0)
+            })
+            .map_err(failed)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(failed)?;
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
         let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
         let paths = statement
             .query_map(params![self.config.namespace.as_str(), limit as i64], |r| {
@@ -1782,6 +1797,15 @@ mod tests {
                 .any(|line| line.contains("storage_ns_source_pending"))
         );
         assert!(plan.iter().all(|line| !line.contains("TEMP B-TREE")));
+        let selected_plan: Vec<String> = plan_db
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTED_PENDING_SQL}"))
+            .unwrap()
+            .query_map(params!["A", 1], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(selected_plan.iter().all(|line| !line.contains("TEMP B-TREE")));
+        assert!(selected_plan.iter().all(|line| !line.starts_with("SCAN ")));
         // Repeated discovery is idempotent, including its source claims.
         assert_eq!(
             store.discover(&discovery, &paths, true).unwrap(),
