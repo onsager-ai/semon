@@ -402,7 +402,7 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
         serde_json::json!({"type":"assistant","sessionId":"one","uuid":"a1","parentUuid":"u1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"id":"m1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized answer"}]}}),
     ];
     fs::write(
-        source,
+        &source,
         lines
             .iter()
             .map(|line| format!("{line}\n"))
@@ -486,6 +486,14 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
             repair: false,
         })
         .collect::<Vec<_>>();
+    // Retain actual Raw custody while the ordinary removal writer records
+    // withdrawal. A row with cleared sources alone cannot authorize removing
+    // the still-live ledger from a complete publication.
+    let archived = root.join("retained-one.jsonl");
+    fs::rename(&source, &archived).unwrap();
+    cache
+        .retain(&std::collections::BTreeSet::new(), &mut false)
+        .unwrap();
     // Missing-source replacement and original custody share the ordinary
     // publication lifecycle. Never reopen a physical writer without its role.
     let missing_generation = cache
@@ -504,11 +512,16 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     let composite_slots = read(
         "SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
     );
+    fs::rename(&archived, &source).unwrap();
+    // Returning Raw has a new ctime: obtain its real producer witness rather
+    // than publishing the stale pre-withdrawal Source identity.
+    let restored =
+        crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
     let restored_generation = cache
         .publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
-                rows: &prepared.rows,
-                transcripts: Some(&prepared.transcripts),
+                rows: &restored.rows,
+                transcripts: Some(&restored.transcripts),
             },
             missing_generation.as_deref(),
         )

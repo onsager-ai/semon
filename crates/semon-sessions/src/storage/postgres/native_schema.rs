@@ -747,8 +747,7 @@ mod tests {
         let line = serde_json::json!({"type":"assistant","uuid":"u-1","timestamp":"2026-09-29T00:00:01Z","message":{"id":"m-1","role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"fixture body stays in Raw"}}]}});
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let cache_path = path.with_extension("index.json");
-        let source = crate::storage::HostSource::new(ns("parser-fixture"), "a".repeat(64))
-            .unwrap();
+        let source = crate::storage::HostSource::new(ns("parser-fixture"), "a".repeat(64)).unwrap();
         let mut cache = EventCache::open(&cache_path, &source).unwrap();
         let index = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let tree = TreeRows::new(index.tree_summary.as_ref().unwrap()).unwrap();
