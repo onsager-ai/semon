@@ -1347,6 +1347,14 @@ impl Stage {
                 && prepared.withdrawals.is_empty()
                 && prepared.relationships.retired_owners.is_empty())
         {
+            #[cfg(test)]
+            eprintln!(
+                "semantic_component_budget site=publish rows={} claims={} withdrawals={} retired={}",
+                prepared.rows.len(),
+                prepared.claims.len(),
+                prepared.withdrawals.len(),
+                prepared.relationships.retired_owners.len()
+            );
             return Err(refuse("semantic_publication_component_budget"));
         }
         if prepared
@@ -2832,6 +2840,14 @@ impl Stage {
                 || prepared.rows.len() > 64
                 || prepared.transcripts.len() > 64
             {
+                #[cfg(test)]
+                eprintln!(
+                    "semantic_component_budget site=record rows={} transcripts={} withdrawals={} retired={}",
+                    prepared.rows.len(),
+                    prepared.transcripts.len(),
+                    prepared.withdrawals.len(),
+                    prepared.relationships.retired_owners.len()
+                );
                 return Err(refuse("semantic_publication_component_budget"));
             }
             let mut metadata = Vec::new();
