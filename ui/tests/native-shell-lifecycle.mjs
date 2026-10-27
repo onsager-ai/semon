@@ -81,6 +81,32 @@ for (const width of [390, 1280])
       const result = await page.evaluate(async (width) => {
         const base = resources();
         const outcomes = [];
+        for (const remount of [false, true]) {
+          let owner = NativeShell.mountNativeShell();
+          const form = document.querySelector('form');
+          const dialog = document.getElementById('confirm');
+          form.requestSubmit();
+          // Deliver the real queued close after reopening, before clicking Cancel.
+          await new Promise((resolve, reject) => {
+            const closed = () => {
+              dialog.removeEventListener('close', closed);
+              try {
+                if (!dialog.open) throw new Error('confirmation was not reopened');
+                document.querySelector('[value="cancel"]').click();
+                if (dialog.open) throw new Error('queued close detached the reopened confirmation');
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
+            };
+            dialog.addEventListener('close', closed);
+            if (remount) owner = NativeShell.mountNativeShell();
+            else dialog.close();
+            form.requestSubmit();
+          });
+          owner.destroy();
+          outcomes.push(resources());
+        }
         for (let i = 0; i < 3; i++) {
           const owner = NativeShell.mountNativeShell();
           document.getElementById('lead-btn').click();

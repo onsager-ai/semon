@@ -940,11 +940,12 @@ export default async function (browser) {
         JSON.stringify({ failed, previewInfo }),
     );
     r.expect(
-      ok.notes.length === 0 && ok.out > preview,
-      'a working fetch shows the whole text, longer than the preview: ' + JSON.stringify(ok),
+      ok.notes.length === 1 && ok.notes[0] === 'Complete recorded text loaded.' && ok.out > preview,
+      'a working fetch confirms complete text without a preview or failure notice: ' +
+        JSON.stringify(ok),
     );
-    // The transcript and FullTool panel share the same qualified field request.
-    // Opening the panel while that request is in flight must join its completion.
+    // The recorded tool has no outer text-loading control. Closing and reopening
+    // View all while its qualified field read is in flight must join completion.
     await page.reload();
     await settled(page);
     await childRequestsSettled();
@@ -963,8 +964,10 @@ export default async function (browser) {
       }
       await route.continue();
     });
-    await page.getByRole('button', { name: 'Load recorded text', exact: true }).first().click();
+    await openAll();
     await startedField;
+    await page.click('dialog.panel.full .panel-h .ibtn');
+    await page.waitForFunction(() => !history.state?.sheet);
     await openAll();
     releaseField();
     await page.waitForFunction(
@@ -973,11 +976,15 @@ export default async function (browser) {
         preview,
       preview,
     );
-    await page.locator('dialog.panel.full .vnote').waitFor({ state: 'detached' });
+    await page
+      .locator('dialog.panel.full .vnote')
+      .getByText('Complete recorded text loaded.', { exact: true })
+      .waitFor();
     r.expect(fieldReads === 1, 'View all joins the in-flight native field read: ' + fieldReads);
     r.expect(
-      (await page.locator('dialog.panel.full .vnote').count()) === 0,
-      'View all redraws when the shared field request completes',
+      (await page.locator('dialog.panel.full .vnote').allTextContents()).join('') ===
+        'Complete recorded text loaded.',
+      'View all replaces the loading state with completion after the shared field read',
     );
     await page.click('dialog.panel.full .panel-h .ibtn');
     await page.unroute('**/api/session-entry?**');
@@ -1492,6 +1499,19 @@ export default async function (browser) {
           .querySelectorAll('.event .ev-more:not([hidden]), .hop .more:not([hidden])')
           .forEach((x) => x.click());
       });
+    const canonicalOwner = (page) => {
+      const parts = new URL(page.url()).pathname.split('/');
+      if (parts.length !== 4 || parts[1] !== 'session')
+        throw new Error('Expected a canonical session path before opening trace');
+      const source = decodeURIComponent(parts[2]);
+      const key = decodeURIComponent(parts[3]);
+      const match = Object.entries(D.KEYS).find(
+        ([sid, catalogKey]) =>
+          catalogKey === key && D.SESS[sid] && D.SOURCES[D.SESS[sid].machine] === source,
+      );
+      if (!match) throw new Error('Canonical session path has no fixture owner');
+      return match[0];
+    };
     for (const [size, dark] of [
       ['phone', false],
       ['desktop', true],
@@ -1501,14 +1521,13 @@ export default async function (browser) {
         await goto(page, { v }, D);
         await scan(page, size + ' ' + v);
       }
-      const sids = [...D.nativeKeys, 'unsent:' + XSS];
-      for (const id of sids) {
+      for (const id of D.nativeKeys) {
         await goto(page, { v: 'session', id }, D);
         await page.waitForTimeout(100);
         await openEverything(page);
         await page.waitForTimeout(80);
         await scan(page, size + ' session ' + id.slice(0, 20));
-        const owner = decodeURIComponent(new URL(page.url()).pathname.split('/')[3]);
+        const owner = canonicalOwner(page);
         const traces = await page.evaluate(() =>
           [...document.querySelectorAll('.turn-end .link')].map(
             (b) => b.closest('.turn').dataset.turn,
@@ -1520,6 +1539,52 @@ export default async function (browser) {
           await scan(page, size + ' trace ' + t.slice(0, 20));
         }
       }
+      const realSession = D.SESS[XSS_KEY],
+        source = realSession && D.SOURCES[realSession.machine],
+        key = D.KEYS[XSS_KEY],
+        unsent = 'unsent:' + XSS;
+      if (!source || !key)
+        throw new Error('Payload fixture is missing its source or Catalog key mapping');
+      const unsentPage = await served(browser, {
+        extras: true,
+        size,
+        dark,
+        path: '/s/native/' + encodeURIComponent(unsent) + '?machine=' + encodeURIComponent(source),
+      });
+      await unsentPage.waitForFunction(
+        ({ expectedSource, expectedKey }) => {
+          const parts = location.pathname.split('/');
+          try {
+            return (
+              parts.length === 4 &&
+              parts[1] === 'session' &&
+              decodeURIComponent(parts[2]) === expectedSource &&
+              decodeURIComponent(parts[3]) === expectedKey &&
+              document.querySelector('[aria-label="Transcript"] [data-entry-key]') !== null
+            );
+          } catch {
+            return false;
+          }
+        },
+        { expectedSource: source, expectedKey: key },
+        { timeout: 5000 },
+      );
+      await unsentPage.waitForTimeout(100);
+      await openEverything(unsentPage);
+      await unsentPage.waitForTimeout(80);
+      await scan(unsentPage, size + ' session ' + unsent.slice(0, 20));
+      const owner = canonicalOwner(unsentPage);
+      const traces = await unsentPage.evaluate(() =>
+        [...document.querySelectorAll('.turn-end .link')].map(
+          (b) => b.closest('.turn').dataset.turn,
+        ),
+      );
+      for (const t of traces) {
+        await goto(unsentPage, { v: 'trace', sid: owner, turn: t }, D);
+        await openEverything(unsentPage);
+        await scan(unsentPage, size + ' trace ' + t.slice(0, 20));
+      }
+      await unsentPage.context().close();
       // The payload lane's details menu.
       await goto(page, { v: 'session', id: XSS_KEY }, D);
       await openEverything(page);

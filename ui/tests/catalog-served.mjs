@@ -382,46 +382,232 @@ test(
           await context.close();
         }
       }
+      const nativeDeadline = Date.now() + 30_000;
       const nativeContext = await browser.newContext({ javaScriptEnabled: false });
+      const nativeNavigationDiagnostics = [];
       try {
         const nativePage = await nativeContext.newPage();
         const nativeRequests = [];
-        nativePage.on('request', (request) => nativeRequests.push(new URL(request.url()).pathname));
-        const listing = await nativePage.goto(url[1] + '/sessions?native=1&t=' + url[2]);
-        assert.equal(listing.status(), 200);
-        await nativePage.locator('a[href^="/session/local/backlog?"]').click();
-        await nativePage.getByRole('region', { name: 'Session transcript' }).waitFor();
-        const earlier = nativePage.getByRole('link', { name: 'Earlier records', exact: true });
-        const anchor = new URL(await earlier.getAttribute('href'), url[1]);
-        assert.ok(anchor.searchParams.get('generation'), 'HTML paging binds its native generation');
-        assert.equal(anchor.pathname, '/session/local/backlog');
-        assert.equal(anchor.searchParams.has('machine'), false);
-        await earlier.click();
-        assert.equal(
-          new URL(nativePage.url()).searchParams.get('generation'),
-          anchor.searchParams.get('generation'),
-        );
-        assert.ok(
-          (await nativePage
-            .locator('section[aria-label="Session transcript"] > article')
-            .count()) <= 60,
-        );
-        await nativePage.goto(url[1] + '/s/codex/native-tools?machine=local&native=1');
-        const thinking = nativePage
-          .locator('details')
-          .filter({ has: nativePage.locator('summary', { hasText: /^Thinking$/ }) });
-        assert.ok(
-          (await thinking.count()) > 0,
-          'native reasoning remains accessible without JavaScript',
-        );
-        assert.equal(
-          await thinking.first().getAttribute('open'),
-          null,
-          'Thinking starts collapsed',
-        );
-        assert.ok(
-          nativeRequests.every((path) => !/^\/api\/(model|tx|events|analytics)(?:\/|$)/.test(path)),
-        );
+        const recordsByRequest = new Map();
+        let activeNavigationLabel = 'native navigation';
+        const remainingNativeMs = () => Math.max(1, nativeDeadline - Date.now());
+        nativePage.on('request', (request) => {
+          const requestURL = new URL(request.url());
+          nativeRequests.push(requestURL.pathname);
+          if (!request.isNavigationRequest()) return;
+          const record = {
+            label: activeNavigationLabel,
+            method: request.method(),
+            requestPath: requestURL.pathname,
+            status: null,
+            canonicalPath: null,
+            dom: '',
+          };
+          nativeNavigationDiagnostics.push(record);
+          recordsByRequest.set(request, record);
+        });
+        nativePage.on('response', (response) => {
+          const record = recordsByRequest.get(response.request());
+          if (record) record.status = response.status();
+        });
+        const finishNativeDiagnostic = async (start, label) => {
+          const records = nativeNavigationDiagnostics.slice(start);
+          let dom = '';
+          try {
+            dom = await nativePage
+              .locator('body')
+              .innerText({ timeout: Math.min(500, remainingNativeMs()) });
+          } catch {
+            dom = '(body text unavailable)';
+          }
+          dom = dom.split(url[2]).join('[redacted bootstrap token]').slice(0, 240);
+          const currentURL = new URL(nativePage.url());
+          if (!records.length) {
+            const record = {
+              label,
+              method: null,
+              requestPath: null,
+              status: null,
+              canonicalPath: currentURL.pathname,
+              dom,
+            };
+            nativeNavigationDiagnostics.push(record);
+            return [record];
+          }
+          for (const record of records) {
+            record.canonicalPath = currentURL.pathname;
+            record.dom = dom;
+          }
+          return records;
+        };
+        const captureNativeNavigation = async (label, action) => {
+          const start = nativeNavigationDiagnostics.length;
+          activeNavigationLabel = label;
+          try {
+            await action(remainingNativeMs());
+          } catch (error) {
+            // Snapshot the failure page before the outer finally closes the context.
+            await finishNativeDiagnostic(start, label);
+            throw error;
+          }
+          const records = await finishNativeDiagnostic(start, label);
+          return records.at(-1);
+        };
+        const navigateNativeWithRetry = async (
+          label,
+          action,
+          canonicalPath,
+          requestedPath = canonicalPath,
+        ) => {
+          let record = await captureNativeNavigation(label, action);
+          let detail = JSON.stringify(record);
+          assert.equal(record.method, 'GET', `${label} navigation is a read: ${detail}`);
+          assert.ok(
+            record.status === 200 || record.status === 503,
+            `${label} unexpected HTTP status: ${detail}`,
+          );
+          if (record.status === 503) {
+            assert.equal(
+              record.canonicalPath,
+              requestedPath,
+              `${label} retry starts from the requested path: ${detail}`,
+            );
+            const retryMessage =
+              'The recorded session index is updating. Reload this page to retry.';
+            assert.equal(
+              await nativePage.getByText(retryMessage, { exact: true }).count(),
+              1,
+              `${label} 503 retry message: ${detail}`,
+            );
+            const href = await nativePage
+              .getByRole('link', { name: 'Reload to retry', exact: true })
+              .getAttribute('href', { timeout: remainingNativeMs() });
+            assert.ok(href, `${label} 503 retry link is missing: ${detail}`);
+            const retryURL = new URL(href, url[1]);
+            const currentURL = new URL(nativePage.url());
+            assert.equal(retryURL.origin, currentURL.origin, `${label} retry stays same-origin`);
+            assert.ok(
+              [requestedPath, canonicalPath].includes(retryURL.pathname),
+              `${label} retry keeps its requested or canonical path`,
+            );
+            assert.equal(
+              retryURL.searchParams.get('native'),
+              '1',
+              `${label} retry keeps native mode`,
+            );
+            assert.equal(
+              retryURL.searchParams.has('t'),
+              false,
+              `${label} retry omits the bootstrap secret`,
+            );
+            for (const name of ['machine', 'generation']) {
+              if (currentURL.searchParams.has(name)) {
+                assert.equal(
+                  retryURL.searchParams.get(name),
+                  currentURL.searchParams.get(name),
+                  `${label} retry keeps ${name}`,
+                );
+              }
+            }
+            record = await captureNativeNavigation(`${label} documented GET retry`, (timeout) =>
+              nativePage.goto(retryURL.href, { timeout }),
+            );
+            detail = JSON.stringify(record);
+            assert.equal(record.method, 'GET', `${label} documented retry is a read`);
+            assert.equal(
+              record.canonicalPath,
+              canonicalPath,
+              `${label} GET retry canonical path: ${JSON.stringify(record)}`,
+            );
+          }
+          if (record.status === 200) {
+            assert.equal(record.canonicalPath, canonicalPath, `${label} canonical path: ${detail}`);
+          }
+          assert.equal(
+            record.status,
+            200,
+            `${label} needs a served page: ${JSON.stringify(record)}`,
+          );
+          return record;
+        };
+
+        try {
+          const listing = await captureNativeNavigation('native Sessions listing', (timeout) =>
+            nativePage.goto(url[1] + '/sessions?native=1&t=' + url[2], { timeout }),
+          );
+          assert.equal(listing.canonicalPath, '/sessions', `listing: ${JSON.stringify(listing)}`);
+          assert.equal(listing.status, 200, `listing: ${JSON.stringify(listing)}`);
+          await navigateNativeWithRetry(
+            'native backlog selection',
+            (timeout) =>
+              nativePage.locator('a[href^="/session/local/backlog?"]').click({ timeout }),
+            '/session/local/backlog',
+          );
+          await nativePage
+            .getByRole('region', { name: 'Session transcript' })
+            .waitFor({ timeout: remainingNativeMs() });
+          const earlier = nativePage.getByRole('link', { name: 'Earlier records', exact: true });
+          const anchor = new URL(
+            await earlier.getAttribute('href', { timeout: remainingNativeMs() }),
+            url[1],
+          );
+          assert.ok(
+            anchor.searchParams.get('generation'),
+            'HTML paging binds its native generation',
+          );
+          assert.equal(anchor.pathname, '/session/local/backlog');
+          assert.equal(anchor.searchParams.has('machine'), false);
+          await navigateNativeWithRetry(
+            'native earlier records',
+            (timeout) => earlier.click({ timeout }),
+            '/session/local/backlog',
+          );
+          assert.equal(
+            new URL(nativePage.url()).searchParams.get('generation'),
+            anchor.searchParams.get('generation'),
+          );
+          assert.ok(
+            (await nativePage
+              .locator('section[aria-label="Session transcript"] > article')
+              .count()) <= 60,
+          );
+          await navigateNativeWithRetry(
+            'native tools selection',
+            (timeout) =>
+              nativePage.goto(url[1] + '/s/codex/native-tools?machine=local&native=1', { timeout }),
+            '/session/local/native-tools',
+            '/s/codex/native-tools',
+          );
+          const thinking = nativePage
+            .locator('details')
+            .filter({ has: nativePage.locator('summary', { hasText: /^Thinking$/ }) });
+          assert.ok(
+            (await thinking.count()) > 0,
+            'native reasoning remains accessible without JavaScript',
+          );
+          assert.equal(
+            await thinking.first().getAttribute('open'),
+            null,
+            'Thinking starts collapsed',
+          );
+          assert.ok(
+            nativeRequests.every(
+              (path) => !/^\/api\/(model|tx|events|analytics)(?:\/|$)/.test(path),
+            ),
+          );
+          console.log(
+            `Native served navigation diagnostics: ${JSON.stringify(nativeNavigationDiagnostics)}`,
+          );
+        } catch (error) {
+          const message = String(error?.stack || error)
+            .split(url[2])
+            .join('[redacted bootstrap token]');
+          const diagnostics = JSON.stringify(nativeNavigationDiagnostics);
+          console.error(
+            `Native served navigation diagnostics before cleanup: ${diagnostics}\n${message}`,
+          );
+          throw new Error(message);
+        }
       } finally {
         await nativeContext.close();
       }
