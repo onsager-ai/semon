@@ -179,10 +179,13 @@ impl SourceLock {
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("source lock is not regular"));
         }
+        // Shared Catalog readers take the facts fence before per-source
+        // fences. Writers hold one fence at a time (multi-source relocation
+        // sorts its keys), so waiting here preserves the established order.
         let operation = if exclusive {
             libc::LOCK_EX
         } else {
-            libc::LOCK_SH | libc::LOCK_NB
+            libc::LOCK_SH
         };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             return Err(io::Error::last_os_error());
