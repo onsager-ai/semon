@@ -486,6 +486,25 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
             repair: false,
         })
         .collect::<Vec<_>>();
+    // Original withdrawal and same-key missing-source composition are distinct
+    // lifecycles. Seed both with the same real producer before Raw moves.
+    let mut original_options = options.clone();
+    original_options.cache = root.join("original-index.json");
+    let mut original_cache = crate::events::EventCache::open_scoped(
+        &original_options.cache,
+        &original_options.source,
+    )
+    .unwrap();
+    let original_prepared = crate::model::prepare_sources(
+        &original_options,
+        &mut original_cache,
+        &inputs,
+        1790812802000,
+    )
+    .unwrap();
+    let (_, original_generation) = original_cache
+        .publish_partial_catalog_fenced(&original_prepared)
+        .unwrap();
     // Retain actual Raw custody while the ordinary removal writer records
     // withdrawal. A row with cleared sources alone cannot authorize removing
     // the still-live ledger from a complete publication.
@@ -494,6 +513,19 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     cache
         .retain(&std::collections::BTreeSet::new(), &mut false)
         .unwrap();
+    original_cache
+        .retain(&std::collections::BTreeSet::new(), &mut false)
+        .unwrap();
+    let withdrawn_generation = original_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &[],
+                transcripts: Some(&[]),
+            },
+            original_generation.as_deref(),
+        )
+        .unwrap();
+    assert!(withdrawn_generation.is_some());
     // Missing-source replacement and original custody share the ordinary
     // publication lifecycle. Never reopen a physical writer without its role.
     let missing_generation = cache
@@ -527,14 +559,41 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
         )
         .unwrap();
     assert!(restored_generation.is_some());
-    let original = read(
-        "SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
-    );
-    let original_slots = read(
-        "SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
-    );
+    let restored_original = crate::model::prepare_sources(
+        &original_options,
+        &mut original_cache,
+        &inputs,
+        1790812802000,
+    )
+    .unwrap();
+    assert!(original_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &restored_original.rows,
+                transcripts: Some(&restored_original.transcripts),
+            },
+            withdrawn_generation.as_deref(),
+        )
+        .unwrap()
+        .is_some());
+    let original_config = original_options.source.config(&original_options.cache).unwrap();
+    let original_owner = crate::events::store::configured::NativeOwnership::admit(&original_config).unwrap();
+    let original_db = crate::storage::sqlite::source_journal::SourceJournal::owned(original_owner)
+        .connection()
+        .unwrap();
+    let original = original_db.prepare("SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key").unwrap()
+        .query_map([], |r| r.get::<_, String>(0)).unwrap()
+        .map(|r| r.unwrap().into_bytes()).collect::<Vec<_>>();
+    let original_slots = original_db.prepare("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot").unwrap()
+        .query_map([], |r| r.get::<_, String>(0)).unwrap()
+        .map(|r| r.unwrap().into_bytes()).collect::<Vec<_>>();
+    let retained_metadata = original_prepared.rows.iter().map(|row| {
+        let mut row = row.clone();
+        row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        serde_json::to_vec(&row).unwrap()
+    }).collect::<Vec<_>>();
     assert_eq!(
-        original, metadata,
+        original, retained_metadata,
         "original custody keeps the published row"
     );
     assert_eq!(
@@ -543,6 +602,8 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     );
     assert!(!slots.is_empty());
     drop(cache);
+    drop(original_cache);
+    drop(original_db);
     drop(connection);
     if !keep_raw {
         fs::remove_dir_all(&root).unwrap();
