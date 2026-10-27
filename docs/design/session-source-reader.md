@@ -148,7 +148,8 @@ validates selected archive witnesses and preserves existing claim revisions;
 the ordinary producer alone publishes and acknowledges completion. PostgreSQL
 fences the scheduling write against the observed Catalog head and source epoch.
 There is no native-meta prefix scan, Raw I/O under its SQL lock, or SQLite open
-on this PostgreSQL route. Current-format transfer carries this marker unchanged.
+on this PostgreSQL route. Complete pending-state transfer must preserve this
+marker unchanged; that transfer remains unqualified.
 
 Retained Query metadata keeps its original lifecycle observation. Whether a
 selected query requires a live runtime follows membership in the requested
