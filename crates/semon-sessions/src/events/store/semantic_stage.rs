@@ -3130,15 +3130,50 @@ mod tests {
 
     #[test]
     fn catalog_runtime_semantic_replay_pages_preserve_bounds_and_do_not_reserve_writer() {
-        let (root, mut store, _) = header_repair_store("replay-pages");
-        store
-            .connection
-            .execute("UPDATE catalog_semantic_stage SET phase='publication'", [])
+        use crate::storage::sqlite::semantic::{SemanticStaging, Stage};
+        let root = std::env::temp_dir().join(format!(
+            "semon-replay-pages-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            claude_home: root.join("claude"),
+            claude_json: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
+            proc_root: root.join("proc"),
+            ..crate::Options::default()
+        };
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/owner.jsonl".into(),
+        };
+        let path = input.full_path(&options);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"owner\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"replay owner\"}}\n").unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let prepared = crate::model::prepare_sources(&options, &mut cache, &[input], crate::model::now_ms()).unwrap();
+        let endpoint = &prepared.relationships.endpoints["owner"];
+        let config = options.source.config(&options.cache).unwrap();
+        drop(cache);
+        let mut stage = Stage::open(SemanticStaging::admit(&config).unwrap()).unwrap();
+        assert_eq!(stage.begin(&[path.to_string_lossy().into_owned()], "runtime").unwrap(), Outcome::Written);
+        let db = Stage::open(SemanticStaging::admit(&config).unwrap())
+            .unwrap()
+            .into_test_connection();
+        db.execute("UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=semon_namespace()", [])
             .unwrap();
-        let epoch: i64 = store
-            .connection
-            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+        let epoch: i64 = db
+            .query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()", [], |r| r.get(0))
             .unwrap();
+        db.execute("INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,metadata) VALUES(semon_namespace(),'owner','claude',?1)", [json(endpoint).unwrap()]).unwrap();
         for n in 0..100 {
             let relation = Relation {
                 id: format!("edge-{n:03}"),
@@ -3162,20 +3197,22 @@ mod tests {
                 stubs: Vec::new(),
                 inline: false,
             };
-            store.connection.execute("INSERT INTO catalog_semantic_relations(relation_id,from_key,metadata) VALUES(?1,'owner',?2)",params![relation.id,json(&relation).unwrap()]).unwrap();
+            db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,metadata) VALUES(semon_namespace(),?1,'owner',?2)",params![relation.id,json(&relation).unwrap()]).unwrap();
         }
-        let writer = Connection::open(&store.path).unwrap();
+        let writer = Stage::open(SemanticStaging::admit(&config).unwrap())
+            .unwrap()
+            .into_test_connection();
         writer.busy_timeout(std::time::Duration::ZERO).unwrap();
         writer
             .execute_batch(
-                "BEGIN IMMEDIATE; INSERT INTO meta(key,value) VALUES('replay_writer_probe','1')",
+                "BEGIN IMMEDIATE; INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'replay_writer_probe','1')",
             )
             .unwrap();
         let mut after = String::new();
         let mut all = Vec::new();
         loop {
-            let page = store
-                .semantic_replay(epoch, &["owner".into()], &after)
+            let page = stage
+                .replay(epoch, &["owner".into()], &after)
                 .unwrap();
             if page.relations.is_empty() {
                 break;
@@ -3199,18 +3236,17 @@ mod tests {
             (0..100).map(|n| format!("edge-{n:03}")).collect::<Vec<_>>()
         );
         writer.execute_batch("ROLLBACK").unwrap();
-        store
-            .connection
-            .execute("UPDATE catalog_semantic_stage SET epoch=epoch+1", [])
+        db.execute("UPDATE main.catalog_semantic_stage SET epoch=epoch+1 WHERE namespace=semon_namespace()", [])
             .unwrap();
-        assert!(store.semantic_replay(epoch, &["owner".into()], "").is_err());
+        assert!(stage.replay(epoch, &["owner".into()], "").is_err());
         assert!(
-            store
-                .semantic_replay(epoch + 1, &vec!["owner".into(); 65], "")
+            stage
+                .replay(epoch + 1, &vec!["owner".into(); 65], "")
                 .is_err()
         );
         drop(writer);
-        drop(store);
+        drop(stage);
+        drop(db);
         fs::remove_dir_all(root).unwrap();
     }
 
