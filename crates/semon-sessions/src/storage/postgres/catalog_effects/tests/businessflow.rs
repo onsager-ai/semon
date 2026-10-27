@@ -575,31 +575,41 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     );
+    let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(
+            recent_machine.into(),
+            withdraw_options.clone(),
+        )]),
+    ));
     let oracle_retained_reads = oracle_withdrawn
         .iter()
         .map(|row| {
             let key = row["key"].as_str().unwrap();
             let args = serde_json::json!({"id":key,"limit":100});
-            let body = crate::query::transcript::read(
-                &withdraw_options,
-                key,
-                &args,
-                Some(&sqlite_host),
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
-            .unwrap()
-            .expect("SQLite retained body through preserved Raw custody");
-            let fields = crate::query::transcript::session(
-                &withdraw_options,
-                key,
-                &serde_json::json!({"id":key}),
-                Some(&sqlite_host),
-                crate::SessionSourceReadMode::LocalThenProvider,
-                1790812802000,
-            )
-            .unwrap()
-            .expect("SQLite retained fields through preserved Raw custody");
+            let body = retained_query
+                .call_selected_at(
+                    recent_machine,
+                    key,
+                    "read_transcript",
+                    &args,
+                    Some(&sqlite_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    1790812802000,
+                )
+                .expect("SQLite retained body through public Query and preserved Raw custody");
+            let fields = retained_query
+                .call_selected_at(
+                    recent_machine,
+                    key,
+                    "get_session",
+                    &serde_json::json!({"id":key}),
+                    Some(&sqlite_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    1790812802000,
+                )
+                .expect("SQLite retained fields through public Query and preserved Raw custody");
+            assert_eq!(body["sid"], key);
+            assert_eq!(fields["session"]["id"], key);
             (
                 key.to_owned(),
                 serde_json::json!({"body":body,"fields":fields}),
@@ -3674,7 +3684,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .full_path(&facts_options)
         .to_string_lossy()
         .into_owned();
-    let unrelated_path = bulk[1]
+    let unrelated_path = bulk[3]
         .full_path(&facts_options)
         .to_string_lossy()
         .into_owned();
