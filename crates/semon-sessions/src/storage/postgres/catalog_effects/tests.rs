@@ -370,6 +370,14 @@ fn oracle() -> Input {
 }
 
 fn build_oracle(keep_raw: bool, history: bool) -> Input {
+    build_oracle_with_binding(keep_raw, history, |_, _| {})
+}
+
+fn build_oracle_with_binding(
+    keep_raw: bool,
+    history: bool,
+    bind: impl FnOnce(&[CatalogRow], &[crate::slot_projection::Projection]),
+) -> Input {
     let root = std::env::temp_dir().join(format!(
         "pg124-{}-{}",
         std::process::id(),
@@ -503,6 +511,7 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     let (_, original_generation) = original_cache
         .publish_partial_catalog_fenced(&original_prepared)
         .unwrap();
+    bind(&prepared.rows, &prepared.transcripts);
     // Retain actual Raw custody while the ordinary removal writer records
     // withdrawal. A row with cleared sources alone cannot authorize removing
     // the still-live ledger from a complete publication.
@@ -631,6 +640,49 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     }
 }
 
+fn bind_custody_fixture(
+    pool: &crate::storage::postgres::PgPool,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    rows: &[CatalogRow],
+    projections: &[crate::slot_projection::Projection],
+) {
+    use crate::storage::native_events::NativeEventStore;
+    let control = PgCancellation::default();
+    let mut cache = crate::events::EventCache::open_pg_native(
+        pool.clone(),
+        namespace.clone(),
+        control.clone(),
+    )
+    .unwrap();
+    let mut paths = Vec::new();
+    for (at, source) in rows.iter().flat_map(|row| &row.sources).enumerate() {
+        let receipt = cache
+            .ingest(&format!("{:064x}", at + 1), &source.path, "claude")
+            .unwrap();
+        assert_eq!(receipt.consumed_bytes, source.offset);
+        paths.push(source.path.to_str().unwrap().to_owned());
+    }
+    drop(cache);
+    let fence = pool
+        .transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            super::admission::capture(tx, &paths)
+        })
+        .unwrap();
+    pool.transaction(namespace, TxnKind::Write, &control, |tx| {
+        super::admission::stage_bound(
+            tx,
+            L1,
+            &crate::slot_projection::Publication {
+                rows,
+                transcripts: Some(projections),
+            },
+            &fence,
+        )
+        .map(|_| ())
+    })
+    .unwrap();
+}
+
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
     TABLES.iter().map(|table| {
         tx.driver.query(&format!("SELECT to_jsonb(t)::text FROM semon_pg_native_{table} t ORDER BY to_jsonb(t)::text"), &[]).map_err(sqlstate::error).map(|rows| rows.iter().map(|row| row.get(0)).collect())
@@ -639,8 +691,12 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
 
 #[test]
 fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
-    let data = oracle();
     let (pool, _) = fixture(|_| {});
+    let data = build_oracle_with_binding(false, true, |rows, projections| {
+        for name in ["history127-a", "history127-b"] {
+            bind_custody_fixture(&pool, &ns(name), rows, projections);
+        }
+    });
     let mut missing = data.rows.clone();
     for row in &mut missing {
         row.sources.clear();
@@ -655,13 +711,6 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
         .collect::<Vec<_>>();
     for name in ["history127-a", "history127-b"] {
         let namespace = ns(name);
-        pool.transaction(
-            &namespace,
-            TxnKind::Write,
-            &PgCancellation::default(),
-            |tx| stage(tx, L1, &data.publication()),
-        )
-        .unwrap();
         pool.transaction(
             &namespace,
             TxnKind::Write,
@@ -722,16 +771,11 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
 
 #[test]
 fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() {
-    let data = oracle();
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog127-original");
-    pool.transaction(
-        &namespace,
-        TxnKind::Write,
-        &PgCancellation::default(),
-        |tx| stage(tx, L1, &data.publication()),
-    )
-    .unwrap();
+    let data = build_oracle_with_binding(false, true, |rows, projections| {
+        bind_custody_fixture(&pool, &namespace, rows, projections);
+    });
     let preserve = |tx: &mut PgTxn<'_>| {
         let store = history::History {
             effects: Effects {
