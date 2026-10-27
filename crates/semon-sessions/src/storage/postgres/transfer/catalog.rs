@@ -701,8 +701,8 @@ mod tests {
         let retired = prior.admit_namespace().unwrap();
         prior.unenroll_namespace(&retired).unwrap();
         let target_admission = config.admit_namespace().unwrap();
-        assert_ne!(target_admission.generation, owner.admission());
         let manifest = stage(&source, &config, &[120; 32]);
+        assert_ne!(target_admission.generation, manifest.binding_epoch);
         for category in [
             transfer::Category::Operations,
             transfer::Category::Proofs,

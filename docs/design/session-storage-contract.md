@@ -200,7 +200,7 @@ destination admission are separate: the import receipt records the target epoch,
 and imported publication bindings authorize local leases while their original
 producer coordinates and proof IDs remain immutable. Namespace/stream and the
 fully applied frozen-source checkpoint are still checked. This operation's
-reader path still require qualification; copied content alone is not an ACK.
+reader path still requires qualification; copied content alone is not an ACK.
 Source quiesce,
 unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
 final qualification and qualified reverse transfer remain undelivered. The
