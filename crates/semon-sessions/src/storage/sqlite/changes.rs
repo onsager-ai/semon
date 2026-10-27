@@ -172,7 +172,7 @@ pub(super) fn compact(
         )
         .map_err(failed)?;
         tx.execute(
-            "UPDATE meta SET value=?2 WHERE namespace=semon_namespace() AND key=?1",
+            "UPDATE main.meta SET value=?2 WHERE namespace=semon_namespace() AND key=?1",
             (&floor_key, through.to_string()),
         )
         .map_err(failed)?;
@@ -276,41 +276,83 @@ fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn database() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db);
-        db
+    use crate::storage::{LogicalSourceNamespace, StoreBackend, StoreConfig};
+    struct Database {
+        db: Option<Connection>,
+        root: std::path::PathBuf,
     }
-    fn initialize(db: &Connection) {
-        db.execute_batch(crate::events::store::metadata_schema())
+    impl std::ops::Deref for Database {
+        type Target = Connection;
+        fn deref(&self) -> &Connection {
+            self.db.as_ref().unwrap()
+        }
+    }
+    impl std::ops::DerefMut for Database {
+        fn deref_mut(&mut self) -> &mut Connection {
+            self.db.as_mut().unwrap()
+        }
+    }
+    impl Drop for Database {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    fn database() -> Database {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "semon-changes-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("index.sqlite3");
+        drop(crate::events::store::current_search_test_connection(
+            &path,
+            &LogicalSourceNamespace::new("machine").unwrap(),
+        ));
+        Database {
+            db: Some(reopen(&path)),
+            root,
+        }
+    }
+    fn reopen(path: &std::path::Path) -> Connection {
+        let epoch = Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        db.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
-        db.execute_batch(SCHEMA).unwrap();
-        db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION)
-            .unwrap();
-        db.execute(
-            "INSERT INTO meta VALUES('','cache_version',?1)",
-            [crate::events::CACHE_VERSION.to_string()],
+        let config = StoreConfig {
+            backend: StoreBackend::Sqlite {
+                database: path.to_owned(),
+            },
+            namespace: LogicalSourceNamespace::new("machine").unwrap(),
+            expected_stream_epoch: Some(epoch),
+        };
+        super::super::semantic::Stage::open(
+            super::super::semantic::SemanticStaging::admit(&config).unwrap(),
         )
+        .unwrap()
+        .into_test_connection()
+    }
+    fn insert(db: &Connection, key: &str) {
+        let row: crate::model::summary::CatalogRow = serde_json::from_value(serde_json::json!({
+            "key":key,"name":key,"harness":"claude","kind":"session",
+            "native_ids":[key],"parent":null,"parent_source":null,"repo":"project",
+            "branch":null,"model":"","effort":null,"start":null,"last":0,
+            "tokens":[0,0,0],"cost":crate::pricing::Cost::default(),"sources":[]
+        }))
         .unwrap();
-        db.execute(
-            "INSERT INTO meta VALUES('catalog_version',?1)",
-            [CATALOG_VERSION.to_string()],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO meta VALUES('catalog_generation',?1)",
-            ["a".repeat(64)],
-        )
-        .unwrap();
+        db.execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,0,'claude',?2)", (key, serde_json::to_string(&row).unwrap())).unwrap();
     }
     #[test]
     fn change_delivery_is_atomic_scoped_and_survives_replaced_database_epochs() {
         let mut db = database();
-        db.execute("INSERT INTO session_catalog VALUES('one','original')", [])
-            .unwrap();
+        insert(&db, "one");
         db.execute(
-            "INSERT INTO session_history_catalog VALUES('one','original')",
+            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) SELECT namespace,session_key,metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='one'",
             [],
         )
         .unwrap();
@@ -321,7 +363,7 @@ mod tests {
         {
             let tx = db.transaction().unwrap();
             tx.execute(
-                "UPDATE session_catalog SET metadata='changed' WHERE session_key='one'",
+                "UPDATE main.session_catalog SET metadata=json_set(metadata,'$.name','changed') WHERE namespace=semon_namespace() AND session_key='one'",
                 [],
             )
             .unwrap();
@@ -340,7 +382,7 @@ mod tests {
         assert!(empty.changes.is_empty());
         assert!(empty.caught_up);
         db.execute(
-            "UPDATE session_catalog SET metadata='changed' WHERE session_key='one'",
+            "UPDATE main.session_catalog SET metadata=json_set(metadata,'$.name','changed') WHERE namespace=semon_namespace() AND session_key='one'",
             [],
         )
         .unwrap();
@@ -380,7 +422,7 @@ mod tests {
             ),
             Err(StorageError::ScopeChanged)
         );
-        db.execute("DELETE FROM session_catalog WHERE session_key='one'", [])
+        db.execute("DELETE FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='one'", [])
             .unwrap();
         let deleted = read(
             &mut db,
@@ -397,24 +439,20 @@ mod tests {
     fn fixed_change_page_query_work_does_not_scan_unrelated_metadata() {
         use rusqlite::StatementStatus;
         let mut db = database();
-        db.execute(
-            "INSERT INTO session_catalog VALUES('selected','original')",
-            [],
-        )
-        .unwrap();
+        insert(&db, "selected");
         let steps = |db: &Connection| {
-            let mut statement=db.prepare("SELECT revision,session_key FROM session_catalog_changes WHERE read_scope='current' AND revision>0 ORDER BY revision LIMIT 1").unwrap();
+            let mut statement=db.prepare("SELECT revision,session_key FROM main.session_catalog_changes WHERE namespace=semon_namespace() AND read_scope='current' AND revision>0 ORDER BY revision LIMIT 1").unwrap();
             let key: String = statement.query_row([], |r| r.get(1)).unwrap();
             assert_eq!(key, "selected");
             statement.get_status(StatementStatus::VmStep)
         };
         let before = steps(&db);
-        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog SELECT 'unrelated-'||x,'metadata' FROM n;").unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) SELECT semon_namespace(),'unrelated-'||x,0,'claude',json_set(metadata,'$.key','unrelated-'||x) FROM n,main.session_catalog WHERE namespace=semon_namespace() AND session_key='selected';").unwrap();
         assert_eq!(before, steps(&db));
         let page = read(&mut db, "machine", CatalogReadScope::Current, None, 0, 1).unwrap();
         assert_eq!(page.changes[0].catalog_key, "selected");
         assert!(!page.caught_up);
-        let mut query=db.prepare("EXPLAIN QUERY PLAN SELECT revision FROM session_catalog_changes WHERE read_scope='current' AND revision>0 ORDER BY revision LIMIT 1").unwrap();
+        let mut query=db.prepare("EXPLAIN QUERY PLAN SELECT revision FROM main.session_catalog_changes WHERE namespace=semon_namespace() AND read_scope='current' AND revision>0 ORDER BY revision LIMIT 1").unwrap();
         let plan: String = query.query_row([], |r| r.get(3)).unwrap();
         assert!(plan.contains("COVERING INDEX"), "{plan}");
     }
@@ -423,8 +461,7 @@ mod tests {
     fn acknowledged_compaction_is_bounded_scoped_and_rejects_lagging_cursors() {
         let mut db = database();
         for key in ["one", "two", "three", "four"] {
-            db.execute("INSERT INTO session_catalog VALUES(?1,'metadata')", [key])
-                .unwrap();
+            insert(&db, key);
         }
         let page = read(&mut db, "machine", CatalogReadScope::Current, None, 0, 256).unwrap();
         let first = compact(
@@ -526,7 +563,9 @@ mod tests {
     #[test]
     fn failed_compaction_rolls_back_hints_and_cursor_floor_together() {
         let mut db = database();
-        db.execute_batch("INSERT INTO session_catalog VALUES('one','metadata'),('two','metadata'); CREATE TRIGGER refuse_floor BEFORE UPDATE ON meta WHEN NEW.key='catalog_changes_floor_current' BEGIN SELECT RAISE(ABORT,'fixture write failure'); END;").unwrap();
+        insert(&db, "one");
+        insert(&db, "two");
+        db.execute_batch("CREATE TRIGGER refuse_floor BEFORE UPDATE ON main.meta WHEN NEW.namespace='machine' AND NEW.key='catalog_changes_floor_current' BEGIN SELECT RAISE(ABORT,'fixture write failure'); END;").unwrap();
         let before = read(&mut db, "machine", CatalogReadScope::Current, None, 0, 256).unwrap();
         assert_eq!(
             compact(
@@ -554,20 +593,10 @@ mod tests {
 
     #[test]
     fn compaction_floor_survives_restart_and_new_source_generation() {
-        let path = std::env::temp_dir().join(format!(
-            "semon-catalog-compaction-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut db = Connection::open(&path).unwrap();
-        initialize(&db);
-        db.execute_batch(
-            "INSERT INTO session_catalog VALUES('one','metadata'),('two','metadata');",
-        )
-        .unwrap();
+        let mut db = database();
+        let path = db.root.join("index.sqlite3");
+        insert(&db, "one");
+        insert(&db, "two");
         let page = read(&mut db, "machine", CatalogReadScope::Current, None, 0, 256).unwrap();
         let compacted = compact(
             &mut db,
@@ -577,10 +606,9 @@ mod tests {
             256,
         )
         .unwrap();
-        drop(db);
-        let mut restarted = Connection::open(&path).unwrap();
-        // Migration/startup must not reset the epoch or compaction floor.
-        restarted.execute_batch(SCHEMA).unwrap();
+        db.db.take().unwrap().close().unwrap();
+        let mut restarted = reopen(&path);
+        // Current startup must not reset the epoch or compaction floor.
         assert_eq!(
             read(
                 &mut restarted,
@@ -594,13 +622,13 @@ mod tests {
         );
         restarted
             .execute(
-                "UPDATE meta SET value=?1 WHERE key='catalog_generation'",
+                "UPDATE main.meta SET value=?1 WHERE namespace=semon_namespace() AND key='catalog_generation'",
                 ["b".repeat(64)],
             )
             .unwrap();
         restarted
             .execute(
-                "UPDATE session_catalog SET metadata='changed' WHERE session_key='one'",
+                "UPDATE main.session_catalog SET metadata=json_set(metadata,'$.name','changed') WHERE namespace=semon_namespace() AND session_key='one'",
                 [],
             )
             .unwrap();
@@ -618,6 +646,5 @@ mod tests {
         assert_eq!(resumed.changes.len(), 2);
         assert_eq!(resumed.changes[1].catalog_key, "one");
         drop(restarted);
-        std::fs::remove_file(path).unwrap();
     }
 }

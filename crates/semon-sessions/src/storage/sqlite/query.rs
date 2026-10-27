@@ -113,7 +113,7 @@ fn read(
 ) -> Result<Part, QueryError> {
     let generation = generation(db)?;
     let ready_sql = if private_listing {
-        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
+        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND ((SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' OR (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2) AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
     } else {
         "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
     };
@@ -124,9 +124,10 @@ fn read(
                 crate::model::summary::CATALOG_VERSION.to_string(),
                 generation
             ],
-            |row| row.get(0),
+            |row| row.get::<_, Option<bool>>(0),
         )
-        .map_err(unavailable)?;
+        .map_err(unavailable)?
+        .unwrap_or(false);
     if !ready {
         return Err(unavailable("Native Catalog publication is incomplete"));
     }
