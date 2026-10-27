@@ -117,9 +117,10 @@ pub(crate) fn admit_catalog(
         }
         let admission = i64::try_from(import.manifest().binding_epoch)
             .map_err(|_| StorageError::ScopeChanged)?;
-        let revision =
-            i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
-        let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND admission=?3 AND source_revision<=?4)", params![tx.1,import.generation(),admission,revision], |row| row.get(0)).map_err(failed)?;
+        // The original receipt keeps its producer's revision coordinates.
+        // The typed import binds the actual frozen source snapshot; its local
+        // journal revision is not comparable after a physical backend change.
+        let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND admission=?3)", params![tx.1,import.generation(),admission], |row| row.get(0)).map_err(failed)?;
         let missing: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=c.namespace AND r.session_key=c.session_key AND r.kind='current')) OR EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=h.namespace AND r.session_key=h.session_key AND r.kind='history'))", [tx.1], |row| row.get(0)).map_err(failed)?;
         if !admitted || missing {
             return Err(StorageError::ScopeChanged);

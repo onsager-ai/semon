@@ -323,9 +323,21 @@ pub(crate) fn seed_catalog(
         copilot_home: root.join("copilot"),
         proc_root: root.join("proc"),
         cache: root.join("unused.sqlite3"),
+        facts: Some(root.join("transfer-facts.json")),
         all: true,
         ..Default::default()
     };
+    let facts = crate::Facts {
+        version: crate::facts::FACTS_VERSION,
+        hostname: "sanitized-transfer-host".into(),
+        repos: std::collections::BTreeMap::from([(
+            "/sanitized".into(),
+            Some("facts-transfer-repo".into()),
+        )]),
+        codex_rollouts: Some(BTreeSet::new()),
+        ..Default::default()
+    };
+    crate::write_facts(options.facts.as_ref().unwrap(), &facts, &options.source).unwrap();
     let input = crate::Input {
         root: crate::InputRoot::Claude,
         path: "projects/sanitized/catalog.jsonl".into(),
@@ -351,6 +363,7 @@ pub(crate) fn seed_catalog(
         crate::events::Outcome::Written
     );
     let rows = finish_catalog(&mut cache, &options, std::slice::from_ref(&input));
+    assert_eq!(rows[0].repo.as_deref(), Some("facts-transfer-repo"));
     (options, rows)
 }
 

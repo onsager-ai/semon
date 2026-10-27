@@ -106,7 +106,15 @@ pub(crate) fn admit_catalog(
     pool: &PgPool,
     control: &PgCancellation,
     import: &transfer::reported::CatalogImport,
+    options: &crate::Options,
 ) -> Result<String, StorageError> {
+    if options.facts.is_some() {
+        // Validate completed target content first. Existing ordinary producer
+        // preparation reads canonical Facts outside SourceState row locks and
+        // publishes its namespace/epoch-bound selection head with its own CAS.
+        transaction(config, pool, control, |tx| import.require_applied(tx))?;
+        super::current_sources::prepare(pool, &config.namespace, control, options)?;
+    }
     transaction(config, pool, control, |tx| {
         import.require_applied(tx)?;
         super::catalog_effects::publication::import(tx.0, import)
