@@ -398,9 +398,8 @@ impl ReaderRuntime {
         };
         let (publication, proof, metadata, slots, prefix, admission, stream): (String, String, String, String, String, i64, String) = tx.query_row("SELECT g.publication,p.proof_digest,g.metadata,g.slots,g.prefix,g.admission,g.stream FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(failed)?;
         let admission = u64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-        if admission != owner.admission()
-            || Some(&stream) != owner.config().expected_stream_epoch.as_ref()
-        {
+        validate_publication_owner(&tx, owner, &publication, admission)?;
+        if Some(&stream) != owner.config().expected_stream_epoch.as_ref() {
             return Err(StorageError::ScopeChanged);
         }
         let (record, row) = proof_codec::decode_generation(
@@ -419,7 +418,7 @@ impl ReaderRuntime {
             proof_codec::ExpectedGeneration {
                 namespace: ns,
                 id: expected,
-                admission: owner.admission(),
+                admission,
                 stream: owner
                     .config()
                     .expected_stream_epoch
@@ -459,6 +458,12 @@ impl Lease {
         let Some(proof) = proof else {
             return Err(StorageError::ScopeChanged);
         };
+        validate_publication_owner(
+            db,
+            &self.owner,
+            &self.snapshot.publication_generation,
+            self.snapshot.admission,
+        )?;
         if ProofGenerationId::derive(
             self.snapshot.namespace.as_str(),
             self.snapshot.admission,
@@ -471,12 +476,37 @@ impl Lease {
         validate_presentation(db, &self.snapshot, &self.row.key, &proof)?;
         let metadata = serde_json::to_string(&self.row).map_err(|_| StorageError::Unavailable)?;
         let sql_admission =
+            i64::try_from(self.owner.admission()).map_err(|_| StorageError::ScopeChanged)?;
+        let producer_admission =
             i64::try_from(self.snapshot.admission).map_err(|_| StorageError::ScopeChanged)?;
-        let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key WHERE l.namespace=?1 AND l.token=?2 AND l.id=?3 AND l.session_key=?4 AND l.admission=?5 AND l.stream=?6 AND l.owner_epoch=?8 AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.expires>?7 AND g.admission=l.admission AND g.stream=l.stream AND g.metadata=?9 AND g.prefix=?10 AND g.publication=?11 AND l.serial=?12)", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.row.key, sql_admission, self.snapshot.stream_epoch, crate::model::now_ms(), self.owner_epoch, metadata, self.snapshot.consumed_prefix, self.snapshot.publication_generation, self.serial], |r| r.get(0)).map_err(failed)?;
+        let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key WHERE l.namespace=?1 AND l.token=?2 AND l.id=?3 AND l.session_key=?4 AND l.admission=?5 AND l.stream=?6 AND l.owner_epoch=?8 AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.expires>?7 AND g.admission=?13 AND g.stream=l.stream AND g.metadata=?9 AND g.prefix=?10 AND g.publication=?11 AND l.serial=?12)", params![self.snapshot.namespace.as_str(), self.token, self.snapshot.proof_generation.0, self.row.key, sql_admission, self.snapshot.stream_epoch, crate::model::now_ms(), self.owner_epoch, metadata, self.snapshot.consumed_prefix, self.snapshot.publication_generation, self.serial, producer_admission], |r| r.get(0)).map_err(failed)?;
         if self.released || !valid {
             return Err(StorageError::ScopeChanged);
         }
         Ok(())
+    }
+}
+
+fn validate_publication_owner(
+    db: &Connection,
+    owner: &crate::events::store::configured::NativeOwnership,
+    publication: &str,
+    producer_admission: u64,
+) -> Result<(), StorageError> {
+    if producer_admission == owner.admission() {
+        return Ok(());
+    }
+    let stream = owner
+        .config()
+        .expected_stream_epoch
+        .as_deref()
+        .ok_or(StorageError::ScopeChanged)?;
+    let binding = format!("{}:{stream}", owner.admission());
+    let admitted: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta p JOIN main.meta a ON a.namespace=p.namespace AND a.key='native_transfer_v1:catalog-owner:'||p.value WHERE p.namespace=?1 AND p.key=?2 AND a.value=?3)", params![owner.config().namespace.as_str(), format!("native_transfer_v1:publication:{publication}"), binding], |r| r.get(0)).map_err(failed)?;
+    if admitted {
+        Ok(())
+    } else {
+        Err(StorageError::ScopeChanged)
     }
 }
 

@@ -334,6 +334,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
     verify_authority(tx, *kind, values)?;
+    catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
@@ -692,8 +693,16 @@ mod tests {
             namespace: source.namespace.clone(),
             expected_stream_epoch: source.expected_stream_epoch.clone(),
         };
-        config.create_native_store().unwrap();
+        // Exercise different physical admissions through real empty-target
+        // retirement/re-enrollment, preserving the final logical stream.
+        let mut prior = config.clone();
+        prior.expected_stream_epoch = Some("b".repeat(64));
+        prior.create_native_store().unwrap();
+        let retired = prior.admit_namespace().unwrap();
+        prior.unenroll_namespace(&retired).unwrap();
+        let target_admission = config.admit_namespace().unwrap();
         let manifest = stage(&source, &config, &[120; 32]);
+        assert_ne!(target_admission.generation, manifest.binding_epoch);
         for category in [
             transfer::Category::Operations,
             transfer::Category::Proofs,
@@ -962,6 +971,14 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        let mut wrong_epoch = reverse.clone();
+        wrong_epoch.expected_stream_epoch = Some("b".repeat(64));
+        assert!(
+            wrong_epoch
+                .transfer_inbox()
+                .admit_catalog_from(&config.transfer_inbox(), &backwards, &options)
+                .is_err()
+        );
         assert_eq!(
             reverse
                 .transfer_inbox()

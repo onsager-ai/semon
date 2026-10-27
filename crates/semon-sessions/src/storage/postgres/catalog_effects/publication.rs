@@ -12,7 +12,8 @@ pub(in crate::storage::postgres) fn import(
 ) -> Result<String, StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let payload = import.payload()?;
+    let admission = super::super::model_cache::binding(tx)?.admission;
+    let payload = import.payload(admission)?;
     let operation = digest(&payload);
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old = tx.driver.query("SELECT payload=$3 AND generation=$4 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns,&operation,&payload,&import.generation().as_bytes()]).map_err(sqlstate::error)?;
@@ -25,15 +26,10 @@ pub(in crate::storage::postgres) fn import(
     if super::super::model_cache::generation(tx)?.is_some() {
         return Err(StorageError::Conflict);
     }
-    let admission =
-        i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
-    if super::super::model_cache::binding(tx)?.admission != import.manifest().binding_epoch {
-        return Err(StorageError::ScopeChanged);
-    }
     // Original receipt revisions belong to their producer's journal. The
     // typed completed-source import supplies current snapshot authority;
     // comparing those counters across physical backends would reject reverse.
-    let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND admission=$3 LIMIT 2", &[&ns,&import.generation().as_bytes(),&admission]).map_err(sqlstate::error)?;
+    let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&import.generation().as_bytes()]).map_err(sqlstate::error)?;
     if receipt.len() != 1 {
         return Err(StorageError::ScopeChanged);
     }
