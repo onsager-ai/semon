@@ -4324,6 +4324,9 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     // the remaining history; appending every page to this same unfinished
     // component would turn the per-operation source limit into a history cap.
     if let Some(page) = paths.chunks(64).next() {
+        prepare_semantic_index_sources(options, &mut cache, &inputs[..page.len()], NOW).unwrap();
+        cache.end_scan();
+        cache.release_published_indexes();
         assert_eq!(
             cache.begin_semantic_stage(page, &runtime).unwrap(),
             crate::events::Outcome::Written

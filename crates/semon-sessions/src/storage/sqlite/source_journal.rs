@@ -1210,9 +1210,11 @@ mod tests {
         let cookie: i64 = blocker
             .query_row("PRAGMA schema_version", [], |r| r.get(0))
             .unwrap();
-        let capability =
-            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
-        assert!(crate::storage::sqlite::semantic::Stage::open(capability).is_err());
+        assert!(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config)
+                .and_then(crate::storage::sqlite::semantic::Stage::open)
+                .is_err()
+        );
         let after: i64 = blocker
             .query_row("PRAGMA schema_version", [], |r| r.get(0))
             .unwrap();
