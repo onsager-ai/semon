@@ -7,9 +7,9 @@ use super::{
 use crate::storage::{
     LogicalSourceNamespace, StorageError,
     source_observations::{
-        SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims, SourceIntent,
+        SourceMutationReceipt, SourceObservationStore, SourceOperation, selected_projection_paths,
         validate_intent, validate_paths,
-        SELECTED_PROJECTION_KEY, SELECTED_PROJECTION_BYTES, selected_projection_paths,
     },
 };
 
@@ -29,21 +29,34 @@ impl PgSourceJournal {
     ) -> std::io::Result<bool> {
         use crate::storage::catalog::CatalogSnapshot;
         let result = (|| {
-            if key.is_empty() || key.len() > 4096 {
-                return Err(StorageError::InvalidArguments);
-            }
             let generation = self.read(super::native_recovery::head)?;
             let sources = super::catalog_effects::snapshot::with_generation(
-                &self.pool, &self.namespace, &self.control, &generation, |snapshot| {
-                    snapshot.require_current().map_err(|_| StorageError::ScopeChanged)?;
+                &self.pool,
+                &self.namespace,
+                &self.control,
+                &generation,
+                |snapshot| {
+                    snapshot
+                        .require_current()
+                        .map_err(|_| StorageError::ScopeChanged)?;
                     let history = snapshot.owner(key)?.is_some();
-                    let Some(row) = snapshot.catalog(key, history)? else { return Ok(None); };
+                    let Some(row) = snapshot.catalog(key, history)? else {
+                        return Ok(None);
+                    };
                     crate::overview_repair::source_refs(options, std::slice::from_ref(&row))
                         .map_err(|_| StorageError::ScopeChanged)?;
                     let source = crate::retention::source_generation(&row.sources)
                         .map_err(|_| StorageError::ScopeChanged)?;
-                    let owner = if history { snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)? } else { generation.clone() };
-                    let table = if history { "semon_pg_native_catalog_history_headers" } else { "semon_pg_native_catalog_recipe_headers" };
+                    let owner = if history {
+                        snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?
+                    } else {
+                        generation.clone()
+                    };
+                    let table = if history {
+                        "semon_pg_native_catalog_history_headers"
+                    } else {
+                        "semon_pg_native_catalog_recipe_headers"
+                    };
                     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
                     let ready: bool = tx.driver.query_one(
                         &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND version=$4 AND source_generation=$5)"),
@@ -52,8 +65,19 @@ impl PgSourceJournal {
                     Ok((!ready).then_some(row.sources))
                 },
             )?;
-            let Some(sources) = sources else { return Ok(false); };
-            let mut paths = sources.iter().map(|source| source.path.to_str().map(str::to_owned).ok_or(StorageError::InvalidArguments)).collect::<Result<Vec<_>, _>>()?;
+            let Some(sources) = sources else {
+                return Ok(false);
+            };
+            let mut paths = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .path
+                        .to_str()
+                        .map(str::to_owned)
+                        .ok_or(StorageError::InvalidArguments)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             paths.sort();
             paths.dedup();
             validate_paths(&paths)?;
@@ -65,15 +89,22 @@ impl PgSourceJournal {
                     return Err(StorageError::Conflict);
                 }
                 for path in &paths {
-                    if let Some(marker) = super::native_keys::read_meta(tx, format!("archive_event_index:{path}").as_bytes(), 16384)? {
-                        let marker = String::from_utf8(marker).map_err(|_| StorageError::ScopeChanged)?;
+                    if let Some(marker) = super::native_keys::read_meta(
+                        tx,
+                        format!("archive_event_index:{path}").as_bytes(),
+                        16384,
+                    )? {
+                        let marker =
+                            String::from_utf8(marker).map_err(|_| StorageError::ScopeChanged)?;
                         crate::events::store::validate_archive_marker(&marker)?;
                     }
                 }
                 let claims = claims(tx, &paths)?;
                 super::native_keys::put_meta(tx, SELECTED_PROJECTION_KEY.as_bytes(), &encoded)?;
                 for (path, revision) in claims {
-                    if revision.is_none() { invalidate(tx, &path)?; }
+                    if revision.is_none() {
+                        invalidate(tx, &path)?;
+                    }
                 }
                 Ok(true)
             })

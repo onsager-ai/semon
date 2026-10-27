@@ -203,7 +203,8 @@ pub(crate) fn selected_projection_paths(bytes: &[u8]) -> Result<Vec<String>, Sto
     if bytes.len() > SELECTED_PROJECTION_BYTES {
         return Err(StorageError::Busy);
     }
-    let paths: Vec<String> = serde_json::from_slice(bytes).map_err(|_| StorageError::ScopeChanged)?;
+    let paths: Vec<String> =
+        serde_json::from_slice(bytes).map_err(|_| StorageError::ScopeChanged)?;
     validate_paths(&paths)?;
     if paths.is_empty() || paths.len() > 64 || paths.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StorageError::ScopeChanged);
