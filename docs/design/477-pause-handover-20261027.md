@@ -1,5 +1,22 @@
 # #477 paused — 2026-10-27
 
+## Resumed — 2026-10-27
+
+The user resumed this task with “please continue working on semon 477” and
+supplied the current AGENTS.md rules. The pause below is historical. The current
+Manager uses native Workers under `orchestrate-harnesses`; the stopped historical
+controllers are not restarted. Original snapshots and attempt history remain
+preserved. This resumes implementation and CI, without authorizing a main merge,
+deployment, publication or live data migration.
+
+The first resumed work isolates relation-batch companion validation, transfer
+destination intent/receipt custody, and PostgreSQL fixture proof binding. These
+are component corrections, not full migration acceptance. Exact revision and CI
+evidence belong to the integration PR and its subsequent delivery checkpoint.
+The temperature log remains unavailable; CPU-bound local checks remain forbidden.
+
+## Historical pause instruction and saved state
+
 User instruction: 「让477 session停一下，把所有本地工作都commit。等新的编排规则更新，再重新开始」
 
 ## Stop and resume boundary
