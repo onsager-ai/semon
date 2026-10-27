@@ -1391,7 +1391,7 @@ mod tests {
         use crate::storage::sqlite::changes::initialize_source_floors;
         use crate::storage::{LogicalSourceNamespace, StorageError, StoreBackend, StoreConfig};
         let directory = root();
-        let database = directory.join("metadata.sqlite");
+        let database = directory.join("metadata.sqlite3");
         let namespace = LogicalSourceNamespace::new("a").unwrap();
         let mut store = current_store(&database, &namespace);
         let config = StoreConfig {
