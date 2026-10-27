@@ -91,6 +91,41 @@ pub(crate) fn checkpoint(
     transaction(config, |tx| transfer::checkpoint_tx(tx, manifest))
 }
 
+pub(crate) fn admit_catalog(
+    config: &StoreConfig,
+    import: &transfer::reported::CatalogImport,
+) -> Result<String, StorageError> {
+    use crate::storage::catalog::CatalogPublicationHead;
+    let owner = crate::events::store::configured::NativeOwnership::restore_transfer(config)?;
+    let source = super::semantic::AdmittedSource::native(owner);
+    transaction(config, |tx| {
+        import.require_applied(tx)?;
+        let payload = import.payload()?;
+        let receipt = "native_transfer_v1:catalog-admission";
+        let head = super::publication::admitted_head(tx.0, &source)?;
+        if let Some(old) = tx.get(receipt, transfer::MAX_PAGE_BYTES)? {
+            if old != payload || head.base_generation()?.as_deref() != Some(import.generation()) {
+                return Err(StorageError::Conflict);
+            }
+            return Ok(import.generation().to_owned());
+        }
+        if head.base_generation()?.is_some() {
+            return Err(StorageError::Conflict);
+        }
+        let admission = i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
+        let revision = i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
+        let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND admission=?3 AND source_revision<=?4)", params![tx.1,import.generation(),admission,revision], |row| row.get(0)).map_err(failed)?;
+        let missing: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=c.namespace AND r.session_key=c.session_key AND r.kind='current')) OR EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=h.namespace AND r.session_key=h.session_key AND r.kind='history'))", [tx.1], |row| row.get(0)).map_err(failed)?;
+        if !admitted || missing {
+            return Err(StorageError::ScopeChanged);
+        }
+        head.publish_generation(import.generation(), &crate::model::summary::CATALOG_VERSION.to_string())?;
+        tx.put("catalog_completeness", b"partial")?;
+        tx.put(receipt, &payload)?;
+        Ok(import.generation().to_owned())
+    })
+}
+
 fn transfer_writer(db: &Connection) -> Result<(), StorageError> {
     db.create_scalar_function(
         "semon_transfer_writer",
@@ -203,17 +238,16 @@ pub(crate) fn capture(
             return Err(StorageError::ScopeChanged);
         }
         if state.native && !state.done {
-            return capture_native(tx, &mut state).map_err(|error| {
+            return capture_native(tx, &mut state).inspect_err(|_error| {
                 #[cfg(test)]
                 eprintln!(
-                    "transfer capture refused: family={} page={} cursor_bytes={} key_bytes={} retained={} error={error:?}",
+                    "transfer capture refused: family={} page={} cursor_bytes={} key_bytes={} retained={} error={_error:?}",
                     state.native_family,
                     state.checkpoint.sequence,
                     state.cursor.as_ref().map_or(0, |(key, _)| key.len()),
                     state.native_key.as_ref().map_or(0, String::len),
                     state.native_backing.is_some(),
                 );
-                error
             });
         }
         if state.done {
