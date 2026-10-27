@@ -212,7 +212,12 @@ impl QueryCatalogStore for QueryCatalog {
                                 .is_none_or(|part| part.rows.contains_key(id)))
                         },
                     )
-                    .map_err(|_| StorageError::Unavailable)?;
+                    .map_err(|error| {
+                        #[cfg(test)]
+                        eprintln!("pg_selected_render_session key={key:?}: {error:?}");
+                        let _ = error;
+                        StorageError::Unavailable
+                    })?;
                     if let Some(machine) = args["_machine_alias"].as_str() {
                         summary["machine"] = serde_json::json!(machine);
                     }

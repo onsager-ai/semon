@@ -575,10 +575,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     );
-    let mut retained_query =
-        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
-            vec![(recent_machine.into(), withdraw_options.clone())],
-        )));
+    // Match the all-history request used by the PG retained-body comparison.
+    // The withdrawal listing above deliberately uses a finite window; its
+    // window_start envelope is not the envelope of this all-history read.
+    // Keep the same published withdrawal cache and real Raw custody.
+    let mut retained_options = withdraw_options.clone();
+    retained_options.all = options.all;
+    retained_options.since = options.since;
+    let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(recent_machine.into(), retained_options)]),
+    ));
     let oracle_retained_reads = oracle_withdrawn
         .iter()
         .map(|row| {
@@ -3548,6 +3554,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: caught.clone(),
         options: options.clone(),
     };
+    // Session fields also read the qualified connected parent, whose Raw
+    // prefix advanced during the ordinary Source/Facts writes above. Retain
+    // both actual captures explicitly; the original-only host still serves
+    // the retained transcript and never gains authority by path alone.
+    let mut withdrawal_host = facts_host.clone();
+    withdrawal_host.0.extend(retained_host.0.iter().cloned());
     for key in &removed {
         let body = query
             .call_bound_selected_at(
@@ -3571,7 +3583,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &serde_json::json!({"id":key}),
                 1790812802000,
                 &caught_store,
-                &retained_host,
+                &withdrawal_host,
                 None,
             )
             .unwrap();

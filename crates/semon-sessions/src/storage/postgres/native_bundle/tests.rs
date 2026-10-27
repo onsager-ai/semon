@@ -446,10 +446,13 @@ fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
 
 fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, String)>) {
     use sha2::{Digest, Sha256};
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(
-        &data.root.join("index.json"),
-    ))
-    .unwrap();
+    let config = crate::storage::postgres::tree_checkpoint::tests::fixture_host_source()
+        .config(&data.root.join("index.json"))
+        .unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+        .connection()
+        .unwrap();
     let physical = data.path.strip_suffix("\0🦀").unwrap();
     let prefix = format!(
         "native_source_chunks:{:x}:",
