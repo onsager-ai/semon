@@ -172,18 +172,18 @@ impl crate::storage::catalog::SlotPublicationStore for SlotWriter<'_> {
     }
 }
 
-pub(crate) struct BoundPublicationHead<'a> {
-    tx: &'a rusqlite::Connection,
+pub(crate) struct BoundPublicationHead<'a, 'connection> {
+    tx: &'a Transaction<'connection>,
     source: &'a super::semantic::AdmittedSource,
 }
-pub(crate) fn admitted_head<'a>(
-    tx: &'a rusqlite::Connection,
+pub(crate) fn admitted_head<'a, 'connection>(
+    tx: &'a Transaction<'connection>,
     source: &'a super::semantic::AdmittedSource,
-) -> Result<BoundPublicationHead<'a>, StorageError> {
+) -> Result<BoundPublicationHead<'a, 'connection>, StorageError> {
     source.validate_publication(tx)?;
     Ok(BoundPublicationHead { tx, source })
 }
-impl CatalogPublicationHead for BoundPublicationHead<'_> {
+impl CatalogPublicationHead for BoundPublicationHead<'_, '_> {
     fn base_generation(&self) -> Result<Option<String>, StorageError> {
         self.tx
             .query_row(

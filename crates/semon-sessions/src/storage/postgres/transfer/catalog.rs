@@ -847,16 +847,48 @@ mod tests {
             options.source = crate::storage::HostSource::new(
                 config.namespace.clone(),
                 config.expected_stream_epoch.clone().unwrap(),
-            ).unwrap().with_store(config.clone()).unwrap();
+            )
+            .unwrap()
+            .with_store(config.clone())
+            .unwrap();
             let mut query = crate::Query::new(options);
             let originals = host.clone();
-            let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
-                Ok(Box::new(originals.clone()))
-            };
-            let listed = query.call_catalog_at("list_sessions", &serde_json::json!({"limit":60}), Some(&readers), crate::SessionSourceReadMode::ProviderOnly, 1_790_000_000_000).unwrap();
+            let readers =
+                move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+                    Ok(Box::new(originals.clone()))
+                };
+            let listed = query
+                .call_catalog_at(
+                    "list_sessions",
+                    &serde_json::json!({"limit":60}),
+                    Some(&readers),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    1_790_000_000_000,
+                )
+                .unwrap();
             assert!(!listed["sessions"].as_array().unwrap().is_empty());
-            let fields = query.call_selected_at("local", &expected[0].key, "get_session", &serde_json::json!({"id":expected[0].key}), Some(&host), crate::SessionSourceReadMode::ProviderOnly, 1_790_000_000_000).unwrap();
-            let body = query.call_selected_at("local", &expected[0].key, "read_transcript", &serde_json::json!({"id":expected[0].key,"after":0,"limit":1}), Some(&host), crate::SessionSourceReadMode::ProviderOnly, 1_790_000_000_000).unwrap();
+            let fields = query
+                .call_selected_at(
+                    "local",
+                    &expected[0].key,
+                    "get_session",
+                    &serde_json::json!({"id":expected[0].key}),
+                    Some(&host),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+            let body = query
+                .call_selected_at(
+                    "local",
+                    &expected[0].key,
+                    "read_transcript",
+                    &serde_json::json!({"id":expected[0].key,"after":0,"limit":1}),
+                    Some(&host),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    1_790_000_000_000,
+                )
+                .unwrap();
             assert!(body.to_string().contains("sanitized 0"));
             (listed, fields, body)
         };

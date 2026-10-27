@@ -12,6 +12,18 @@ retain their metadata and source mappings; their lifecycle changes atomically
 with the collection generation. Native event-cache ledgers can retire without
 removing the original catalog provenance or versioned transcript recipes.
 
+Current-format transfer enumerates reachable immutable prefixes even after their
+live file rows retire. Export selects an exact live ledger header or its exact
+retained header, as the normal Native reader does. Retiring an owner moves its
+selected proof reference from Current to History in the publication transaction.
+`TransferInbox::admit_catalog_from` requires the actual completed frozen source
+capture and the exact applied target checkpoint. Its destination operation keeps
+the original publication receipts and retained rows, and commits a new import
+receipt with the Catalog head CAS. It neither replays completed producer staging
+nor creates reader leases or acknowledges pending claims. This Catalog-scoped
+effect reports partial completeness; full inventory, catchup, fenced ownership
+cutover and qualified rollback remain separate unqualified obligations.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when
