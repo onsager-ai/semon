@@ -326,6 +326,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
 | `storage/postgres/native_ingest_tests.rs` | direct | Independent ordinary SQLite parser oracle for the private PostgreSQL native EventCache integration; no complete backend qualification. |
+| `storage/postgres/native_schema.rs` | direct | Test-only SQLite parser oracle for native tree values; production schema verification uses PostgreSQL. |
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
 | `storage/postgres/semantic_events.rs` | direct | Private PG event projection reuses the ordinary qualifier through its existing rusqlite result type; error-type decoupling remains required. It reads PG native rows and does not open SQLite. Full backend qualification remains incomplete. |

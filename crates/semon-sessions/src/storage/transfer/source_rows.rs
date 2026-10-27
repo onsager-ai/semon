@@ -48,13 +48,18 @@ impl SourceJournalRecord {
                 let intent: super::super::source_observations::SourceIntent =
                     serde_json::from_str(payload).map_err(|_| StorageError::ScopeChanged)?;
                 super::super::source_observations::validate_intent(
-                    Some(&intent.operation().namespace), &intent,
+                    Some(&intent.operation().namespace),
+                    &intent,
                 )?;
             }
-            Self::Receipt { operation, outcome, .. } => {
+            Self::Receipt {
+                operation, outcome, ..
+            } => {
                 if !super::super::source_observations::operation_identity_matches(
-                    operation, Some(&operation.namespace),
-                )? || !["applied", "conflict"].contains(&outcome.as_str()) {
+                    operation,
+                    Some(&operation.namespace),
+                )? || !["applied", "conflict"].contains(&outcome.as_str())
+                {
                     return Err(StorageError::ScopeChanged);
                 }
             }
@@ -95,6 +100,10 @@ impl SourceJournalRecord {
             Self::Receipt { operation, .. } => operation.namespace == namespace,
             _ => true,
         };
-        if valid { Ok(()) } else { Err(StorageError::ScopeChanged) }
+        if valid {
+            Ok(())
+        } else {
+            Err(StorageError::ScopeChanged)
+        }
     }
 }
