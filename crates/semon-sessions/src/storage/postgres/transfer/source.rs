@@ -59,7 +59,13 @@ pub(super) fn capture(
     };
     if let Some(row) = row {
         row.validate()?;
-        if matches!(row, Row::State { revision: 0, backfill: None }) {
+        if matches!(
+            row,
+            Row::State {
+                revision: 0,
+                backfill: None
+            }
+        ) {
             state.source_phase += 1;
             transfer::reported::save_capture(tx, state)?;
             return Ok(state.progress());
