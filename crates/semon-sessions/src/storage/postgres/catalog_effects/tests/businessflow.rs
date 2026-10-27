@@ -425,6 +425,35 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let mut withdraw_options = history_options.clone();
     withdraw_options.cache = oracle.root.join("oracle-withdraw201");
+    // Replay the actual parent continuation and recorded PID/Facts context
+    // consumed before PG withdrawal. Retained fields use that live context;
+    // comparing them with the earlier local-machine oracle is not parity.
+    let source_append = format!(
+        "{}\n",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
+    );
+    let facts_append = format!(
+        "{}\n",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}})
+    );
+    let pid_bytes = serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
+    let parent_before_withdrawal = fs::read(&claude_parent).unwrap();
+    let mut parent = fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
+    parent.write_all(source_append.as_bytes()).unwrap();
+    parent.write_all(facts_append.as_bytes()).unwrap();
+    drop(parent);
+    let oracle_pid = options.claude_home.join("sessions/4242.json");
+    fs::create_dir_all(oracle_pid.parent().unwrap()).unwrap();
+    fs::write(&oracle_pid, &pid_bytes).unwrap();
+    let oracle_facts = oracle.root.join("withdrawal-facts.json");
+    let mut withdrawal_facts = crate::Facts {
+        version: 2,
+        hostname: "source-write-after158".into(),
+        ..Default::default()
+    };
+    withdrawal_facts.proc_starts.insert(4242, 1234);
+    crate::write_facts(&oracle_facts, &withdrawal_facts, &options.source).unwrap();
+    withdraw_options.facts = Some(oracle_facts);
     let refresh = |options: &Options| {
         // Query's private listing completion does not finish Catalog/search
         // publication. Run the ordinary observer to completion before saving
@@ -471,7 +500,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     ))
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
-    let sqlite_host = body_host(&options, &expected.rows);
+    let mut withdrawal_cache = EventCache::open_scoped(&withdraw_options.cache, &withdraw_options.source).unwrap();
+    let withdrawal_prepared = crate::model::prepare_sources(&withdraw_options, &mut withdrawal_cache, &inputs, 1790812805000).unwrap();
+    let mut sqlite_host = body_host(&withdraw_options, &withdrawal_prepared.rows);
+    sqlite_host.0.extend(body_host(&options, &expected.rows).0);
+    drop(withdrawal_cache);
     let parked = [
         (
             claude_agent.clone(),
@@ -639,6 +672,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
+    fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
+    fs::remove_file(&oracle_pid).unwrap();
     // Capture the ordinary Query's post-withdrawal membership independently,
     // before the process-wide Guard. Query membership includes virtual peers
     // as well as physical Catalog owners.
@@ -1718,10 +1753,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     use std::io::Write;
     let path = inputs[0].full_path(&options);
-    let append = format!(
-        "{}\n",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
-    );
+    let append = source_append;
     let raw_store = || {
         crate::storage::postgres::index_store::open(
             pool.clone(),
@@ -2427,10 +2459,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let facts_intent = writer.intent();
-    let extra = format!(
-        "{}\n",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}})
-    );
+    let extra = facts_append;
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(extra.as_bytes()).unwrap();
     file.sync_all().unwrap();
@@ -2464,7 +2493,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         None,
     )
     .unwrap();
-    let pid_bytes=serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
     fs::write(pid_input.full_path(&facts_options), &pid_bytes).unwrap();
     fs::OpenOptions::new()
         .write(true)
