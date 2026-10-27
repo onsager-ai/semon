@@ -188,7 +188,6 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
     "native_source_chunks:",
     "native_tree_failure:",
     "native_tree_summary:",
-    "slot_upgrade_selected:",
     "history_transfer:",
     "history_original_header:",
     "overview_needed:",
@@ -202,6 +201,7 @@ const STORE_METADATA_KEYS: &[&str] = &[
 // These describe completed/ongoing work for one logical source, rather than
 // the shared SQL schema or physical-store incarnation.
 const SOURCE_METADATA_KEYS: &[&str] = &[
+    "slot_upgrade_selected",
     "catalog_version",
     "search_version",
     "catalog_semantic_recipe",
@@ -982,7 +982,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -1137,7 +1137,7 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key GLOB 'slot_upgrade_selected:*' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
+                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
             } else {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),

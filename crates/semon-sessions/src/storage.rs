@@ -314,6 +314,33 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
+    pub(crate) fn request_projection_upgrade(
+        &self,
+        options: &crate::Options,
+        key: &str,
+    ) -> std::io::Result<bool> {
+        match &self.backend {
+            StoreBackend::Sqlite { .. } => {
+                crate::overview_repair::request_sqlite_projection_upgrade(options, key)
+            }
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => {
+                postgres::require_configured(self, pool, control).map_err(std::io::Error::other)?;
+                postgres::PgSourceJournal::configured(
+                    pool.bind_source(
+                        &self.namespace,
+                        self.expected_stream_epoch.as_deref(),
+                        control,
+                    )
+                    .map_err(std::io::Error::other)?,
+                    self.namespace.clone(),
+                    control.clone(),
+                )
+                .request_projection_upgrade(options, key)
+            }
+        }
+    }
+
     /// Explicitly create a fresh native store at a previously absent path.
     /// Requires a host-chosen epoch. Existing stores are never reset or copied;
     /// admission and Catalog namespace assignment are separate operations.

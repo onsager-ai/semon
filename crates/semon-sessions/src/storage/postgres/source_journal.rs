@@ -1,6 +1,5 @@
-//! Typed Source observation family only. There is deliberately no StoreConfig
-//! selector or public constructor: native ledger/publication TX ports are not PG
-//! yet. Tests inject this exact port into the normal EventCache producer.
+//! Typed Source observations and selected upgrade demand for the ordinary
+//! producer. Scheduling never grants Raw access or publishes a Catalog.
 use super::{
     PgCancellation, PgPool, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -8,7 +7,8 @@ use super::{
 use crate::storage::{
     LogicalSourceNamespace, StorageError,
     source_observations::{
-        SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims, SourceIntent,
+        SourceMutationReceipt, SourceObservationStore, SourceOperation, selected_projection_paths,
         validate_intent, validate_paths,
     },
 };
@@ -22,6 +22,96 @@ pub struct PgSourceJournal {
 }
 
 impl PgSourceJournal {
+    pub(crate) fn request_projection_upgrade(
+        &self,
+        options: &crate::Options,
+        key: &str,
+    ) -> std::io::Result<bool> {
+        use crate::storage::catalog::CatalogSnapshot;
+        let result = (|| {
+            let generation = self.read(super::native_recovery::head)?;
+            let sources = super::catalog_effects::snapshot::with_generation(
+                &self.pool,
+                &self.namespace,
+                &self.control,
+                &generation,
+                |snapshot| {
+                    snapshot
+                        .require_current()
+                        .map_err(|_| StorageError::ScopeChanged)?;
+                    let history = snapshot.owner(key)?.is_some();
+                    let Some(row) = snapshot.catalog(key, history)? else {
+                        return Ok(None);
+                    };
+                    crate::overview_repair::source_refs(options, std::slice::from_ref(&row))
+                        .map_err(|_| StorageError::ScopeChanged)?;
+                    let source = crate::retention::source_generation(&row.sources)
+                        .map_err(|_| StorageError::ScopeChanged)?;
+                    let owner = if history {
+                        snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?
+                    } else {
+                        generation.clone()
+                    };
+                    let table = if history {
+                        "semon_pg_native_catalog_history_headers"
+                    } else {
+                        "semon_pg_native_catalog_recipe_headers"
+                    };
+                    let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                    let ready: bool = tx.driver.query_one(
+                        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND version=$4 AND source_generation=$5)"),
+                        &[&tx.namespace.as_str().as_bytes(), &owner.as_bytes(), &key.as_bytes(), &(crate::slot_projection::VERSION as i64), &source.as_bytes()],
+                    ).map_err(sqlstate::error)?.get(0);
+                    Ok((!ready).then_some(row.sources))
+                },
+            )?;
+            let Some(sources) = sources else {
+                return Ok(false);
+            };
+            let mut paths = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .path
+                        .to_str()
+                        .map(str::to_owned)
+                        .ok_or(StorageError::InvalidArguments)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            paths.sort();
+            paths.dedup();
+            validate_paths(&paths)?;
+            let encoded = serde_json::to_vec(&paths).map_err(|_| StorageError::InvalidArguments)?;
+            selected_projection_paths(&encoded)?;
+            self.write(|tx| {
+                // The namespace lock fences publication and claim revisions.
+                if super::native_recovery::head(tx)? != generation {
+                    return Err(StorageError::Conflict);
+                }
+                for path in &paths {
+                    if let Some(marker) = super::native_keys::read_meta(
+                        tx,
+                        format!("archive_event_index:{path}").as_bytes(),
+                        16384,
+                    )? {
+                        let marker =
+                            String::from_utf8(marker).map_err(|_| StorageError::ScopeChanged)?;
+                        crate::events::store::validate_archive_marker(&marker)?;
+                    }
+                }
+                let claims = claims(tx, &paths)?;
+                super::native_keys::put_meta(tx, SELECTED_PROJECTION_KEY.as_bytes(), &encoded)?;
+                for (path, revision) in claims {
+                    if revision.is_none() {
+                        invalidate(tx, &path)?;
+                    }
+                }
+                Ok(true)
+            })
+        })();
+        result.map_err(std::io::Error::other)
+    }
+
     pub(crate) fn configured(
         pool: PgPool,
         namespace: LogicalSourceNamespace,
@@ -286,6 +376,14 @@ impl SourceObservationStore for PgSourceJournal {
             return Err(StorageError::InvalidArguments);
         }
         self.read(|tx| {
+            let draining: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND backfill_state='draining')", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
+            if draining && let Some(marker) = super::native_keys::read_meta(tx, SELECTED_PROJECTION_KEY.as_bytes(), SELECTED_PROJECTION_BYTES)? {
+                let paths = selected_projection_paths(&marker)?;
+                let mut selected = claims(tx, &paths)?.into_iter().filter_map(|(path, revision)| revision.map(|revision| (revision, path))).collect::<Vec<_>>();
+                selected.sort();
+                selected.truncate(limit);
+                if !selected.is_empty() { return Ok(selected.into_iter().map(|(_, path)| path).collect()); }
+            }
             let rows = tx.driver.query("SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) ORDER BY revision,source_path LIMIT $2", &[&tx.namespace.as_str().as_bytes(), &(limit as i64)]).map_err(sqlstate::error)?;
             rows.iter().map(|row| {
                 String::from_utf8(row.try_get(0).map_err(|_| StorageError::Unavailable)?).map_err(|_| StorageError::Unavailable)
