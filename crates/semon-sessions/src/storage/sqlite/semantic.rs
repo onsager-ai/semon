@@ -2311,9 +2311,11 @@ impl Stage {
         let plan = match semantic_owner::begin(
             Observed {
                 epoch: actual_epoch,
-                runtime: existing.as_ref().map(|(old, _)| {
-                    if journaled { runtime } else { old.as_str() }
-                }),
+                runtime: existing.as_ref().map(
+                    |(old, _)| {
+                        if journaled { runtime } else { old.as_str() }
+                    },
+                ),
                 generation: existing
                     .as_ref()
                     .and_then(|(_, generation)| generation.as_deref()),

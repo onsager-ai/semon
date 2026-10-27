@@ -3217,7 +3217,7 @@ mod tests {
         writer.busy_timeout(std::time::Duration::ZERO).unwrap();
         writer
             .execute_batch(
-                "BEGIN IMMEDIATE; INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'replay_writer_probe','1')",
+                "BEGIN IMMEDIATE; INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','1')",
             )
             .unwrap();
         let mut after = String::new();
