@@ -645,39 +645,34 @@ fn bind_custody_fixture(
     namespace: &crate::storage::LogicalSourceNamespace,
     rows: &[CatalogRow],
     projections: &[crate::slot_projection::Projection],
-) {
+) -> String {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
     let mut cache =
         crate::events::EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
             .unwrap();
-    let mut paths = Vec::new();
     for (at, source) in rows.iter().flat_map(|row| &row.sources).enumerate() {
         let receipt = cache
             .ingest(&format!("{:064x}", at + 1), &source.path, "claude")
             .unwrap();
         assert_eq!(receipt.consumed_bytes, source.offset);
-        paths.push(source.path.to_str().unwrap().to_owned());
     }
     drop(cache);
-    let fence = pool
-        .transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            super::admission::capture(tx, &paths)
-        })
-        .unwrap();
-    pool.transaction(namespace, TxnKind::Write, &control, |tx| {
-        super::admission::stage_bound(
+    let (outcome, generation) = pool.transaction(namespace, TxnKind::Write, &control, |tx| {
+        super::publication::publish(
             tx,
-            L1,
             &crate::slot_projection::Publication {
                 rows,
                 transcripts: Some(projections),
             },
-            &fence,
+            None,
+            &[],
+            false,
         )
-        .map(|_| ())
     })
     .unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    generation.expect("ordinary custody fixture publication")
 }
 
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
@@ -689,9 +684,10 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
 #[test]
 fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let (pool, _) = fixture(|_| {});
+    let mut generations = Vec::new();
     let data = build_oracle_with_binding(false, true, |rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            bind_custody_fixture(&pool, &ns(name), rows, projections);
+            generations.push(bind_custody_fixture(&pool, &ns(name), rows, projections));
         }
     });
     let mut missing = data.rows.clone();
@@ -706,7 +702,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             repair: false,
         })
         .collect::<Vec<_>>();
-    for name in ["history127-a", "history127-b"] {
+    for (name, generation) in ["history127-a", "history127-b"].into_iter().zip(&generations) {
         let namespace = ns(name);
         pool.transaction(
             &namespace,
@@ -716,7 +712,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                 assert!(history::preserve(
                     tx,
                     L2,
-                    L1,
+                    generation,
                     &crate::slot_projection::Publication {
                         rows: &missing,
                         transcripts: Some(&recipes)
@@ -770,16 +766,18 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
 fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() {
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog127-original");
+    let mut generation = None;
     let data = build_oracle_with_binding(false, true, |rows, projections| {
-        bind_custody_fixture(&pool, &namespace, rows, projections);
+        generation = Some(bind_custody_fixture(&pool, &namespace, rows, projections));
     });
+    let generation = generation.expect("ordinary custody fixture publication");
     let preserve = |tx: &mut PgTxn<'_>| {
         let store = history::History {
             effects: Effects {
                 tx: RefCell::new(tx),
                 generation: L2,
             },
-            previous: L1,
+            previous: &generation,
         };
         for row in &data.rows {
             assert!(catalog::preserve_original(&store, row)?);
