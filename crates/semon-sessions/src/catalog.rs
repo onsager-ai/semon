@@ -7703,6 +7703,97 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cold_catalog_refresh_waits_for_facts_and_raw_writers() {
+        use sha2::Digest;
+        use std::{os::fd::AsRawFd, sync::mpsc, thread};
+
+        for writer_key in [Some("facts"), None] {
+            let fixture = Fixture::new();
+            let path = fixture.source("selected");
+            let key = writer_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            assert_eq!(
+                fixture.body("limit=100").0,
+                503,
+                "fixture must start unpublished"
+            );
+
+            let writer =
+                crate::source_change::SourceLock::acquire(&fixture.options, &key, true).unwrap();
+            let mut lock_path = fixture.options.cache.with_extension("source-locks");
+            lock_path.push(format!("{:x}", sha2::Sha256::digest(key.as_bytes())));
+            let probe = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            let probe_result =
+                unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            assert_eq!(probe_result, -1);
+            let contention = std::io::Error::last_os_error();
+            assert_eq!(contention.raw_os_error(), Some(libc::EAGAIN));
+
+            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let (started, starts) = mpsc::channel();
+            let (finished, finishes) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let mut work = crate::viewer::lock(&evidence.work);
+                started.send(()).unwrap();
+                let result = (|| -> std::io::Result<()> {
+                    for _ in 0..256 {
+                        if evidence.refresh_catalog(&mut work, crate::model::now_ms())? {
+                            return Ok(());
+                        }
+                    }
+                    Err(std::io::Error::other("cold Catalog refresh did not finish"))
+                })();
+                drop(work);
+                evidence.retire();
+                finished.send(result).unwrap();
+            });
+
+            starts
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Catalog producer did not start");
+            // The channel marks entry to refresh, not entry to flock; scheduler
+            // delay can let a nonblocking implementation miss this window.
+            let while_writer_holds = finishes.recv_timeout(Duration::from_millis(100));
+            let (finished_before_release, after_release) = match while_writer_holds {
+                Ok(result) => {
+                    drop(writer);
+                    worker.join().unwrap();
+                    (true, result)
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drop(writer);
+                    let result = finishes
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("Catalog producer did not finish after writer release");
+                    worker.join().unwrap();
+                    (false, result)
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    drop(writer);
+                    worker.join().unwrap();
+                    panic!("Catalog producer exited without a result");
+                }
+            };
+            assert!(
+                !finished_before_release,
+                "refresh returned before the exclusive {key} writer released"
+            );
+            after_release.unwrap();
+            assert_eq!(
+                fixture.body("limit=100").0,
+                200,
+                "release should permit publication"
+            );
+        }
+    }
+
     #[test]
     fn pid_mutations_replay_without_rebuilding_unrelated_catalog_rows() {
         for unrelated in [0, 256, 2048] {
