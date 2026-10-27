@@ -481,6 +481,7 @@ pub(crate) fn prepare_apply(
     }
     for record in &page.records {
         match record {
+            TransferRecord::SourceJournal(row) => row.validate()?,
             TransferRecord::CatalogRow { .. } => super::catalog_rows::validate(record)?,
             TransferRecord::ReportedFact(run) => {
                 crate::events::reported_rows::ReportedRow::new(run)
