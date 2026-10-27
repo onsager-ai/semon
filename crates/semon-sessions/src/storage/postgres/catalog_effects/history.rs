@@ -3,6 +3,17 @@
 use super::*;
 use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 
+macro_rules! custody_stage {
+    ($name:literal, $result:expr) => {{
+        let result = $result;
+        #[cfg(test)]
+        if result.is_err() {
+            eprintln!("catalog custody stage={}", $name);
+        }
+        result
+    }};
+}
+
 pub(super) struct History<'a, 'tx> {
     pub(super) effects: Effects<'a, 'tx>,
     pub(super) previous: &'a str,
@@ -28,6 +39,8 @@ impl History<'_, '_> {
         rows.first()
             .map(|row| {
                 if !row.get::<_, bool>(0) {
+                    #[cfg(test)]
+                    eprintln!("catalog custody stage=owner_key");
                     return Err(StorageError::ScopeChanged);
                 }
                 Ok((text(row.get(1))?, row.get(2)))
@@ -42,6 +55,8 @@ impl History<'_, '_> {
         let ns = tx.namespace.as_str().as_bytes();
         let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
         if changed != 1 {
+            #[cfg(test)]
+            eprintln!("catalog custody stage=link_header");
             return Err(StorageError::ScopeChanged);
         }
         boundary(&tx)
@@ -59,6 +74,8 @@ impl History<'_, '_> {
         rows.first()
             .map(|row| {
                 if !row.get::<_, bool>(0) {
+                    #[cfg(test)]
+                    eprintln!("catalog custody stage=metadata_key");
                     return Err(StorageError::ScopeChanged);
                 }
                 text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)
@@ -84,6 +101,8 @@ impl History<'_, '_> {
         rows.first()
             .map(|row| {
                 if !row.get::<_, bool>(0) {
+                    #[cfg(test)]
+                    eprintln!("catalog custody stage=recipe_key");
                     return Err(StorageError::ScopeChanged);
                 }
                 let version =
@@ -120,9 +139,11 @@ impl History<'_, '_> {
         let row: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         if row.key != key {
+            #[cfg(test)]
+            eprintln!("catalog custody stage=header_key");
             return Err(StorageError::ScopeChanged);
         }
-        self.effects.put(
+        custody_stage!("write_header", self.effects.put(
             "semon_pg_native_catalog_history_headers",
             &[
                 "key_digest",
@@ -155,14 +176,14 @@ impl History<'_, '_> {
                 &row.repo.as_deref().unwrap_or("").as_bytes(),
                 &row.model.as_bytes(),
             ],
-        )?;
+        ))?;
         self.link(key, self.effects.generation, original.is_some())
     }
     fn put_slot(&self, key: &str, slot: i64, metadata: &str) -> Result<(), StorageError> {
         if metadata.len() > MAX {
             return Err(StorageError::Busy);
         }
-        self.effects.put(
+        custody_stage!("put_slot", self.effects.put(
             "semon_pg_native_catalog_history_slots",
             &["key_digest", "session_key", "slot", "metadata"],
             "key_digest,slot",
@@ -172,7 +193,7 @@ impl History<'_, '_> {
                 &slot,
                 &metadata.as_bytes(),
             ],
-        )
+        ))
     }
 }
 
@@ -187,6 +208,8 @@ impl OriginalHistoryStore for History<'_, '_> {
             // Preserve custody by reference; no recipe copying or latest-path
             // overwrite can invalidate the previous immutable owner.
             if self.recipe(&owner, key, true)?.is_none() {
+                #[cfg(test)]
+                eprintln!("catalog custody stage=retained_recipe_missing");
                 return Err(StorageError::ScopeChanged);
             }
             self.link(key, &owner, true)?;
@@ -228,6 +251,8 @@ impl OriginalHistoryStore for History<'_, '_> {
     }
     fn reset_transfer(&self, _: &str) -> Result<(), StorageError> {
         // A changed same-generation custody request is not a reset authority.
+        #[cfg(test)]
+        eprintln!("catalog custody stage=reset_transfer");
         Err(StorageError::ScopeChanged)
     }
     fn next_slot(&self, key: &str, last: Option<i64>) -> Result<Option<(i64, i64)>, StorageError> {
@@ -238,6 +263,8 @@ impl OriginalHistoryStore for History<'_, '_> {
         rows.first()
             .map(|row| {
                 if !row.get::<_, bool>(0) {
+                    #[cfg(test)]
+                    eprintln!("catalog custody stage=next_slot_key");
                     return Err(StorageError::ScopeChanged);
                 }
                 Ok((row.get(1), row.get(2)))
@@ -262,8 +289,14 @@ impl OriginalHistoryStore for History<'_, '_> {
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query("SELECT session_key=$4,CASE WHEN octet_length(metadata)::bigint=$6 AND octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM semon_pg_native_catalog_recipe_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND slot=$5", &[&ns, &self.previous.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &slot, &take]).map_err(sqlstate::error)?;
-        let row = rows.first().ok_or(StorageError::ScopeChanged)?;
+        let row = rows.first().ok_or_else(|| {
+            #[cfg(test)]
+            eprintln!("catalog custody stage=copy_slot_missing");
+            StorageError::ScopeChanged
+        })?;
         if !row.get::<_, bool>(0) {
+            #[cfg(test)]
+            eprintln!("catalog custody stage=copy_slot_key");
             return Err(StorageError::ScopeChanged);
         }
         let metadata = text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
@@ -298,7 +331,7 @@ impl OriginalHistoryStore for History<'_, '_> {
         for source in &row.sources {
             self.retain_source(row, source)?;
         }
-        self.write_header(&row.key, metadata, header, !complete, Some(original_header))
+        custody_stage!("complete_header", self.write_header(&row.key, metadata, header, !complete, Some(original_header)))
     }
 }
 
@@ -333,11 +366,16 @@ impl CompositeHistoryStore for History<'_, '_> {
         if changed == 0 {
             let retained: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3 AND g.ledger=$4)", &[&ns, &self.effects.generation.as_bytes(), &path, &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
             if !retained {
+                #[cfg(test)]
+                {
+                    let prior = tx.driver.query_one("SELECT count(*)>0,coalesce(bool_or(g.ledger=$4),false) FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3", &[&ns, &self.previous.as_bytes(), &path, &receipt.as_bytes()]).ok().map(|row| (row.get::<_, bool>(0), row.get::<_, bool>(1)));
+                    eprintln!("catalog custody stage=retain_proof prior_exists_and_matches={prior:?}");
+                }
                 return Err(StorageError::ScopeChanged);
             }
         }
         drop(tx);
-        self.effects.put(
+        custody_stage!("retain_source", self.effects.put(
             "semon_pg_native_catalog_history_sources",
             &[
                 "key_digest",
@@ -356,7 +394,7 @@ impl CompositeHistoryStore for History<'_, '_> {
                 &encoded(source)?,
                 &digest(source.native_id.as_bytes()),
             ],
-        )
+        ))
     }
     fn relocated(
         &self,
@@ -509,9 +547,9 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !catalog::preserve_rows(&store, publication.rows, &old)? {
+    if !custody_stage!("preserve_rows", catalog::preserve_rows(&store, publication.rows, &old))? {
         return Ok(false);
     }
-    catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
+    custody_stage!("publish_history_rows", catalog::publish_history_rows(&store, publication.rows, publication.transcripts))?;
     Ok(true)
 }
