@@ -334,6 +334,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
     verify_authority(tx, *kind, values)?;
+    catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
@@ -642,7 +643,20 @@ mod tests {
         }
         let root = root();
         let source = sqlite(&root, "pg-catalog-source");
+        let prior = StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: root.join("pg-catalog-reverse.sqlite3"),
+            },
+            namespace: crate::storage::LogicalSourceNamespace::new("prior-admission").unwrap(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        prior.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&prior).unwrap();
         let reverse = sqlite(&root, "pg-catalog-reverse");
+        assert_ne!(
+            crate::events::store::configured::NativeOwnership::restore_transfer(&source).unwrap().admission(),
+            crate::events::store::configured::NativeOwnership::restore_transfer(&reverse).unwrap().admission(),
+        );
         use crate::storage::proof_lifetime::ProofReaderLease;
         let (options, initial) = seed_catalog(&source, &root);
         let original_facts = crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap();
@@ -962,6 +976,9 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        let mut wrong_epoch = reverse.clone();
+        wrong_epoch.expected_stream_epoch = Some("b".repeat(64));
+        assert!(wrong_epoch.transfer_inbox().admit_catalog_from(&config.transfer_inbox(), &backwards, &options).is_err());
         assert_eq!(
             reverse
                 .transfer_inbox()

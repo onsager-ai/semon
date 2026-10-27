@@ -101,9 +101,14 @@ impl CatalogImport {
         &self.generation
     }
 
-    pub(crate) fn payload(&self) -> Result<Vec<u8>, StorageError> {
+    pub(crate) fn payload(&self, target_admission: u64) -> Result<Vec<u8>, StorageError> {
         encode_bounded(
-            &("catalog-import-v1", &self.manifest, &self.generation),
+            &(
+                "catalog-import-v1",
+                &self.manifest,
+                &self.generation,
+                target_admission,
+            ),
             MAX_PAGE_BYTES,
         )
     }
@@ -138,6 +143,13 @@ impl CatalogImport {
                 .get(super::catalog_rows::IMPORTED_GENERATION, 64)?
                 .as_deref()
                 != Some(self.generation.as_bytes())
+            || tx
+                .get(
+                    &format!("native_transfer_v1:publication:{}", self.generation),
+                    64,
+                )?
+                .as_deref()
+                != Some(self.generation.as_bytes())
         {
             return Err(StorageError::Conflict);
         }
@@ -147,6 +159,8 @@ impl CatalogImport {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CaptureState {
+    pub(crate) source_phase: u8,
+    pub(crate) source_after: String,
     pub(crate) manifest: SnapshotManifest,
     pub(crate) checkpoint: TransferCheckpoint,
     /// Private adapter keyset: SQLite UTF-8 ID or PG digest, plus exact start.
@@ -245,6 +259,8 @@ pub(crate) fn start_capture(
     manifest.seal()?;
     let checkpoint = TransferCheckpoint::initial(&manifest);
     let mut state = CaptureState {
+        source_phase: 0,
+        source_after: String::new(),
         manifest,
         checkpoint,
         cursor: None,

@@ -3,6 +3,7 @@ mod catalog;
 mod native;
 mod pages;
 mod rows;
+mod source;
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,
@@ -97,13 +98,11 @@ pub(crate) fn admit_catalog(
 ) -> Result<String, StorageError> {
     use crate::storage::catalog::CatalogPublicationHead;
     let owner = crate::events::store::configured::NativeOwnership::restore_transfer(config)?;
-    if owner.admission() != import.manifest().binding_epoch {
-        return Err(StorageError::ScopeChanged);
-    }
+    let admission = owner.admission();
     let source = super::semantic::AdmittedSource::native(owner);
     transaction(config, |tx| {
         import.require_applied(tx)?;
-        let payload = import.payload()?;
+        let payload = import.payload(admission)?;
         let receipt = "native_transfer_v1:catalog-admission";
         let head = super::publication::admitted_head(tx.0, &source)?;
         if let Some(old) = tx.get(receipt, transfer::MAX_PAGE_BYTES)? {
@@ -115,12 +114,10 @@ pub(crate) fn admit_catalog(
         if head.base_generation()?.is_some() {
             return Err(StorageError::Conflict);
         }
-        let admission = i64::try_from(import.manifest().binding_epoch)
-            .map_err(|_| StorageError::ScopeChanged)?;
         // The original receipt keeps its producer's revision coordinates.
         // The typed import binds the actual frozen source snapshot; its local
         // journal revision is not comparable after a physical backend change.
-        let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND admission=?3)", params![tx.1,import.generation(),admission], |row| row.get(0)).map_err(failed)?;
+        let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications p JOIN main.meta m ON m.namespace=p.namespace AND m.key='native_transfer_v1:publication:'||p.generation WHERE p.namespace=?1 AND p.generation=?2 AND m.value=?2)", params![tx.1,import.generation()], |row| row.get(0)).map_err(failed)?;
         let missing: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=c.namespace AND r.session_key=c.session_key AND r.kind='current')) OR EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=h.namespace AND r.session_key=h.session_key AND r.kind='history'))", [tx.1], |row| row.get(0)).map_err(failed)?;
         if !admitted || missing {
             return Err(StorageError::ScopeChanged);
@@ -128,6 +125,12 @@ pub(crate) fn admit_catalog(
         head.publish_generation(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),
+        )?;
+        transfer::catalog_rows::admit_imported_publications(
+            tx,
+            import.generation(),
+            admission,
+            &import.manifest().stream_epoch,
         )?;
         if import
             .manifest()
@@ -257,6 +260,9 @@ pub(crate) fn capture(
         {
             return Err(StorageError::ScopeChanged);
         }
+        if state.source_phase < 4 && !state.done {
+            return source::capture(tx, &mut state);
+        }
         if state.native && !state.done {
             return capture_native(tx, &mut state).inspect_err(|_error| {
                 #[cfg(test)]
@@ -357,6 +363,8 @@ pub(crate) fn apply(
             return Ok(page.checkpoint);
         }
         if page.first {
+            let source_owned: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_source_journal WHERE namespace=?1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_backfill_sources WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='slot_upgrade_selected')", [tx.1], |r| r.get(0)).map_err(failed)?;
+            if source_owned { return Err(StorageError::Conflict); }
             let occupied: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1) OR EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='claude_json_stamp') OR EXISTS(SELECT 1 FROM files WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_catalog WHERE namespace=?1) OR EXISTS(SELECT 1 FROM session_history_catalog WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
             let published: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_generation','native_transfer_v1:catalog-content-generation') AND value<>'') OR EXISTS(SELECT 1 FROM main.storage_semantic_publications WHERE namespace=?1)", [tx.1], |r|r.get(0)).map_err(failed)?;
             if occupied || published || catalog::occupied(tx)? {
@@ -366,6 +374,7 @@ pub(crate) fn apply(
         }
         for record in &page.records {
             match record {
+                transfer::TransferRecord::SourceJournal(row) => source::apply(tx, row)?,
                 transfer::TransferRecord::ReportedFact(run) => {
                     let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE namespace=?1 AND session_id=?2 AND start=?3)", params![tx.1,run.last_session_id,run.last_start_time], |r|r.get(0)).map_err(failed)?;
                     if exists {
