@@ -139,6 +139,23 @@ they never revive an expired live runtime. Public Query arguments are validated
 before applying the host's typed Machine label; internal rendering fields are
 not accepted in caller-supplied JSON.
 
+Selected projection-upgrade requests dispatch through the configured store.
+Both engines persist the same namespace-owned `slot_upgrade_selected` point
+key: a sorted unique JSON array of at most 64 paths and 32 KiB. During draining,
+pending reads probe only these paths' existing invalidation claims, ordered by
+revision and path, before returning to the ordinary indexed queue. Scheduling
+validates selected archive witnesses and preserves existing claim revisions;
+the ordinary producer alone publishes and acknowledges completion. PostgreSQL
+fences the scheduling write against the observed Catalog head and source epoch.
+There is no native-meta prefix scan, Raw I/O under its SQL lock, or SQLite open
+on this PostgreSQL route. Current-format transfer carries this marker unchanged.
+
+Retained Query metadata keeps its original lifecycle observation. Whether a
+selected query requires a live runtime follows membership in the requested
+generation's Current Catalog, matching SQLite's current lifecycle check.
+Qualified retained-only bodies continue to require the leased native proofs
+and host Raw authority; an expired live Current context still refuses.
+
 The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent. The replay path charges raw body bytes eightfold before buffering and parsed line bytes eightfold again, plus fixed event/catalog costs, against that same 64 MiB budget. Its effective raw-body replay ceiling is therefore about 4 MiB before those other costs, often less; the separate 64 MiB raw I/O ceiling is not an availability promise for replay. A long selected owner can return unavailable during complete preparation even when its requested transcript page is small. Narrowing turns or page size, or a time window that still includes the same complete source, does not reduce complete Index preparation; excluding source files can. The normal generation-bound native paged transcript/tool path remains available for long sessions and does not become complete-history replay.
 
 The native-line oracle requests bounded chunks, pins generation and length,

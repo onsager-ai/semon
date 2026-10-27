@@ -1064,18 +1064,25 @@ pub(crate) fn prioritize_projection_sources(
         let path = source.path.to_string_lossy();
         let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
     }
+    let mut paths = sources
+        .iter()
+        .map(|source| source.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    let encoded = serde_json::to_string(&paths).map_err(io::Error::other)?;
+    crate::storage::source_observations::selected_projection_paths(encoded.as_bytes())
+        .map_err(io::Error::other)?;
     tx.execute(
-        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'",
-        [],
+        "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+        params![
+            crate::storage::source_observations::SELECTED_PROJECTION_KEY,
+            encoded
+        ],
     )
     .map_err(io::Error::other)?;
     for source in sources {
         let path = source.path.to_string_lossy();
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
-            params![format!("slot_upgrade_selected:{path}"), path],
-        )
-        .map_err(io::Error::other)?;
         let pending: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)",
@@ -6769,15 +6776,15 @@ mod tests {
         )
         .unwrap()
         .into_test_connection();
-        let selected_meta = format!("slot_upgrade_selected:{path}");
+        let selected_meta = crate::storage::source_observations::SELECTED_PROJECTION_KEY;
         assert_eq!(
             db.query_row(
                 "SELECT value FROM meta WHERE key=?1",
-                [&selected_meta],
+                [selected_meta],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-            path
+            serde_json::to_string(&vec![path.clone()]).unwrap()
         );
         assert!(
             db.query_row(
