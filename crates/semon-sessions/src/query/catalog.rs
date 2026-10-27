@@ -427,7 +427,12 @@ impl Query {
                 local = source.query_catalog().map_err(unavailable)?;
                 &*local
             };
-            let part = store.read_cohort(&namespace, now, &mut bytes_left)?;
+            let part = store
+                .read_cohort(&namespace, now, &mut bytes_left)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("transfer_query_stage read_cohort_refused");
+                })?;
             if part.runtime != identity_observations[index] {
                 return Err(unavailable(
                     "Native machine identity changed during the query",
@@ -586,7 +591,11 @@ impl Query {
                 source
                     .query_catalog()
                     .map_err(unavailable)?
-                    .validate(&namespace, &part)?;
+                    .validate(&namespace, &part)
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("transfer_query_stage validation_refused");
+                    })?;
             }
         }
         if self.sources.is_retired() {

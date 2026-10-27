@@ -41,6 +41,8 @@ fn load(tx: &mut PgTxn<'_>) -> Result<Option<Head>, StorageError> {
                 serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
             let binding = model_cache::binding(tx)?;
             if head.admission != binding.admission || head.stream_epoch != binding.stream_epoch {
+                #[cfg(test)]
+                eprintln!("transfer_query_stage facts_head_binding_mismatch");
                 return Err(StorageError::ScopeChanged);
             }
             Ok(head)
@@ -261,15 +263,29 @@ impl CurrentSources {
         control: PgCancellation,
         path: &Path,
     ) -> Result<Self, StorageError> {
-        let source = identity(path)?;
+        let source = identity(path).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("transfer_query_stage facts_identity_refused");
+        })?;
         let (head, binding) =
             pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
                 Ok((
-                    load(tx)?.ok_or(StorageError::ScopeChanged)?,
+                    load(tx)
+                        .inspect_err(|_| {
+                            #[cfg(test)]
+                            eprintln!("transfer_query_stage facts_head_load_refused");
+                        })?
+                        .ok_or_else(|| {
+                            #[cfg(test)]
+                            eprintln!("transfer_query_stage facts_head_missing");
+                            StorageError::ScopeChanged
+                        })?,
                     model_cache::binding(tx)?,
                 ))
             })?;
         if head.path != path || head.source != source || identity(path)? != source {
+            #[cfg(test)]
+            eprintln!("transfer_query_stage facts_identity_mismatch");
             return Err(StorageError::ScopeChanged);
         }
         Ok(Self {

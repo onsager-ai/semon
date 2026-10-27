@@ -306,8 +306,16 @@ impl NativeEvidence {
                 control,
                 &self.options,
             )
-            .map_err(io::Error::other)?
-            .generation(&self.options);
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!("transfer_query_stage pg_runtime_open_refused");
+                io::Error::other(error)
+            })?
+            .generation(&self.options)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("transfer_query_stage pg_runtime_generation_refused");
+            });
         }
         query_runtime_generation(&self.options)
     }

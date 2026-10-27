@@ -922,6 +922,7 @@ mod tests {
         };
         let forward_ordinary = {
             let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+            eprintln!("transfer_query_direction forward_pg");
             ordinary(&config)
         };
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -987,6 +988,7 @@ mod tests {
             admitted
         );
         assert_eq!(reverse.catalog_generation().unwrap(), admitted);
+        eprintln!("transfer_query_direction reverse_sqlite");
         assert_eq!(ordinary(&reverse), forward_ordinary);
         assert_eq!(
             crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),
