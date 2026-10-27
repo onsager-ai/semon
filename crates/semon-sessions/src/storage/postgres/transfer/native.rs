@@ -2,7 +2,10 @@
 use super::super::native_reader::{self, EVENT, FILE};
 use super::*;
 use crate::storage::transfer::{CaptureProgress, Category, TransferRecord, reported::CaptureState};
+use sha2::Digest;
 use tokio_postgres::types::ToSql;
+
+pub(super) const WITHDRAWN_SOURCE: &str = "WITH candidate AS MATERIALIZED (SELECT * FROM semon_pg_native_selected_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND (id,key_digest,path_digest)>($2,$3,$4) ORDER BY id,key_digest,path_digest LIMIT 1) SELECT s.id,s.key_digest,s.path_digest,CASE WHEN octet_length(s.path)<=1048576 THEN s.path END,CASE WHEN octet_length(s.ledger)=64 THEN s.ledger END,EXISTS(SELECT 1 FROM semon_pg_native_files f WHERE f.namespace_digest=s.namespace_digest AND f.namespace=s.namespace AND f.path_digest=sha256(s.path) AND semon_pg_native_key_matches(f.path,f.path_digest,s.path)),EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.key_digest=s.key_digest AND r.session_key=s.session_key AND r.id=s.id) FROM candidate s";
 
 pub(super) fn capture_native(
     tx: &mut Inbox<'_, '_>,
@@ -13,13 +16,16 @@ pub(super) fn capture_native(
     }
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     if state.native_family == 16 {
-        let path = state.native_path.as_ref().map(|path| path.as_bytes());
-        let ledger = state
-            .native_backing
-            .as_ref()
-            .map(|ledger| ledger.as_bytes());
-        let rows = tx.0.driver.query("SELECT CASE WHEN octet_length(s.path)<=1048576 THEN s.path END,CASE WHEN octet_length(s.ledger)=64 THEN s.ledger END FROM semon_pg_native_selected_sources s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND ($2::bytea IS NULL OR (s.path,s.ledger)>($2,$3)) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_files f WHERE f.namespace_digest=s.namespace_digest AND f.namespace=s.namespace AND semon_pg_native_key_matches(f.path,sha256(s.path),s.path)) AND EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.id=s.id AND r.key_digest=s.key_digest AND r.session_key=s.session_key) GROUP BY s.path,s.ledger ORDER BY s.path,s.ledger LIMIT 1", &[&ns,&path,&ledger]).map_err(sqlstate::error)?;
+        // Advance the existing physical PK before checking reachability. A
+        // path/ledger GROUP BY would rescan and sort the namespace per page.
+        let after = state.native_withdrawn_after.clone().unwrap_or_default();
+        let rows = tx.0.driver.query(WITHDRAWN_SOURCE, &[&ns,&after[0],&after[1],&after[2]]).map_err(sqlstate::error)?;
         if let Some(row) = rows.first() {
+            state.native_withdrawn_after = Some([row.get(0), row.get(1), row.get(2)]);
+            if row.get::<_, bool>(5) || !row.get::<_, bool>(6) {
+                transfer::reported::save_capture(tx, state)?;
+                return Ok(state.progress());
+            }
             let text = |index: usize| {
                 String::from_utf8(
                     row.get::<_, Option<Vec<u8>>>(index)
@@ -27,8 +33,23 @@ pub(super) fn capture_native(
                 )
                 .map_err(|_| StorageError::ScopeChanged)
             };
-            state.native_path = Some(text(0)?);
-            state.native_backing = Some(text(1)?);
+            let path = text(3)?;
+            let ledger = text(4)?;
+            let witness = transfer::encode_bounded(&(&path, &ledger), transfer::MAX_PAGE_BYTES)?;
+            let receipt = transfer::key(
+                &state.manifest.snapshot_id,
+                &format!("withdrawn/{:x}", sha2::Sha256::digest(&witness)),
+            );
+            if let Some(saved) = tx.get(&receipt, transfer::MAX_PAGE_BYTES)? {
+                if saved != witness {
+                    return Err(StorageError::ScopeChanged);
+                }
+                transfer::reported::save_capture(tx, state)?;
+                return Ok(state.progress());
+            }
+            tx.put(&receipt, &witness)?;
+            state.native_path = Some(path);
+            state.native_backing = Some(ledger);
             state.native_family = 3;
         } else {
             state.native_family = 32;

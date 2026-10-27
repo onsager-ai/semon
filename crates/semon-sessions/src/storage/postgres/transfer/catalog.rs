@@ -624,11 +624,28 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw() {
+        const CHILD: &str = "SEMON_TRANSFER273_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            assert!(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "storage::postgres::transfer::catalog::tests::pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            return;
+        }
         let root = root();
         let source = sqlite(&root, "pg-catalog-source");
         let reverse = sqlite(&root, "pg-catalog-reverse");
         use crate::storage::proof_lifetime::ProofReaderLease;
         let (options, initial) = seed_catalog(&source, &root);
+        let original_facts = crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap();
         let mut host = crate::storage::transfer::reported::tests::selected_receipts::AuthorizedOriginals::default();
         originals(&source, &options, &mut host);
         let owner =
@@ -894,7 +911,22 @@ mod tests {
             assert!(body.to_string().contains("sanitized 0"));
             (listed, fields, body)
         };
-        let forward_ordinary = ordinary(&config);
+        let forward_ordinary = {
+            let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+            ordinary(&config)
+        };
+        pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            let empty = b"".as_slice();
+            let plan = tx.driver.query(
+                &format!("EXPLAIN (ANALYZE, BUFFERS) {}", super::super::native::WITHDRAWN_SOURCE),
+                &[&ns, &empty, &empty, &empty],
+            ).map_err(sqlstate::error)?;
+            for row in plan {
+                eprintln!("transfer273_withdrawn_plan {}", row.get::<_, String>(0));
+            }
+            Ok(())
+        }).unwrap();
         let backwards = stage(&config, &reverse, &[121; 32]);
         for category in [
             transfer::Category::PageGenerations,
@@ -932,6 +964,10 @@ mod tests {
         );
         assert_eq!(reverse.catalog_generation().unwrap(), admitted);
         assert_eq!(ordinary(&reverse), forward_ordinary);
+        assert_eq!(
+            crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),
+            original_facts
+        );
         assert_eq!(
             selected_receipts(&reverse, &options, &host),
             original_selected,
