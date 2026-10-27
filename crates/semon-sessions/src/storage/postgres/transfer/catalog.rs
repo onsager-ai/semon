@@ -559,6 +559,11 @@ fn bind_backing(tx: &mut Inbox<'_, '_>, values: &[Value]) -> Result<(), StorageE
             return Err(StorageError::ScopeChanged);
         }
     }
+    // The ordinary Catalog reader leases the captured head, while a selected
+    // generation retains its original publication. Bind both addresses to the
+    // same verified ledger; neither address grants a lease or host Raw access.
+    let generation = tx.get(catalog_rows::IMPORTED_GENERATION, 64)?.ok_or(StorageError::ScopeChanged)?;
+    tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT p.namespace,$6,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_selected_generations s ON s.namespace_digest=p.namespace_digest AND s.namespace=p.namespace AND s.publication=p.generation JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.id=$2 AND s.key_digest=sha256($3::bytea) AND s.session_key=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5 ON CONFLICT DO NOTHING", &[&tx.0.namespace.as_str().as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes(),&text(2)?.as_bytes(),&receipt.as_bytes(),&generation]).map_err(sqlstate::error)?;
     Ok(())
 }
 
@@ -806,6 +811,16 @@ mod tests {
             assert!(super::super::super::model_cache::generation(tx)?.is_none(),"content transfer must not fabricate a publication ACK");
             Ok(())
         }).unwrap();
+        let admitted = config.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), &manifest).unwrap();
+        assert_eq!(config.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), &manifest).unwrap(), admitted);
+        assert_eq!(config.catalog_generation().unwrap(), admitted);
+        super::super::super::catalog_effects::snapshot::with_admitted_generation(
+            &pool, &config.namespace, &control, &admitted, |snapshot| {
+                let rows = snapshot.rows(&crate::catalog::Request::parse("limit=60").unwrap()).map_err(|_| StorageError::ScopeChanged)?;
+                assert_eq!(serde_json::to_value(rows).unwrap(),serde_json::to_value(&expected).unwrap());
+                Ok(())
+            }
+        ).unwrap();
         let backwards = stage(&config, &reverse, &[121; 32]);
         for category in [
             transfer::Category::PageGenerations,
@@ -834,6 +849,8 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        assert_eq!(reverse.transfer_inbox().admit_catalog_from(&config.transfer_inbox(), &backwards).unwrap(), admitted);
+        assert_eq!(reverse.catalog_generation().unwrap(), admitted);
         assert_eq!(
             selected_receipts(&reverse, &options, &host),
             original_selected,

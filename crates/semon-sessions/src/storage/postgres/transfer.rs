@@ -101,6 +101,18 @@ pub(crate) fn checkpoint(
     })
 }
 
+pub(crate) fn admit_catalog(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    import: &transfer::reported::CatalogImport,
+) -> Result<String, StorageError> {
+    transaction(config, pool, control, |tx| {
+        import.require_applied(tx)?;
+        super::catalog_effects::publication::import(tx.0, import)
+    })
+}
+
 pub(crate) fn capture(
     config: &StoreConfig,
     pool: &PgPool,
