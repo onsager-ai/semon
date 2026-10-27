@@ -429,6 +429,8 @@ impl StoreConfig {
 
     /// Revoke the exact admission witness. Refuses an active qualified transfer;
     /// this is not migration rollback and never discards native rows or writes.
+    /// SQLite refuses until current-format revocation is qualified; it never
+    /// removes namespace custody to restore an unbound writer.
     pub fn unenroll_namespace(&self, admission: &NamespaceAdmission) -> Result<(), StorageError> {
         match &self.backend {
             StoreBackend::Sqlite { .. } => sqlite::namespace::unenroll(self, admission),

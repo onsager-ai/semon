@@ -54,13 +54,18 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![self.namespace,key], |r|r.get(0))
     }
     fn replacement(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
-        // Same-harness source withdrawal composes its retained sources below;
-        // it must not freeze the old aggregate as a different native owner.
-        let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3 AND harness<>?4",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?,row.harness],|r|r.get(0)).optional()?;
-        text.as_deref()
+        let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
+        let old: Option<CatalogRow> = text.as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(<Self as OriginalHistoryStore>::data)
+            .map_err(<Self as OriginalHistoryStore>::data)?;
+        // A withdrawal or metadata refresh retains the same source revisions.
+        // An append/rewrite replaces a revision and must first preserve its
+        // original recipe, even when the native harness/owner is unchanged.
+        Ok(old.filter(|old| {
+            old.harness != row.harness
+                || row.sources.iter().any(|source| !old.sources.contains(source))
+        }))
     }
     fn header(&self, key: &str) -> rusqlite::Result<Option<OriginalHeader>> {
         self.db.query_row("SELECT generation,version,source_generation,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2", params![self.namespace,key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()
