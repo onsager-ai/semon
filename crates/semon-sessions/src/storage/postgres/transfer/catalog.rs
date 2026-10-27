@@ -643,24 +643,7 @@ mod tests {
         }
         let root = root();
         let source = sqlite(&root, "pg-catalog-source");
-        let prior = StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite {
-                database: root.join("pg-catalog-reverse.sqlite3"),
-            },
-            namespace: crate::storage::LogicalSourceNamespace::new("prior-admission").unwrap(),
-            expected_stream_epoch: source.expected_stream_epoch.clone(),
-        };
-        prior.create_native_store().unwrap();
-        crate::events::store::configured::NativeOwnership::admit(&prior).unwrap();
         let reverse = sqlite(&root, "pg-catalog-reverse");
-        assert_ne!(
-            crate::events::store::configured::NativeOwnership::restore_transfer(&source)
-                .unwrap()
-                .admission(),
-            crate::events::store::configured::NativeOwnership::restore_transfer(&reverse)
-                .unwrap()
-                .admission(),
-        );
         use crate::storage::proof_lifetime::ProofReaderLease;
         let (options, initial) = seed_catalog(&source, &root);
         let original_facts = crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap();
@@ -710,7 +693,15 @@ mod tests {
             namespace: source.namespace.clone(),
             expected_stream_epoch: source.expected_stream_epoch.clone(),
         };
-        config.create_native_store().unwrap();
+        // Exercise different physical admissions through real empty-target
+        // retirement/re-enrollment, preserving the final logical stream.
+        let mut prior = config.clone();
+        prior.expected_stream_epoch = Some("b".repeat(64));
+        prior.create_native_store().unwrap();
+        let retired = prior.admit_namespace().unwrap();
+        prior.unenroll_namespace(&retired).unwrap();
+        let target_admission = config.admit_namespace().unwrap();
+        assert_ne!(target_admission.generation, owner.admission());
         let manifest = stage(&source, &config, &[120; 32]);
         for category in [
             transfer::Category::Operations,
