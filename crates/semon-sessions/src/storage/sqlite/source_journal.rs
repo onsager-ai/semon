@@ -15,6 +15,8 @@ use std::time::Duration;
 pub(crate) const SOURCE_JOURNAL_QUALIFICATION_VERSION: u32 = 1;
 const MAX_PATHS: usize = 256;
 const PENDING_SQL: &str = "SELECT source_path FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision,source_path LIMIT ?2";
+const CLAIM_SQL: &str = "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=?2 AND source_path=?1";
+const SELECTED_MARKER_SQL: &str = "SELECT CASE WHEN octet_length(value)<=32768 THEN value END FROM main.meta WHERE namespace=?1 AND key=?2";
 
 // Shared by the existing native transaction and the configured transaction.
 // The caller owns the transaction: invalidation never commits independently.
@@ -189,8 +191,7 @@ pub(crate) fn claims(
     namespace: &str,
     paths: &[String],
 ) -> rusqlite::Result<crate::storage::source_observations::SourceClaims> {
-    let sql = "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=?2 AND source_path=?1";
-    let mut statement = db.prepare(sql)?;
+    let mut statement = db.prepare(CLAIM_SQL)?;
     paths
         .iter()
         .map(|path| {
@@ -588,7 +589,7 @@ impl SourceObservationStore for SourceJournal {
         let draining: bool = db.query_row("SELECT backfill_state='draining' FROM main.storage_source_journal WHERE namespace=?1", [self.config.namespace.as_str()], |row| row.get(0)).map_err(failed)?;
         if draining {
             let marker: Option<Option<String>> = db.query_row(
-                "SELECT CASE WHEN octet_length(value)<=32768 THEN value END FROM main.meta WHERE namespace=?1 AND key=?2",
+                SELECTED_MARKER_SQL,
                 params![self.config.namespace.as_str(), crate::storage::source_observations::SELECTED_PROJECTION_KEY], |row| row.get(0),
             ).optional().map_err(failed)?;
             if let Some(marker) = marker {
@@ -1802,9 +1803,9 @@ mod tests {
         );
         assert!(plan.iter().all(|line| !line.contains("TEMP B-TREE")));
         let selected_plan: Vec<String> = plan_db
-            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTED_PENDING_SQL}"))
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTED_MARKER_SQL}"))
             .unwrap()
-            .query_map(params!["A", 1], |r| r.get(3))
+            .query_map(params!["A", crate::storage::source_observations::SELECTED_PROJECTION_KEY], |r| r.get(3))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -1814,6 +1815,14 @@ mod tests {
                 .all(|line| !line.contains("TEMP B-TREE"))
         );
         assert!(selected_plan.iter().all(|line| !line.starts_with("SCAN ")));
+        let claim_plan: Vec<String> = plan_db
+            .prepare(&format!("EXPLAIN QUERY PLAN {CLAIM_SQL}"))
+            .unwrap()
+            .query_map(params!["seed", "A"], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(claim_plan.iter().all(|line| !line.contains("TEMP B-TREE") && !line.starts_with("SCAN ")));
         // Repeated discovery is idempotent, including its source claims.
         assert_eq!(
             store.discover(&discovery, &paths, true).unwrap(),
