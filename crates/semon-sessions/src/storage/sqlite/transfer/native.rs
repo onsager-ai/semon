@@ -10,6 +10,23 @@ pub(super) fn capture_native(
     if state.native_family >= 32 {
         return super::catalog::capture(tx, state);
     }
+    if state.native_family == 16 {
+        // Withdrawn files have no live file row. Their reachable immutable
+        // prefixes are still authoritative Native backing, not orphan inventory.
+        let next: Option<(Option<String>, Option<String>)> = tx.0.query_row("SELECT CASE WHEN octet_length(s.path)<=1048576 THEN s.path END,CASE WHEN octet_length(s.ledger)=64 THEN s.ledger END FROM storage_proof_sources s WHERE s.namespace=?1 AND (?2 IS NULL OR (s.path,s.ledger)>(?2,?3)) AND NOT EXISTS(SELECT 1 FROM files f WHERE f.namespace=s.namespace AND f.path=s.path) AND EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) GROUP BY s.path,s.ledger ORDER BY s.path,s.ledger LIMIT 1", params![tx.1,state.native_path,state.native_backing], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(failed)?;
+        if let Some((path, ledger)) = next {
+            state.native_path = Some(path.ok_or(StorageError::ScopeChanged)?);
+            state.native_backing = Some(ledger.ok_or(StorageError::ScopeChanged)?);
+            state.native_family = 3;
+        } else {
+            state.native_family = 32;
+            state.native_path = None;
+            state.native_backing = None;
+        }
+        state.native_key = None;
+        transfer::reported::save_capture(tx, state)?;
+        return Ok(state.progress());
+    }
     let id = state
         .cursor
         .as_ref()
@@ -33,8 +50,11 @@ pub(super) fn capture_native(
             )
             .map_err(failed)?;
         let Some(next) = next else {
-            state.native_family = 32;
+            state.native_family = 16;
             state.native_key = None;
+            state.native_path = None;
+            state.native_backing = None;
+            state.cursor = None;
             transfer::reported::save_capture(tx, state)?;
             return Ok(state.progress());
         };

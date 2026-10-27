@@ -31,7 +31,9 @@ impl TransferInbox {
             generation: source.0.catalog_generation()?,
         };
         match &self.0.backend {
-            StoreBackend::Sqlite { .. } => super::super::sqlite::transfer::admit_catalog(&self.0, &import),
+            StoreBackend::Sqlite { .. } => {
+                super::super::sqlite::transfer::admit_catalog(&self.0, &import)
+            }
             #[cfg(feature = "postgres")]
             StoreBackend::Postgres { pool, control } => {
                 super::super::postgres::transfer::admit_catalog(&self.0, pool, control, &import)
@@ -94,18 +96,42 @@ impl CatalogImport {
     }
 
     pub(crate) fn payload(&self) -> Result<Vec<u8>, StorageError> {
-        encode_bounded(&("catalog-import-v1", &self.manifest, &self.generation), MAX_PAGE_BYTES)
+        encode_bounded(
+            &("catalog-import-v1", &self.manifest, &self.generation),
+            MAX_PAGE_BYTES,
+        )
     }
 
-    pub(crate) fn require_applied(&self, tx: &mut impl InboxTransaction) -> Result<(), StorageError> {
+    pub(crate) fn require_applied(
+        &self,
+        tx: &mut impl InboxTransaction,
+    ) -> Result<(), StorageError> {
         let staged = checkpoint_tx(tx, &self.manifest)?;
-        if staged.rows.iter().zip(&self.manifest.categories).any(|(rows, category)| *rows != category.rows)
-            || staged.digests.iter().zip(&self.manifest.categories).any(|(digest, category)| *digest != category.digest)
-            || tx.get(&key(&self.manifest.identity(), "applied"), MAX_MANIFEST_BYTES)?
+        if staged
+            .rows
+            .iter()
+            .zip(&self.manifest.categories)
+            .any(|(rows, category)| *rows != category.rows)
+            || staged
+                .digests
+                .iter()
+                .zip(&self.manifest.categories)
+                .any(|(digest, category)| *digest != category.digest)
+            || tx
+                .get(
+                    &key(&self.manifest.identity(), "applied"),
+                    MAX_MANIFEST_BYTES,
+                )?
                 .map(|bytes| decode_checkpoint(&bytes, &self.manifest))
-                .transpose()? != Some(staged)
-            || tx.get(INCOMING, MAX_MANIFEST_BYTES)?.is_some_and(|bytes| !bytes.is_empty())
-            || tx.get(super::catalog_rows::IMPORTED_GENERATION, 64)?.as_deref() != Some(self.generation.as_bytes())
+                .transpose()?
+                != Some(staged)
+            || tx
+                .get(INCOMING, MAX_MANIFEST_BYTES)?
+                .is_some_and(|bytes| !bytes.is_empty())
+            || tx
+                .get(super::catalog_rows::IMPORTED_GENERATION, 64)?
+                .as_deref()
+                != Some(self.generation.as_bytes())
         {
             return Err(StorageError::Conflict);
         }

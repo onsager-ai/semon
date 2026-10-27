@@ -55,11 +55,13 @@ pub(super) fn verify_backing(
     let current = metadata(
         tx,
         &format!("{}header", prefix(path, NativePageKind::Chunks)),
-    )?
-    .ok_or(StorageError::ScopeChanged)?;
-    let current_header: crate::events::native_pages::chunks::Header =
-        serde_json::from_str(&current).map_err(|_| StorageError::ScopeChanged)?;
-    let backing = (current_header.ledger != receipt).then_some(digest);
+    )?;
+    let live_matches = current.as_deref().is_some_and(|encoded| {
+        serde_json::from_str::<crate::events::native_pages::chunks::Header>(encoded)
+            .is_ok_and(|header| header.ledger == receipt && header.version == 1
+                && header.parser_version == crate::events::CACHE_VERSION)
+    });
+    let backing = (!live_matches).then_some(digest);
     let encoded = metadata(
         tx,
         &format!(
@@ -276,6 +278,14 @@ pub(super) fn capture(
             native_pages::append(tx, state, Category::PageBlobs, records)?;
         }
     } else {
+        if state.cursor.is_none() {
+            // This is the exact retained prefix selected by the reachable
+            // proof-source cursor, not the live file's prefix/usage traversal.
+            state.native_family = 16;
+            state.native_key = None;
+            transfer::reported::save_capture(tx, state)?;
+            return Ok(state.progress());
+        }
         let manifest_key = format!(
             "native_published_chunks_manifest:{:x}",
             Sha256::digest(path.as_bytes())

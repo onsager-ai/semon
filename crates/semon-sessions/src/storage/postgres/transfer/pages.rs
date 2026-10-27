@@ -136,6 +136,12 @@ pub(super) fn capture(
             native_pages::append(tx, state, Category::PageBlobs, records)?;
         }
     } else {
+        if state.cursor.is_none() {
+            state.native_family = 16;
+            state.native_key = None;
+            transfer::reported::save_capture(tx, state)?;
+            return Ok(state.progress());
+        }
         let next = tx.0.driver.query("SELECT encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex') AS digest FROM semon_pg_native_page_generations g WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.source_path=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_page_current p WHERE p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.source_path=g.source_path AND p.generation=g.generation) AND ($3::text IS NULL OR encode(sha256(decode('73656d6f6e2d6c65646765722d763100','hex')||g.ledger),'hex')>$3) ORDER BY digest LIMIT 1", &[&ns,&path.as_bytes(),&state.native_backing]).map_err(sqlstate::error)?.into_iter().next().map(|r|r.get::<_,String>(0));
         if let Some(next) = next {
             state.native_backing = Some(next);
