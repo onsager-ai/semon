@@ -128,9 +128,12 @@ pub(crate) fn admit_catalog(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),
         )?;
-        if import.manifest().categories.iter().any(|category| {
-            category.category == transfer::Category::Recipes && category.rows > 0
-        }) {
+        if import
+            .manifest()
+            .categories
+            .iter()
+            .any(|category| category.category == transfer::Category::Recipes && category.rows > 0)
+        {
             tx.put(
                 "slot_projection_catalog_generation",
                 import.generation().as_bytes(),
