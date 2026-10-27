@@ -490,11 +490,9 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     // lifecycles. Seed both with the same real producer before Raw moves.
     let mut original_options = options.clone();
     original_options.cache = root.join("original-index.json");
-    let mut original_cache = crate::events::EventCache::open_scoped(
-        &original_options.cache,
-        &original_options.source,
-    )
-    .unwrap();
+    let mut original_cache =
+        crate::events::EventCache::open_scoped(&original_options.cache, &original_options.source)
+            .unwrap();
     let original_prepared = crate::model::prepare_sources(
         &original_options,
         &mut original_cache,
@@ -566,18 +564,24 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
         1790812802000,
     )
     .unwrap();
-    assert!(original_cache
-        .publish_catalog_projection_fenced(
-            &crate::slot_projection::Publication {
-                rows: &restored_original.rows,
-                transcripts: Some(&restored_original.transcripts),
-            },
-            withdrawn_generation.as_deref(),
-        )
-        .unwrap()
-        .is_some());
-    let original_config = original_options.source.config(&original_options.cache).unwrap();
-    let original_owner = crate::events::store::configured::NativeOwnership::admit(&original_config).unwrap();
+    assert!(
+        original_cache
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &restored_original.rows,
+                    transcripts: Some(&restored_original.transcripts),
+                },
+                withdrawn_generation.as_deref(),
+            )
+            .unwrap()
+            .is_some()
+    );
+    let original_config = original_options
+        .source
+        .config(&original_options.cache)
+        .unwrap();
+    let original_owner =
+        crate::events::store::configured::NativeOwnership::admit(&original_config).unwrap();
     let original_db = crate::storage::sqlite::source_journal::SourceJournal::owned(original_owner)
         .connection()
         .unwrap();
@@ -587,11 +591,15 @@ fn build_oracle(keep_raw: bool, history: bool) -> Input {
     let original_slots = original_db.prepare("SELECT metadata FROM session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot").unwrap()
         .query_map([], |r| r.get::<_, String>(0)).unwrap()
         .map(|r| r.unwrap().into_bytes()).collect::<Vec<_>>();
-    let retained_metadata = original_prepared.rows.iter().map(|row| {
-        let mut row = row.clone();
-        row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-        serde_json::to_vec(&row).unwrap()
-    }).collect::<Vec<_>>();
+    let retained_metadata = original_prepared
+        .rows
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            serde_json::to_vec(&row).unwrap()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         original, retained_metadata,
         "original custody keeps the published row"
