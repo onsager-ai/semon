@@ -19,7 +19,10 @@ pub(super) fn capture_native(
         // Advance the existing physical PK before checking reachability. A
         // path/ledger GROUP BY would rescan and sort the namespace per page.
         let after = state.native_withdrawn_after.clone().unwrap_or_default();
-        let rows = tx.0.driver.query(WITHDRAWN_SOURCE, &[&ns,&after[0],&after[1],&after[2]]).map_err(sqlstate::error)?;
+        let rows =
+            tx.0.driver
+                .query(WITHDRAWN_SOURCE, &[&ns, &after[0], &after[1], &after[2]])
+                .map_err(sqlstate::error)?;
         if let Some(row) = rows.first() {
             state.native_withdrawn_after = Some([row.get(0), row.get(1), row.get(2)]);
             if row.get::<_, bool>(5) || !row.get::<_, bool>(6) {

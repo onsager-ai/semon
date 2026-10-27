@@ -832,12 +832,12 @@ mod tests {
         }).unwrap();
         let admitted = config
             .transfer_inbox()
-            .admit_catalog_from(&source.transfer_inbox(), &manifest)
+            .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
             .unwrap();
         assert_eq!(
             config
                 .transfer_inbox()
-                .admit_catalog_from(&source.transfer_inbox(), &manifest)
+                .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
                 .unwrap(),
             admitted
         );
@@ -918,15 +918,22 @@ mod tests {
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             let ns = config.namespace.as_str().as_bytes();
             let empty = b"".as_slice();
-            let plan = tx.driver.query(
-                &format!("EXPLAIN (ANALYZE, BUFFERS) {}", super::super::native::WITHDRAWN_SOURCE),
-                &[&ns, &empty, &empty, &empty],
-            ).map_err(sqlstate::error)?;
+            let plan = tx
+                .driver
+                .query(
+                    &format!(
+                        "EXPLAIN (ANALYZE, BUFFERS) {}",
+                        super::super::native::WITHDRAWN_SOURCE
+                    ),
+                    &[&ns, &empty, &empty, &empty],
+                )
+                .map_err(sqlstate::error)?;
             for row in plan {
                 eprintln!("transfer273_withdrawn_plan {}", row.get::<_, String>(0));
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let backwards = stage(&config, &reverse, &[121; 32]);
         for category in [
             transfer::Category::PageGenerations,
@@ -958,7 +965,7 @@ mod tests {
         assert_eq!(
             reverse
                 .transfer_inbox()
-                .admit_catalog_from(&config.transfer_inbox(), &backwards)
+                .admit_catalog_from(&config.transfer_inbox(), &backwards, &options)
                 .unwrap(),
             admitted
         );

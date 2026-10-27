@@ -21,8 +21,12 @@ impl TransferInbox {
         &self,
         source: &TransferInbox,
         manifest: &SnapshotManifest,
+        options: &crate::Options,
     ) -> Result<String, StorageError> {
         manifest.bind(&self.0)?;
+        // Facts are host-authorized Raw, independent of the SQL placement.
+        // Validate the host's logical identity before any destination effect.
+        options.source.clone().with_store(self.0.clone())?;
         if source.capture(&manifest.snapshot_id)? != CaptureProgress::Ready(manifest.clone()) {
             return Err(StorageError::Conflict);
         }
@@ -36,7 +40,7 @@ impl TransferInbox {
             }
             #[cfg(feature = "postgres")]
             StoreBackend::Postgres { pool, control } => {
-                super::super::postgres::transfer::admit_catalog(&self.0, pool, control, &import)
+                super::super::postgres::transfer::admit_catalog(&self.0, pool, control, &import, options)
             }
         }
     }
