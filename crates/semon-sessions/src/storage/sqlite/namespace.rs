@@ -26,9 +26,7 @@ pub(crate) fn require_semantic_admitted(
     let Some((generation, admitted_at, version, qualification)) = row else {
         return Err(StorageError::ScopeChanged);
     };
-    if generation <= 0
-        || version != FORMAT_VERSION
-        || qualification != WRITER_QUALIFICATION_VERSION
+    if generation <= 0 || version != FORMAT_VERSION || qualification != WRITER_QUALIFICATION_VERSION
     {
         return Err(StorageError::NamespaceUpgradePending);
     }
