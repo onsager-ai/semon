@@ -84,13 +84,14 @@ impl Fixture {
             .unwrap();
         relative
     }
-    /// The admitted current writer: the namespace binding and writer roles
-    /// of the production source-journal connection.
+    /// The admitted Catalog producer, including its namespace and writer roles.
     fn db(&self) -> Connection {
         let config = self.options.source.config(&self.options.cache).unwrap();
-        crate::storage::sqlite::source_journal::SourceJournal(config)
-            .connection()
-            .unwrap()
+        crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection()
     }
     fn publish(&self, count: usize) {
         for id in 0..count {

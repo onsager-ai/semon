@@ -71,7 +71,7 @@ pub(crate) fn initialize_source_floors(
     ] {
         let value: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
                 [key],
                 |r| r.get(0),
             )
@@ -90,7 +90,7 @@ pub(crate) fn initialize_source_floors(
     }
     for key in missing {
         tx.execute(
-            "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')",
+            "INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')",
             [key],
         )
         .map_err(failed)?;
