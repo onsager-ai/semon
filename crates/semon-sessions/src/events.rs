@@ -2711,10 +2711,14 @@ impl EventCache {
                 }
                 Ok(generation)
             }
-            Outcome::Deferred | Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "native Catalog publication generation changed",
-            )),
+            Outcome::Deferred | Outcome::Conflict | Outcome::Stale => {
+                #[cfg(test)]
+                eprintln!("native_catalog_publication_outcome={outcome:?}");
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native Catalog publication generation changed",
+                ))
+            }
         }
     }
 

@@ -2905,11 +2905,13 @@ impl Stage {
                 eprintln!("semantic_record_conflict: reduction_witness");
                 return Ok(Outcome::Conflict);
             }
-            for path in &batch.paths {
+            for (index, path) in batch.paths.iter().enumerate() {
                 let sql = if batch.phase == Phase::Identity {
                     "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=1 AND identity_done=0)"
-                } else {
+                } else if index == 0 {
                     "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND identity_done=1 AND relation_done=0)"
+                } else {
+                    "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND identity_done=1)"
                 };
                 let pending: bool = tx
                     .query_row(sql, params![ns, path], |r| r.get(0))
