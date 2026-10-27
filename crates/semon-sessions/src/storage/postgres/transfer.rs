@@ -259,7 +259,7 @@ pub(crate) fn apply(
         }
         let ns = config.namespace.as_str().as_bytes();
         if page.first {
-            let source_owned: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_source_members WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='slot_upgrade_selected')", &[&ns]).map_err(sqlstate::error)?.get(0);
+            let source_owned: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_source_members WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_source_intents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_source_receipts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) OR EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='slot_upgrade_selected')", &[&ns]).map_err(sqlstate::error)?.get(0);
             if source_owned {
                 return Err(StorageError::Conflict);
             }
@@ -300,6 +300,43 @@ pub(crate) fn apply(
 mod tests {
     use super::*;
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
+
+    #[test]
+    fn pg_current_transfer225_refuses_existing_source_intent_or_receipt() {
+        use transfer::reported::tests::{occupied_source_refuses, root, sqlite};
+
+        let root = root();
+        for receipt in [false, true] {
+            let suffix = if receipt { "receipt" } else { "intent" };
+            let source = sqlite(&root, &format!("source-{suffix}"));
+            let (pool, _) = super::super::tests::fixture(|limits| {
+                limits.idle_timeout = std::time::Duration::from_secs(1);
+            });
+            let control = PgCancellation::default();
+            let target = StoreConfig {
+                backend: StoreBackend::Postgres {
+                    pool: pool.clone(),
+                    control: control.clone(),
+                },
+                namespace: source.namespace.clone(),
+                expected_stream_epoch: source.expected_stream_epoch.clone(),
+            };
+            target.create_native_store().unwrap();
+            let manifest = occupied_source_refuses(&source, &target, &root.join(suffix), receipt);
+            transaction(&target, &pool, &control, |tx| {
+                let ns = target.namespace.as_str().as_bytes();
+                let count: i64 = tx.0.driver.query_one("SELECT count(*) FROM semon_pg_native_reported_runs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+                assert_eq!(count, 0);
+                let clean: bool = tx.0.driver.query_one("SELECT revision=0 AND backfill_state IS NULL AND NOT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) AND NOT EXISTS(SELECT 1 FROM semon_pg_source_members WHERE namespace_digest=sha256($1::bytea) AND namespace=$1) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key='slot_upgrade_selected') FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
+                assert!(clean);
+                assert!(tx.get(&transfer::key(&manifest.identity(), "applied"), 32768)?.is_none());
+                assert!(tx.get(&transfer::key(&manifest.identity(), "applied:1"), 32768)?.is_none());
+                Ok(())
+            })
+            .unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pg_current_transfer225_selected_pending_claims_resume_both_directions() {

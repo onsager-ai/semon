@@ -122,6 +122,92 @@ pub(crate) fn apply(target: &StoreConfig, manifest: &SnapshotManifest) {
     }
 }
 
+pub(crate) fn occupied_source_refuses(
+    source: &StoreConfig,
+    target: &StoreConfig,
+    input: &Path,
+    receipt: bool,
+) -> SnapshotManifest {
+    use crate::storage::source_observations::{SourceIntent, SourceMutationReceipt, SourceOperation};
+
+    let expected: Vec<(String, Option<i64>)> = Vec::new();
+    let operation = SourceOperation::capture(
+        target.namespace.as_str(),
+        "invalidate",
+        &serde_json::to_vec(&expected).unwrap(),
+    );
+    let intent = SourceIntent::Invalidate {
+        operation: operation.clone(),
+        expected: expected.clone(),
+    };
+    let mut observations = target.source_observations().unwrap();
+    if receipt {
+        assert_eq!(
+            observations.invalidate(&operation, &expected).unwrap(),
+            SourceMutationReceipt::Applied
+        );
+    } else {
+        observations.persist_intent(&intent).unwrap();
+    }
+    drop(observations);
+    let observations = target.source_observations().unwrap();
+    assert_eq!(observations.pending_intents().unwrap().len(), usize::from(!receipt));
+    drop(observations);
+
+    observe(source, input, 100, 200);
+    let manifest = stage(source, target, &[if receipt { 151 } else { 150 }; 32]);
+    let staged = target.transfer_inbox().checkpoint(&manifest).unwrap();
+    assert!(staged.sequence > 0);
+    for _ in 0..2 {
+        assert!(matches!(
+            target.transfer_inbox().apply_page(&manifest, 1),
+            Err(StorageError::Conflict)
+        ));
+        assert_eq!(target.transfer_inbox().checkpoint(&manifest).unwrap(), staged);
+    }
+    let mut observations = target.source_observations().unwrap();
+    if receipt {
+        assert_eq!(
+            observations.invalidate(&operation, &expected).unwrap(),
+            SourceMutationReceipt::AlreadyApplied
+        );
+    } else {
+        assert_eq!(observations.pending_intents().unwrap(), vec![intent]);
+    }
+    manifest
+}
+
+#[test]
+fn current_transfer225_sqlite_refuses_existing_source_intent_or_receipt() {
+    let root = root();
+    for receipt in [false, true] {
+        let suffix = if receipt { "receipt" } else { "intent" };
+        let source = sqlite(&root, &format!("source-{suffix}"));
+        let target = sqlite(&root, &format!("target-{suffix}"));
+        let manifest = occupied_source_refuses(&source, &target, &root.join(suffix), receipt);
+        let db = rusqlite::Connection::open(target.backend.sqlite_database().unwrap()).unwrap();
+        let facts: i64 = db
+            .query_row("SELECT count(*) FROM reported_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(facts, 0);
+        let clean: bool = db.query_row("SELECT revision=0 AND backfill_state IS NULL AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1) AND NOT EXISTS(SELECT 1 FROM catalog_backfill_sources WHERE namespace=?1) AND NOT EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key='slot_upgrade_selected') FROM storage_source_journal WHERE namespace=?1", [target.namespace.as_str()], |row| row.get(0)).unwrap();
+        assert!(clean);
+        let applied: i64 = db
+            .query_row(
+                "SELECT count(*) FROM meta WHERE namespace=?1 AND key IN (?2,?3)",
+                rusqlite::params![
+                    target.namespace.as_str(),
+                    key(&manifest.identity(), "applied"),
+                    key(&manifest.identity(), "applied:1")
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn current_transfer225_reported_more_than_one_page_restart_reverse_and_fences() {
     let root = root();
