@@ -55,6 +55,7 @@
     "fresh configured composite-meta activation and complete writer/guard qualification; performance qualification remains pending"
   ],
   "unqualified_paths": [
+    "storage/postgres/transfer.rs",
     "storage/postgres/catalog_effects/tests.rs",
     "catalog_observer.rs",
     "catalog_search.rs",
