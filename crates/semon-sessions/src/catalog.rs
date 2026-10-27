@@ -956,6 +956,55 @@ pub(crate) fn page(options: &Options, machine: &str, request: Request) -> Viewer
     }
 }
 
+/// Whether a normal first Catalog page can read the current persisted
+/// publication. Completeness is deliberately not required: source-scoped
+/// consumers can read a published partial Catalog while the producer continues.
+/// Missing, blank or unpublished stores return `false`; invalid, unsupported and
+/// I/O failures propagate. This check does not admit or start an observer.
+pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
+    let path = EventCache::path(&options.cache);
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(false),
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session index is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+
+    let mut connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    connection
+        .busy_timeout(Duration::from_millis(100))
+        .map_err(io::Error::other)?;
+    let transaction = connection.transaction().map_err(io::Error::other)?;
+    if !crate::events::store::current_or_fresh(&transaction)? {
+        return Ok(false);
+    }
+    let (version, generation): (Option<String>, Option<String>) = transaction
+        .query_row(
+            "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(io::Error::other)?;
+    if generation.is_none() {
+        return Ok(false);
+    }
+    if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
+        return Err(io::Error::other("catalog version"));
+    }
+    transaction.commit().map_err(io::Error::other)?;
+    Ok(true)
+}
+
 fn read_page(
     options: &Options,
     machine: &str,
@@ -8667,6 +8716,159 @@ mod tests {
                 "qualified current source {path} lost its original projection"
             );
         }
+    }
+
+    #[test]
+    fn initial_catalog_wait_publishes_a_cold_page() {
+        let fixture = Fixture::new();
+        fixture.source("cold-wait");
+        assert_eq!(fixture.body("").0, 503);
+
+        let observer = crate::SessionCatalogObserver::with_pool(
+            fixture.options.clone(),
+            crate::RefreshPool::new(1),
+        );
+        let result = observer
+            .wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
+        observer.close();
+        result.unwrap();
+        assert_eq!(fixture.body("").0, 200);
+    }
+
+    #[test]
+    fn initial_catalog_wait_does_not_demand_when_publication_predates_wait() {
+        let fixture = Fixture::new();
+        fixture.source("published-before-wait");
+        assert_eq!(fixture.body("").0, 503);
+        fixture.publish_existing();
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        drop(db);
+
+        let observer = crate::SessionCatalogObserver::with_pool(
+            fixture.options.clone(),
+            crate::RefreshPool::new(1),
+        );
+        let view = observer.shared_view();
+        let result = observer
+            .wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
+        let demanded = view
+            .evidence
+            .catalog_demand
+            .load(std::sync::atomic::Ordering::Relaxed);
+        observer.close();
+        result.unwrap();
+        assert!(
+            !demanded,
+            "a persisted publication must not start cold work"
+        );
+        let (status, page) = fixture.body("");
+        assert_eq!(status, 200);
+        assert_eq!(page["completeness"]["state"], "partial");
+    }
+
+    #[test]
+    fn session_sources_wait_reuses_a_warm_owner_while_its_work_lock_is_held() {
+        let fixture = Fixture::new();
+        fixture.source("warm-owner");
+        fixture.publish_existing();
+
+        let pool = crate::RefreshPool::new(1);
+        let observer =
+            crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
+        let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![(
+            "source".into(),
+            &observer,
+        )]));
+        let view = observer.shared_view();
+        let _work = crate::viewer::lock(&view.evidence.work);
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiting_sources = sources.clone();
+        let waiter = std::thread::spawn(move || {
+            let result = waiting_sources.wait_until_initial_catalog(
+                "source",
+                pool,
+                std::time::Instant::now() + Duration::from_secs(10),
+            );
+            let _ = sent.send(result);
+        });
+        let observed_while_held = received.recv_timeout(Duration::from_secs(5));
+        let demanded = view
+            .evidence
+            .catalog_demand
+            .load(std::sync::atomic::Ordering::Relaxed);
+        drop(_work);
+        let answered_while_held = matches!(observed_while_held.as_ref(), Ok(Ok(true)));
+        let result = match observed_while_held {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => received
+                .recv_timeout(Duration::from_secs(10))
+                .expect("waiter should finish after work is released"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                sources.close();
+                let _ = waiter.join();
+                panic!("initial Catalog waiter exited without an answer")
+            }
+        };
+        sources.close();
+        waiter.join().unwrap();
+        assert!(result.unwrap());
+        assert!(
+            answered_while_held,
+            "warm readiness must not wait on the producer work lock"
+        );
+        assert!(!demanded, "a warm existing owner must not be queued");
+        assert_eq!(fixture.body("").0, 200);
+    }
+
+    #[test]
+    fn initial_catalog_wait_reports_deadline_and_retirement() {
+        let fixture = Fixture::new();
+        let observer = crate::SessionCatalogObserver::with_pool(
+            fixture.options.clone(),
+            crate::RefreshPool::new(1),
+        );
+        let view = observer.shared_view();
+        let deadline = observer
+            .wait_until_initial_catalog(std::time::Instant::now())
+            .unwrap_err();
+        assert_eq!(deadline.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            !view
+                .evidence
+                .catalog_demand
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        observer.retire();
+        let closed = observer
+            .wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap_err();
+        observer.close();
+        assert_eq!(closed.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn catalog_ready_classifies_blank_and_foreign_stores() {
+        let blank = Fixture::new();
+        let db = Connection::open(EventCache::path(&blank.options.cache)).unwrap();
+        assert!(!crate::events::store::current_or_fresh(&db).unwrap());
+        drop(db);
+        assert!(!session_catalog_page_ready(&blank.options).unwrap());
+
+        let foreign = Fixture::new();
+        let db = Connection::open(EventCache::path(&foreign.options.cache)).unwrap();
+        db.execute_batch("CREATE TABLE foreign_rows(value TEXT)")
+            .unwrap();
+        drop(db);
+        assert!(session_catalog_page_ready(&foreign.options).is_err());
     }
 }
 

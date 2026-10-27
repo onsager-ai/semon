@@ -9134,9 +9134,11 @@ mod tests {
         PARSED.with(std::cell::Cell::get)
     }
 
+    #[cfg(unix)]
     #[test]
     fn receiver_append_chain_reads_only_boundary_and_recovers_interrupted_or_corrupt_proofs() {
         use std::io::Write;
+        use std::os::fd::AsRawFd;
         for history_bytes in [4 * 1024 * 1024, 16 * 1024 * 1024] {
             let root = scratch("receiver-append-chain");
             let options = crate::Options {
@@ -9169,12 +9171,27 @@ mod tests {
                 let intent =
                     crate::SessionSourceWrite::begin(&options, &input, Some(generation), from)
                         .unwrap();
+                let lock_key = crate::source_change::lock_key(&options, &input);
+                let lock_path = options
+                    .cache
+                    .with_extension("source-locks")
+                    .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+                let probe = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(lock_path)
+                    .unwrap();
+                let probe_result =
+                    unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+                let contention = io::Error::last_os_error();
                 assert_eq!(
-                    scan_file(&path, "claude", &mut cache, &mut false)
-                        .unwrap_err()
-                        .kind(),
-                    io::ErrorKind::WouldBlock,
-                    "producer admitted an active Raw write"
+                    probe_result, -1,
+                    "a reader acquired the receiver's source lock during its Raw write"
+                );
+                assert_eq!(
+                    contention.raw_os_error(),
+                    Some(libc::EAGAIN),
+                    "a reader can acquire the receiver's source lock during its Raw write"
                 );
                 let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
                 writer.write_all(append.as_bytes()).unwrap();

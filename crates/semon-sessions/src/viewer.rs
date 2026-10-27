@@ -903,11 +903,15 @@ impl MachineView {
     /// queued in the one before moves to it.
     pub(crate) fn set_pool(&self, pool: Arc<RefreshPool>) {
         let mut state = lock(&self.live.state);
+        self.set_pool_state(&mut state, pool);
+    }
+
+    fn set_pool_state(&self, state: &mut LiveState, pool: Arc<RefreshPool>) {
         if let Slot::Queued(key) = state.slot {
             state.pool.remove(key);
             state.slot = Slot::Idle;
             state.pool = pool;
-            self.queue(&mut state, key.0, true);
+            self.queue(state, key.0, true);
         } else {
             state.pool = pool;
         }
@@ -1045,7 +1049,16 @@ impl MachineView {
 
     fn note_read_with(&self, kind: Kind, prepare: bool) -> io::Result<()> {
         let mut state = lock(&self.live.state);
-        let now = Instant::now();
+        self.note_read_state(&mut state, kind, prepare, Instant::now())
+    }
+
+    fn note_read_state(
+        &self,
+        state: &mut LiveState,
+        kind: Kind,
+        prepare: bool,
+        now: Instant,
+    ) -> io::Result<()> {
         state.read_at = Some(now);
         if state.closed {
             return Ok(());
@@ -1066,7 +1079,7 @@ impl MachineView {
             Slot::Idle => {
                 if prepare || state.invalidated {
                     state.unconfirmed = [true; 2];
-                    self.queue(&mut state, now, false);
+                    self.queue(state, now, false);
                 }
                 false
             }
@@ -1105,6 +1118,83 @@ impl MachineView {
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
         self.note_read_with(Kind::Catalog, pending)
+    }
+
+    /// Wait for the first readable persisted Catalog publication, using the
+    /// existing source owner and refresh worker. A warm persisted page returns
+    /// before creating a cold demand. The caller must wait off its reactor.
+    pub(crate) fn wait_until_initial_catalog(&self, deadline: Instant) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, None)
+    }
+
+    pub(crate) fn wait_until_initial_catalog_in_pool(
+        &self,
+        pool: Arc<RefreshPool>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, Some(pool))
+    }
+
+    fn wait_for_initial_catalog(
+        &self,
+        deadline: Instant,
+        mut pool: Option<Arc<RefreshPool>>,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.live.state);
+        let mut demanded = false;
+        loop {
+            if state.closed {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "session catalog source is closed",
+                ));
+            }
+            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "initial session catalog was not published before the deadline",
+                ));
+            }
+            if ready {
+                return Ok(());
+            }
+            let at = Kind::Catalog as usize;
+            let stalled = match state.slot {
+                Slot::Running => state.running_since.is_some_and(|since| {
+                    now.saturating_duration_since(since) >= state.stalled_after
+                }),
+                Slot::Queued(key) => now.saturating_duration_since(key.0) >= state.stalled_after,
+                Slot::Idle => false,
+            };
+            if stalled {
+                return Err(io::Error::other("rebuilds stalled"));
+            }
+            if let (Some(message), Some(since)) = (&state.error[at], state.failing_since[at])
+                && !state.unconfirmed[at]
+                && now.saturating_duration_since(since) >= FAILING_AFTER
+            {
+                return Err(io::Error::other(message.clone()));
+            }
+            if !demanded {
+                if let Some(pool) = pool.take()
+                    && !Arc::ptr_eq(&state.pool, &pool)
+                {
+                    self.set_pool_state(&mut state, pool);
+                }
+                self.evidence.catalog_demand.store(true, Ordering::Relaxed);
+                self.note_read_state(&mut state, Kind::Catalog, true, now)?;
+                demanded = true;
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let (next, _) = self
+                .live
+                .changed
+                .wait_timeout(state, wait)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
     }
 
     /// A read's own refresh of the kind it wants, when none is built yet
@@ -1357,7 +1447,9 @@ impl MachineView {
     /// longer served. [`MachineView::close`] still waits out one running.
     pub(crate) fn retire(&self) {
         self.evidence.retire();
-        Self::stop(&mut lock(&self.live.state));
+        let mut state = lock(&self.live.state);
+        Self::stop(&mut state);
+        self.live.changed.notify_all();
     }
 
     /// Stops this view's background checks and waits out a check or a
@@ -1368,6 +1460,7 @@ impl MachineView {
         self.evidence.retire();
         let mut state = lock(&self.live.state);
         Self::stop(&mut state);
+        self.live.changed.notify_all();
         while state.slot == Slot::Running {
             state = self
                 .live
