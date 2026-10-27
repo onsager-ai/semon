@@ -27,12 +27,13 @@ pub(in crate::storage::postgres) fn import(
     }
     let admission =
         i64::try_from(import.manifest().binding_epoch).map_err(|_| StorageError::ScopeChanged)?;
-    let revision =
-        i64::try_from(import.manifest().revision).map_err(|_| StorageError::ScopeChanged)?;
     if super::super::model_cache::binding(tx)?.admission != import.manifest().binding_epoch {
         return Err(StorageError::ScopeChanged);
     }
-    let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND admission=$3 AND source_revision<=$4 LIMIT 2", &[&ns,&import.generation().as_bytes(),&admission,&revision]).map_err(sqlstate::error)?;
+    // Original receipt revisions belong to their producer's journal. The
+    // typed completed-source import supplies current snapshot authority;
+    // comparing those counters across physical backends would reject reverse.
+    let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND admission=$3 LIMIT 2", &[&ns,&import.generation().as_bytes(),&admission]).map_err(sqlstate::error)?;
     if receipt.len() != 1 {
         return Err(StorageError::ScopeChanged);
     }
