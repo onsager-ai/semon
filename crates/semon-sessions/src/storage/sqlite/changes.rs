@@ -310,21 +310,32 @@ mod tests {
             &path,
             &LogicalSourceNamespace::new("machine").unwrap(),
         ));
-        Database { db: Some(reopen(&path)), root }
+        Database {
+            db: Some(reopen(&path)),
+            root,
+        }
     }
     fn reopen(path: &std::path::Path) -> Connection {
-        let epoch = Connection::open(path).unwrap().query_row(
-            "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let epoch = Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let config = StoreConfig {
-            backend: StoreBackend::Sqlite { database: path.to_owned() },
+            backend: StoreBackend::Sqlite {
+                database: path.to_owned(),
+            },
             namespace: LogicalSourceNamespace::new("machine").unwrap(),
             expected_stream_epoch: Some(epoch),
         };
         super::super::semantic::Stage::open(
             super::super::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap().into_test_connection()
+        )
+        .unwrap()
+        .into_test_connection()
     }
     fn insert(db: &Connection, key: &str) {
         let row: crate::model::summary::CatalogRow = serde_json::from_value(serde_json::json!({
@@ -332,7 +343,8 @@ mod tests {
             "native_ids":[key],"parent":null,"parent_source":null,"repo":"project",
             "branch":null,"model":"","effort":null,"start":null,"last":0,
             "tokens":[0,0,0],"cost":crate::pricing::Cost::default(),"sources":[]
-        })).unwrap();
+        }))
+        .unwrap();
         db.execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,0,'claude',?2)", (key, serde_json::to_string(&row).unwrap())).unwrap();
     }
     #[test]

@@ -55,7 +55,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
     }
     fn replacement(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
         let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
-        let old: Option<CatalogRow> = text.as_deref()
+        let old: Option<CatalogRow> = text
+            .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(<Self as OriginalHistoryStore>::data)?;
@@ -64,7 +65,10 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         // original recipe, even when the native harness/owner is unchanged.
         Ok(old.filter(|old| {
             old.harness != row.harness
-                || row.sources.iter().any(|source| !old.sources.contains(source))
+                || row
+                    .sources
+                    .iter()
+                    .any(|source| !old.sources.contains(source))
         }))
     }
     fn header(&self, key: &str) -> rusqlite::Result<Option<OriginalHeader>> {
