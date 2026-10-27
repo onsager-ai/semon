@@ -194,6 +194,23 @@ pub trait SourceObservationStore: Send {
     ) -> Result<SourceMutationReceipt, StorageError>;
 }
 
+pub(crate) const SELECTED_PROJECTION_KEY: &str = "slot_upgrade_selected";
+pub(crate) const SELECTED_PROJECTION_BYTES: usize = 32 * 1024;
+
+/// The current selected-demand marker is one bounded point-key value on both
+/// engines, so capture/reverse preserves the same pending selection verbatim.
+pub(crate) fn selected_projection_paths(bytes: &[u8]) -> Result<Vec<String>, StorageError> {
+    if bytes.len() > SELECTED_PROJECTION_BYTES {
+        return Err(StorageError::Busy);
+    }
+    let paths: Vec<String> = serde_json::from_slice(bytes).map_err(|_| StorageError::ScopeChanged)?;
+    validate_paths(&paths)?;
+    if paths.is_empty() || paths.len() > 64 || paths.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(paths)
+}
+
 pub(crate) fn operation_replay(
     operation: &SourceOperation,
     namespace: Option<&str>,

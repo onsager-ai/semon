@@ -9,13 +9,9 @@ use crate::storage::{
     source_observations::{
         SourceClaims, SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
         validate_intent, validate_paths,
+        SELECTED_PROJECTION_KEY, SELECTED_PROJECTION_BYTES, selected_projection_paths,
     },
 };
-
-// PG metadata has digest point keys. One bounded selected marker holds the
-// exact demand set; enumerating arbitrary native_meta prefixes is unnecessary.
-const SELECTED: &[u8] = b"slot_upgrade_selected";
-const SELECTED_BYTES: usize = 32 * 1024;
 
 /// PostgreSQL implementation of the shared typed observation contract. It owns
 /// no SQLite handle, parser, Catalog publisher, credential or backend selector.
@@ -62,9 +58,7 @@ impl PgSourceJournal {
             paths.dedup();
             validate_paths(&paths)?;
             let encoded = serde_json::to_vec(&paths).map_err(|_| StorageError::InvalidArguments)?;
-            if paths.len() > 64 || encoded.len() > SELECTED_BYTES {
-                return Err(StorageError::Busy);
-            }
+            selected_projection_paths(&encoded)?;
             self.write(|tx| {
                 // The namespace lock fences publication and claim revisions.
                 if super::native_recovery::head(tx)? != generation {
@@ -77,7 +71,7 @@ impl PgSourceJournal {
                     }
                 }
                 let claims = claims(tx, &paths)?;
-                super::native_keys::put_meta(tx, SELECTED, &encoded)?;
+                super::native_keys::put_meta(tx, SELECTED_PROJECTION_KEY.as_bytes(), &encoded)?;
                 for (path, revision) in claims {
                     if revision.is_none() { invalidate(tx, &path)?; }
                 }
@@ -352,12 +346,8 @@ impl SourceObservationStore for PgSourceJournal {
         }
         self.read(|tx| {
             let draining: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND backfill_state='draining')", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?.get(0);
-            if draining && let Some(marker) = super::native_keys::read_meta(tx, SELECTED, SELECTED_BYTES)? {
-                let paths: Vec<String> = serde_json::from_slice(&marker).map_err(|_| StorageError::ScopeChanged)?;
-                validate_paths(&paths)?;
-                if paths.len() > 64 || paths.windows(2).any(|pair| pair[0] >= pair[1]) {
-                    return Err(StorageError::ScopeChanged);
-                }
+            if draining && let Some(marker) = super::native_keys::read_meta(tx, SELECTED_PROJECTION_KEY.as_bytes(), SELECTED_PROJECTION_BYTES)? {
+                let paths = selected_projection_paths(&marker)?;
                 let mut selected = claims(tx, &paths)?.into_iter().filter_map(|(path, revision)| revision.map(|revision| (revision, path))).collect::<Vec<_>>();
                 selected.sort();
                 selected.truncate(limit);
