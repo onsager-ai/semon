@@ -438,7 +438,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let pid_bytes = serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
     let parent_before_withdrawal = fs::read(&claude_parent).unwrap();
-    let mut parent = fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
+    let mut parent = fs::OpenOptions::new()
+        .append(true)
+        .open(&claude_parent)
+        .unwrap();
     parent.write_all(source_append.as_bytes()).unwrap();
     parent.write_all(facts_append.as_bytes()).unwrap();
     drop(parent);
@@ -500,8 +503,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     ))
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
-    let mut withdrawal_cache = EventCache::open_scoped(&withdraw_options.cache, &withdraw_options.source).unwrap();
-    let withdrawal_prepared = crate::model::prepare_sources(&withdraw_options, &mut withdrawal_cache, &inputs, 1790812805000).unwrap();
+    let mut withdrawal_cache =
+        EventCache::open_scoped(&withdraw_options.cache, &withdraw_options.source).unwrap();
+    let withdrawal_prepared = crate::model::prepare_sources(
+        &withdraw_options,
+        &mut withdrawal_cache,
+        &inputs,
+        1790812805000,
+    )
+    .unwrap();
     let mut sqlite_host = body_host(&withdraw_options, &withdrawal_prepared.rows);
     sqlite_host.0.extend(body_host(&options, &expected.rows).0);
     drop(withdrawal_cache);
