@@ -658,19 +658,20 @@ fn bind_custody_fixture(
         assert_eq!(receipt.consumed_bytes, source.offset);
     }
     drop(cache);
-    let (outcome, generation) = pool.transaction(namespace, TxnKind::Write, &control, |tx| {
-        super::publication::publish(
-            tx,
-            &crate::slot_projection::Publication {
-                rows,
-                transcripts: Some(projections),
-            },
-            None,
-            &[],
-            false,
-        )
-    })
-    .unwrap();
+    let (outcome, generation) = pool
+        .transaction(namespace, TxnKind::Write, &control, |tx| {
+            super::publication::publish(
+                tx,
+                &crate::slot_projection::Publication {
+                    rows,
+                    transcripts: Some(projections),
+                },
+                None,
+                &[],
+                false,
+            )
+        })
+        .unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
     generation.expect("ordinary custody fixture publication")
 }
@@ -702,7 +703,10 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             repair: false,
         })
         .collect::<Vec<_>>();
-    for (name, generation) in ["history127-a", "history127-b"].into_iter().zip(&generations) {
+    for (name, generation) in ["history127-a", "history127-b"]
+        .into_iter()
+        .zip(&generations)
+    {
         let namespace = ns(name);
         pool.transaction(
             &namespace,
