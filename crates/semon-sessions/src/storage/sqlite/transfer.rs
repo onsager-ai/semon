@@ -363,7 +363,7 @@ pub(crate) fn apply(
             return Ok(page.checkpoint);
         }
         if page.first {
-            let source_owned: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_source_journal WHERE namespace=?1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_backfill_sources WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='slot_upgrade_selected')", [tx.1], |r| r.get(0)).map_err(failed)?;
+            let source_owned: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_source_journal WHERE namespace=?1 AND (revision<>0 OR backfill_state IS NOT NULL)) OR EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1) OR EXISTS(SELECT 1 FROM catalog_backfill_sources WHERE namespace=?1) OR EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1) OR EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='slot_upgrade_selected')", [tx.1], |r| r.get(0)).map_err(failed)?;
             if source_owned {
                 return Err(StorageError::Conflict);
             }
