@@ -851,7 +851,9 @@ mod tests {
             .unwrap()
             .with_store(config.clone())
             .unwrap();
-            let mut query = crate::Query::new(options);
+            let mut query = crate::Query::from_sources(std::sync::Arc::new(
+                crate::SessionSources::with_machines(vec![(String::new(), options)]),
+            ));
             let originals = host.clone();
             let readers =
                 move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
