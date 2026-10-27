@@ -1257,6 +1257,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 recent_now,
                 &store,
                 &retained_host,
+                None,
             );
             assert_eq!(
                 &fields, expected,
@@ -1304,6 +1305,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         1790812802000,
                         store,
                         host,
+                        None,
                     )
                     .unwrap_or_else(|error| panic!("PG selected body pass={pass}: {error:?}"));
                 let fields = query
@@ -1313,6 +1315,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         1790812802000,
                         store,
                         host,
+                        None,
                     )
                     .unwrap();
                 (
@@ -1557,7 +1560,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &serde_json::json!({"id":prepared.rows[0].key}),
                 1790812802000,
                 &query_store,
-                &DeniedHost
+                &DeniedHost,
+                None,
             )
             .is_err(),
         "Catalog metadata must not grant Raw or return blank success"
@@ -2126,7 +2130,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &serde_json::json!({"id":removed_key,"limit":100}),
                 1790812802000,
                 &withdrawn_store,
-                &retained_host
+                &retained_host,
+                None,
             )
             .is_err()
     );
@@ -2310,7 +2315,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &serde_json::json!({"id":moved_owner.key,"limit":100}),
                 1790812802000,
                 &moved_store,
-                &moved_host
+                &moved_host,
+                None,
             )
             .unwrap(),
         expected_bodies[&moved_owner.key]["body"]
@@ -2470,7 +2476,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     &serde_json::json!({"id":prepared.rows[0].key}),
                     1790812802000,
                     &query_store,
-                    &retained_host
+                    &retained_host,
+                    None,
                 )
                 .unwrap_err()
                 .code,
@@ -2743,6 +2750,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     1790812805000,
                     facts_store.as_ref(),
                     &facts_host,
+                    None,
                 )
                 .unwrap();
             let actual = facts_query
@@ -3540,6 +3548,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 1790812802000,
                 &caught_store,
                 &retained_host,
+                None,
             )
             .unwrap();
         assert_eq!(body, expected_bodies[key]["body"], "retained body {key}");
@@ -3555,6 +3564,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 1790812802000,
                 &caught_store,
                 &retained_host,
+                None,
             )
             .unwrap();
         assert_eq!(
