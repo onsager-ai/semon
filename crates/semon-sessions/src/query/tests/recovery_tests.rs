@@ -387,8 +387,12 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-call","content":output}]}}));
         home.top("long", &records);
         publish(&home);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let config = home.options.source.config(&home.options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let source_path: String = db
             .query_row(
                 "SELECT source_path FROM session_catalog_sources WHERE session_key='long' LIMIT 1",
@@ -403,7 +407,16 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         let before = generations();
         assert_eq!(before.0, before.1);
         assert_eq!(before.0, before.2);
-        db.execute_batch("UPDATE session_slot_projections SET version=5 WHERE session_key='long'; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        let mut journal = config.source_observations().unwrap();
+        let paths: Vec<String> = Vec::new();
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            config.namespace.as_str(),
+            "discover",
+            &serde_json::to_vec(&(&paths, true)).unwrap(),
+        );
+        journal.discover(&operation, &paths, true).unwrap();
+        assert_eq!(journal.backfill_state().unwrap().as_deref(), Some("draining"));
+        db.execute_batch("UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='long'; INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         crate::invalidate_session_sources(
             &home.options,
             &[crate::Input {
