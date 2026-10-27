@@ -4320,14 +4320,17 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-    for page in paths.chunks(64) {
+    // Seed one bounded operation. The ordinary producer discovers and drains
+    // the remaining history; appending every page to this same unfinished
+    // component would turn the per-operation source limit into a history cap.
+    if let Some(page) = paths.chunks(64).next() {
         assert_eq!(
             cache.begin_semantic_stage(page, &runtime).unwrap(),
             crate::events::Outcome::Written
         );
     }
-    drop(cache);
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    crate::viewer::lock(&evidence.work).events = Some(cache);
     let mut complete = false;
     for _ in 0..512 {
         if evidence

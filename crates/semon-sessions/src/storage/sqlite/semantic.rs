@@ -2199,6 +2199,15 @@ impl Stage {
     }
 
     pub(crate) fn begin(&mut self, paths: &[String], runtime: &str) -> Result<Outcome, StoreError> {
+        self.begin_with_journal(paths, runtime, false)
+    }
+
+    pub(crate) fn begin_with_journal(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+        journaled_runtime: bool,
+    ) -> Result<Outcome, StoreError> {
         if paths.len() > 64
             || runtime.len() > 65536
             || paths.iter().any(|p| p.is_empty() || p.len() > 4096)
@@ -2286,11 +2295,25 @@ impl Stage {
             })
             .transpose()?
             .unwrap_or(false);
+        // The ordinary Facts writer journals actual native/PID dependencies,
+        // including unpublished identities. Unrelated runtime activity may
+        // update the witness without discarding this component's progress.
+        // Local/unobserved changes and negative custody retain full resets.
+        let journaled = journaled_runtime
+            && self.source.owner.is_some()
+            && authority.is_none()
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='catalog_push_driven' AND value='1')",
+                [ns], |r| r.get::<_, bool>(0),
+            ).map_err(error)?
+            && reduction_witnesses(&tx, ns).map_err(error)?.current()?;
         use crate::storage::semantic_owner::{self, Begin, Observed};
         let plan = match semantic_owner::begin(
             Observed {
                 epoch: actual_epoch,
-                runtime: existing.as_ref().map(|(runtime, _)| runtime.as_str()),
+                runtime: existing.as_ref().map(|(old, _)| {
+                    if journaled { runtime } else { old.as_str() }
+                }),
                 generation: existing
                     .as_ref()
                     .and_then(|(_, generation)| generation.as_deref()),
@@ -2319,6 +2342,12 @@ impl Stage {
         if plan == Begin::Create {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
             tx.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,generation,runtime,revision) SELECT ?1,1,epoch,'indexing',?2,?3,(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM storage_semantic_profiles WHERE namespace=?1", params![ns,self.source.generation,runtime]).map_err(error)?;
+        }
+        if journaled {
+            tx.execute(
+                "UPDATE main.catalog_semantic_stage SET runtime=?2 WHERE namespace=?1 AND runtime<>?2",
+                params![ns, runtime],
+            ).map_err(error)?;
         }
         let claims = super::source_journal::claims(&tx, ns, paths).map_err(error)?;
         for (path, claim) in claims {
