@@ -40,7 +40,9 @@ impl TransferInbox {
             }
             #[cfg(feature = "postgres")]
             StoreBackend::Postgres { pool, control } => {
-                super::super::postgres::transfer::admit_catalog(&self.0, pool, control, &import, options)
+                super::super::postgres::transfer::admit_catalog(
+                    &self.0, pool, control, &import, options,
+                )
             }
         }
     }
