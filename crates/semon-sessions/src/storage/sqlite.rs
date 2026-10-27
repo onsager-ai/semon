@@ -261,8 +261,16 @@ mod tests {
             LogicalSourceNamespace::new("authorized-source").unwrap()
         }
         fn publish(&mut self, key: &str) {
+            let row: crate::model::summary::CatalogRow =
+                serde_json::from_value(serde_json::json!({
+                    "key":key,"name":key,"harness":"claude","kind":"session",
+                    "native_ids":[key],"parent":null,"parent_source":null,"repo":"project",
+                    "branch":null,"model":"","effort":null,"start":null,"last":0,
+                    "tokens":[0,0,0],"cost":crate::pricing::Cost::default(),"sources":[]
+                }))
+                .unwrap();
             self.db
-                .execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,repo,metadata) VALUES(semon_namespace(),?1,0,'claude','project','metadata')", [key])
+                .execute("INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,repo,metadata) VALUES(semon_namespace(),?1,0,'claude','project',?2)", (key, serde_json::to_string(&row).unwrap()))
                 .unwrap();
         }
         fn restart(&mut self) {

@@ -874,13 +874,17 @@ fn recovery_selected_sql_progress_observes_request_cancellation() {
 fn recovery_selected_repair_cancellation_rolls_back_publication() {
     for ready in [true, false] {
         let (home, _) = shared_home(16);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let config = home.options.source.config(&home.options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         if !ready {
-            db.execute("UPDATE session_catalog SET metadata=json_remove(metadata,'$.query') WHERE session_key='first'", []).unwrap();
+            db.execute("UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'", []).unwrap();
         }
         db.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('overview_needed:first','1')",
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
             [],
         )
         .unwrap();
@@ -952,8 +956,12 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
 #[test]
 fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
     let (home, _) = shared_home(128);
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let encoded: String = db
         .query_row(
             "SELECT metadata FROM session_catalog WHERE session_key='first'",
@@ -963,7 +971,7 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
         .unwrap();
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).unwrap();
     db.execute(
-        "UPDATE files SET head_sha256=zeroblob(32) WHERE path=?1",
+        "UPDATE main.files SET head_sha256=zeroblob(32) WHERE namespace=semon_namespace() AND path=?1",
         [row.sources[0].path.to_str().unwrap()],
     )
     .unwrap();
