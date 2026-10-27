@@ -1387,71 +1387,43 @@ mod tests {
     }
 
     #[test]
-    fn native_usage_metadata_enrollment_initializes_floors_atomically_and_fences_warm_writers() {
+    fn native_usage_metadata_current_admission_preserves_floors_and_fences_warm_writers() {
+        use crate::storage::sqlite::changes::initialize_source_floors;
         use crate::storage::{LogicalSourceNamespace, StorageError, StoreBackend, StoreConfig};
         let directory = root();
-        let database = directory.join("metadata.sqlite");
-        let db = Connection::open(&database).unwrap();
-        assembled_metadata_fixture(&db);
-        let epoch: String = db
-            .query_row(
-                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let database = directory.join("metadata.sqlite3");
+        let namespace = LogicalSourceNamespace::new("a").unwrap();
+        let mut store = current_store(&database, &namespace);
         let config = StoreConfig {
             backend: StoreBackend::Sqlite {
                 database: database.clone(),
             },
-            namespace: LogicalSourceNamespace::new("a").unwrap(),
-            expected_stream_epoch: Some(epoch.clone()),
+            namespace: namespace.clone(),
+            expected_stream_epoch: Some("a".repeat(64)),
         };
-        // A current version/profile still needs the current journal contract.
-        // Refusal must precede registry/floor/fence writes, not repair the file.
-        db.pragma_update(None, "journal_mode", "DELETE").unwrap();
-        let before = usage_family_state(&db, "a");
-        assert_eq!(config.admit_namespace(), Err(StorageError::Unavailable));
-        assert_eq!(usage_family_state(&db, "a"), before);
-        assert!(!crate::storage::sqlite::namespace::is_bound(&db).unwrap());
-        let mode: String = db
-            .pragma_query_value(None, "journal_mode", |r| r.get(0))
-            .unwrap();
-        assert_eq!(mode, "delete");
-        db.pragma_update(None, "journal_mode", "WAL").unwrap();
-        // A malformed second floor must not leave the first floor, enrollment
-        // row, registry DDL or fences behind after the real admission fails.
-        db.execute(
-            "INSERT INTO meta VALUES('a','catalog_changes_floor_retained_history','corrupt')",
-            [],
-        )
-        .unwrap();
-        let before = usage_family_state(&db, "a");
-        assert_eq!(
-            config.admit_namespace(),
-            Err(StorageError::NamespaceUpgradePending)
-        );
-        assert_eq!(usage_family_state(&db, "a"), before);
-        assert!(!crate::storage::sqlite::namespace::is_bound(&db).unwrap());
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM meta WHERE key='catalog_changes_floor_current'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        db.execute(
-            "DELETE FROM meta WHERE key='catalog_changes_floor_retained_history'",
-            [],
-        )
-        .unwrap();
+        let warm = Connection::open(&database).unwrap();
         let first = config.admit_namespace().unwrap();
         assert_eq!(config.admit_namespace().unwrap(), first);
-        let restarted = config.clone();
-        assert_eq!(restarted.admit_namespace().unwrap(), first);
-        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(config.clone().admit_namespace().unwrap(), first);
+        assert_eq!(warm.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        {
+            let tx = store.connection.transaction().unwrap();
+            tx.execute(
+                "DELETE FROM main.meta WHERE namespace='a' AND key='catalog_changes_floor_current'",
+                [],
+            )
+            .unwrap();
+            tx.execute("UPDATE main.meta SET value='corrupt' WHERE namespace='a' AND key='catalog_changes_floor_retained_history'", []).unwrap();
+            // Validation must not install the first missing floor when the
+            // second floor is malformed. Rollback restores both original floors.
+            assert_eq!(
+                initialize_source_floors(&tx, &namespace),
+                Err(StorageError::NamespaceUpgradePending)
+            );
+            assert_eq!(tx.query_row("SELECT count(*) FROM main.meta WHERE namespace='a' AND key='catalog_changes_floor_current'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            tx.rollback().unwrap();
+        }
+        assert_eq!(warm.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         let other = StoreConfig {
             namespace: LogicalSourceNamespace::new("b").unwrap(),
             ..config.clone()
@@ -1461,24 +1433,25 @@ mod tests {
             Err(StorageError::MultiSourceUnqualified)
         );
         assert_eq!(
-            db.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r
+            warm.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r
                 .get::<_, i64>(
                 0
             ))
             .unwrap(),
             0
         );
-        assert!(db.execute("UPDATE meta SET value='99' WHERE namespace='a' AND key='catalog_changes_floor_current'", []).is_err(), "the warm pre-enrollment writer remains fenced");
+        assert!(warm.execute("UPDATE meta SET value='99' WHERE namespace='a' AND key='catalog_changes_floor_current'", []).is_err());
         assert_eq!(
-            db.query_row(
+            warm.query_row(
                 "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
                 [],
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-            epoch
+            "a".repeat(64)
         );
-        drop(db);
+        drop(warm);
+        drop(store);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1543,7 +1516,7 @@ mod tests {
                 "slot_projection_catalog_generation",
                 "search_generation_current",
                 "claude_json_stamp",
-                "slot_upgrade_selected:same.jsonl",
+                "slot_upgrade_selected",
             ] {
                 db.execute(native_metadata_put(&db).unwrap(), params![key, namespace])
                     .unwrap();
