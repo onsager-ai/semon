@@ -596,10 +596,15 @@ impl StoreConfig {
         let reader = reader.map_err(|error| crate::QueryError::io(&error))?;
         let sources =
             crate::SessionSources::with_machines(vec![(machine.to_owned(), options.clone())]);
-        let mut selected_args = args.clone();
-        selected_args["_machine_alias"] = serde_json::json!(machine);
         let answer = crate::Query::from_sources(std::sync::Arc::new(sources))
-            .call_bound_selected_at(tool, &selected_args, now, store.as_ref(), reader.as_ref());
+            .call_bound_selected_at(
+                tool,
+                args,
+                now,
+                store.as_ref(),
+                reader.as_ref(),
+                Some(machine),
+            );
         crate::selected_read::checkpoint("captured_final")
             .map_err(|error| crate::QueryError::new("unavailable", error.to_string()))?;
         answer

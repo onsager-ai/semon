@@ -877,7 +877,10 @@ pub(crate) mod selected_receipts {
             2,
             "fixture must qualify both original and successor receipts"
         );
-        assert_eq!(refs, inventory, "references must bind the exact receipt inventory");
+        assert_eq!(
+            refs, inventory,
+            "references must bind the exact receipt inventory"
+        );
         drop(db);
         let runtime = crate::storage::NativeReaderBinding::Semantic(owner)
             .reader_runtime()

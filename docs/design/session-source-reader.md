@@ -135,7 +135,9 @@ proof/body rendering and the final check. `machine` is the external host Machine
 key, independent of the Source namespace; the factory receives the admitted
 namespace and canonical selected key. Captured session Machine labels use the
 external key. Captured reads still require `all=true` and qualified history;
-they never revive an expired live runtime.
+they never revive an expired live runtime. Public Query arguments are validated
+before applying the host's typed Machine label; internal rendering fields are
+not accepted in caller-supplied JSON.
 
 The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent. The replay path charges raw body bytes eightfold before buffering and parsed line bytes eightfold again, plus fixed event/catalog costs, against that same 64 MiB budget. Its effective raw-body replay ceiling is therefore about 4 MiB before those other costs, often less; the separate 64 MiB raw I/O ceiling is not an availability promise for replay. A long selected owner can return unavailable during complete preparation even when its requested transcript page is small. Narrowing turns or page size, or a time window that still includes the same complete source, does not reduce complete Index preparation; excluding source files can. The normal generation-bound native paged transcript/tool path remains available for long sessions and does not become complete-history replay.
 
