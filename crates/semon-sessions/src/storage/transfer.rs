@@ -11,10 +11,12 @@ pub(crate) mod inventory;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 pub(crate) mod reported;
+mod source_rows;
 pub use catalog_rows::CatalogRowKind;
 pub use native_pages::{NativePageKind, NativeSource};
 pub use native_rows::NativeRowKind;
 pub use reported::CaptureProgress;
+pub use source_rows::SourceJournalRecord;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_PAGE_ROWS: usize = 64;
@@ -195,6 +197,7 @@ impl SnapshotManifest {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum TransferRecord {
+    SourceJournal(SourceJournalRecord),
     CatalogRow {
         generation: String,
         kind: CatalogRowKind,
@@ -292,6 +295,7 @@ impl TransferRecord {
 
     fn category(&self) -> Category {
         match self {
+            Self::SourceJournal(row) => row.category(),
             Self::CatalogRow { kind, .. } => kind.category(),
             Self::Metadata { .. } => Category::Metadata,
             Self::ReportedFact(_) => Category::ReportedFacts,
@@ -478,6 +482,7 @@ impl TransferInbox {
         }
         for record in &page.records {
             match record {
+                TransferRecord::SourceJournal(row) => row.validate()?,
                 TransferRecord::CatalogRow { .. } => catalog_rows::validate(record)?,
                 TransferRecord::SourceIntent(intent) => {
                     super::source_observations::validate_intent(Some(&manifest.namespace), intent)?;
