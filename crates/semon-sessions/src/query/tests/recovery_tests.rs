@@ -19,10 +19,13 @@ fn publish(home: &Home) {
     .unwrap();
 }
 
-fn shared_home(prefix: usize) -> (Home, String) {
+fn shared_home(prefix: usize, leading_user: bool) -> (Home, String) {
     let home = Home::new("recovery-shared");
     for sid in ["first", "second"] {
-        let mut records = vec![human(sid, ts(1, 0), "shared owner prompt")];
+        let mut records = Vec::new();
+        if leading_user {
+            records.push(human(sid, ts(1, 0), "shared owner prompt"));
+        }
         records.extend((0..prefix).map(|n| {
             assistant(
                 sid,
@@ -162,7 +165,7 @@ fn process_io() -> Option<(u64, u64)> {
 #[test]
 fn recovery_shared_owner_fallback_scope_measurement() {
     for prefix in [0, 128, 1024] {
-        let (home, stub) = shared_home(prefix);
+        let (home, stub) = shared_home(prefix, true);
         let mut oracle = Query::from_sources(admitted(home.options.clone()));
         let mut cases = Vec::new();
         for key in [&stub, "unsent:missing"] {
@@ -250,7 +253,7 @@ struct HeldProvider {
 /// at a private test allowance. It changes no production limit or release gate.
 #[test]
 fn recovery_large_shared_owner_preparation_budget_measurement() {
-    let (home, key) = shared_home(8192);
+    let (home, key) = shared_home(8192, true);
     let mut oracle = Query::from_sources(admitted(home.options.clone()));
     let complete_args = json!({"id":key,"after":0,"limit":10});
     let complete = oracle
@@ -614,7 +617,7 @@ impl crate::SessionSourceReader for HeldProvider {
 
 #[test]
 fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
-    let (home, key) = shared_home(1024);
+    let (home, key) = shared_home(1024, true);
     let sources = admitted(home.options.clone());
     let mut reference = Query::from_sources(sources.clone());
     let expected_metadata = reference
@@ -727,20 +730,9 @@ fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
 #[test]
 fn recovery_selected_preparation_terminal_failures_never_replay_or_publish() {
     for failure in ["before", "deadline", "decode", "cpu", "rows", "bytes"] {
-        let (home, key) = shared_home(128);
-        if failure == "cpu" {
-            // No leading user record: native marker lookup reaches the first
-            // assistant without provider I/O. Cancel inside event ordering.
-            for sid in ["first", "second"] {
-                let path = home
-                    .options
-                    .claude_home
-                    .join(format!("projects/-work-proj/{sid}.jsonl"));
-                let text = fs::read_to_string(&path).unwrap();
-                fs::write(path, text.split_once('\n').unwrap().1).unwrap();
-            }
-            publish(&home);
-        }
+        // Without a leading user record, marker lookup reaches the first
+        // assistant without provider I/O; cancel inside event ordering.
+        let (home, key) = shared_home(128, failure != "cpu");
         let args = json!({"id":key});
         let expected = Query::from_sources(admitted(home.options.clone()))
             .call_at("get_session", &args, NOW)
@@ -873,7 +865,7 @@ fn recovery_selected_sql_progress_observes_request_cancellation() {
 #[test]
 fn recovery_selected_repair_cancellation_rolls_back_publication() {
     for ready in [true, false] {
-        let (home, _) = shared_home(16);
+        let (home, _) = shared_home(16, true);
         let config = home.options.source.config(&home.options.cache).unwrap();
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -955,7 +947,7 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
 
 #[test]
 fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
-    let (home, _) = shared_home(128);
+    let (home, _) = shared_home(128, true);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
