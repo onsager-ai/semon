@@ -2732,6 +2732,7 @@ mod tests {
                 "sid=parent&scope=retained_history&limit=100",
                 None,
                 crate::SessionSourceReadMode::ProviderOnly,
+                || Ok(()),
             )
             .unwrap_or_else(|error| panic!("source-shaped selected parent failed: {error}"));
             assert_eq!(
