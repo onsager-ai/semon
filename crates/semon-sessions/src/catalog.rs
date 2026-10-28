@@ -945,6 +945,18 @@ pub(crate) fn relative_status(
 }
 
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
+    page_with_gate(options, machine, request, || Ok(()))
+}
+
+pub(crate) fn page_with_gate(
+    options: &Options,
+    machine: &str,
+    request: Request,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    if let Err(reply) = before_read() {
+        return reply;
+    }
     match read_page(options, machine, &request) {
         Ok(reply) => reply,
         Err(_) => error(

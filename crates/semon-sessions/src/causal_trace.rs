@@ -771,30 +771,31 @@ fn trace_participant_summary(
 /// At most 100 connected turns and 1,000 edges. Frontiers support explicit
 /// further exploration; absent or ambiguous recorded joins remain absent.
 pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) -> ViewerReply {
+    session_causal_trace_with_gate(options, source_key, query, || Ok(()))
+}
+
+pub(crate) fn session_causal_trace_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    let (key, root) = match parse_session_causal_trace_query(query) {
+        Ok(selection) => selection,
+        Err(()) => {
+            return crate::catalog::error(
+                400,
+                "causal_trace",
+                "Invalid causal trace selection",
+                false,
+            );
+        }
+    };
+    if let Err(reply) = before_read() {
+        return reply;
+    }
     let read = || -> Result<Value, u16> {
-        let mut args = BTreeMap::new();
-        for pair in query.split('&') {
-            let (name, value) = pair.split_once('=').ok_or(400u16)?;
-            if !matches!(name, "sid" | "turn" | "machine" | "scope")
-                || args
-                    .insert(name, crate::viewer::decoded(value).ok_or(400u16)?)
-                    .is_some()
-            {
-                return Err(400);
-            }
-        }
-        let key = args
-            .get("sid")
-            .filter(|value| !value.is_empty() && value.len() <= 4096)
-            .ok_or(400u16)?;
-        let root = args
-            .get("turn")
-            .filter(|value| !value.is_empty() && value.len() <= 4096)
-            .ok_or(400u16)?;
-        if args.get("scope").map(String::as_str) != Some("retained_history") {
-            return Err(400);
-        }
-        let identity = crate::session_catalog_history_identity(options, source_key, key)
+        let identity = crate::session_catalog_history_identity(options, source_key, &key)
             .map_err(|_| 503u16)?
             .ok_or(404u16)?;
         // One bounded status capture for every peer, using the Catalog owner's
@@ -1109,6 +1110,32 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             matches!(status, 409 | 503),
         ),
     }
+}
+
+fn parse_session_causal_trace_query(query: &str) -> Result<(String, String), ()> {
+    let mut args = BTreeMap::new();
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').ok_or(())?;
+        if !matches!(name, "sid" | "turn" | "machine" | "scope")
+            || args
+                .insert(name, crate::viewer::decoded(value).ok_or(())?)
+                .is_some()
+        {
+            return Err(());
+        }
+    }
+    let key = args
+        .remove("sid")
+        .filter(|value| !value.is_empty() && value.len() <= 4096)
+        .ok_or(())?;
+    let root = args
+        .remove("turn")
+        .filter(|value| !value.is_empty() && value.len() <= 4096)
+        .ok_or(())?;
+    if args.remove("scope").as_deref() != Some("retained_history") {
+        return Err(());
+    }
+    Ok((key, root))
 }
 
 #[cfg(test)]

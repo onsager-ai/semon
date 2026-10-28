@@ -234,54 +234,85 @@ pub fn session_overview_observe(
     source_key: &str,
     query: &str,
 ) -> crate::ViewerReply {
-    let read = || -> io::Result<String> {
-        let mut values = BTreeMap::new();
-        for pair in query.split('&') {
-            let (name, value) = pair.split_once('=').ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "Invalid selected observation")
-            })?;
-            if !matches!(name, "sid" | "scope" | "machine")
-                || values
-                    .insert(
-                        name,
-                        crate::viewer::decoded(value).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "Invalid selected observation",
-                            )
-                        })?,
-                    )
-                    .is_some()
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Invalid selected observation",
-                ));
-            }
-        }
-        if values.get("scope").map(String::as_str) != Some("retained_history") {
+    session_overview_observe_with_gate(options, source_key, query, || Ok(()))
+}
+
+pub(crate) fn session_overview_observe_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), crate::ViewerReply>,
+) -> crate::ViewerReply {
+    let key = match parse_session_overview_observe_query(query) {
+        Ok(key) => key,
+        Err(error) => return selected_observation_error(error),
+    };
+    if let Err(reply) = before_read() {
+        return reply;
+    }
+    match repair_session_overview(
+        options,
+        source_key,
+        &key,
+        None,
+        SessionSourceReadMode::LocalThenProvider,
+    ) {
+        Ok(()) => crate::ViewerReply {
+            status: 200,
+            content_type: "application/json; charset=utf-8",
+            body: serde_json::json!({"api":1,"source_key":source_key,"catalog_key":key,"state":"ready"}).to_string().into_bytes(),
+            etag: None,
+        },
+        Err(error) => selected_observation_error(error),
+    }
+}
+
+fn parse_session_overview_observe_query(query: &str) -> io::Result<String> {
+    let mut values = BTreeMap::new();
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Invalid selected observation")
+        })?;
+        if !matches!(name, "sid" | "scope" | "machine")
+            || values
+                .insert(
+                    name,
+                    crate::viewer::decoded(value).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "Invalid selected observation")
+                    })?,
+                )
+                .is_some()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Select retained history",
+                "Invalid selected observation",
             ));
         }
-        let key = values
-            .get("sid")
-            .filter(|key| !key.is_empty() && key.len() <= 4096)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Select one session"))?;
-        repair_session_overview(
-            options,
-            source_key,
-            key,
-            None,
-            SessionSourceReadMode::LocalThenProvider,
-        )?;
-        Ok(key.clone())
-    };
-    match read() {
-        Ok(key)=>crate::ViewerReply{status:200,content_type:"application/json; charset=utf-8",body:serde_json::json!({"api":1,"source_key":source_key,"catalog_key":key,"state":"ready"}).to_string().into_bytes(),etag:None},
-        Err(error)=>crate::catalog::error(if error.kind()==io::ErrorKind::InvalidInput {400}else{503},"selected_observation",&error.to_string(),error.kind()!=io::ErrorKind::InvalidInput),
     }
+    if values.get("scope").map(String::as_str) != Some("retained_history") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Select retained history",
+        ));
+    }
+    values
+        .get("sid")
+        .filter(|key| !key.is_empty() && key.len() <= 4096)
+        .cloned()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Select one session"))
+}
+
+fn selected_observation_error(error: io::Error) -> crate::ViewerReply {
+    crate::catalog::error(
+        if error.kind() == io::ErrorKind::InvalidInput {
+            400
+        } else {
+            503
+        },
+        "selected_observation",
+        &error.to_string(),
+        error.kind() != io::ErrorKind::InvalidInput,
+    )
 }
 fn connection(options: &Options) -> io::Result<Connection> {
     let db = Connection::open_with_flags(

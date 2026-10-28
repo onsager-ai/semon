@@ -14,6 +14,11 @@ use std::{
 use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+#[cfg(test)]
+thread_local! {
+    static INITIAL_CATALOG_WAIT_STARTED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
 use crate::{
     Node, Options, collect_with_index,
     events::EventCache,
@@ -1186,6 +1191,12 @@ impl MachineView {
                 self.evidence.catalog_demand.store(true, Ordering::Relaxed);
                 self.note_read_state(&mut state, Kind::Catalog, true, now)?;
                 demanded = true;
+                #[cfg(test)]
+                INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                    if let Some(send) = started.borrow_mut().take() {
+                        let _ = send.send(());
+                    }
+                });
             }
             let wait = deadline.saturating_duration_since(now);
             let (next, _) = self
@@ -8483,6 +8494,207 @@ mod tests {
             peak <= pool.size(),
             "refresh workers exceeded the shared pool size"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_home_waits_for_first_catalog_publication_without_holding_raw_writer() {
+        use sha2::{Digest, Sha256};
+        use std::os::fd::AsRawFd;
+
+        let fixture = lane_fixture();
+        let home_generation = |cache: &Path| -> Option<String> {
+            let db = rusqlite::Connection::open_with_flags(
+                EventCache::path(cache),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .ok()?;
+            let encoded: String = db
+                .query_row(
+                    "SELECT summary FROM session_overview WHERE session_key='lane'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            let summary: crate::overview::Summary = serde_json::from_str(&encoded).ok()?;
+            Some(crate::overview::content_generation(&summary))
+        };
+        let mut warm_options = fixture.options.clone();
+        warm_options.cache = fixture.root.join("warm-cache");
+        let warm_core = ViewerCore::new(warm_options.clone());
+        let warm_view = warm_core.machine_views().into_iter().next().unwrap();
+        let catalog_warmed = warm_view
+            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(15))
+            .is_ok();
+        let expected_generation = home_generation(&warm_options.cache);
+        warm_core.close();
+
+        let mut cold_options = fixture.options.clone();
+        cold_options.cache = fixture.root.join("cold-cache");
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/lane.jsonl".into(),
+        };
+        let lock_key = crate::source_change::lock_key(&cold_options, &input);
+        let raw_writer =
+            crate::source_change::SourceLock::acquire(&cold_options, &lock_key, true).unwrap();
+        let lock_path = cold_options
+            .cache
+            .with_extension("source-locks")
+            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+        let probe_shared = || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .ok()?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                Some(false)
+            } else {
+                Some(io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+            }
+        };
+        let raw_held_before_request = probe_shared();
+        let core = Arc::new(ViewerCore::new(cold_options.clone()));
+        let view = core.machine_views().into_iter().next().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let request_query = expected_generation
+            .as_ref()
+            .map(|generation| format!("sid=lane&generation={generation}&scope=retained_history"));
+        let cold_direct_reply = request_query.as_ref().map(|query| {
+            crate::session_home_details_with_mode(
+                &cold_options,
+                "local",
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+        });
+        let (send, receive) = mpsc::channel();
+        let (wait_started_send, wait_started_receive) = mpsc::channel();
+        let waiting_core = core.clone();
+        let first_query = request_query.clone();
+        let request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(wait_started_send);
+            });
+            let reply = first_query.map_or_else(
+                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
+                |query| {
+                    waiting_core.respond_with_deadline(
+                        waiting_core.extras(),
+                        "GET",
+                        "/api/session-home",
+                        &query,
+                        None,
+                        deadline,
+                    )
+                },
+            );
+            let _ = send.send((Instant::now(), reply));
+        });
+        let first_wait_started = wait_started_receive
+            .recv_timeout(Duration::from_secs(4))
+            .is_ok();
+        let first_reply = receive.recv_timeout(Duration::from_secs(6)).ok();
+        let returned_while_raw_held = first_reply.is_some();
+        let raw_held_at_deadline = probe_shared();
+        let catalog_ready_at_deadline = crate::session_catalog_page_ready(&cold_options).ok();
+        let producer_running_at_deadline = view
+            .live
+            .state
+            .try_lock()
+            .is_ok_and(|state| state.slot == Slot::Running);
+
+        let (success_send, success_receive) = mpsc::channel();
+        let (success_wait_send, success_wait_receive) = mpsc::channel();
+        let success_core = core.clone();
+        let success_query = request_query.clone();
+        let success_request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(success_wait_send);
+            });
+            let reply = success_query.map_or_else(
+                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
+                |query| {
+                    success_core.respond_with_deadline(
+                        success_core.extras(),
+                        "GET",
+                        "/api/session-home",
+                        &query,
+                        None,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                },
+            );
+            let _ = success_send.send(reply);
+        });
+        let success_wait_started = success_wait_receive
+            .recv_timeout(Duration::from_secs(4))
+            .is_ok();
+
+        // Release only after both cold API requests have reached their waiter.
+        drop(raw_writer);
+        let published = view
+            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(10))
+            .is_ok();
+        let first_reply =
+            first_reply.or_else(|| receive.recv_timeout(Duration::from_secs(10)).ok());
+        let success_reply = success_receive.recv_timeout(Duration::from_secs(10)).ok();
+        let request_joined = request.join().is_ok();
+        let success_request_joined = success_request.join().is_ok();
+        core.close();
+
+        assert!(
+            catalog_warmed,
+            "warm source did not publish its test summary"
+        );
+        assert!(
+            expected_generation.is_some(),
+            "warm Home summary was absent"
+        );
+        assert_eq!(
+            cold_direct_reply.as_ref().map(|reply| reply.status),
+            Some(503)
+        );
+        assert_eq!(raw_held_before_request, Some(true));
+        assert!(
+            first_wait_started,
+            "deadline request did not reach catalog wait"
+        );
+        assert!(
+            success_wait_started,
+            "success request did not reach catalog wait"
+        );
+        assert!(
+            returned_while_raw_held,
+            "request remained blocked past its deadline while Raw was held"
+        );
+        let (completed, reply) = first_reply.unwrap();
+        assert!(
+            completed >= deadline,
+            "cold response returned before its deadline"
+        );
+        assert!(
+            completed <= deadline + Duration::from_secs(2),
+            "cold response exceeded the request deadline by more than two seconds"
+        );
+        assert_eq!(reply.status, 503);
+        let error: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(error["error"]["code"], "catalog_unavailable");
+        assert_eq!(error["error"]["retryable"], true);
+        assert_eq!(raw_held_at_deadline, Some(true));
+        assert_eq!(catalog_ready_at_deadline, Some(false));
+        assert!(
+            producer_running_at_deadline,
+            "cold producer was not still blocked"
+        );
+        assert!(request_joined);
+        assert!(success_request_joined);
+        assert!(published, "Catalog did not publish after Raw was released");
+        assert_eq!(success_reply.as_ref().map(|reply| reply.status), Some(200));
     }
 
     /// A view whose check waits STALLED_AFTER (two seconds here) behind

@@ -1,3 +1,25 @@
+Catalog-backed `ViewerCore` requests wait for the first persisted Catalog page
+after validating their arguments and source authority. One absolute 20-second
+deadline covers the whole request, including nested native-page reads and
+multi-source location. If publication has not arrived, the request returns an
+explicit retryable `503 catalog_unavailable`. Waiting uses the existing producer
+and publication condition variable; it does not acquire the producer's source
+lock. A producer may remain blocked by a native writer after the request ends.
+Native-page reads that still hold the Work fence never wait for publication;
+they retain their existing unavailable/retry response.
+
+This admission applies to `/api/sessions`, `/api/session-locate`,
+`/api/session-transcript`, `/api/session-entry`, `/api/session-identity`,
+`/api/session-anchor`, `/api/session-annotations`, `/api/session-trace`,
+`/api/session-home`, `/api/session-observe` and `/api/session-resolve`.
+`/api/viewer/home` and `/api/viewer/analytics` retain explicit per-source partial
+or unavailable observations. Source inventory, capabilities, chrome and tree
+metadata do not require a Catalog publication. Nonblocking library read
+primitives remain usable independently of a live viewer producer.
+
+First publication is an admission signal, not a promise that every selected
+session or optional projection exists. Existing partial-data, generation,
+retained-history and authorization checks still determine each reply.
 
 Codex native observations may include `turn_lifecycle` with the exactly owned
 thread/turn, last durable phase, source record offset and consumed-prefix
