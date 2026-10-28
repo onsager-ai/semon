@@ -8309,6 +8309,182 @@ mod tests {
         view.close();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn initial_catalog_waiters_time_out_while_raw_writer_holds_the_shared_pool() {
+        use sha2::{Digest, Sha256};
+        use std::os::fd::AsRawFd;
+
+        let blocked = lane_fixture();
+        blocked.claude(
+            "held",
+            &[json!({
+                "type": "user",
+                "timestamp": "2026-09-24T00:00:00Z",
+                "sessionId": "held",
+                "message": {"role": "user", "content": "held source"}
+            })],
+        );
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/held.jsonl".into(),
+        };
+        let lock_key = crate::source_change::lock_key(&blocked.options, &input);
+        let raw_writer =
+            crate::source_change::SourceLock::acquire(&blocked.options, &lock_key, true).unwrap();
+        let lock_path = blocked
+            .options
+            .cache
+            .with_extension("source-locks")
+            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+        let probe_exclusive = || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .ok()?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                Some(false)
+            } else {
+                Some(std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+            }
+        };
+        let raw_lock_held_before_wait = probe_exclusive();
+
+        let available = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let blocked_observer =
+            crate::SessionCatalogObserver::with_pool(blocked.options.clone(), pool.clone());
+        let available_observer =
+            crate::SessionCatalogObserver::with_pool(available.options.clone(), pool.clone());
+        let blocked_view = blocked_observer.shared_view();
+        let sources = Arc::new(crate::SessionSources::from_catalog_observers(vec![
+            ("held".into(), &blocked_observer),
+            ("available".into(), &available_observer),
+        ]));
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let short_deadline = Instant::now() + Duration::from_secs(3);
+        let available_deadline = Instant::now() + Duration::from_secs(10);
+        let (send, receive) = mpsc::channel();
+        let mut waiters = Vec::new();
+        for name in ["held-1", "held-2"] {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result = sources.wait_until_initial_catalog("held", pool, short_deadline);
+                let _ = send.send((name, Instant::now(), result));
+            }));
+        }
+        {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result =
+                    sources.wait_until_initial_catalog("available", pool, available_deadline);
+                let _ = send.send(("available", Instant::now(), result));
+            }));
+        }
+        drop(send);
+        barrier.wait();
+
+        let collect_by = Instant::now() + Duration::from_secs(12);
+        let mut replies = BTreeMap::new();
+        while replies.len() < 3 {
+            let remaining = collect_by.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match receive.recv_timeout(remaining) {
+                Ok((name, completed, result)) => {
+                    replies.insert(name, (completed, result));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let raw_lock_held_with_waiters = probe_exclusive();
+        let blocked_ready_with_waiters = crate::session_catalog_page_ready(&blocked.options);
+        let available_ready_with_waiters = crate::session_catalog_page_ready(&available.options);
+        let (blocked_producer_running, blocked_producer_has_error) =
+            match blocked_view.live.state.try_lock() {
+                Ok(state) => (
+                    state.slot == Slot::Running,
+                    state.error[Kind::Catalog as usize].is_some(),
+                ),
+                Err(_) => (false, true),
+            };
+        let blocked_queue_entries = pool.entries_for(&blocked_view);
+        let held_1_completed_by_deadline = replies
+            .get("held-1")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+        let held_2_completed_by_deadline = replies
+            .get("held-2")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+
+        // Release the real writer before cleanup, joining waiters, or assertions.
+        drop(raw_writer);
+        let published_after_release = sources.wait_until_initial_catalog(
+            "held",
+            pool.clone(),
+            Instant::now() + Duration::from_secs(10),
+        );
+        sources.close();
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+
+        let timed_out = |name| matches!(replies.get(name), Some((_, Err(error))) if error.kind() == std::io::ErrorKind::TimedOut);
+        assert_eq!(pool.size(), 2);
+        assert_eq!(raw_lock_held_before_wait, Some(true));
+        assert_eq!(raw_lock_held_with_waiters, Some(true));
+        assert!(
+            timed_out("held-1"),
+            "first waiter did not time out while Raw was held"
+        );
+        assert!(
+            timed_out("held-2"),
+            "second waiter did not time out while Raw was held"
+        );
+        assert!(
+            held_1_completed_by_deadline,
+            "first waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(
+            held_2_completed_by_deadline,
+            "second waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(!blocked_ready_with_waiters.unwrap());
+        assert!(available_ready_with_waiters.unwrap());
+        assert!(matches!(replies.get("available"), Some((_, Ok(true)))));
+        assert!(
+            blocked_producer_running,
+            "the held source producer did not remain blocked"
+        );
+        assert!(
+            !blocked_producer_has_error,
+            "Raw contention was recorded as a producer error"
+        );
+        assert_eq!(
+            blocked_queue_entries, 0,
+            "a second producer was queued for the held owner"
+        );
+        assert!(published_after_release.unwrap());
+        let (peak, _) = pool.peak_and_started();
+        assert!(
+            peak <= pool.size(),
+            "refresh workers exceeded the shared pool size"
+        );
+    }
+
     /// A view whose check waits STALLED_AFTER (two seconds here) behind
     /// another view's hung build, on a pool that may not grow, is stalled
     /// too: its reads answer the last model at once, then "rebuilds
