@@ -1,0 +1,650 @@
+{
+  "version": 1,
+  "approval": "claude-1c77da81:9",
+  "change": "provenance-only visual binding refresh; no appearance change approved",
+  "sourceSha": "a7c05173ef8a8029352cfe1668a350298522528c",
+  "previousRuntimeFingerprint": "f0d1e54030e9e596425ad874124eedf91d00964832d06bf5a70e3ff3fae99298",
+  "runtimeFingerprint": "ada39b2aed01954afd4e903b7a271f3b12da6b63a9fad61e205785e5fb106463",
+  "ciRun": "40630551058",
+  "artifacts": {
+    "mainVisual": "12791184220",
+    "twoMachinesTransport": "12790569851"
+  },
+  "oldRegistry": {
+    "archive": "docs/history/499-visual-bindings-40630551058-1/visual-acceptance.previous.json",
+    "sha256": "2472cd0709a1e52cf562868751571f1a4d5af67f65b05e42b4b1e00f136238aa",
+    "gitBlobBeforeRebind": "e72a65093d9387921c1520d0c95a8a08445c0085"
+  },
+  "newRegistrySha256": "3d79a6ed86b691811913cb0c1c84006e85b3584d081b9861adf60344ad64618e",
+  "exactRecordCount": 99,
+  "changedFields": [
+    "candidateFingerprint"
+  ],
+  "candidateEvidenceDigestUpdates": 0,
+  "imageReferenceDiffEvidenceDigestsUnchanged": true,
+  "reportSummaries": [
+    {
+      "path": "/tmp/semon-500-a7-visual-artifact/pixels/report.json",
+      "scope": "main",
+      "sha256": "b499f61006f964a2fe892e95127250d650fe5fd9aa2194caabde0eef2a16dc39",
+      "candidateFingerprint": "ada39b2aed01954afd4e903b7a271f3b12da6b63a9fad61e205785e5fb106463",
+      "frameCount": 113,
+      "regionCount": 162,
+      "errorCount": 0,
+      "coverageFailureCount": 0,
+      "failedFrameCount": 87,
+      "failedRegionCount": 6,
+      "sourceSha": "a7c05173ef8a8029352cfe1668a350298522528c"
+    },
+    {
+      "path": "/tmp/semon-500-a7-transport-artifact/two-machines/pixels.json",
+      "scope": "two-machines",
+      "sha256": "08bb9c3b57fd222c86c6881d67f6766a3e7c79bb08d41acc629d7f11e406fd94",
+      "candidateFingerprint": "ada39b2aed01954afd4e903b7a271f3b12da6b63a9fad61e205785e5fb106463",
+      "frameCount": 12,
+      "regionCount": 20,
+      "errorCount": 0,
+      "coverageFailureCount": 0,
+      "failedFrameCount": 6,
+      "failedRegionCount": 0,
+      "sourceSha": "a7c05173ef8a8029352cfe1668a350298522528c"
+    }
+  ],
+  "updatedRecords": [
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|analytics"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|home"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|machine-laptop"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|machines"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-docs"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-index"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-parse"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-review-grep"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-scan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-a-store"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-advisor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-atlas"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-atlas-ingest"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-deps"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-h-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-h-failed"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-h-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-h-review-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-harbor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-l-sub"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-ledger"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-principal"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-q-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-q-plan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-quill"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|session-sentinel"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|sessions"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-a-review-a-h-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-atlas-h12"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-atlas-ingest-a-ask"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-h-review-h3"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-harbor-h1"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-ledger-h16"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-principal-h8"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-quill-h4"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "desktop-light|trace-sentinel-sentinel_0"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|drawer"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|home"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-docs"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-index"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-parse"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-review-grep"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-scan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-a-store"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-advisor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-atlas"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-atlas-ingest"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-deps"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-h-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-h-failed"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-h-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-h-review-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-harbor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-l-sub"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-ledger"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-principal"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-q-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-q-plan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-quill"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-dark|session-sentinel"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|drawer"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|home"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-docs"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-index"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-parse"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-review-grep"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-scan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-a-store"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-advisor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-atlas"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-atlas-ingest"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-deps"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-h-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-h-failed"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-h-review"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-h-review-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-harbor"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-l-sub"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-ledger"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-principal"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-q-codex"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-q-plan"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-quill"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "frame",
+      "key": "phone-light|session-sentinel"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "desktop-light|home|topbar"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "desktop-light|session-deps|menu"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-dark|home|topbar"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-dark|session-deps|menu"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-light|home|topbar"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-light|session-deps|menu"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-dark|machine-desktop"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-dark|machine-laptop"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-dark|machines"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-light|machine-desktop"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-light|machine-laptop"
+    },
+    {
+      "comparator": "pixels",
+      "scope": "two-machines",
+      "kind": "frame",
+      "key": "desktop-light|machines"
+    }
+  ],
+  "captureCandidate": "1cbaec61a8e61717eea4448d41e2abc4fcc0adb3"
+}

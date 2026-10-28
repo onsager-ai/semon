@@ -39,13 +39,7 @@ pub fn session_catalog_resolve_native(
     native_id: &str,
     scope: CatalogReadScope,
 ) -> Result<CatalogNativeResolution, CatalogIdentityError> {
-    if source_key.is_empty()
-        || source_key.len() > 4096
-        || native_id.is_empty()
-        || native_id.len() > 4096
-        || native_id.chars().any(char::is_control)
-        || !matches!(harness, "claude" | "codex" | "copilot")
-    {
+    if !valid_resolution_arguments(source_key, harness, native_id) {
         return Err(CatalogIdentityError::InvalidArguments);
     }
     let mut result = CatalogNativeResolution {
@@ -69,6 +63,15 @@ pub fn session_catalog_resolve_native(
     resolve(&mut connection, &mut result, Some(options))
         .map_err(|_| CatalogIdentityError::Unavailable)?;
     Ok(result)
+}
+
+fn valid_resolution_arguments(source_key: &str, harness: &str, native_id: &str) -> bool {
+    !source_key.is_empty()
+        && source_key.len() <= 4096
+        && !native_id.is_empty()
+        && native_id.len() <= 4096
+        && !native_id.chars().any(char::is_control)
+        && matches!(harness, "claude" | "codex" | "copilot")
 }
 
 fn resolve(
@@ -175,7 +178,12 @@ fn resolve(
     tx.commit()
 }
 
-pub(crate) fn page(options: &Options, key: &str, query: &str) -> ViewerReply {
+pub(crate) fn page_with_gate(
+    options: &Options,
+    key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
     use crate::viewer::{decoded, query_value};
     let value = |name| query_value(query, name).and_then(decoded);
     let scope = match value("scope").as_deref() {
@@ -183,12 +191,26 @@ pub(crate) fn page(options: &Options, key: &str, query: &str) -> ViewerReply {
         Some("retained_history") => CatalogReadScope::RetainedHistory,
         _ => return crate::catalog::error(400, "invalid_arguments", "Unknown read scope.", false),
     };
-    let reply = match (value("harness"), value("native_id")) {
-        (Some(harness), Some(native)) => {
-            session_catalog_resolve_native(options, key, &harness, &native, scope)
-        }
-        _ => Err(CatalogIdentityError::InvalidArguments),
+    let (Some(harness), Some(native)) = (value("harness"), value("native_id")) else {
+        return crate::catalog::error(
+            400,
+            "invalid_arguments",
+            "Explicit harness and native_id are required.",
+            false,
+        );
     };
+    if !valid_resolution_arguments(key, &harness, &native) {
+        return crate::catalog::error(
+            400,
+            "invalid_arguments",
+            "Explicit harness and native_id are required.",
+            false,
+        );
+    }
+    if let Err(reply) = before_read() {
+        return reply;
+    }
+    let reply = session_catalog_resolve_native(options, key, &harness, &native, scope);
     match reply {
         Ok(resolution) => ViewerReply {
             status: 200,

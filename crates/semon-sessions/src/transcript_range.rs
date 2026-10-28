@@ -93,7 +93,18 @@ pub fn session_transcript_range_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
-    match read(options, source_key, query, reader, mode) {
+    session_transcript_range_with_gate(options, source_key, query, reader, mode, || Ok(()))
+}
+
+pub(crate) fn session_transcript_range_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    reader: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    match read(options, source_key, query, reader, mode, before_read) {
         Ok(reply) => reply,
         Err(_) => unavailable(),
     }
@@ -104,6 +115,15 @@ pub fn session_transcript_range_with_mode(
 /// pass the returned projection generation into the subsequent range read so
 /// a rewrite cannot reinterpret the recorded slot address.
 pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> ViewerReply {
+    session_turn_anchor_with_gate(options, source_key, query, || Ok(()))
+}
+
+pub(crate) fn session_turn_anchor_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
     let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
         let Some(key) = query_value(query, "sid")
             .and_then(decoded)
@@ -149,6 +169,9 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
                     false,
                 ));
             }
+        }
+        if let Err(reply) = before_read() {
+            return Ok(reply);
         }
         let mut db = Connection::open_with_flags(
             EventCache::path(&options.cache),
@@ -215,6 +238,15 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
 /// bodies are opened. Each page holds at most 100 identities, even when failures
 /// are spread throughout a large transcript.
 pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> ViewerReply {
+    session_annotations_with_gate(options, source_key, query, || Ok(()))
+}
+
+pub(crate) fn session_annotations_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
     let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
         let argument = |name| query_value(query, name).and_then(decoded);
         let invalid_arguments = || {
@@ -267,6 +299,9 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         let after = after.unwrap_or(0);
         if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
             return Ok(invalid_arguments());
+        }
+        if let Err(reply) = before_read() {
+            return Ok(reply);
         }
         let mut db = Connection::open_with_flags(
             EventCache::path(&options.cache),
@@ -459,6 +494,7 @@ struct Selection {
     context: Value,
 }
 
+#[derive(Clone, Copy)]
 enum SelectedPart {
     Transcript,
     Script,
@@ -472,6 +508,7 @@ pub(crate) fn read(
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     for name in [
         "sid",
@@ -544,6 +581,75 @@ pub(crate) fn read(
             "Use limit=1..100.",
             false,
         ));
+    }
+    let part = argument("part");
+    let attachment = if part.as_deref() == Some("attachment") {
+        match argument("image")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|index| *index < 64)
+        {
+            Some(index) => Some(index),
+            None => {
+                return Ok(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "A recorded image ordinal is required.",
+                    false,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let requested_part = match part.as_deref() {
+        None => SelectedPart::Transcript,
+        Some("script" | "output" | "attachment")
+            if argument("generation").is_some()
+                && argument("after").is_some()
+                && argument("field_chunk").is_none() =>
+        {
+            match part.as_deref() {
+                Some("script") => SelectedPart::Script,
+                Some("output") => SelectedPart::Output,
+                Some("attachment") => SelectedPart::Attachment(
+                    attachment.expect("attachment ordinal validated before Catalog read"),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Selected part reads require generation, after and limit=1.",
+                false,
+            ));
+        }
+    };
+    let field_chunk = match argument("field_chunk") {
+        Some(chunk) => {
+            let Ok(chunk) = chunk.parse::<usize>() else {
+                return Ok(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "Invalid field chunk.",
+                    false,
+                ));
+            };
+            if argument("generation").is_none() || argument("after").is_none() {
+                return Ok(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "Field reads require generation, after and limit=1.",
+                    false,
+                ));
+            }
+            Some(chunk)
+        }
+        None => None,
+    };
+    if let Err(reply) = before_read() {
+        return Ok(reply);
     }
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -723,57 +829,16 @@ pub(crate) fn read(
         history_incomplete,
         context,
     };
-    let attachment = if argument("part").as_deref() == Some("attachment") {
-        match argument("image")
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value < 64)
-        {
-            Some(index) => Some(index),
-            None => {
-                return Ok(catalog::error(
-                    400,
-                    "invalid_arguments",
-                    "A recorded image ordinal is required.",
-                    false,
-                ));
-            }
-        }
-    } else {
-        None
-    };
-    let part = match argument("part").as_deref() {
-        None => SelectedPart::Transcript,
-        Some("script" | "output" | "attachment")
-            if argument("generation").is_some()
-                && argument("after").is_some()
-                && selection.end == selection.first + 1
-                && argument("field_chunk").is_none() =>
-        {
-            match (argument("part").as_deref(), attachment) {
-                (_, Some(index)) => SelectedPart::Attachment(index),
-                (Some("output"), _) => SelectedPart::Output,
-                _ => SelectedPart::Script,
-            }
-        }
-        _ => {
-            return Ok(catalog::error(
-                400,
-                "invalid_arguments",
-                "Selected part reads require generation, after and limit=1.",
-                false,
-            ));
-        }
-    };
-    if let Some(chunk) = argument("field_chunk") {
-        let Ok(chunk) = chunk.parse::<usize>() else {
-            return Ok(catalog::error(
-                400,
-                "invalid_arguments",
-                "Invalid field chunk.",
-                false,
-            ));
-        };
-        if argument("generation").is_none() || selection.end != selection.first + 1 {
+    if !matches!(requested_part, SelectedPart::Transcript) && selection.end != selection.first + 1 {
+        return Ok(catalog::error(
+            400,
+            "invalid_arguments",
+            "Selected part reads require generation, after and limit=1.",
+            false,
+        ));
+    }
+    if let Some(chunk) = field_chunk {
+        if selection.end != selection.first + 1 {
             return Ok(catalog::error(
                 400,
                 "invalid_arguments",
@@ -783,7 +848,7 @@ pub(crate) fn read(
         }
         return Ok(render_field(options, selection, provider, chunk, mode));
     }
-    Ok(render(options, selection, provider, mode, part))
+    Ok(render(options, selection, provider, mode, requested_part))
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
@@ -1886,6 +1951,17 @@ pub fn session_entry_field_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
+    session_entry_field_with_gate(options, source_key, query, reader, mode, || Ok(()))
+}
+
+pub(crate) fn session_entry_field_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    reader: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
     if (query_value(query, "field_chunk").is_none()
         && !matches!(
             query_value(query, "part"),
@@ -1900,7 +1976,7 @@ pub fn session_entry_field_with_mode(
             false,
         );
     }
-    session_transcript_range_with_mode(options, source_key, query, reader, mode)
+    session_transcript_range_with_gate(options, source_key, query, reader, mode, before_read)
 }
 
 fn render_field(

@@ -1,0 +1,463 @@
+{
+  "version": 1,
+  "approval": "claude-1c77da81:10",
+  "change": "provenance-only preservation visual binding refresh; no appearance change approved",
+  "predecessor": "656100b4aef77a1e83e30a04716a5b48306f9ee4",
+  "candidate": "cf6ffdd00b352b325a731611f36c44a2397ecaa6",
+  "runtimeFingerprint": "ada39b2aed01954afd4e903b7a271f3b12da6b63a9fad61e205785e5fb106463",
+  "previousRuntimeFingerprint": "f0d1e54030e9e596425ad874124eedf91d00964832d06bf5a70e3ff3fae99298",
+  "ciRun": "40636393369",
+  "artifact": "12793624220",
+  "report": {
+    "path": "preservation/report.json",
+    "sha256": "2a16fce849a71f572549ceb57f76c717bc3cbd449f71b71d15c9726bdb55b1dd",
+    "mode": "required",
+    "frameCount": 68,
+    "failedFrameCount": 62,
+    "regionCount": 0,
+    "errorCount": 0,
+    "coverageFailureCount": 0
+  },
+  "oldRegistry": {
+    "archive": "docs/history/499-preservation-bindings-40636393369-1/visual-acceptance.previous.json",
+    "sha256": "3d79a6ed86b691811913cb0c1c84006e85b3584d081b9861adf60344ad64618e",
+    "gitBlobBeforeRebind": "d6f765dd6a092d03dd474d2d39c1f00a21ad0494"
+  },
+  "newRegistrySha256": "e8e8af18fa54c271532eb3bbab19572bd4a524dc7b7150196b2e2eb8d897c73f",
+  "exactRecordCount": 62,
+  "changedFields": [
+    "candidateFingerprint"
+  ],
+  "artifactDigestComparison": {
+    "compared": 372,
+    "mismatches": 0,
+    "unchangedByField": {
+      "candidate.image": 62,
+      "candidate.evidence": 62,
+      "reference.image": 62,
+      "reference.evidence": 62,
+      "diff.image": 62,
+      "diff.evidence": 62
+    }
+  },
+  "existing99PixelRecordsUnchanged": true,
+  "gateInventory": {
+    "reports": [
+      {
+        "scope": "required",
+        "frames": 68,
+        "regions": 0
+      },
+      {
+        "scope": "main",
+        "frames": 113,
+        "regions": 162
+      },
+      {
+        "scope": "two-machines",
+        "frames": 12,
+        "regions": 20
+      },
+      {
+        "scope": "pushed",
+        "frames": 15,
+        "regions": 24
+      }
+    ],
+    "source500Outcomes": {
+      "preservation": {
+        "failedBindings": 62,
+        "matchedAcceptedRecords": 62,
+        "artifactDigestMismatches": 0
+      },
+      "main": {
+        "failedBindings": 93,
+        "matchedAcceptedRecords": 93
+      },
+      "twoMachines": {
+        "failedBindings": 6,
+        "matchedAcceptedRecords": 6
+      },
+      "pushed": {
+        "failedBindings": 0,
+        "coverageFailures": 0
+      },
+      "otherFunctionalUiRustAndAgentChecks": "green on predecessor 656100b4"
+    },
+    "auditSource": "Manager acceptance-gate audit"
+  },
+  "updatedRecords": [
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-analytics"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-sessions"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-dark-sessions-filter-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-analytics"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-sessions"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "1280-light-sessions-filter-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-drawer"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-dark-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-drawer"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "390-light-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-analytics"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-sessions"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-dark-sessions-filter-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-analytics"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-harbor-thinking-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-harbor-tool-output-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-harbor-tools-open"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-home"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-session-atlas-ingest"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-session-deps"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-session-h-failed"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-session-harbor"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-sessions"
+    },
+    {
+      "comparator": "preservation",
+      "scope": "required",
+      "kind": "frame",
+      "key": "820-light-sessions-filter-open"
+    }
+  ]
+}

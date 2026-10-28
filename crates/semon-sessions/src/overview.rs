@@ -360,6 +360,132 @@ pub fn session_home_details_with_mode(
     session_home_details_inner(options, source_key, query, provider, mode, true)
 }
 
+pub(crate) fn session_home_details_with_gate(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    include_session: bool,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    let selection = match parse_session_home_selection(query) {
+        Ok(selection) => selection,
+        Err(error) => return home_details_error(error),
+    };
+    if let Err(reply) = before_read() {
+        return reply;
+    }
+    session_home_details_with_selection(
+        options,
+        source_key,
+        selection,
+        provider,
+        mode,
+        include_session,
+    )
+}
+
+struct SessionHomeSelection {
+    key: String,
+    expected: String,
+    ids: Vec<String>,
+    session_fields: Vec<String>,
+    turns: Vec<String>,
+}
+
+fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection> {
+    let args: Vec<_> = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+    for name in [
+        "sid",
+        "generation",
+        "events",
+        "turns",
+        "scope",
+        "machine",
+        "session_fields",
+    ] {
+        if args.iter().filter(|(key, _)| *key == name).count() > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Duplicate Home detail argument",
+            ));
+        }
+    }
+    let value = |name: &str| {
+        args.iter()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| crate::viewer::decoded(value))
+    };
+    let key = value("sid")
+        .filter(|key| !key.is_empty() && key.len() <= 4096)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Supply a session key"))?;
+    let expected = value("generation").ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Supply an overview generation")
+    })?;
+    if expected.len() != 64
+        || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value("scope").as_deref() != Some("retained_history")
+        || args.iter().any(|(name, _)| {
+            !matches!(
+                *name,
+                "sid" | "generation" | "events" | "turns" | "scope" | "machine" | "session_fields"
+            )
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid Home detail scope or generation",
+        ));
+    }
+    let ids: Vec<String> = serde_json::from_str(&value("events").unwrap_or_else(|| "[]".into()))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid event selection"))?;
+    let session_fields: Vec<String> = serde_json::from_str(
+        &value("session_fields").unwrap_or_else(|| "[\"detail\",\"activity\"]".into()),
+    )
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid session field selection",
+        )
+    })?;
+    if session_fields.len() > 2
+        || session_fields
+            .iter()
+            .any(|field| !matches!(field.as_str(), "detail" | "activity"))
+        || (session_fields.len() == 2 && session_fields[0] == session_fields[1])
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid session field selection",
+        ));
+    }
+    let turns: Vec<String> =
+        serde_json::from_str(&value("turns").unwrap_or_else(|| "[]".into()))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid turn selection"))?;
+    if ids.len() + turns.len() > 100
+        || ids
+            .iter()
+            .chain(&turns)
+            .any(|id| id.is_empty() || id.len() > 4096)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Home detail selection exceeds its bound",
+        ));
+    }
+    Ok(SessionHomeSelection {
+        key,
+        expected,
+        ids,
+        session_fields,
+        turns,
+    })
+}
+
 pub(crate) fn session_home_details_inner(
     options: &Options,
     source_key: &str,
@@ -368,98 +494,33 @@ pub(crate) fn session_home_details_inner(
     mode: crate::SessionSourceReadMode,
     include_session: bool,
 ) -> ViewerReply {
+    session_home_details_with_gate(
+        options,
+        source_key,
+        query,
+        provider,
+        mode,
+        include_session,
+        || Ok(()),
+    )
+}
+
+fn session_home_details_with_selection(
+    options: &Options,
+    source_key: &str,
+    selection: SessionHomeSelection,
+    provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    include_session: bool,
+) -> ViewerReply {
+    let SessionHomeSelection {
+        key,
+        expected,
+        ids,
+        session_fields,
+        turns,
+    } = selection;
     let read = || -> io::Result<Value> {
-        let args: Vec<_> = query
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .collect();
-        for name in [
-            "sid",
-            "generation",
-            "events",
-            "turns",
-            "scope",
-            "machine",
-            "session_fields",
-        ] {
-            if args.iter().filter(|(key, _)| *key == name).count() > 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Duplicate Home detail argument",
-                ));
-            }
-        }
-        let value = |name: &str| {
-            args.iter()
-                .find(|(key, _)| *key == name)
-                .and_then(|(_, value)| crate::viewer::decoded(value))
-        };
-        let key = value("sid")
-            .filter(|key| !key.is_empty() && key.len() <= 4096)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Supply a session key"))?;
-        let expected = value("generation").ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Supply an overview generation")
-        })?;
-        if expected.len() != 64
-            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || value("scope").as_deref() != Some("retained_history")
-            || args.iter().any(|(name, _)| {
-                !matches!(
-                    *name,
-                    "sid"
-                        | "generation"
-                        | "events"
-                        | "turns"
-                        | "scope"
-                        | "machine"
-                        | "session_fields"
-                )
-            })
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid Home detail scope or generation",
-            ));
-        }
-        let ids: Vec<String> = serde_json::from_str(
-            &value("events").unwrap_or_else(|| "[]".into()),
-        )
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid event selection"))?;
-        let session_fields: Vec<String> = serde_json::from_str(
-            &value("session_fields").unwrap_or_else(|| "[\"detail\",\"activity\"]".into()),
-        )
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid session field selection",
-            )
-        })?;
-        if session_fields.len() > 2
-            || session_fields
-                .iter()
-                .any(|field| !matches!(field.as_str(), "detail" | "activity"))
-            || (session_fields.len() == 2 && session_fields[0] == session_fields[1])
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid session field selection",
-            ));
-        }
-        let turns: Vec<String> =
-            serde_json::from_str(&value("turns").unwrap_or_else(|| "[]".into())).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "Invalid turn selection")
-            })?;
-        if ids.len() + turns.len() > 100
-            || ids
-                .iter()
-                .chain(&turns)
-                .any(|id| id.is_empty() || id.len() > 4096)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Home detail selection exceeds its bound",
-            ));
-        }
         let identity = crate::session_catalog_history_identity(options, source_key, &key)
             .map_err(failed)?
             .ok_or_else(|| {
@@ -681,18 +742,22 @@ pub(crate) fn session_home_details_inner(
     };
     match read() {
         Ok(value) => reply(value),
-        Err(error) => crate::catalog::error(
-            match error.kind() {
-                io::ErrorKind::InvalidInput => 400,
-                io::ErrorKind::NotFound => 404,
-                io::ErrorKind::InvalidData => 409,
-                _ => 503,
-            },
-            "home_details_unavailable",
-            "The recorded preview is unavailable. Retry with the current source observation.",
-            true,
-        ),
+        Err(error) => home_details_error(error),
     }
+}
+
+fn home_details_error(error: io::Error) -> ViewerReply {
+    crate::catalog::error(
+        match error.kind() {
+            io::ErrorKind::InvalidInput => 400,
+            io::ErrorKind::NotFound => 404,
+            io::ErrorKind::InvalidData => 409,
+            _ => 503,
+        },
+        "home_details_unavailable",
+        "The recorded preview is unavailable. Retry with the current source observation.",
+        true,
+    )
 }
 
 fn reply(value: Value) -> ViewerReply {
