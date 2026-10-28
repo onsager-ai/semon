@@ -134,6 +134,32 @@ impl SessionSources {
         self.catalog_source(source_key, pool, true)
     }
 
+    /// Wait for the first readable Catalog page through this machine set's
+    /// existing source owner; call off-reactor. Unknown, invalid or retired
+    /// sources return `Ok(false)`. Deadline, closure and producer/storage
+    /// failures propagate from the existing owner.
+    pub fn wait_until_initial_catalog(
+        &self,
+        source_key: &str,
+        pool: Arc<crate::RefreshPool>,
+        deadline: Instant,
+    ) -> io::Result<bool> {
+        if self.is_retired() || !self.inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = self.inventory.index(source_key) else {
+            return Ok(false);
+        };
+        let view = self.view(index);
+        view.set_refresh(crate::Refresh::OnInvalidate);
+        if self.is_retired() {
+            view.retire();
+            return Ok(false);
+        }
+        view.wait_until_initial_catalog_in_pool(pool, deadline)?;
+        Ok(true)
+    }
+
     /// Register interest after a host has read qualified persisted evidence.
     /// Existing admission, source identity and retirement checks still apply.
     pub fn watch_catalog_source(

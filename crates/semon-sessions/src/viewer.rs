@@ -903,11 +903,15 @@ impl MachineView {
     /// queued in the one before moves to it.
     pub(crate) fn set_pool(&self, pool: Arc<RefreshPool>) {
         let mut state = lock(&self.live.state);
+        self.set_pool_state(&mut state, pool);
+    }
+
+    fn set_pool_state(&self, state: &mut LiveState, pool: Arc<RefreshPool>) {
         if let Slot::Queued(key) = state.slot {
             state.pool.remove(key);
             state.slot = Slot::Idle;
             state.pool = pool;
-            self.queue(&mut state, key.0, true);
+            self.queue(state, key.0, true);
         } else {
             state.pool = pool;
         }
@@ -1045,7 +1049,16 @@ impl MachineView {
 
     fn note_read_with(&self, kind: Kind, prepare: bool) -> io::Result<()> {
         let mut state = lock(&self.live.state);
-        let now = Instant::now();
+        self.note_read_state(&mut state, kind, prepare, Instant::now())
+    }
+
+    fn note_read_state(
+        &self,
+        state: &mut LiveState,
+        kind: Kind,
+        prepare: bool,
+        now: Instant,
+    ) -> io::Result<()> {
         state.read_at = Some(now);
         if state.closed {
             return Ok(());
@@ -1066,7 +1079,7 @@ impl MachineView {
             Slot::Idle => {
                 if prepare || state.invalidated {
                     state.unconfirmed = [true; 2];
-                    self.queue(&mut state, now, false);
+                    self.queue(state, now, false);
                 }
                 false
             }
@@ -1105,6 +1118,83 @@ impl MachineView {
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
         self.note_read_with(Kind::Catalog, pending)
+    }
+
+    /// Wait for the first readable persisted Catalog publication, using the
+    /// existing source owner and refresh worker. A warm persisted page returns
+    /// before creating a cold demand. The caller must wait off its reactor.
+    pub(crate) fn wait_until_initial_catalog(&self, deadline: Instant) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, None)
+    }
+
+    pub(crate) fn wait_until_initial_catalog_in_pool(
+        &self,
+        pool: Arc<RefreshPool>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, Some(pool))
+    }
+
+    fn wait_for_initial_catalog(
+        &self,
+        deadline: Instant,
+        mut pool: Option<Arc<RefreshPool>>,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.live.state);
+        let mut demanded = false;
+        loop {
+            if state.closed {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "session catalog source is closed",
+                ));
+            }
+            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "initial session catalog was not published before the deadline",
+                ));
+            }
+            if ready {
+                return Ok(());
+            }
+            let at = Kind::Catalog as usize;
+            let stalled = match state.slot {
+                Slot::Running => state.running_since.is_some_and(|since| {
+                    now.saturating_duration_since(since) >= state.stalled_after
+                }),
+                Slot::Queued(key) => now.saturating_duration_since(key.0) >= state.stalled_after,
+                Slot::Idle => false,
+            };
+            if stalled {
+                return Err(io::Error::other("rebuilds stalled"));
+            }
+            if let (Some(message), Some(since)) = (&state.error[at], state.failing_since[at])
+                && !state.unconfirmed[at]
+                && now.saturating_duration_since(since) >= FAILING_AFTER
+            {
+                return Err(io::Error::other(message.clone()));
+            }
+            if !demanded {
+                if let Some(pool) = pool.take()
+                    && !Arc::ptr_eq(&state.pool, &pool)
+                {
+                    self.set_pool_state(&mut state, pool);
+                }
+                self.evidence.catalog_demand.store(true, Ordering::Relaxed);
+                self.note_read_state(&mut state, Kind::Catalog, true, now)?;
+                demanded = true;
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let (next, _) = self
+                .live
+                .changed
+                .wait_timeout(state, wait)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
     }
 
     /// A read's own refresh of the kind it wants, when none is built yet
@@ -1357,7 +1447,9 @@ impl MachineView {
     /// longer served. [`MachineView::close`] still waits out one running.
     pub(crate) fn retire(&self) {
         self.evidence.retire();
-        Self::stop(&mut lock(&self.live.state));
+        let mut state = lock(&self.live.state);
+        Self::stop(&mut state);
+        self.live.changed.notify_all();
     }
 
     /// Stops this view's background checks and waits out a check or a
@@ -1368,6 +1460,7 @@ impl MachineView {
         self.evidence.retire();
         let mut state = lock(&self.live.state);
         Self::stop(&mut state);
+        self.live.changed.notify_all();
         while state.slot == Slot::Running {
             state = self
                 .live
@@ -8214,6 +8307,182 @@ mod tests {
         });
         assert!(serves(&view, "after the hang"));
         view.close();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initial_catalog_waiters_time_out_while_raw_writer_holds_the_shared_pool() {
+        use sha2::{Digest, Sha256};
+        use std::os::fd::AsRawFd;
+
+        let blocked = lane_fixture();
+        blocked.claude(
+            "held",
+            &[json!({
+                "type": "user",
+                "timestamp": "2026-09-24T00:00:00Z",
+                "sessionId": "held",
+                "message": {"role": "user", "content": "held source"}
+            })],
+        );
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/held.jsonl".into(),
+        };
+        let lock_key = crate::source_change::lock_key(&blocked.options, &input);
+        let raw_writer =
+            crate::source_change::SourceLock::acquire(&blocked.options, &lock_key, true).unwrap();
+        let lock_path = blocked
+            .options
+            .cache
+            .with_extension("source-locks")
+            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+        let probe_exclusive = || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .ok()?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                Some(false)
+            } else {
+                Some(std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+            }
+        };
+        let raw_lock_held_before_wait = probe_exclusive();
+
+        let available = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let blocked_observer =
+            crate::SessionCatalogObserver::with_pool(blocked.options.clone(), pool.clone());
+        let available_observer =
+            crate::SessionCatalogObserver::with_pool(available.options.clone(), pool.clone());
+        let blocked_view = blocked_observer.shared_view();
+        let sources = Arc::new(crate::SessionSources::from_catalog_observers(vec![
+            ("held".into(), &blocked_observer),
+            ("available".into(), &available_observer),
+        ]));
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let short_deadline = Instant::now() + Duration::from_secs(3);
+        let available_deadline = Instant::now() + Duration::from_secs(10);
+        let (send, receive) = mpsc::channel();
+        let mut waiters = Vec::new();
+        for name in ["held-1", "held-2"] {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result = sources.wait_until_initial_catalog("held", pool, short_deadline);
+                let _ = send.send((name, Instant::now(), result));
+            }));
+        }
+        {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result =
+                    sources.wait_until_initial_catalog("available", pool, available_deadline);
+                let _ = send.send(("available", Instant::now(), result));
+            }));
+        }
+        drop(send);
+        barrier.wait();
+
+        let collect_by = Instant::now() + Duration::from_secs(12);
+        let mut replies = BTreeMap::new();
+        while replies.len() < 3 {
+            let remaining = collect_by.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match receive.recv_timeout(remaining) {
+                Ok((name, completed, result)) => {
+                    replies.insert(name, (completed, result));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let raw_lock_held_with_waiters = probe_exclusive();
+        let blocked_ready_with_waiters = crate::session_catalog_page_ready(&blocked.options);
+        let available_ready_with_waiters = crate::session_catalog_page_ready(&available.options);
+        let (blocked_producer_running, blocked_producer_has_error) =
+            match blocked_view.live.state.try_lock() {
+                Ok(state) => (
+                    state.slot == Slot::Running,
+                    state.error[Kind::Catalog as usize].is_some(),
+                ),
+                Err(_) => (false, true),
+            };
+        let blocked_queue_entries = pool.entries_for(&blocked_view);
+        let held_1_completed_by_deadline = replies
+            .get("held-1")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+        let held_2_completed_by_deadline = replies
+            .get("held-2")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+
+        // Release the real writer before cleanup, joining waiters, or assertions.
+        drop(raw_writer);
+        let published_after_release = sources.wait_until_initial_catalog(
+            "held",
+            pool.clone(),
+            Instant::now() + Duration::from_secs(10),
+        );
+        sources.close();
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+
+        let timed_out = |name| matches!(replies.get(name), Some((_, Err(error))) if error.kind() == std::io::ErrorKind::TimedOut);
+        assert_eq!(pool.size(), 2);
+        assert_eq!(raw_lock_held_before_wait, Some(true));
+        assert_eq!(raw_lock_held_with_waiters, Some(true));
+        assert!(
+            timed_out("held-1"),
+            "first waiter did not time out while Raw was held"
+        );
+        assert!(
+            timed_out("held-2"),
+            "second waiter did not time out while Raw was held"
+        );
+        assert!(
+            held_1_completed_by_deadline,
+            "first waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(
+            held_2_completed_by_deadline,
+            "second waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(!blocked_ready_with_waiters.unwrap());
+        assert!(available_ready_with_waiters.unwrap());
+        assert!(matches!(replies.get("available"), Some((_, Ok(true)))));
+        assert!(
+            blocked_producer_running,
+            "the held source producer did not remain blocked"
+        );
+        assert!(
+            !blocked_producer_has_error,
+            "Raw contention was recorded as a producer error"
+        );
+        assert_eq!(
+            blocked_queue_entries, 0,
+            "a second producer was queued for the held owner"
+        );
+        assert!(published_after_release.unwrap());
+        let (peak, _) = pool.peak_and_started();
+        assert!(
+            peak <= pool.size(),
+            "refresh workers exceeded the shared pool size"
+        );
     }
 
     /// A view whose check waits STALLED_AFTER (two seconds here) behind

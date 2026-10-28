@@ -43,27 +43,82 @@ const inView = (page, sel) =>
     return r.top >= bar.bottom - 1 && r.top < innerHeight - 40;
   }, sel);
 // Waiting is tied to source-qualified selected reads, with no child workspace poller.
-function trackChildRequests(page) {
+function trackChildRequests(page, routeStages = new WeakMap()) {
   const requests = new Map();
+  const recent = [];
+  let documentEpoch = 0;
+  let nextRequestId = 1;
   const selected = (request) => new URL(request.url()).pathname === '/api/session-transcript';
-  page.on('request', (request) => {
-    if (selected(request)) requests.set(request, Date.now());
+  const summary = (record) => ({
+    id: record.id,
+    path: record.path,
+    pagePathAtStart: record.pagePathAtStart,
+    currentPagePath: new URL(page.url()).pathname,
+    documentEpoch: record.documentEpoch,
+    startedAt: new Date(record.startedAtMs).toISOString(),
+    elapsedMs: Date.now() - record.startedAtMs,
+    response: record.response,
+    finished: record.finished,
+    failed: record.failed,
+    routeStages: (routeStages.get(record.request) ?? []).map(({ stage, atMs, status }) => ({
+      stage,
+      elapsedMs: atMs - record.startedAtMs,
+      ...(status == null ? {} : { status }),
+    })),
   });
-  const done = (request) => requests.delete(request);
-  page.on('requestfinished', done);
-  page.on('requestfailed', done);
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) documentEpoch++;
+  });
+  page.on('request', (request) => {
+    if (!selected(request)) return;
+    const startedAtMs = Date.now();
+    const record = {
+      id: nextRequestId++,
+      request,
+      path: new URL(request.url()).pathname + new URL(request.url()).search,
+      pagePathAtStart: new URL(page.url()).pathname,
+      documentEpoch,
+      startedAtMs,
+      response: null,
+      finished: null,
+      failed: null,
+    };
+    requests.set(request, record);
+    recent.push(record);
+    if (recent.length > 16) recent.shift();
+  });
+  page.on('response', (response) => {
+    const record = requests.get(response.request());
+    if (record)
+      record.response = { status: response.status(), elapsedMs: Date.now() - record.startedAtMs };
+  });
+  page.on('requestfinished', (request) => {
+    const record = requests.get(request);
+    if (record) record.finished = { elapsedMs: Date.now() - record.startedAtMs };
+    requests.delete(request);
+  });
+  page.on('requestfailed', (request) => {
+    const record = requests.get(request);
+    if (record) {
+      record.failed = {
+        elapsedMs: Date.now() - record.startedAtMs,
+        failure: request.failure()?.errorText.slice(0, 256) ?? null,
+      };
+    }
+    requests.delete(request);
+  });
   return async () => {
     for (let n = 0; requests.size && n < 100; n++) await page.waitForTimeout(20);
-    if (requests.size)
+    if (requests.size) {
       throw Error(
         'Selected requests did not settle: ' +
-          JSON.stringify(
-            [...requests].slice(0, 16).map(([request, started]) => ({
-              path: new URL(request.url()).pathname + new URL(request.url()).search,
-              elapsedMs: Date.now() - started,
-            })),
-          ),
+          JSON.stringify({
+            pendingCount: requests.size,
+            pending: [...requests.values()].slice(-16).map(summary),
+            recent: recent.map(summary),
+          }),
       );
+    }
   };
 }
 export default async function (browser) {
@@ -290,12 +345,25 @@ export default async function (browser) {
     const shotTitle = 'Run queue retry tests';
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
       const shot = await served(browser, { extras: true, path: '/s/claude/harbor', size, dark });
-      const childRequestsSettled = trackChildRequests(shot);
+      const routeStages = new WeakMap();
+      const recordRouteStage = (request, stage, status) => {
+        const stages = routeStages.get(request) ?? [];
+        if (stages.length >= 8) return;
+        stages.push({ stage, atMs: Date.now(), ...(status == null ? {} : { status }) });
+        routeStages.set(request, stages);
+      };
+      const childRequestsSettled = trackChildRequests(shot, routeStages);
       await shot.route('**/api/session-transcript?**', async (route) => {
-        const url = new URL(route.request().url());
+        const request = route.request();
+        const url = new URL(request.url());
+        const isHarbor = url.searchParams.get('sid') === 'harbor';
+        if (isHarbor) recordRouteStage(request, 'route.fetch:start');
         const response = await route.fetch();
-        if (url.searchParams.get('sid') !== 'harbor') return route.fulfill({ response });
+        if (isHarbor) recordRouteStage(request, 'route.fetch:done', response.status());
+        if (!isHarbor) return route.fulfill({ response });
+        recordRouteStage(request, 'response.json:start', response.status());
         const tx = await response.json();
+        recordRouteStage(request, 'response.json:done', response.status());
         const entry = tx.entries
           .filter(
             (item) => item.k === 'tool' && item.name === 'Bash' && item.ok === true && item.in,
@@ -304,7 +372,9 @@ export default async function (browser) {
         if (!entry)
           throw new Error('harbor needs a finished Bash call with a command for title screenshots');
         entry.title = shotTitle;
-        return route.fulfill({ response, json: tx });
+        recordRouteStage(request, 'route.fulfill:start', response.status());
+        await route.fulfill({ response, json: tx });
+        recordRouteStage(request, 'route.fulfill:done', response.status());
       });
       await shot.reload({ waitUntil: 'load' });
       await shot.waitForFunction(
