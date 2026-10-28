@@ -257,7 +257,7 @@ pub(crate) fn session_overview_observe_with_gate(
         None,
         SessionSourceReadMode::LocalThenProvider,
     ) {
-        Ok(()) => crate::ViewerReply {
+        Ok(_) => crate::ViewerReply {
             status: 200,
             content_type: "application/json; charset=utf-8",
             body: serde_json::json!({"api":1,"source_key":source_key,"catalog_key":key,"state":"ready"}).to_string().into_bytes(),
