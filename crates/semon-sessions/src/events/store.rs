@@ -4471,6 +4471,18 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
     }
 }
 
+/// Classify a focused read's store without preparing or converting it.
+/// A blank, initializable database is cold; malformed and foreign stores stay
+/// errors so callers do not mistake them for an unpublished Catalog.
+pub(crate) fn current_or_fresh(connection: &Connection) -> io::Result<bool> {
+    match qualify_contract(connection).map_err(io::Error::other)? {
+        Init::Ready => Ok(true),
+        Init::Fresh => Ok(false),
+        Init::Unsupported(reason) => Err(io::Error::other(reason)),
+        _ => Err(io::Error::other("session index is not initialized")),
+    }
+}
+
 /// A writer qualifies the fixed-size current contract in its own transaction
 /// before changing durable rows or proof metadata. Writers that touch archive
 /// custody validate only the selected marker at that call site.

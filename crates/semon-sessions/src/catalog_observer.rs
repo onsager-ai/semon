@@ -1,5 +1,5 @@
 //! Source-scoped demand for the existing coherent asynchronous producer.
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Instant};
 
 use crate::{Options, Refresh, RefreshPool, viewer::MachineView};
 
@@ -42,6 +42,14 @@ impl SessionCatalogObserver {
     pub fn demand(&self) -> io::Result<()> {
         self.view.evidence.request_metadata_audit_if_idle();
         self.view.note_catalog_read()
+    }
+
+    /// Wait for the first readable persisted Catalog page by the deadline.
+    /// The existing bounded producer is queued only when no page is published;
+    /// call off-reactor. Deadline and closed-owner failures are `TimedOut` and
+    /// `BrokenPipe`; store, producer-failure and stall errors propagate.
+    pub fn wait_until_initial_catalog(&self, deadline: Instant) -> io::Result<()> {
+        self.view.wait_until_initial_catalog(deadline)
     }
 
     /// Register a qualified persisted read's interest in future changes. This
