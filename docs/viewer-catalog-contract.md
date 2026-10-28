@@ -1,12 +1,12 @@
 Catalog-backed `ViewerCore` requests wait for the first persisted Catalog page
 after validating their arguments and source authority. One absolute 20-second
-deadline covers the whole request, including nested native-page reads and
-multi-source location. If publication has not arrived, the request returns an
+deadline covers the whole request, including multi-source location. If
+publication has not arrived, the request returns an
 explicit retryable `503 catalog_unavailable`. Waiting uses the existing producer
 and publication condition variable; it does not acquire the producer's source
 lock. A producer may remain blocked by a native writer after the request ends.
-Native-page reads that still hold the Work fence never wait for publication;
-they retain their existing unavailable/retry response.
+Native HTML page reads never wait for publication; they retain their existing
+unavailable/retry response, including when a Work fence is held.
 
 This admission applies to `/api/sessions`, `/api/session-locate`,
 `/api/session-transcript`, `/api/session-entry`, `/api/session-identity`,

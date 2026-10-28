@@ -7581,28 +7581,35 @@ mod tests {
         view.close();
     }
 
-    /// With no model built yet, the first read waits for the first build,
-    /// as before (here it is held for 300 ms and more); the reads after it
-    /// answer from that model and build nothing.
+    /// A cold selected read waits for the first Catalog publication without
+    /// holding Work, and a warm read answers while the later build is held.
     #[test]
-    fn a_cold_native_read_returns_retry_without_waiting_for_the_producer() {
+    fn a_cold_native_read_waits_for_publication_without_holding_work() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
         view.set_refresh(Refresh::Background);
         let (starts, release) = view.hooks.hold();
         let observing = lock(&view.evidence.work);
-        let first = ask(
-            "cold selected read",
-            &view,
-            "/api/session-transcript",
-            "sid=lane&limit=100",
-        );
-        assert_eq!(first.status, 503);
-        assert_eq!(body_of(&first)["error"]["retryable"], true);
+        let native_view = view.clone();
+        let native_page = at_once("cold native page", move || {
+            ViewerCore::with_test_view(native_view).respond("GET", "/sessions", "native=1", None)
+        });
+        assert_eq!(native_page.status, 503);
+        let (wait_started_send, wait_started_receive) = mpsc::channel();
+        let (first_send, first_receive) = mpsc::channel();
+        let reader = view.clone();
+        let request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(wait_started_send);
+            });
+            let reply = native_api(&reader, "/api/session-transcript", "sid=lane&limit=100");
+            let _ = first_send.send(reply);
+        });
+        let wait_started = wait_started_receive.recv_timeout(HUNG_AFTER).is_ok();
         drop(observing);
-        starts
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the native producer starts");
+        let producer_started = starts.recv_timeout(Duration::from_secs(10)).is_ok();
+        assert!(wait_started, "cold read did not enter its publication wait");
+        assert!(producer_started, "the native producer did not start");
         assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
         let during = ask(
             "cold selected read during observation",
@@ -7623,6 +7630,9 @@ mod tests {
             "<img src=x onerror=alert(2)>"
         );
         drop(release);
+        let first = first_receive.recv_timeout(Duration::from_secs(10)).ok();
+        assert_eq!(first.as_ref().map(|reply| reply.status), Some(200));
+        assert!(request.join().is_ok());
         eventually("the first qualified native read", || {
             let reply = native_api(&view, "/api/session-transcript", "sid=lane&limit=100");
             (reply.status == 200).then_some(())
