@@ -92,7 +92,7 @@ fn wait_for_catalog_read(
             }
         }
     }
-    Ok(view.note_catalog_interest().err())
+    Ok(view.note_catalog_read().err())
 }
 
 fn catalog_unavailable() -> ViewerReply {
@@ -1093,7 +1093,17 @@ impl ViewerCore {
         }
         if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
             return crate::native_page::reply(path, query, |endpoint, args| {
-                self.respond_with_deadline(extras, "GET", endpoint, args, None, deadline)
+                self.respond_with_deadline_mode(
+                    extras,
+                    "GET",
+                    endpoint,
+                    args,
+                    None,
+                    CatalogReadContext {
+                        deadline,
+                        allow_wait: false,
+                    },
+                )
             });
         }
         self.follow();
@@ -1409,7 +1419,17 @@ impl ViewerCore {
                 }
                 if native_requested {
                     crate::native_page::reply(path, query, |endpoint, args| {
-                        self.respond_with_deadline(extras, "GET", endpoint, args, None, deadline)
+                        self.respond_with_deadline_mode(
+                            extras,
+                            "GET",
+                            endpoint,
+                            args,
+                            None,
+                            CatalogReadContext {
+                                deadline,
+                                allow_wait: false,
+                            },
+                        )
                     })
                 } else if let Some((_, view)) = views.first() {
                     view.respond("GET", "/", "", None)
