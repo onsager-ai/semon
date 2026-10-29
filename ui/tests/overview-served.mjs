@@ -405,7 +405,7 @@ test(
                 if (holdPreviews) await new Promise((resolve) => held.push(resolve));
                 await route.fulfill({ response });
               });
-            await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+            await page.goto(address[1] + '/?t=' + address[2]);
             await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             // The sample's six direct ingest children include one nested child.
             // The published All action opens all seven recorded descendants.
@@ -505,7 +505,7 @@ test(
               await page.route(/\/api\/viewer\/home(?:\?.*)?$/, withoutHomeSelected);
               await page.route('**/api/sessions?**', withoutCatalogSelected);
               await page.route('**/api/session-transcript?**', unavailableTranscript);
-              await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2]);
+              await page.goto(address[1] + '/session/local/a-docs?t=' + address[2]);
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               await page
@@ -574,7 +574,7 @@ test(
               );
               // Drain active async routes before navigation so no handler races its response.
               await page.unrouteAll({ behavior: 'wait' });
-              await page.goto(address[1] + '/s/claude/a-review?t=' + address[2]);
+              await page.goto(address[1] + '/session/local/a-review?t=' + address[2]);
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
@@ -595,7 +595,7 @@ test(
               await page.route('**/api/sessions?**', withoutCatalogSelected);
               sawUnavailableStatus = false;
               await page.route('**/api/session-transcript?**', unavailableTranscript);
-              await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+              await page.goto(address[1] + '/?t=' + address[2]);
               await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
               await ingestRecent.waitFor({ state: 'visible' });
               await ingestRecent
@@ -635,7 +635,7 @@ test(
               await page.evaluate((path) => {
                 history.pushState(history.state, '', path);
                 window.dispatchEvent(new PopStateEvent('popstate'));
-              }, '/s/claude/a-docs');
+              }, '/session/local/a-docs');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               assert.equal(
@@ -671,7 +671,7 @@ test(
                 'a newly selected child leads a retained Recent ordering scope',
               );
               await page.unrouteAll({ behavior: 'wait' });
-              await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+              await page.goto(address[1] + '/?t=' + address[2]);
               await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             }
             if (width === 1280) {
@@ -721,28 +721,19 @@ test(
               (await page.locator('#lanes .tree-group .treeitem').count()) > 0,
               'resolved ancestry remains nested',
             );
-            assert.equal(new URL(page.url()).searchParams.has('compat'), false);
             await screenshot('root-sessions');
             // The removed Home Trace button is replaced by the retained native
             // Trace bookmark for the same exact source/session/recorded turn.
             const traceTurn = question.turn ?? waiting.event.turn;
             assert.ok(traceTurn, 'the qualified question identifies its recorded turn');
             const tracePath =
-              '/trace/' +
-              encodeURIComponent(waiting.session.harness) +
+              '/session/' +
+              encodeURIComponent(waiting.source_key) +
               '/' +
               encodeURIComponent(waiting.catalog_key) +
-              '/' +
+              '/trace/' +
               encodeURIComponent(traceTurn);
-            await page.goto(
-              address[1] +
-                tracePath +
-                '?' +
-                new URLSearchParams({
-                  t: address[2],
-                  machine: waiting.source_key,
-                }),
-            );
+            await page.goto(address[1] + tracePath + '?t=' + address[2]);
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
             assert.equal(typeof waiting.event.turn, 'string');
@@ -836,9 +827,6 @@ test(
               /Morning sweep/,
               'machine prompt preview uses selected native evidence',
             );
-            const nativeMachine = await page.request.get(page.url() + '&native=1');
-            assert.equal(nativeMachine.status(), 200, 'native machine bookmark reloads');
-            assert.match(await nativeMachine.text(), /Principal.*All sessions/s);
             await screenshot('machine');
             await page.getByRole('button', { name: 'Back to Machines', exact: true }).click();
             await page.locator('#page h1').filter({ hasText: 'Machines' }).waitFor();

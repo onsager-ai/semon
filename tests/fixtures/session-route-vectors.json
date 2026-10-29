@@ -722,9 +722,9 @@
     "canonical": "/session/alpha/same?all_machines=1&harness=codex&model=m&q=a%2Bb&repo=a%2Fb"
   },
   {
-    "name": "native paging",
+    "name": "paging",
     "path": "/session/alpha/same",
-    "query": "native=1&after=60&generation=g&field_chunk=2",
+    "query": "after=60&generation=g&field_chunk=2",
     "outcome": "valid",
     "candidates": [
       {
@@ -738,12 +738,12 @@
         "harness": "codex"
       }
     ],
-    "canonical": "/session/alpha/same?after=60&field_chunk=2&generation=g&native=1"
+    "canonical": "/session/alpha/same?after=60&field_chunk=2&generation=g"
   },
   {
-    "name": "native expansion",
+    "name": "expansion",
     "path": "/session/alpha/same",
-    "query": "native=1&after=0&generation=g&part=output",
+    "query": "after=0&generation=g&part=output",
     "outcome": "valid",
     "candidates": [
       {
@@ -757,329 +757,7 @@
         "harness": "codex"
       }
     ],
-    "canonical": "/session/alpha/same?after=0&generation=g&native=1&part=output"
-  },
-  {
-    "name": "legacy native",
-    "path": "/s/native/same",
-    "query": "machine=alpha",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ],
-    "canonical": "/session/alpha/same"
-  },
-  {
-    "name": "legacy claude",
-    "path": "/s/claude/same",
-    "query": "machine=alpha",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ],
-    "canonical": "/session/alpha/same"
-  },
-  {
-    "name": "legacy codex",
-    "path": "/s/codex/same",
-    "query": "machine=alpha",
-    "outcome": "mismatch",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ]
-  },
-  {
-    "name": "legacy ambiguous",
-    "path": "/s/native/same",
-    "query": "",
-    "outcome": "ambiguous",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ]
-  },
-  {
-    "name": "legacy unique",
-    "path": "/s/claude/same",
-    "query": "",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      }
-    ],
-    "canonical": "/session/alpha/same"
-  },
-  {
-    "name": "legacy missing",
-    "path": "/s/native/absent",
-    "query": "",
-    "outcome": "not_found",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ]
-  },
-  {
-    "name": "legacy trace",
-    "path": "/trace/native/same/turn%2Bone",
-    "query": "machine=alpha&native=1",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ],
-    "canonical": "/session/alpha/same/trace/turn%2Bone?native=1"
-  },
-  {
-    "name": "missing harness slot",
-    "path": "/s//same",
-    "query": "machine=alpha",
-    "outcome": "malformed",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ]
-  },
-  {
-    "name": "duplicate source",
-    "path": "/s/native/same",
-    "query": "machine=alpha&machine=beta",
-    "outcome": "malformed",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "same",
-        "harness": "codex"
-      }
-    ]
-  },
-  {
-    "name": "legacy query turn anchor",
-    "path": "/s/native/same",
-    "query": "machine=alpha&turn=turn%2Bone",
-    "outcome": "valid",
-    "canonical": "/session/alpha/same#turn%2Bone",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "same",
-        "harness": "claude"
-      }
-    ]
-  },
-  {
-    "name": "/s/copilot/real%2Fkey valid indexed=False",
-    "path": "/s/copilot/real%2Fkey",
-    "query": "",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": false,
-    "canonical": "/session/alpha/real%2Fkey"
-  },
-  {
-    "name": "/trace/copilot/real%2Fkey/turn valid indexed=False",
-    "path": "/trace/copilot/real%2Fkey/turn",
-    "query": "",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": false,
-    "canonical": "/session/alpha/real%2Fkey/trace/turn"
-  },
-  {
-    "name": "/s/copilot/real%2Fkey mismatch indexed=False",
-    "path": "/s/copilot/real%2Fkey",
-    "query": "",
-    "outcome": "mismatch",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "claude"
-      }
-    ],
-    "indexed_bookmark": false
-  },
-  {
-    "name": "/s/copilot/real%2Fkey ambiguous indexed=False",
-    "path": "/s/copilot/real%2Fkey",
-    "query": "",
-    "outcome": "ambiguous",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      },
-      {
-        "source_key": "beta",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": false
-  },
-  {
-    "name": "/s/native/unsent%3Atarget valid indexed=True",
-    "path": "/s/native/unsent%3Atarget",
-    "query": "",
-    "outcome": "valid",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": true,
-    "canonical": "/session/alpha/real%2Fkey"
-  },
-  {
-    "name": "/s/native/unsent%3Atarget ambiguous indexed=True",
-    "path": "/s/native/unsent%3Atarget",
-    "query": "",
-    "outcome": "ambiguous",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      },
-      {
-        "source_key": "alpha",
-        "catalog_key": "another",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": true
-  },
-  {
-    "name": "/s/native/unsent%3Atarget not_found indexed=True",
-    "path": "/s/native/unsent%3Atarget",
-    "query": "",
-    "outcome": "not_found",
-    "candidates": [],
-    "indexed_bookmark": true
-  },
-  {
-    "name": "/s/claude/unsent%3Atarget mismatch indexed=True",
-    "path": "/s/claude/unsent%3Atarget",
-    "query": "",
-    "outcome": "mismatch",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": true
-  },
-  {
-    "name": "/session/alpha/unsent%3Atarget not_found indexed=True",
-    "path": "/session/alpha/unsent%3Atarget",
-    "query": "",
-    "outcome": "not_found",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": true
-  },
-  {
-    "name": "/s/native/arbitrary-native-id not_found indexed=True",
-    "path": "/s/native/arbitrary-native-id",
-    "query": "",
-    "outcome": "not_found",
-    "candidates": [
-      {
-        "source_key": "alpha",
-        "catalog_key": "real/key",
-        "harness": "copilot"
-      }
-    ],
-    "indexed_bookmark": true
+    "canonical": "/session/alpha/same?after=0&generation=g&part=output"
   },
   {
     "name": "transport credential rejected /session/alpha/real%2Fkey",
@@ -1089,10 +767,42 @@
     "candidates": []
   },
   {
-    "name": "transport credential rejected /s/copilot/real%2Fkey",
-    "path": "/s/copilot/real%2Fkey",
-    "query": "t=secret",
+    "name": "retired native flag",
+    "path": "/session/alpha/same",
+    "query": "native=1",
     "outcome": "malformed",
     "candidates": []
+  },
+  {
+    "name": "retired legacy session path",
+    "path": "/s/claude/same",
+    "query": "machine=alpha",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "retired legacy trace path",
+    "path": "/trace/claude/same/turn",
+    "query": "machine=alpha",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "duplicate candidate",
+    "path": "/session/alpha/same",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      }
+    ]
   }
 ]

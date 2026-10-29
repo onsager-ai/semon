@@ -97,8 +97,8 @@ cannot be rebuilt, and old archive markers do not become new custody authority.
   during remote I/O and unrelated restoration, coalesce duplicate reads and bound
   cache admission. Unavailable, incomplete and stale evidence fails explicitly.
 - Native Home/recent, navigation/tree, timeline/analytics, machine/runtime,
-  transcript expansion, embedded and native/no-JavaScript consumers retain their
-  behavior. Full-workspace Model ownership/routes, transaction/delta/SSE, compat=1
+  transcript expansion and embedded consumers retain their behavior. The
+  server-rendered no-JavaScript session reader and its legacy URL aliases are retired. Full-workspace Model ownership/routes, transaction/delta/SSE, compat=1
   and warming are retired. Preserve structural and consumer regression evidence.
 - Preserve session names, selection/navigation, the paused control boundary, tool
   rendering, collapsed Thinking, scroll/focus, responsive/accessibility behavior

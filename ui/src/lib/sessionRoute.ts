@@ -1,10 +1,8 @@
 /** Public addresses bind source and Catalog key. Harness/native IDs are provenance. */
 export interface SessionRoute {
-  source: string | null;
+  source: string;
   key: string;
   turn: string | null;
-  legacyHarness: string | null;
-  anchor: string | null;
   controls: URLSearchParams;
 }
 export interface SessionCandidate {
@@ -23,24 +21,15 @@ export const routeSegment = (value: string) =>
     /[!'()*]/g,
     (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
   );
-/** Read canonical anchors and the former query-shaped spelling strictly. */
+/** Read the canonical transcript anchor fragment strictly. */
 export function sessionHashTurn(hash: string) {
   if (!hash.startsWith('#')) return undefined;
   try {
-    const legacy = hash.startsWith('#turn=');
-    const raw = hash.slice(legacy ? 6 : 1);
-    if (legacy && raw.includes('&')) return undefined;
-    const turn = decodeURIComponent(legacy ? raw.replace(/\+/g, ' ') : raw);
+    const turn = decodeURIComponent(hash.slice(1));
     return identifier(turn) ? turn : undefined;
   } catch {
     return undefined;
   }
-}
-/** Canonicalize the former query-shaped turn fragment without changing its ID. */
-export function canonicalSessionHash(hash: string) {
-  if (!hash.startsWith('#turn=')) return hash;
-  const turn = sessionHashTurn(hash);
-  return turn ? '#' + routeSegment(turn) : hash;
 }
 export const sessionPath = (source: string, key: string) =>
   '/session/' + routeSegment(source) + '/' + routeSegment(key);
@@ -54,49 +43,26 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
     return fail();
   const parts = path.slice(1).split('/').map(decodeURIComponent);
   if (parts.some((part) => !identifier(part))) return fail();
-  let source: string | null = null,
-    key: string,
-    turn: string | null = null,
-    legacyHarness: string | null = null;
   if (
-    parts[0] === 'session' &&
-    (parts.length === 3 || (parts.length === 5 && parts[3] === 'trace'))
-  ) {
-    source = parts[1];
-    key = parts[2];
+    parts[0] !== 'session' ||
+    !(parts.length === 3 || (parts.length === 5 && parts[3] === 'trace'))
+  )
+    return fail();
+  const source = parts[1],
+    key = parts[2],
     turn = parts[4] ?? null;
-  } else if (
-    (parts[0] === 's' && parts.length === 3) ||
-    (parts[0] === 'trace' && parts.length === 4)
-  ) {
-    if (!['native', 'codex', 'claude', 'copilot'].includes(parts[1])) return fail();
-    legacyHarness = parts[1];
-    key = parts[2];
-    turn = parts[3] ?? null;
-  } else return fail();
   const controls = new URLSearchParams();
-  let anchor: string | null = null;
   for (const pair of query.replace(/^\?/, '').split('&').filter(Boolean)) {
     const equal = pair.indexOf('=');
     const name = decodeURIComponent((equal < 0 ? pair : pair.slice(0, equal)).replace(/\+/g, ' '));
     const value = decodeURIComponent((equal < 0 ? '' : pair.slice(equal + 1)).replace(/\+/g, ' '));
     if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return fail();
-    if (name === 'machine' && legacyHarness) {
-      if (source !== null || !identifier(value)) return fail();
-      source = value;
-      continue;
-    }
-    if (name === 'turn' && legacyHarness && !turn) {
-      if (anchor !== null || !identifier(value)) return fail();
-      anchor = value;
-      continue;
-    }
     const valid =
       name === 'harness'
         ? ['', 'codex', 'claude', 'copilot'].includes(value)
         : ['repo', 'model', 'q'].includes(name)
           ? new TextEncoder().encode(value).length <= 4096
-          : ['no_repo', 'all_machines', 'native'].includes(name)
+          : ['no_repo', 'all_machines'].includes(name)
             ? value === '1'
             : ['after', 'field_chunk'].includes(name)
               ? /^\d+$/.test(value) && Number.isSafeInteger(Number(value))
@@ -120,7 +86,7 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
   )
     return fail();
   controls.sort();
-  return { source, key, turn, legacyHarness, anchor, controls };
+  return { source, key, turn, controls };
 }
 export function canonicalSessionRoute(route: SessionRoute, source: string, key: string) {
   const query = [...route.controls]
@@ -128,44 +94,17 @@ export function canonicalSessionRoute(route: SessionRoute, source: string, key: 
     .join('&');
   return (
     (route.turn ? tracePath(source, key, route.turn) : sessionPath(source, key)) +
-    (query ? '?' + query : '') +
-    (route.anchor ? '#' + routeSegment(route.anchor) : '')
+    (query ? '?' + query : '')
   );
 }
 export function resolveSessionRoute(
   route: SessionRoute,
   candidates: readonly SessionCandidate[],
-):
-  | { outcome: 'valid'; candidate: SessionCandidate }
-  | { outcome: 'not_found' | 'ambiguous' | 'mismatch' } {
+): { outcome: 'valid'; candidate: SessionCandidate } | { outcome: 'not_found' | 'ambiguous' } {
   const matches = candidates.filter(
-    (candidate) =>
-      candidate.catalog_key === route.key &&
-      (!route.source || route.source === candidate.source_key),
+    (candidate) => candidate.catalog_key === route.key && route.source === candidate.source_key,
   );
   if (!matches.length) return { outcome: 'not_found' };
   if (matches.length > 1) return { outcome: 'ambiguous' };
-  const candidate = matches[0];
-  if (
-    route.legacyHarness &&
-    route.legacyHarness !== 'native' &&
-    route.legacyHarness !== candidate.harness
-  )
-    return { outcome: 'mismatch' };
-  return { outcome: 'valid', candidate };
-}
-
-/** Only authorized complete session-locate index results may use this compatibility path. */
-export function resolveSessionBookmark(
-  route: SessionRoute,
-  candidates: readonly SessionCandidate[],
-) {
-  if (route.legacyHarness && route.key.startsWith('unsent:')) {
-    const mapped = candidates.map((candidate) => ({ ...candidate, catalog_key: '' }));
-    const result = resolveSessionRoute({ ...route, key: '' }, mapped);
-    if (result.outcome === 'valid')
-      return { outcome: 'valid' as const, candidate: candidates[mapped.indexOf(result.candidate)] };
-    return result;
-  }
-  return resolveSessionRoute(route, candidates);
+  return { outcome: 'valid', candidate: matches[0] };
 }

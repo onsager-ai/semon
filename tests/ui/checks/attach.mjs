@@ -144,7 +144,11 @@ export default async function attachCheck(browser) {
 
   // ---- The API: references in the page JSON, bytes by reference, validation -------------------------------------------
   {
-    const page = await served(browser, { extras: true, size: 'desktop', path: '/s/claude/' + SID });
+    const page = await served(browser, {
+      extras: true,
+      size: 'desktop',
+      path: '/session/local/' + SID,
+    });
     await page.waitForFunction(() => document.querySelectorAll('button.attach').length === 4);
     const api = await page.evaluate(attachmentApi, SID);
     R.api = api;
@@ -212,7 +216,7 @@ export default async function attachCheck(browser) {
     ['desktop', true],
   ]) {
     const tag = (size === 'phone' ? '390' : '1280') + '-' + (dark ? 'dark' : 'light');
-    const page = await served(browser, { extras: true, size, dark, path: '/s/claude/' + SID });
+    const page = await served(browser, { extras: true, size, dark, path: '/session/local/' + SID });
     // Nothing moves as the thumbnails load: with every image held back, each button's box is already the one it keeps.
     let release;
     const gate = new Promise((done) => {

@@ -291,23 +291,6 @@ pub struct ViewerReply {
 }
 
 impl ViewerReply {
-    /// Redirects carry their same-origin canonical target as their plain body.
-    /// HTTP adapters must forward it as Location, including for no-JS clients.
-    pub fn redirect(location: String) -> Self {
-        Self {
-            status: 308,
-            content_type: "text/plain; charset=utf-8",
-            body: location.into_bytes(),
-            etag: None,
-        }
-    }
-
-    pub fn redirect_location(&self) -> Option<&str> {
-        (self.status == 308)
-            .then(|| std::str::from_utf8(&self.body).ok())
-            .flatten()
-    }
-
     /// The headers to send with this reply besides `Content-Type` and
     /// `ETag`: [`SECURITY_HEADERS`], except for an attachment's image (a 200
     /// whose type is one of the four native selected image types,
@@ -486,11 +469,7 @@ fn header(name: &str, value: &str) -> Header {
 
 fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let headers = reply.headers();
-    let location = reply.redirect_location().map(str::to_owned);
     let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
-    if let Some(location) = location {
-        response.add_header(header("Location", &location));
-    }
     if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }
@@ -1533,9 +1512,7 @@ impl MachineView {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
-            "/" | "/timeline" | "/analytics" | "/sessions" | "/machines" => {
-                Ok((200, html, PAGE.into()))
-            }
+            "/" | "/analytics" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -1602,10 +1579,9 @@ impl MachineView {
     }
 }
 
-/// Whether `path` is a page URL that names something: `/machines/<id>`,
-/// `/s/<harness>/<id>` or `/trace/<harness>/<id>/<turn>`, by its prefix.
+/// Whether `path` is a page URL that names something: `/machines/<id>`, by its prefix.
 pub(crate) fn is_named_page(path: &str) -> bool {
-    path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")
+    path.starts_with("/machines/")
 }
 
 /// A page URL's path segments, decoded; `None` when one doesn't decode.
@@ -1894,88 +1870,6 @@ mod tests {
     }
 
     #[test]
-    fn native_html_uses_selected_history_without_showing_a_workspace_model() {
-        let fixture = Fixture::new();
-        fixture.claude("native-html", &[
-            json!({"type":"user","sessionId":"native-html","uuid":"u","origin":{"kind":"human"},"timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"<script>private prompt</script>"}}),
-            json!({"type":"assistant","sessionId":"native-html","uuid":"a","timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"collapsed reasoning"},{"type":"tool_use","id":"read-call","name":"Read","input":{"file_path":"safe-file.txt"}}]}}),
-            json!({"type":"user","sessionId":"native-html","uuid":"result","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-call","content":"native tool output"}]}}),
-        ]);
-        let core = ViewerCore::new(fixture.options.clone());
-        core.demand_catalog_source("local").unwrap();
-        eventually("native HTML fixture publication", || {
-            let reply = core.respond("GET", "/api/sessions", "limit=60", None);
-            let page: Value = serde_json::from_slice(&reply.body).ok()?;
-            (reply.status == 200 && page["completeness"]["state"] == "complete").then_some(())
-        });
-        let listing = core.respond("GET", "/sessions", "native=1", None);
-        assert_eq!(listing.status, 200);
-        let listing = String::from_utf8(listing.body).unwrap();
-        assert!(listing.contains("/session/local/native-html?native=1"));
-        assert_eq!(
-            core.respond("GET", "/machines/local", "machine=local", None)
-                .status,
-            200
-        );
-        let machine = core.respond("GET", "/machines/local", "native=1&machine=local", None);
-        assert_eq!(machine.status, 200);
-        let machine = String::from_utf8(machine.body).unwrap();
-        assert!(machine.contains("native-html") && machine.contains("All sessions"));
-        assert_eq!(
-            core.respond("GET", "/machines/local", "native=1&machine=foreign", None)
-                .status,
-            400
-        );
-        assert_eq!(
-            core.respond("GET", "/machines/foreign", "native=1", None)
-                .status,
-            404
-        );
-        let selected = core.respond("GET", "/session/local/native-html", "native=1", None);
-        assert_eq!(selected.status, 200);
-        let html = String::from_utf8(selected.body).unwrap();
-        assert!(
-            html.contains("&lt;script&gt;private prompt&lt;/script&gt;"),
-            "{html}"
-        );
-        assert!(html.contains("<summary>Thinking</summary>"), "{html}");
-        assert!(html.contains("<summary>Read</summary>"), "{html}");
-        assert!(html.contains("native tool output"), "{html}");
-        assert!(!html.contains("<script") && !html.contains("secret-bootstrap"));
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/s/codex/native-html",
-                "native=1&machine=local",
-                None
-            )
-            .status,
-            404
-        );
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/sessions",
-                "native=1&machine=local&machine=local",
-                None
-            )
-            .status,
-            400
-        );
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/session/local/native-html",
-                "native=1&after=0&generation=obsolete",
-                None
-            )
-            .status,
-            409
-        );
-        core.close();
-    }
-
-    #[test]
     fn http_session_bootstrap_is_consumed_before_routing() {
         let fixture = Fixture::new();
         fixture.claude("bootstrap-session", &[
@@ -1985,7 +1879,7 @@ mod tests {
         let cold = http_with_publication(
             &fixture,
             &format!(
-                "GET /s/claude/bootstrap-session?machine=local&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
+                "GET /session/local/bootstrap-session?t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
             ),
             None,
             true,
@@ -2007,55 +1901,16 @@ mod tests {
                 );
             }
         }
-
-        for path in [
-            format!("/s/claude/bootstrap-session?machine=local&t={token}"),
-            format!("/s/claude/bootstrap-session?t={token}&native=1"),
-        ] {
-            let wire = http_with_publication(
-                &fixture,
-                &format!(
-                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
-                ),
-                Some("bootstrap-session"),
-                false,
-            );
-            assert!(wire.starts_with("HTTP/1.1 308"), "{wire}");
-            let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
-            assert!(!body.contains(token), "credential leaked into content");
-            let cookie = headers
-                .lines()
-                .find(|line| line.starts_with("Set-Cookie:"))
-                .unwrap();
-            assert!(cookie.contains(token), "{cookie}");
-            for header in headers.lines().skip(1) {
-                if !header.starts_with("Set-Cookie:") {
-                    assert!(
-                        !header.contains(token),
-                        "credential leaked into header: {header}"
-                    );
-                }
-            }
-            let location = headers
-                .lines()
-                .find(|line| line.starts_with("Location:"))
-                .unwrap();
-            assert!(
-                location.contains("/session/local/bootstrap-session"),
-                "{location}"
-            );
-            assert!(!location.contains("t="), "{location}");
-        }
         let continuation = http_with_publication(
             &fixture,
             &format!(
-                "GET /session/local/bootstrap-session?native=1 HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
+                "GET /session/local/bootstrap-session HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
             ),
             Some("bootstrap-session"),
             false,
         );
         assert!(continuation.starts_with("HTTP/1.1 200"), "{continuation}");
-        assert!(continuation.contains("Bootstrap transcript"));
+        assert!(continuation.contains("<!doctype html") || continuation.contains("<!DOCTYPE html"));
         for query in [
             "t=invalid".to_owned(),
             format!("t={token}&t={token}"),
@@ -2098,37 +1953,6 @@ mod tests {
     }
 
     #[test]
-    fn cold_native_session_retry_observes_source_without_javascript() {
-        let fixture = Fixture::new();
-        fixture.claude(
-            "readiness",
-            &[json!({
-                "type":"user",
-                "sessionId":"readiness",
-                "uuid":"u",
-                "timestamp":"2026-10-01T00:00:00Z",
-                "message":{"role":"user","content":"Cold native observation"}
-            })],
-        );
-        let core = ViewerCore::new(fixture.options.clone());
-        let view = core.machine_views().into_iter().next().unwrap();
-        let work = view.evidence.work.lock().unwrap();
-        let unavailable = core.respond("GET", "/session/local/readiness", "native=1", None);
-        assert_eq!(unavailable.status, 503);
-        assert!(unavailable.content_type.starts_with("text/html"));
-        let unavailable = String::from_utf8(unavailable.body).unwrap();
-        assert!(unavailable.contains("The recorded session index is updating."));
-        assert!(unavailable.contains("href=\"/session/local/readiness?native=1\""));
-        drop(work);
-        eventually("direct native session retry", || {
-            let reply = core.respond("GET", "/session/local/readiness", "native=1", None);
-            let body = String::from_utf8_lossy(&reply.body);
-            (reply.status == 200 && body.contains("Cold native observation")).then_some(())
-        });
-        core.close();
-    }
-
-    #[test]
     fn http_guards_and_headers() {
         let fixture = Fixture::new();
         let token = "0123456789abcdef0123456789abcdef";
@@ -2137,7 +1961,7 @@ mod tests {
             &format!("GET /?t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"),
         );
         assert!(good.starts_with("HTTP/1.1 200"));
-        assert!(good.contains("Open native session history"));
+        assert!(good.contains("JavaScript is required"));
         for header in [
             "Cache-Control: no-store",
             "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
@@ -2741,7 +2565,7 @@ mod tests {
             .to_owned();
         for path in [
             "/".to_owned(),
-            "/timeline".into(),
+            "/analytics".into(),
             "/sessions".into(),
             "/machines".into(),
             "/machines/testbox".into(),
@@ -2759,35 +2583,12 @@ mod tests {
                 assert!(wire.contains(header), "{path}: missing {header}");
             }
         }
-        for (legacy, canonical) in [
-            (
-                "/s/claude/lane".to_owned(),
-                "/session/local/lane".to_owned(),
-            ),
-            (
-                format!("/s/claude/lane?turn={turn}"),
-                format!("/session/local/lane#{turn}"),
-            ),
-            (
-                format!("/trace/claude/lane/{turn}"),
-                format!("/session/local/lane/trace/{turn}"),
-            ),
-        ] {
-            let wire = get(&fixture, &legacy);
-            assert!(wire.starts_with("HTTP/1.1 308"), "{legacy}: {wire}");
-            assert!(
-                wire.contains(&format!("Location: {canonical}\r\n")),
-                "{wire}"
-            );
-        }
-        let wire = get(&fixture, "/s/claude/lane/more");
-        assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
         for path in [
             "/machines/elsewhere",
+            "/s/claude/lane",
             "/s/claude/nobody",
-            "/s/codex/lane",
             "/trace/claude/lane/no-such-turn",
-            "/trace/claude/nobody/x",
+            "/timeline",
             "/fonts/nope.woff2",
             "/elsewhere",
         ] {
@@ -2801,7 +2602,7 @@ mod tests {
         assert!(
             http(
                 &fixture,
-                "GET /timeline HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
+                "GET /analytics HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
             )
             .starts_with("HTTP/1.1 403")
         );
@@ -3866,7 +3667,7 @@ mod tests {
         let fixture = lane_fixture();
         let core = ViewerCore::new(fixture.options.clone());
         publish_native(&core.machine_views()[0]);
-        let page = core.respond("GET", "/timeline", "", None);
+        let page = core.respond("GET", "/analytics", "", None);
         assert_eq!(
             (
                 page.status,
@@ -3925,7 +3726,7 @@ mod tests {
             assert_eq!(refused.status, 405, "{method}");
         }
         // The loopback server sends exactly these, and the same body.
-        let wire = get(&fixture, "/timeline");
+        let wire = get(&fixture, "/analytics");
         assert!(wire.ends_with(PAGE));
         for (name, value) in SECURITY_HEADERS {
             assert!(wire.contains(&format!("{name}: {value}")), "{name}");
@@ -3955,7 +3756,6 @@ mod tests {
 
         let paths = [
             "/".to_owned(),
-            "/timeline".into(),
             "/analytics".into(),
             "/sessions".into(),
             "/machines".into(),
@@ -3971,8 +3771,11 @@ mod tests {
         }
 
         // The predicate checks dynamic route shapes without querying the model.
-        assert!(crate::shell::is_page_path("/s/claude/not-in-model"));
+        assert!(crate::shell::is_page_path("/machines/not-in-model"));
         for path in [
+            "/timeline",
+            "/s/claude/not-in-model",
+            "/trace/claude/not-in-model/turn",
             "/api/model",
             "/api/analytics",
             "/viewer.js",
@@ -4696,10 +4499,8 @@ mod tests {
             (&embedded, "some-key"),
             (&background, "some-key"),
         ] {
-            let legacy = core.respond("GET", "/s/claude/lane", "", None);
-            assert_eq!(legacy.status, 308);
+            assert_eq!(core.respond("GET", "/s/claude/lane", "", None).status, 404);
             let canonical = format!("/session/{source}/lane");
-            assert_eq!(legacy.redirect_location(), Some(canonical.as_str()));
             let page = core.respond("GET", &canonical, "", None);
             assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
         }
@@ -4886,7 +4687,7 @@ mod tests {
             ("/machines/alpha", 200),
             ("/machines/bravo", 200),
             ("/machines/gamma", 404),
-            ("/timeline", 200),
+            ("/timeline", 404),
             ("/analytics", 200),
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, status, "{path}");
@@ -4926,11 +4727,11 @@ mod tests {
             assert_eq!(body_of(&selected)["identity"]["source_key"], source);
             assert!(String::from_utf8_lossy(&selected.body).contains(&format!("done on {name}")));
         }
-        let chooser = core.respond("GET", "/s/claude/same", "", None);
-        assert_eq!(chooser.status, 200);
-        let chooser = String::from_utf8(chooser.body).unwrap();
-        assert!(chooser.contains("/session/a/same") && chooser.contains("/session/b/same"));
-        assert!(!chooser.contains("done on"));
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
+        for source in ["a", "b"] {
+            let page = core.respond("GET", &format!("/session/{source}/same"), "", None);
+            assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
+        }
         let analytics = analytics_of(&core, "range=7d");
         assert_eq!(
             analytics["machine_labels"],
@@ -5568,11 +5369,9 @@ mod tests {
                 "{path}"
             );
         }
-        let legacy = core.respond("GET", "/s/claude/lane-alpha", "", None);
-        assert_eq!(legacy.status, 308);
         assert_eq!(
-            legacy.redirect_location(),
-            Some("/session/alpha/lane-alpha")
+            core.respond("GET", "/s/claude/lane-alpha", "", None).status,
+            404
         );
         assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
         // DIR is only read.
@@ -5849,7 +5648,7 @@ mod tests {
             .collect();
         assert_eq!(same.len(), 1);
         assert_eq!(same[0]["machine"], "home");
-        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 200);
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
     }
 
     #[test]
@@ -7590,11 +7389,6 @@ mod tests {
         view.set_refresh(Refresh::Background);
         let (starts, release) = view.hooks.hold();
         let observing = lock(&view.evidence.work);
-        let native_view = view.clone();
-        let native_page = at_once("cold native page", move || {
-            ViewerCore::with_test_view(native_view).respond("GET", "/sessions", "native=1", None)
-        });
-        assert_eq!(native_page.status, 503);
         let (wait_started_send, wait_started_receive) = mpsc::channel();
         let (first_send, first_receive) = mpsc::channel();
         let reader = view.clone();
@@ -7796,13 +7590,11 @@ mod tests {
         for path in [
             "/s/claude/missing",
             "/s/codex/lane-a",
-            "/s/claude/lane-b@unconfigured",
             "/machines/missing",
             "/trace/claude/lane-a/missing-turn",
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
         }
-        assert_eq!(core.respond("GET", "/s/claude/%FF", "", None).status, 400);
         assert_eq!(
             core.respond("GET", "/session/a/lane-a/extra", "", None)
                 .status,
@@ -7827,11 +7619,6 @@ mod tests {
             (during.status, during.body.as_slice()),
             (200, PAGE.as_bytes())
         );
-        let retry = core.respond("GET", "/session/a/brand-new", "native=1", None);
-        assert_eq!(retry.status, 503);
-        let html = String::from_utf8(retry.body).unwrap();
-        assert!(html.contains("The recorded session index is updating."));
-        assert!(html.contains("href=\"/session/a/brand-new?native=1\""));
         drop(observing);
         core.close();
     }
@@ -7859,13 +7646,10 @@ mod tests {
             assert_eq!(reply.body, PAGE.as_bytes(), "{path}");
         };
         // No model yet: every page is the shell, and nothing is read.
-        for path in ["/", "/timeline", "/machines/testbox"] {
+        for path in ["/", "/analytics", "/machines/testbox"] {
             page(path);
         }
         page("/session/local/lane");
-        let retry = core.respond("GET", "/session/local/lane", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
         let api =
             crate::session_transcript_range(&fixture.options, "local", "sid=lane&limit=100", None);
         assert_eq!(api.status, 503);
@@ -7887,7 +7671,7 @@ mod tests {
             "/session/local/lane".to_owned(),
             "/machines/testbox".into(),
             format!("/session/local/lane/trace/{turn}"),
-            "/timeline".into(),
+            "/analytics".into(),
         ] {
             page(&path);
         }
@@ -7922,7 +7706,12 @@ mod tests {
             "an API read refreshed first"
         );
         // A URL the built model lacks: checked against a fresh one, 404.
-        for path in ["/s/claude/nobody", "/machines/elsewhere", "/s/codex/lane"] {
+        for path in [
+            "/s/claude/nobody",
+            "/machines/elsewhere",
+            "/s/codex/lane",
+            "/timeline",
+        ] {
             assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
         }
         core.close();
@@ -7954,9 +7743,6 @@ mod tests {
         };
         shell("/machines/alpha");
         shell("/session/b/lane-b");
-        let retry = core.respond("GET", "/session/b/lane-b", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
         let api =
             crate::session_transcript_range(&bravo.options, "b", "sid=lane-b&limit=100", None);
         assert_eq!(api.status, 503);
@@ -8025,9 +7811,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the warm builds");
 
+        let source = if key.is_empty() { "local" } else { key };
         let page = {
             let core = core.clone();
-            thread::spawn(move || core.respond("GET", "/s/claude/brand-new", "", None))
+            let path = format!("/session/{source}/brand-new");
+            thread::spawn(move || core.respond("GET", &path, "", None))
         };
         thread::sleep(Duration::from_millis(300));
         assert!(
@@ -8036,11 +7824,6 @@ mod tests {
         );
         let page = page.join().expect("the page request panicked");
         assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
-        let retry = core.respond("GET", "/s/claude/brand-new", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
-        // The last complete publication cannot prove a newly written key absent
-        // while its producer is held. Native reads must retain that retry state.
         drop(release);
         let published = warming.join().expect("native publication panicked");
         assert!(
@@ -8051,7 +7834,7 @@ mod tests {
                 .any(|item| item["key"] == "brand-new")
         );
         assert_eq!(
-            core.respond("GET", "/s/claude/not-even-new", "", None)
+            core.respond("GET", &format!("/session/{source}/not-even-new"), "", None)
                 .status,
             404
         );

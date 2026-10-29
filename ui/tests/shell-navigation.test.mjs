@@ -14,8 +14,8 @@ const { projectShellNavigation, parseShellNavigation, withReturnPath } = await i
 const input = () => ({
   leading: [{ key: 'new-session', label: 'New session', icon: 'M4 4h16', href: '/sessions/new' }],
   paths: {
-    sessions: '/sessions?compat=1',
-    analytics: '/analytics?compat=1',
+    sessions: '/sessions',
+    analytics: '/analytics',
     machines: '/machines',
   },
   trailing: [
@@ -46,8 +46,8 @@ test('all entry paths share destination order; selected context only changes the
       ['new-session', 'sessions', 'analytics', 'machines', 'runtime-pending'],
     );
     assert.equal(rows.find((row) => row.current)?.key, active);
-    assert.equal(rows[1].href, '/sessions?compat=1');
-    assert.equal(rows[2].href, '/analytics?compat=1');
+    assert.equal(rows[1].href, '/sessions');
+    assert.equal(rows[2].href, '/analytics');
     assert(rows.every((row) => row.count === undefined));
   }
   const rows = projectShellNavigation(policy, 'session', {
@@ -69,7 +69,7 @@ test('host navigation cannot replace core identity or accept unsafe destinations
   assert.equal(parseShellNavigation(repeated), undefined);
 });
 test('return paths retain machine/filter context and refuse foreign navigation', () => {
-  globalThis.location = { href: 'https://viewer.test/s/codex/session?machine=one' };
+  globalThis.location = { href: 'https://viewer.test/session/one/session' };
   const url = new URL(
     withReturnPath('/sessions/new', '/sessions?machine=one&q=retained#position'),
     location.href,

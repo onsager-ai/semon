@@ -4,11 +4,9 @@ use std::{collections::BTreeMap, io};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRoute {
-    pub source: Option<String>,
+    pub source: String,
     pub key: String,
     pub turn: Option<String>,
-    pub legacy_harness: Option<String>,
-    pub anchor: Option<String>,
     pub controls: BTreeMap<String, String>,
 }
 
@@ -66,29 +64,15 @@ impl SessionRoute {
             return Err(malformed());
         }
         let strings: Vec<_> = parts.iter().map(String::as_str).collect();
-        let (source, key, turn, legacy) = match strings.as_slice() {
-            ["session", source, key] => (Some((*source).into()), *key, None, None),
-            ["session", source, key, "trace", turn] => {
-                (Some((*source).into()), *key, Some((*turn).into()), None)
-            }
-            ["s", harness, key]
-                if matches!(*harness, "native" | "codex" | "claude" | "copilot") =>
-            {
-                (None, *key, None, Some((*harness).into()))
-            }
-            ["trace", harness, key, turn]
-                if matches!(*harness, "native" | "codex" | "claude" | "copilot") =>
-            {
-                (None, *key, Some((*turn).into()), Some((*harness).into()))
-            }
+        let (source, key, turn) = match strings.as_slice() {
+            ["session", source, key] => (*source, *key, None),
+            ["session", source, key, "trace", turn] => (*source, *key, Some((*turn).into())),
             _ => return Err(malformed()),
         };
         let mut route = Self {
-            source,
+            source: source.into(),
             key: key.into(),
             turn,
-            legacy_harness: legacy,
-            anchor: None,
             controls: BTreeMap::new(),
         };
         for pair in query.split('&').filter(|pair| !pair.is_empty()) {
@@ -98,24 +82,10 @@ impl SessionRoute {
             if value.chars().any(char::is_control) {
                 return Err(malformed());
             }
-            if name == "machine" && route.legacy_harness.is_some() {
-                if route.source.is_some() || !identifier(&value) {
-                    return Err(malformed());
-                }
-                route.source = Some(value);
-                continue;
-            }
-            if name == "turn" && route.legacy_harness.is_some() && route.turn.is_none() {
-                if route.anchor.is_some() || !identifier(&value) {
-                    return Err(malformed());
-                }
-                route.anchor = Some(value);
-                continue;
-            }
             let valid = match name.as_str() {
                 "harness" => matches!(value.as_str(), "" | "codex" | "claude" | "copilot"),
                 "repo" | "model" | "q" => value.len() <= 4096,
-                "no_repo" | "all_machines" | "native" => value == "1",
+                "no_repo" | "all_machines" => value == "1",
                 "after" | "field_chunk" => {
                     !value.is_empty()
                         && value.bytes().all(|b| b.is_ascii_digit())
@@ -166,10 +136,6 @@ impl SessionRoute {
                     .join("&"),
             );
         }
-        if let Some(anchor) = &self.anchor {
-            path.push('#');
-            path.push_str(&segment(anchor));
-        }
         path
     }
 }
@@ -186,49 +152,23 @@ pub enum Resolution {
     Valid(usize),
     NotFound,
     Ambiguous,
-    Mismatch,
 }
 
 /// Candidates must already be authorized, unrevoked and from the active scope.
 /// Exact opaque keys win; provenance and display labels never select a reader.
 pub fn resolve(route: &SessionRoute, candidates: &[Candidate]) -> Resolution {
-    resolve_candidates(route, candidates, false)
-}
-
-fn resolve_candidates(route: &SessionRoute, candidates: &[Candidate], indexed: bool) -> Resolution {
     let matches: Vec<_> = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            (candidate.catalog_key == route.key
-                || indexed && route.legacy_harness.is_some() && route.key.starts_with("unsent:"))
-                && route
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| *source == candidate.source_key)
+            candidate.catalog_key == route.key && route.source == candidate.source_key
         })
         .collect();
     match matches.as_slice() {
         [] => Resolution::NotFound,
-        [(index, candidate)] => {
-            if route
-                .legacy_harness
-                .as_ref()
-                .is_some_and(|h| h != "native" && *h != candidate.harness)
-            {
-                Resolution::Mismatch
-            } else {
-                Resolution::Valid(*index)
-            }
-        }
+        [(index, _)] => Resolution::Valid(*index),
         _ => Resolution::Ambiguous,
     }
-}
-
-/// Only call with results from the authorized, complete session_bookmark index.
-/// The historical unsent target is an indexed bookmark, never a canonical alias.
-pub fn resolve_bookmark(route: &SessionRoute, candidates: &[Candidate]) -> Resolution {
-    resolve_candidates(route, candidates, true)
 }
 
 #[cfg(test)]
@@ -253,16 +193,11 @@ mod tests {
             let route = route.unwrap_or_else(|error| panic!("{vector}: {error}"));
             let candidates: Vec<Candidate> =
                 serde_json::from_value(vector["candidates"].clone()).unwrap();
-            let result = if vector["indexed_bookmark"] == true {
-                resolve_bookmark(&route, &candidates)
-            } else {
-                resolve(&route, &candidates)
-            };
+            let result = resolve(&route, &candidates);
             let outcome = match result {
                 Resolution::Valid(_) => "valid",
                 Resolution::NotFound => "not_found",
                 Resolution::Ambiguous => "ambiguous",
-                Resolution::Mismatch => "mismatch",
             };
             assert_eq!(outcome, vector["outcome"], "{vector}");
             if let Resolution::Valid(index) = result {

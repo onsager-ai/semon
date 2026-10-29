@@ -153,8 +153,8 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
   - It takes the page's filters too, each at most once: `repo` (empty for no repo), `machine`, `harness` and `model`. Anything else, a key named twice, or a value over 256 bytes is a 400.
   - A build keeps what it reads of every session active in the last 60 days before it trims the model to its window, so a request builds nothing. Answers are kept per range and filters until the model changes (at most once a second) or for 30 s as time moves; the `ETag` hashes the body and `If-None-Match` answers 304. `version` is the model version the answer was computed from.
 - **Pages:**
-  - `/`, `/timeline`, `/sessions`, `/machines`, `/machines/<id>`, `/s/<harness>/<id>` (with `?turn=`) and `/trace/<harness>/<id>/<turn>` all serve the same HTML.
-  - The frontend switches from state-only `history.pushState` to real URLs. `/s/...` stays compatible with #47's links.
+  - `/`, `/analytics`, `/sessions`, `/machines`, `/machines/<id>`, `/session/<source>/<key>` and `/session/<source>/<key>/trace/<turn>` all serve the same HTML. The viewer requires JavaScript; there is no server-rendered reader.
+  - The frontend switches from state-only `history.pushState` to real URLs. The retired `/timeline`, `/s/...` and `/trace/...` forms are not served.
 
 ### Frontend: the mockup, split into files
 
