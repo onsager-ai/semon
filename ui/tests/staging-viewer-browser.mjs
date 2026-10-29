@@ -93,7 +93,7 @@ for (const width of [390, 820, 1280])
             body: path === '/viewer.css' ? css : html,
           });
         });
-        await page.goto('http://viewer-fixes.test/s/session');
+        await page.goto('http://viewer-fixes.test/session/source/session');
         await page.addScriptTag({ content: outputFiles[0].text });
         await page.evaluate(() => {
           window.root = document.querySelector('#page');

@@ -397,7 +397,7 @@ const scenarios = {
 
   session: (server, vp, browser, fixture, warn) =>
     open(browser, vp, async (page, rec) => {
-      await page.goto(url(server, '/s/claude/marathon'), { waitUntil: 'load' });
+      await page.goto(url(server, '/session/local/marathon'), { waitUntil: 'load' });
       const opened = await sessionOpened(page, rec);
       const out = {
         'session-open': await row(page, rec, 0, { firstEntryMs: opened.firstEntryMs }, opened),
@@ -552,7 +552,7 @@ const scenarios = {
   live: (server, vp, browser, fixture) =>
     open(browser, vp, async (page, rec) => {
       await page.addInitScript(installRefreshTracing);
-      await page.goto(url(server, '/s/claude/marathon'), { waitUntil: 'load' });
+      await page.goto(url(server, '/session/local/marathon'), { waitUntil: 'load' });
       const opened = await sessionOpened(page, rec);
       const initialTotal = await page.evaluate(
         () =>

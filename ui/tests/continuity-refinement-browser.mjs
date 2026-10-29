@@ -68,7 +68,6 @@ for (const width of [390, 820, 1280])
             query: '',
             metadataSearch: true,
             more: false,
-            compatibilityHref: '/sessions?compat=1',
           };
           window.actions = [];
           window.host = {

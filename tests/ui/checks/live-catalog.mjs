@@ -37,7 +37,7 @@ export default async function liveCatalog(browser) {
           if (!response.ok()) done(response.request());
         });
         try {
-          await page.goto(fixture.base + '/s/claude/harbor');
+          await page.goto(fixture.base + '/session/local/harbor');
           await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
           const root = await page.locator('[aria-label="Transcript"]').elementHandle();
           await page.waitForTimeout(200);

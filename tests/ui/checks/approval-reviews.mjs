@@ -113,7 +113,7 @@ export default async function approvalReviews(browser) {
           await list('approval-review').waitFor();
           await toggle.click();
           await page.goto(
-            fixture.base + '/s/codex/approval-root?' + new URLSearchParams({ machine: source }),
+            fixture.base + '/session/' + encodeURIComponent(source) + '/approval-root',
           );
           await page.locator('[data-entry-key]').first().waitFor({ state: 'attached' });
           if (width === 390) await page.locator('#topbar .lead').click();
@@ -135,7 +135,7 @@ export default async function approvalReviews(browser) {
             'a hidden review forwards descendants to its visible parent',
           );
           await page.goto(
-            fixture.base + '/s/codex/approval-worker?' + new URLSearchParams({ machine: source }),
+            fixture.base + '/session/' + encodeURIComponent(source) + '/approval-worker',
           );
           await page.locator('[data-entry-key]').first().waitFor({ state: 'attached' });
           if (width === 390) await page.locator('#topbar .lead').click();
@@ -148,7 +148,7 @@ export default async function approvalReviews(browser) {
             'the selected review path survives outside the recent 60 rows',
           );
           await page.goto(
-            fixture.base + '/s/codex/approval-review?' + new URLSearchParams({ machine: source }),
+            fixture.base + '/session/' + encodeURIComponent(source) + '/approval-review',
           );
           await page.locator('[data-entry-key]').first().waitFor({ state: 'attached' });
           assert.ok((await page.locator('#topbar').innerText()).includes('Approval review'));
