@@ -44,7 +44,7 @@ MAGPIE_BASE_URL=https://magpie.onsager.ai \
 MAGPIE_API_KEY=… \
 python3 experiments/asi-jev/benchmark.py \
   --strategy llm --llm-model wokey/claude-haiku-5-5 \
-  --mode per-event --context prefix --repeats 3 --max-requests 127
+  --mode per-event --context prefix --repeats 3 --max-requests 256
 ```
 
 Remote runs require at least three repetitions. The default hard request cap is 127; the runner counts the full plan and refuses to start if it exceeds the cap. It makes sequential requests with no automatic retries or cross-provider fallback. The throughput metric is end-to-end sequential throughput and does not measure concurrency scaling.

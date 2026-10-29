@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +50,7 @@ DESCRIPTIONS: dict[str, dict[Any, str]] = {
         "unknown": "A failure is evident but its category is unclear.",
     },
     "retry_loop": {"none": "No retry pattern is evident.", "retry": "An action is retried after a failure or explicit retry cue.", "loop": "The same action or failure repeats at least three times."},
+    "anomaly": {False: "The event follows an expected pattern.", True: "The event is malformed, unexpected, or shows an anomalous repeated pattern."},
     "phase": {
         "start": "The session is starting.", "active": "The session is making ordinary progress.",
         "blocked": "The session is waiting or blocked by a failure.",
@@ -407,11 +408,14 @@ def format_context(event: Event, all_events: list[Event], context_mode: str, max
     if len(target_line.encode("utf-8")) > max_bytes:
         prefix_bytes = len(target_prefix.encode("utf-8"))
         target_line = _truncate_utf8(target_prefix, max_bytes, keep_tail=False) if prefix_bytes >= max_bytes else target_prefix + _truncate_utf8(target_evidence, max_bytes - prefix_bytes)
-    remaining = max(0, max_bytes - len(target_line.encode("utf-8")) - 1)
-    history = _truncate_utf8("\n".join(prior_rows), remaining, keep_tail=True)
-    header_budget = max(0, max_bytes - len(target_line.encode("utf-8")) - (1 if history else 0))
-    header = _truncate_utf8(header, header_budget, keep_tail=False)
-    return "\n".join(part for part in (header.rstrip(), history, target_line) if part)
+    prefix_budget = max_bytes - len(target_line.encode("utf-8")) - 1
+    if prefix_budget <= 0:
+        return target_line
+    if prior_rows:
+        prefix = _truncate_utf8(header.rstrip() + "\n" + "\n".join(prior_rows), prefix_budget, keep_tail=True)
+    else:
+        prefix = _truncate_utf8(header.rstrip(), prefix_budget, keep_tail=False)
+    return f"{prefix}\n{target_line}" if prefix else target_line
 
 
 def rule_classify(event: Event, causal_context: list[Event]) -> dict[str, Any]:
@@ -474,8 +478,12 @@ def rule_classify(event: Event, causal_context: list[Event]) -> dict[str, Any]:
     else:
         failure_category = "unknown"
 
-    signature = re.sub(r"\s+", " ", f"{kind} {lower_text}").strip()[:180]
-    prior_signatures = [re.sub(r"\s+", " ", f"{item.event_kind.lower()} {item.evidence_text.lower()}").strip()[:180] for item in prior]
+    def retry_signature(event_kind: str, event_text: str) -> str:
+        without_call_id = re.sub(r"\[tool call id:[^\]]*\]", "", event_text.lower())
+        return re.sub(r"\s+", " ", f"{event_kind.lower()} {without_call_id}").strip()[:180]
+
+    signature = retry_signature(kind, text)
+    prior_signatures = [retry_signature(item.event_kind, item.evidence_text) for item in prior]
     occurrences = sum(previous == signature for previous in prior_signatures)
     if occurrences >= 2:
         retry_loop = "loop"
@@ -636,7 +644,7 @@ def make_llm_request(batch: list[Event], contexts: dict[int, str], model: str) -
         target_map[target_id] = event.index
         targets.append(f"TARGET {target_id}\n{contexts[event.index]}")
     schema = {dimension: {str(label): DESCRIPTIONS.get(dimension, {}).get(label, str(label)) for label in DIMENSIONS[dimension]} for dimension in DIMENSIONS}
-    schema["anomaly"] = [False, True]
+    schema["anomaly"] = {str(label): DESCRIPTIONS["anomaly"][label] for label in DIMENSIONS["anomaly"]}
     user_message = f"Label meanings and allowed values: {json.dumps(schema, ensure_ascii=False)}\n\n" + "\n\n".join(targets)
     payload = {
         "model": model,
@@ -1128,6 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     provenance = {
         "run_id": run_id, "created_at_utc": datetime.now(timezone.utc).isoformat(), "python": sys.version.split()[0],
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "platform": platform.platform(), "corpus_sha256": corpus_sha256, "event_count": len(events),
         "arguments": provenance_args, "resolved_models": summary["resolved_models"],
         "external_specification": OPENAPI_SOURCE if args.strategy == "jev" else None,
