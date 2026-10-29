@@ -1089,7 +1089,7 @@ impl ViewerCore {
             };
         }
         if path.starts_with("/session/") {
-            return self.session_page(extras, path, query, deadline);
+            return self.session_page(path, query);
         }
         self.follow();
         let views = self.views();
@@ -1178,13 +1178,7 @@ impl ViewerCore {
         views[0].1.respond(method, path, query, if_none_match)
     }
 
-    fn session_page(
-        &self,
-        extras: &Extras,
-        path: &str,
-        query: &str,
-        deadline: Instant,
-    ) -> ViewerReply {
+    fn session_page(&self, path: &str, query: &str) -> ViewerReply {
         use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
         let route = match SessionRoute::parse(path, query) {
             Ok(route) => route,
