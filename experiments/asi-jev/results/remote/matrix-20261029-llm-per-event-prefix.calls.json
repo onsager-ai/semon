@@ -1,0 +1,3308 @@
+[
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 4194.036431028508,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 260,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 4432.249190052971,
+    "payload_bytes": 3060,
+    "evidence_context_bytes": 317,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 972,
+    "output_tokens": 159,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 5842.549397959374,
+    "payload_bytes": 3260,
+    "evidence_context_bytes": 514,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1064,
+    "output_tokens": 176,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 3692.780727054924,
+    "payload_bytes": 3487,
+    "evidence_context_bytes": 738,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1175,
+    "output_tokens": 253,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 2950.4044249188155,
+    "payload_bytes": 3627,
+    "evidence_context_bytes": 874,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1240,
+    "output_tokens": 118,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 3819.643034017645,
+    "payload_bytes": 3791,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1316,
+    "output_tokens": 140,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 3094.9937870027497,
+    "payload_bytes": 3967,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1399,
+    "output_tokens": 168,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 2859.8728709621355,
+    "payload_bytes": 4110,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1460,
+    "output_tokens": 138,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 2993.906092015095,
+    "payload_bytes": 4374,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1554,
+    "output_tokens": 110,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 3511.5441939560696,
+    "payload_bytes": 4475,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1604,
+    "output_tokens": 179,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 3855.833682930097,
+    "payload_bytes": 2932,
+    "evidence_context_bytes": 190,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 906,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 5090.95920692198,
+    "payload_bytes": 3048,
+    "evidence_context_bytes": 305,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 950,
+    "output_tokens": 221,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 4642.680927994661,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 406,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1001,
+    "output_tokens": 332,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 4018.0424409918487,
+    "payload_bytes": 3251,
+    "evidence_context_bytes": 506,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1051,
+    "output_tokens": 199,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 4613.3275830652565,
+    "payload_bytes": 3362,
+    "evidence_context_bytes": 616,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1094,
+    "output_tokens": 172,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 3891.2524229381233,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 263,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 2937.1554179815575,
+    "payload_bytes": 3029,
+    "evidence_context_bytes": 286,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 955,
+    "output_tokens": 170,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 7052.3243099451065,
+    "payload_bytes": 3145,
+    "evidence_context_bytes": 401,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 999,
+    "output_tokens": 296,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 4505.7386219268665,
+    "payload_bytes": 3256,
+    "evidence_context_bytes": 511,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1041,
+    "output_tokens": 229,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 3761.3894230453297,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 360,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 4465.731514035724,
+    "payload_bytes": 3019,
+    "evidence_context_bytes": 276,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 963,
+    "output_tokens": 186,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 4478.633614024147,
+    "payload_bytes": 3121,
+    "evidence_context_bytes": 377,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1012,
+    "output_tokens": 212,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 5997.652253950946,
+    "payload_bytes": 3222,
+    "evidence_context_bytes": 477,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 177,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 3328.4165610093623,
+    "payload_bytes": 3322,
+    "evidence_context_bytes": 576,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1110,
+    "output_tokens": 133,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 4420.804847031832,
+    "payload_bytes": 3423,
+    "evidence_context_bytes": 676,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1160,
+    "output_tokens": 96,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 3858.8337630499154,
+    "payload_bytes": 2914,
+    "evidence_context_bytes": 172,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 205,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 7249.776658019982,
+    "payload_bytes": 3022,
+    "evidence_context_bytes": 279,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 944,
+    "output_tokens": 266,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 3935.0547769572586,
+    "payload_bytes": 3138,
+    "evidence_context_bytes": 394,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1003,
+    "output_tokens": 322,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 3936.8382489774376,
+    "payload_bytes": 3239,
+    "evidence_context_bytes": 494,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1048,
+    "output_tokens": 184,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 3578.691844944842,
+    "payload_bytes": 3348,
+    "evidence_context_bytes": 602,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1092,
+    "output_tokens": 94,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 3298.0126100592315,
+    "payload_bytes": 2947,
+    "evidence_context_bytes": 205,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 239,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 2820.2981289941818,
+    "payload_bytes": 3129,
+    "evidence_context_bytes": 384,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 987,
+    "output_tokens": 185,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 3580.0471629481763,
+    "payload_bytes": 3300,
+    "evidence_context_bytes": 552,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1058,
+    "output_tokens": 223,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 5191.109536914155,
+    "payload_bytes": 3482,
+    "evidence_context_bytes": 731,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1137,
+    "output_tokens": 230,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 3728.8307580165565,
+    "payload_bytes": 3653,
+    "evidence_context_bytes": 899,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1208,
+    "output_tokens": 229,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 3776.8250060034916,
+    "payload_bytes": 3835,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1287,
+    "output_tokens": 282,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 3681.801853934303,
+    "payload_bytes": 4006,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1358,
+    "output_tokens": 218,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 5469.841536949389,
+    "payload_bytes": 4194,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1441,
+    "output_tokens": 435,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 6658.066272968426,
+    "payload_bytes": 4356,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1508,
+    "output_tokens": 389,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 4470.262045972049,
+    "payload_bytes": 4514,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1566,
+    "output_tokens": 373,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 4054.749776958488,
+    "payload_bytes": 2990,
+    "evidence_context_bytes": 246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 918,
+    "output_tokens": 185,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 4475.621356978081,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 405,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 973,
+    "output_tokens": 219,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 4193.092466099188,
+    "payload_bytes": 3283,
+    "evidence_context_bytes": 537,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1022,
+    "output_tokens": 194,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 3771.244919975288,
+    "payload_bytes": 3393,
+    "evidence_context_bytes": 646,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 197,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 5990.79581303522,
+    "payload_bytes": 3502,
+    "evidence_context_bytes": 754,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1104,
+    "output_tokens": 203,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 3018.607084057294,
+    "payload_bytes": 3643,
+    "evidence_context_bytes": 894,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1150,
+    "output_tokens": 162,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 3405.343594029546,
+    "payload_bytes": 2923,
+    "evidence_context_bytes": 181,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 248,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 3451.0619649663568,
+    "payload_bytes": 3113,
+    "evidence_context_bytes": 368,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 979,
+    "output_tokens": 172,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 5237.613649922423,
+    "payload_bytes": 3288,
+    "evidence_context_bytes": 540,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1050,
+    "output_tokens": 202,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 3383.164396043867,
+    "payload_bytes": 3438,
+    "evidence_context_bytes": 689,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1099,
+    "output_tokens": 127,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 3511.5198889980093,
+    "payload_bytes": 3628,
+    "evidence_context_bytes": 876,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1177,
+    "output_tokens": 136,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 3984.5764340134338,
+    "payload_bytes": 3802,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1247,
+    "output_tokens": 236,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 4731.866938062012,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 356,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 4920.2115319203585,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 293,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 5167.696421965957,
+    "payload_bytes": 2980,
+    "evidence_context_bytes": 236,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 934,
+    "output_tokens": 326,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 5484.691504971124,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 282,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 6286.021461011842,
+    "payload_bytes": 2930,
+    "evidence_context_bytes": 188,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 905,
+    "output_tokens": 285,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 5776.370699051768,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 175,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 903,
+    "output_tokens": 231,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 4239.866672898643,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 6636.649864027277,
+    "payload_bytes": 3060,
+    "evidence_context_bytes": 317,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 972,
+    "output_tokens": 150,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 6117.1459020115435,
+    "payload_bytes": 3260,
+    "evidence_context_bytes": 514,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1064,
+    "output_tokens": 157,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 4300.998035003431,
+    "payload_bytes": 3487,
+    "evidence_context_bytes": 738,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1175,
+    "output_tokens": 192,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 3658.365539042279,
+    "payload_bytes": 3627,
+    "evidence_context_bytes": 874,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1240,
+    "output_tokens": 137,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 5413.910608040169,
+    "payload_bytes": 3791,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1316,
+    "output_tokens": 161,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 3824.2692310595885,
+    "payload_bytes": 3967,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1399,
+    "output_tokens": 152,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 5786.295379046351,
+    "payload_bytes": 4110,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1460,
+    "output_tokens": 343,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 2822.309340001084,
+    "payload_bytes": 4374,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1554,
+    "output_tokens": 149,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 2956.3637209357694,
+    "payload_bytes": 4475,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1604,
+    "output_tokens": 172,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 3786.7057230323553,
+    "payload_bytes": 2932,
+    "evidence_context_bytes": 190,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 906,
+    "output_tokens": 204,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 6019.837161060423,
+    "payload_bytes": 3048,
+    "evidence_context_bytes": 305,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 950,
+    "output_tokens": 220,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 7336.1007060157135,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 406,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1001,
+    "output_tokens": 250,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 4277.0606350386515,
+    "payload_bytes": 3251,
+    "evidence_context_bytes": 506,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1051,
+    "output_tokens": 208,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 5121.907435939647,
+    "payload_bytes": 3362,
+    "evidence_context_bytes": 616,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1094,
+    "output_tokens": 222,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 5564.239328959957,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 281,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 3786.0232619568706,
+    "payload_bytes": 3029,
+    "evidence_context_bytes": 286,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 955,
+    "output_tokens": 254,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 6966.280814027414,
+    "payload_bytes": 3145,
+    "evidence_context_bytes": 401,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 999,
+    "output_tokens": 270,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 5588.886435027234,
+    "payload_bytes": 3256,
+    "evidence_context_bytes": 511,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1041,
+    "output_tokens": 204,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 4077.903137076646,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 275,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 4743.064755923115,
+    "payload_bytes": 3019,
+    "evidence_context_bytes": 276,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 963,
+    "output_tokens": 189,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 4461.140388972126,
+    "payload_bytes": 3121,
+    "evidence_context_bytes": 377,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1012,
+    "output_tokens": 267,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 4735.897960024886,
+    "payload_bytes": 3222,
+    "evidence_context_bytes": 477,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 161,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 3583.6481290170923,
+    "payload_bytes": 3322,
+    "evidence_context_bytes": 576,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1110,
+    "output_tokens": 193,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 3717.3609079327434,
+    "payload_bytes": 3423,
+    "evidence_context_bytes": 676,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1160,
+    "output_tokens": 161,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 3387.3633350012824,
+    "payload_bytes": 2914,
+    "evidence_context_bytes": 172,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 177,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 4960.137147922069,
+    "payload_bytes": 3022,
+    "evidence_context_bytes": 279,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 944,
+    "output_tokens": 211,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 3326.36006094981,
+    "payload_bytes": 3138,
+    "evidence_context_bytes": 394,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1003,
+    "output_tokens": 205,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 4445.64277108293,
+    "payload_bytes": 3239,
+    "evidence_context_bytes": 494,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1048,
+    "output_tokens": 157,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 5710.3789480170235,
+    "payload_bytes": 3348,
+    "evidence_context_bytes": 602,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1092,
+    "output_tokens": 120,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 4288.265381008387,
+    "payload_bytes": 2947,
+    "evidence_context_bytes": 205,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 266,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 3486.09119001776,
+    "payload_bytes": 3129,
+    "evidence_context_bytes": 384,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 987,
+    "output_tokens": 185,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 3773.847474018112,
+    "payload_bytes": 3300,
+    "evidence_context_bytes": 552,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1058,
+    "output_tokens": 220,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 4405.092319007963,
+    "payload_bytes": 3482,
+    "evidence_context_bytes": 731,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1137,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 3687.0741460006684,
+    "payload_bytes": 3653,
+    "evidence_context_bytes": 899,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1208,
+    "output_tokens": 246,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 4265.374117996544,
+    "payload_bytes": 3835,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1287,
+    "output_tokens": 308,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 4218.595500104129,
+    "payload_bytes": 4006,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1358,
+    "output_tokens": 203,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 6242.549341986887,
+    "payload_bytes": 4194,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1441,
+    "output_tokens": 552,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 6356.940752011724,
+    "payload_bytes": 4356,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1508,
+    "output_tokens": 504,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 6228.250697022304,
+    "payload_bytes": 4514,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1566,
+    "output_tokens": 520,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 5955.62934607733,
+    "payload_bytes": 2990,
+    "evidence_context_bytes": 246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 918,
+    "output_tokens": 147,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 5956.563091953285,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 405,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 973,
+    "output_tokens": 184,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 4068.7247320311144,
+    "payload_bytes": 3283,
+    "evidence_context_bytes": 537,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1022,
+    "output_tokens": 180,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 4168.46161999274,
+    "payload_bytes": 3393,
+    "evidence_context_bytes": 646,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 199,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 3893.102786038071,
+    "payload_bytes": 3502,
+    "evidence_context_bytes": 754,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1104,
+    "output_tokens": 157,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 3639.314269996248,
+    "payload_bytes": 3643,
+    "evidence_context_bytes": 894,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1150,
+    "output_tokens": 156,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 3448.6752370139584,
+    "payload_bytes": 2923,
+    "evidence_context_bytes": 181,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 154,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 3346.24075202737,
+    "payload_bytes": 3113,
+    "evidence_context_bytes": 368,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 979,
+    "output_tokens": 102,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 4911.90835100133,
+    "payload_bytes": 3288,
+    "evidence_context_bytes": 540,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1050,
+    "output_tokens": 220,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 3637.447742978111,
+    "payload_bytes": 3438,
+    "evidence_context_bytes": 689,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1099,
+    "output_tokens": 157,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 3992.3026940086856,
+    "payload_bytes": 3628,
+    "evidence_context_bytes": 876,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1177,
+    "output_tokens": 157,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 3184.97121904511,
+    "payload_bytes": 3802,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1247,
+    "output_tokens": 235,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 4823.923800024204,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 255,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 5329.275315976702,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 362,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 4802.475593984127,
+    "payload_bytes": 2980,
+    "evidence_context_bytes": 236,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 934,
+    "output_tokens": 259,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 4930.4369980236515,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 285,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 5020.877304952592,
+    "payload_bytes": 2930,
+    "evidence_context_bytes": 188,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 905,
+    "output_tokens": 316,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 4923.722674022429,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 175,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 903,
+    "output_tokens": 317,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 3077.498921076767,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 255,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 5454.511129995808,
+    "payload_bytes": 3060,
+    "evidence_context_bytes": 317,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 972,
+    "output_tokens": 148,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 3454.1772790253162,
+    "payload_bytes": 3260,
+    "evidence_context_bytes": 514,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1064,
+    "output_tokens": 185,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 2912.561197998002,
+    "payload_bytes": 3487,
+    "evidence_context_bytes": 738,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1175,
+    "output_tokens": 193,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 3296.0330200148746,
+    "payload_bytes": 3627,
+    "evidence_context_bytes": 874,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1240,
+    "output_tokens": 181,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 3630.8884130558,
+    "payload_bytes": 3791,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1316,
+    "output_tokens": 133,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 3192.169279092923,
+    "payload_bytes": 3967,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1399,
+    "output_tokens": 247,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 3877.944773994386,
+    "payload_bytes": 4110,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1460,
+    "output_tokens": 246,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 3118.253348977305,
+    "payload_bytes": 4374,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1554,
+    "output_tokens": 166,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 3034.6516880672425,
+    "payload_bytes": 4475,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1604,
+    "output_tokens": 165,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 4358.599105034955,
+    "payload_bytes": 2932,
+    "evidence_context_bytes": 190,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 906,
+    "output_tokens": 206,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 5266.544672078453,
+    "payload_bytes": 3048,
+    "evidence_context_bytes": 305,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 950,
+    "output_tokens": 147,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 6793.874295894057,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 406,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1001,
+    "output_tokens": 294,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 3854.589779046364,
+    "payload_bytes": 3251,
+    "evidence_context_bytes": 506,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1051,
+    "output_tokens": 175,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 4050.6830429658294,
+    "payload_bytes": 3362,
+    "evidence_context_bytes": 616,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1094,
+    "output_tokens": 284,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 3954.3204789515585,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 275,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 3179.7145309392363,
+    "payload_bytes": 3029,
+    "evidence_context_bytes": 286,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 955,
+    "output_tokens": 235,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 5575.868734973483,
+    "payload_bytes": 3145,
+    "evidence_context_bytes": 401,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 999,
+    "output_tokens": 303,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 5584.469318971969,
+    "payload_bytes": 3256,
+    "evidence_context_bytes": 511,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1041,
+    "output_tokens": 266,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 3866.8633919442073,
+    "payload_bytes": 2918,
+    "evidence_context_bytes": 176,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 913,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 4849.1905310656875,
+    "payload_bytes": 3019,
+    "evidence_context_bytes": 276,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 963,
+    "output_tokens": 187,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 3583.26816605404,
+    "payload_bytes": 3121,
+    "evidence_context_bytes": 377,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1012,
+    "output_tokens": 243,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 4632.321079960093,
+    "payload_bytes": 3222,
+    "evidence_context_bytes": 477,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 143,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 3335.268776048906,
+    "payload_bytes": 3322,
+    "evidence_context_bytes": 576,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1110,
+    "output_tokens": 144,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 6069.801741978154,
+    "payload_bytes": 3423,
+    "evidence_context_bytes": 676,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1160,
+    "output_tokens": 125,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 2997.8908429620788,
+    "payload_bytes": 2914,
+    "evidence_context_bytes": 172,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 174,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 4644.529820070602,
+    "payload_bytes": 3022,
+    "evidence_context_bytes": 279,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 944,
+    "output_tokens": 236,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 3150.280329049565,
+    "payload_bytes": 3138,
+    "evidence_context_bytes": 394,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1003,
+    "output_tokens": 180,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 5950.823192019016,
+    "payload_bytes": 3239,
+    "evidence_context_bytes": 494,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1048,
+    "output_tokens": 224,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 5254.59399598185,
+    "payload_bytes": 3348,
+    "evidence_context_bytes": 602,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1092,
+    "output_tokens": 113,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 3459.2755059711635,
+    "payload_bytes": 2947,
+    "evidence_context_bytes": 205,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 290,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 3083.2390499999747,
+    "payload_bytes": 3129,
+    "evidence_context_bytes": 384,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 987,
+    "output_tokens": 206,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 3319.565336103551,
+    "payload_bytes": 3300,
+    "evidence_context_bytes": 552,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1058,
+    "output_tokens": 227,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 6788.73792802915,
+    "payload_bytes": 3482,
+    "evidence_context_bytes": 731,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1137,
+    "output_tokens": 291,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 3352.354033035226,
+    "payload_bytes": 3653,
+    "evidence_context_bytes": 899,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1208,
+    "output_tokens": 256,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 3634.284219937399,
+    "payload_bytes": 3835,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1287,
+    "output_tokens": 319,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 3811.574123916216,
+    "payload_bytes": 4006,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1358,
+    "output_tokens": 194,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 6035.900552989915,
+    "payload_bytes": 4194,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1441,
+    "output_tokens": 509,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 5937.259378028102,
+    "payload_bytes": 4356,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1508,
+    "output_tokens": 403,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 4822.107543004677,
+    "payload_bytes": 4514,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1566,
+    "output_tokens": 500,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 3845.559858949855,
+    "payload_bytes": 2990,
+    "evidence_context_bytes": 246,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 918,
+    "output_tokens": 135,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 4820.869237999432,
+    "payload_bytes": 3150,
+    "evidence_context_bytes": 405,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 973,
+    "output_tokens": 203,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 4459.45139892865,
+    "payload_bytes": 3283,
+    "evidence_context_bytes": 537,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1022,
+    "output_tokens": 192,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 3408.5560890380293,
+    "payload_bytes": 3393,
+    "evidence_context_bytes": 646,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1062,
+    "output_tokens": 165,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 3910.075824940577,
+    "payload_bytes": 3502,
+    "evidence_context_bytes": 754,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1104,
+    "output_tokens": 248,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 2958.997739944607,
+    "payload_bytes": 3643,
+    "evidence_context_bytes": 894,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1150,
+    "output_tokens": 132,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 3421.8489340273663,
+    "payload_bytes": 2923,
+    "evidence_context_bytes": 181,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 901,
+    "output_tokens": 200,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 3998.1888320762664,
+    "payload_bytes": 3113,
+    "evidence_context_bytes": 368,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 979,
+    "output_tokens": 216,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 3837.0540799805894,
+    "payload_bytes": 3288,
+    "evidence_context_bytes": 540,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1050,
+    "output_tokens": 124,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 3341.1559860687703,
+    "payload_bytes": 3438,
+    "evidence_context_bytes": 689,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1099,
+    "output_tokens": 131,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 5766.914025065489,
+    "payload_bytes": 3628,
+    "evidence_context_bytes": 876,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1177,
+    "output_tokens": 189,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 3869.819503976032,
+    "payload_bytes": 3802,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 1247,
+    "output_tokens": 229,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 4664.168077986687,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 320,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 7463.964733993635,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 318,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 4855.484133004211,
+    "payload_bytes": 2980,
+    "evidence_context_bytes": 236,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 934,
+    "output_tokens": 332,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 6987.4828670872375,
+    "payload_bytes": 2924,
+    "evidence_context_bytes": 182,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 908,
+    "output_tokens": 359,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 4949.573669000529,
+    "payload_bytes": 2930,
+    "evidence_context_bytes": 188,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 905,
+    "output_tokens": 259,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 5218.117806944065,
+    "payload_bytes": 2917,
+    "evidence_context_bytes": 175,
+    "resolved_model": "claude-haiku-5-5",
+    "input_tokens": 903,
+    "output_tokens": 260,
+    "usage_complete": true
+  }
+]

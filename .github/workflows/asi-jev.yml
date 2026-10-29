@@ -21,8 +21,8 @@ jobs:
         run: |
           python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
           python3 experiments/asi-jev/load_probe.py --help
-          python3 experiments/asi-jev/benchmark.py --strategy rules --context prefix --out experiments/asi-jev/results/ci --run-id ci
-          python3 experiments/asi-jev/benchmark.py --strategy rules --context offline --out experiments/asi-jev/results/ci --run-id ci
+          python3 experiments/asi-jev/benchmark.py --strategy rules --context prefix --out "$RUNNER_TEMP/asi-jev-reproduced" --run-id ci
+          python3 experiments/asi-jev/benchmark.py --strategy rules --context offline --out "$RUNNER_TEMP/asi-jev-reproduced" --run-id ci
           python3 experiments/asi-jev/analyze.py
       - name: Retain experiment outputs
         if: always()
@@ -30,4 +30,11 @@ jobs:
         with:
           name: asi-jev-offline
           path: experiments/asi-jev/results
+          if-no-files-found: warn
+      - name: Retain fresh deterministic replay separately from measured trials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: asi-jev-reproduced-rules
+          path: ${{ runner.temp }}/asi-jev-reproduced
           if-no-files-found: warn

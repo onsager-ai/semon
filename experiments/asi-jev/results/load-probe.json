@@ -1,0 +1,619 @@
+{
+  "probe": "concurrent Jev burst; not sustained capacity testing",
+  "requested_model": "typesafe/jev-latest",
+  "resolved_models": [
+    "jev-1.14.0"
+  ],
+  "request_design": {
+    "endpoint_path": "/v1/systemone",
+    "helper": "benchmark._request_batch / make_jev_request",
+    "targets_per_request": 1,
+    "dimensions": [
+      "activity",
+      "failure_category",
+      "retry_loop",
+      "anomaly",
+      "phase"
+    ],
+    "context": "sanitized fixture user event, causal prefix, 8192-byte cap",
+    "requests_per_level": 12,
+    "timeout_seconds": 20.0,
+    "samples": [
+      {
+        "harness": "codex",
+        "event_id": "fixture-native-codex-compat-007-28",
+        "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28"
+      },
+      {
+        "harness": "claude-code",
+        "event_id": "fixture-native-claude-compat-003-13",
+        "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de"
+      }
+    ],
+    "automatic_retry": false,
+    "fallback": false
+  },
+  "limitations": [
+    "12 requests per level is a small burst, not sustained load capacity.",
+    "Repeated sanitized fixture prompts may benefit from provider caching.",
+    "Heldout synthetic challenge events are excluded."
+  ],
+  "provenance": {
+    "created_at_utc": "2026-10-29T15:13:53.529541+00:00",
+    "python": "3.12.3",
+    "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+    "client_location": "not provided",
+    "client_location_source": "unavailable",
+    "runner_sha256": "05562b37e0999fa71ff8b7a4cdb2d074b3577e92bebde7709125e74c0458a481",
+    "benchmark_sha256": "ac902afa19ee3cbe052bb841a42ef597eacf13bf7ae6d536e629a02e78fc88ed",
+    "corpus_sha256": "c2c2e185fcac2f46c46a0db40827f71253e7dd3d8478ffdcd8abef72866360c4",
+    "api_base_recorded": false,
+    "api_credentials_recorded": false
+  },
+  "price_basis": {
+    "input_usd_per_million": 0.042,
+    "output_usd_per_million": 0.0,
+    "source": "https://docs.typesafe.ai/models",
+    "failed_request_cost": "unknown"
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "started_at_utc": "2026-10-29T15:13:43.050168+00:00",
+      "finished_at_utc": "2026-10-29T15:13:48.906563+00:00",
+      "wall_seconds": 5.8563373039942235,
+      "attempted_requests": 12,
+      "successful_requests": 12,
+      "failed_requests": 0,
+      "requests_per_second": 2.049062302442106,
+      "attempted_events_per_second": 2.049062302442106,
+      "successful_events_per_second": 2.049062302442106,
+      "http_rtt_ms": {
+        "p50_ms": 483.9736515423283,
+        "p95_ms": 546.8950376554858
+      },
+      "http_status_counts": {
+        "200": 12
+      },
+      "error_code_counts": {},
+      "usage": {
+        "successful_input_tokens": 18414,
+        "successful_output_tokens": 3312,
+        "successful_calls_with_usage": 12,
+        "successful_calls_missing_usage": 0,
+        "failed_request_cost_unknown": 0
+      },
+      "successful_subtotal_estimate_usd": 0.0007733880000000001,
+      "requests": [
+        {
+          "request": 1,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 511.29327109083533,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 2,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 484.0005780570209,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 3,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 483.9467250276357,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 4,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 478.51662209723145,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 5,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 501.33601191919297,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 6,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 498.3626789180562,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 7,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 482.5975669082254,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 8,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 433.3668779581785,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 9,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 445.4492989461869,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 10,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 527.570131001994,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 11,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 570.5143680097535,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 12,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 432.7329130610451,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        }
+      ]
+    },
+    {
+      "concurrency": 2,
+      "started_at_utc": "2026-10-29T15:13:48.906786+00:00",
+      "finished_at_utc": "2026-10-29T15:13:51.868890+00:00",
+      "wall_seconds": 2.962065333966166,
+      "attempted_requests": 12,
+      "successful_requests": 12,
+      "failed_requests": 0,
+      "requests_per_second": 4.051227318450859,
+      "attempted_events_per_second": 4.051227318450859,
+      "successful_events_per_second": 4.051227318450859,
+      "http_rtt_ms": {
+        "p50_ms": 477.71902749082074,
+        "p95_ms": 556.3731081900187
+      },
+      "http_status_counts": {
+        "200": 12
+      },
+      "error_code_counts": {},
+      "usage": {
+        "successful_input_tokens": 18414,
+        "successful_output_tokens": 3312,
+        "successful_calls_with_usage": 12,
+        "successful_calls_missing_usage": 0,
+        "failed_request_cost_unknown": 0
+      },
+      "successful_subtotal_estimate_usd": 0.0007733880000000001,
+      "requests": [
+        {
+          "request": 1,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 466.13919001538306,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 2,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 480.5568529991433,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 3,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 485.30236107762903,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 4,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 471.71895601786673,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 5,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 447.1723480382934,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 6,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 578.8675609510392,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 7,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 537.9685559310019,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 8,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 485.7393850106746,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 9,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 480.7333060307428,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 10,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 466.1496600601822,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 11,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 431.8750509992242,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 12,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 474.88120198249817,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        }
+      ]
+    },
+    {
+      "concurrency": 4,
+      "started_at_utc": "2026-10-29T15:13:51.869052+00:00",
+      "finished_at_utc": "2026-10-29T15:13:53.529391+00:00",
+      "wall_seconds": 1.6603072009747848,
+      "attempted_requests": 12,
+      "successful_requests": 12,
+      "failed_requests": 0,
+      "requests_per_second": 7.227578121057758,
+      "attempted_events_per_second": 7.227578121057758,
+      "successful_events_per_second": 7.227578121057758,
+      "http_rtt_ms": {
+        "p50_ms": 515.203170478344,
+        "p95_ms": 582.3879887349904
+      },
+      "http_status_counts": {
+        "200": 12
+      },
+      "error_code_counts": {},
+      "usage": {
+        "successful_input_tokens": 18414,
+        "successful_output_tokens": 3312,
+        "successful_calls_with_usage": 12,
+        "successful_calls_missing_usage": 0,
+        "failed_request_cost_unknown": 0
+      },
+      "successful_subtotal_estimate_usd": 0.0007733880000000001,
+      "requests": [
+        {
+          "request": 1,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 458.1089389976114,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 2,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 460.9249000204727,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 3,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 587.9831199999899,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 4,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 495.5773249967024,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 5,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 500.85973693057895,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 6,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 531.1720069730654,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 7,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 544.1569309914485,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 8,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 490.46497605741024,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 9,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 529.546604026109,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 10,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 495.84631505422294,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 11,
+          "event_id": "fixture-native-codex-compat-007-28",
+          "harness": "codex",
+          "native_sha256": "f4a6c0a22afc97d66414165d259a0bf33da88ceb77094d601c5421201428ee28",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 571.0674190195277,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1534,
+          "output_tokens": 276,
+          "usage_complete": true
+        },
+        {
+          "request": 12,
+          "event_id": "fixture-native-claude-compat-003-13",
+          "harness": "claude-code",
+          "native_sha256": "3d37dcdc9326c3552cb4e00dbfea298e681f5b2bbc15010c164b7fb8d74555de",
+          "http_status": 200,
+          "error_code": null,
+          "rtt_ms": 577.8101540636271,
+          "resolved_model": "jev-1.14.0",
+          "input_tokens": 1535,
+          "output_tokens": 276,
+          "usage_complete": true
+        }
+      ]
+    }
+  ]
+}

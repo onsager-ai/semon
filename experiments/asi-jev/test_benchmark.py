@@ -113,7 +113,24 @@ class BenchmarkTests(unittest.TestCase):
         self.assertLessEqual(len(prefix.encode("utf-8")), 90)
         self.assertIn("TARGET", prefix)
         self.assertNotIn("FUTURE_SECRET", prefix)
+        self.assertLessEqual(len(offline.encode("utf-8")), 90)
+        self.assertIn("TARGET", offline)
         self.assertNotIn("OTHER_SESSION", offline)
+
+    def test_offline_cap_keeps_target_in_native_order_with_newest_whole_future_row(self):
+        events = [
+            _event(0, order=3, text="BEFORE_1_" + "a" * 40),
+            _event(1, order=14, text="BEFORE_2_" + "b" * 40),
+            _event(2, order=20, text="TARGET_MIDDLE_" + "c" * 40),
+            _event(3, order=29, text="FUTURE_1_" + "d" * 40),
+            _event(4, order=37, text="FUTURE_SENTINEL_" + "e" * 40),
+        ]
+        context = format_context(events[2], events, "offline", 400)
+        self.assertLessEqual(len(context.encode("utf-8")), 400)
+        self.assertIn("omitted", context)
+        self.assertIn("TARGET_MIDDLE_", context)
+        self.assertIn("FUTURE_SENTINEL_", context)
+        self.assertLess(context.index("TARGET_MIDDLE_"), context.index("FUTURE_SENTINEL_"))
 
     def test_microbatches_split_by_session_size_and_timestamp_window(self):
         events = [
