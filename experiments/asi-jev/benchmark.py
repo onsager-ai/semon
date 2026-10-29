@@ -378,8 +378,74 @@ def context_events(event: Event, all_events: list[Event], context_mode: str) -> 
     return group[:target_pos + 1]
 
 
+def _offline_event_line(item: Event, is_target: bool) -> str:
+    marker = "TARGET" if is_target else "record"
+    evidence = item.evidence_text or "[no allowlisted visible text]"
+    if item.malformed_native:
+        evidence = "[malformed native JSON; text omitted]"
+    elif item.oversized_native:
+        evidence = "[native event exceeds parse bound; text omitted]"
+    return f"{marker} harness={item.harness} format={item.native_format} kind={item.event_kind}: {evidence}"
+
+
+def _format_offline_context(event: Event, selected: list[Event], max_bytes: int) -> str:
+    header = "Context mode: offline same-session records. Classify only the target event."
+    target_position = next(index for index, item in enumerate(selected) if item.index == event.index)
+    lines = [_offline_event_line(item, item.index == event.index) for item in selected]
+    complete = "\n".join([header, *lines])
+    if len(complete.encode("utf-8")) <= max_bytes:
+        return complete
+
+    def omission_label(count: int) -> str:
+        return f"[{count} other context rows omitted]" if count else "[target text truncated]"
+
+    target_evidence = event.evidence_text or "[no allowlisted visible text]"
+    if event.malformed_native:
+        target_evidence = "[malformed native JSON; text omitted]"
+    elif event.oversized_native:
+        target_evidence = "[native event exceeds parse bound; text omitted]"
+    target_prefix = f"TARGET harness={event.harness} format={event.native_format} kind={event.event_kind}: "
+    other_rows = [(index, line) for index, line in enumerate(lines) if index != target_position]
+    all_other_count = len(other_rows)
+    omission_reserve = omission_label(all_other_count)
+    target_line = lines[target_position]
+    fixed_bytes = len(header.encode("utf-8")) + len(target_line.encode("utf-8")) + len(omission_reserve.encode("utf-8")) + 2
+    if fixed_bytes > max_bytes:
+        header = "Offline context."
+        target_prefix = "TARGET: "
+        omission_reserve = omission_label(all_other_count)
+        target_budget = max_bytes - len(header.encode("utf-8")) - len(target_prefix.encode("utf-8")) - len(omission_reserve.encode("utf-8")) - 2
+        if target_budget < 0:
+            header = ""
+            target_budget = max_bytes - len(target_prefix.encode("utf-8")) - len(omission_reserve.encode("utf-8")) - 1
+        if target_budget < 0:
+            return _truncate_utf8(target_prefix + target_evidence, max_bytes, keep_tail=False)
+        target_line = target_prefix + _truncate_utf8(target_evidence, target_budget, keep_tail=False)
+
+    omission_reserve = omission_label(all_other_count)
+    remaining = max_bytes - len(header.encode("utf-8")) - len(target_line.encode("utf-8")) - len(omission_reserve.encode("utf-8")) - 2
+    selected_rows: set[int] = set()
+    for position, line in reversed(other_rows):
+        cost = len(line.encode("utf-8")) + 1
+        if cost <= remaining:
+            selected_rows.add(position)
+            remaining -= cost
+
+    omitted_positions = [position for position, _ in other_rows if position not in selected_rows]
+    omission = omission_label(len(omitted_positions))
+    rendered: list[tuple[int, str]] = [(position, line) for position, line in other_rows if position in selected_rows]
+    rendered.append((target_position, target_line))
+    marker_position = min(omitted_positions) if omitted_positions else target_position
+    rendered.append((marker_position, omission))
+    rendered.sort(key=lambda item: item[0])
+    result = "\n".join(([header] if header else []) + [line for _, line in rendered])
+    return result
+
+
 def format_context(event: Event, all_events: list[Event], context_mode: str, max_bytes: int) -> str:
     selected = context_events(event, all_events, context_mode)
+    if context_mode == "offline":
+        return _format_offline_context(event, selected, max_bytes)
     label = "offline same-session records" if context_mode == "offline" else "causal prefix through target"
     prior_rows: list[str] = []
     target_row = ""
