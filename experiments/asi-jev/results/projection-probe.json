@@ -1,0 +1,1199 @@
+{
+  "probe": "Codex turn_aborted payload field projection",
+  "request_design": {
+    "requested_model": "typesafe/jev-latest",
+    "targets_per_call": 1,
+    "variants": [
+      "parser_evidence",
+      "payload_reason_error_message"
+    ],
+    "repetitions_per_event_variant": 3,
+    "timeout_seconds": 20.0,
+    "automatic_retry": false,
+    "context": "single target event, causal prefix, 8192-byte cap"
+  },
+  "provenance": {
+    "created_at_utc": "2026-10-29T15:32:00.868394+00:00",
+    "script_sha256": "63bd301e2ee66260a91214a99eaff3d7eab8da1e09bf093741f70eb6c6788648",
+    "benchmark_sha256": "d9dda901aecf4b8965c561f63c375905f189c2406b6dc79e0fd2d2a700da7ca9",
+    "corpus_sha256": "b15d9fb646846cd8c1aadc04af5a3ece40e65c682e97a88181dbfa9d6f90db9c"
+  },
+  "calls": [
+    {
+      "call": 1,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "parser_evidence",
+      "repetition": 1,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.44,
+        "failure_category": 0.44,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.27
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 0.44,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.0,
+            "wait": 0.01,
+            "failure": 0.51,
+            "recovery": 0.0,
+            "completion": 0.01,
+            "unknown": 0.46
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.44,
+          "probabilities": {
+            "none": 0.32,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.1,
+            "transport": 0.0,
+            "malformed": 0.07,
+            "unknown": 0.51
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.53
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.27,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.05,
+            "blocked": 0.29,
+            "recovery": 0.01,
+            "ending": 0.26,
+            "unknown": 0.39
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 610.8308620750904,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:54.856932+00:00",
+      "finished_at_utc": "2026-10-29T15:31:55.468155+00:00"
+    },
+    {
+      "call": 2,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "parser_evidence",
+      "repetition": 2,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "unknown",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.49,
+        "failure_category": 0.43,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.3
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.49,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.0,
+            "wait": 0.01,
+            "failure": 0.41,
+            "recovery": 0.0,
+            "completion": 0.02,
+            "unknown": 0.55
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.43,
+          "probabilities": {
+            "none": 0.34,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.08,
+            "transport": 0.0,
+            "malformed": 0.08,
+            "unknown": 0.5
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.56
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.3,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.06,
+            "blocked": 0.26,
+            "recovery": 0.01,
+            "ending": 0.25,
+            "unknown": 0.42
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 480.23032397031784,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:55.468169+00:00",
+      "finished_at_utc": "2026-10-29T15:31:55.948734+00:00"
+    },
+    {
+      "call": 3,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "parser_evidence",
+      "repetition": 3,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "unknown",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.5,
+        "failure_category": 0.44,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.32
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.5,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.0,
+            "wait": 0.01,
+            "failure": 0.39,
+            "recovery": 0.0,
+            "completion": 0.02,
+            "unknown": 0.56
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.44,
+          "probabilities": {
+            "none": 0.34,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.1,
+            "transport": 0.0,
+            "malformed": 0.05,
+            "unknown": 0.51
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.56
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.32,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.04,
+            "blocked": 0.28,
+            "recovery": 0.01,
+            "ending": 0.24,
+            "unknown": 0.43
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 476.66403802577406,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:55.948758+00:00",
+      "finished_at_utc": "2026-10-29T15:31:56.425851+00:00"
+    },
+    {
+      "call": 4,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 1,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": false,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 0.55,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.99
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 0.55,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.01,
+            "permission": 0.0,
+            "environment": 0.18,
+            "model": 0.19,
+            "transport": 0.61,
+            "malformed": 0.0,
+            "unknown": 0.01
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.38
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.99,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.0,
+            "blocked": 0.99,
+            "recovery": 0.0,
+            "ending": 0.01,
+            "unknown": 0.0
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1481,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 502.0436340710148,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:56.425878+00:00",
+      "finished_at_utc": "2026-10-29T15:31:56.928279+00:00"
+    },
+    {
+      "call": 5,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 2,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": false,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 0.5,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.98
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 0.5,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.01,
+            "permission": 0.0,
+            "environment": 0.18,
+            "model": 0.24,
+            "transport": 0.56,
+            "malformed": 0.0,
+            "unknown": 0.01
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.36
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.98,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.0,
+            "blocked": 0.98,
+            "recovery": 0.0,
+            "ending": 0.01,
+            "unknown": 0.01
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1481,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 541.3713379530236,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:56.928294+00:00",
+      "finished_at_utc": "2026-10-29T15:31:57.469963+00:00"
+    },
+    {
+      "call": 6,
+      "event_id": "syn-model-error-01",
+      "raw_sha256": "3006ee9fce029cf8ae8dc7d3a5e3ee200ecc57b5e19050e6409aed1cea1f0419",
+      "source_line_sha256": "d740a0984aef4dd43320dfc5a525c06a26ed5b23c167da7b2480e7d0f852af25",
+      "expected_weak_labels": {
+        "failure_category": "model"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 3,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": false,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 0.53,
+        "retry_loop": 0.98,
+        "anomaly": null,
+        "phase": 0.98
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 0.53,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.01,
+            "permission": 0.0,
+            "environment": 0.17,
+            "model": 0.22,
+            "transport": 0.59,
+            "malformed": 0.0,
+            "unknown": 0.01
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 0.98,
+          "probabilities": {
+            "none": 0.99,
+            "retry": 0.01,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.34
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.98,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.0,
+            "blocked": 0.98,
+            "recovery": 0.0,
+            "ending": 0.01,
+            "unknown": 0.01
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1481,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 527.133338036947,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:57.469997+00:00",
+      "finished_at_utc": "2026-10-29T15:31:57.997574+00:00"
+    },
+    {
+      "call": 7,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "parser_evidence",
+      "repetition": 1,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "unknown",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.44,
+        "failure_category": 0.53,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.32
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.44,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.01,
+            "wait": 0.01,
+            "failure": 0.45,
+            "recovery": 0.0,
+            "completion": 0.01,
+            "unknown": 0.51
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.53,
+          "probabilities": {
+            "none": 0.24000000000000002,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.1,
+            "transport": 0.0,
+            "malformed": 0.07,
+            "unknown": 0.59
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.55
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.32,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.04,
+            "blocked": 0.31,
+            "recovery": 0.01,
+            "ending": 0.21,
+            "unknown": 0.43
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 442.726191948168,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:57.997638+00:00",
+      "finished_at_utc": "2026-10-29T15:31:58.440632+00:00"
+    },
+    {
+      "call": 8,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "parser_evidence",
+      "repetition": 2,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.5,
+        "failure_category": 0.47,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.32
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 0.5,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.0,
+            "wait": 0.01,
+            "failure": 0.56,
+            "recovery": 0.0,
+            "completion": 0.02,
+            "unknown": 0.4
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.47,
+          "probabilities": {
+            "none": 0.3,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.08,
+            "transport": 0.0,
+            "malformed": 0.08,
+            "unknown": 0.54
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.54
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.32,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.05,
+            "blocked": 0.24,
+            "recovery": 0.01,
+            "ending": 0.27,
+            "unknown": 0.43
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 457.01487199403346,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:58.440645+00:00",
+      "finished_at_utc": "2026-10-29T15:31:58.898072+00:00"
+    },
+    {
+      "call": 9,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "parser_evidence",
+      "repetition": 3,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "unknown",
+        "failure_category": "unknown",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "unknown"
+      },
+      "confidence": {
+        "activity": 0.5,
+        "failure_category": 0.45,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.38
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.5,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.01,
+            "tool_action": 0.0,
+            "wait": 0.01,
+            "failure": 0.4,
+            "recovery": 0.0,
+            "completion": 0.01,
+            "unknown": 0.56
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.45,
+          "probabilities": {
+            "none": 0.3,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.11,
+            "transport": 0.0,
+            "malformed": 0.07,
+            "unknown": 0.52
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.54
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "unknown",
+          "confidence": 0.38,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.04,
+            "blocked": 0.27,
+            "recovery": 0.01,
+            "ending": 0.2,
+            "unknown": 0.48
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1469,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 494.5643040118739,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:58.898106+00:00",
+      "finished_at_utc": "2026-10-29T15:31:59.393077+00:00"
+    },
+    {
+      "call": 10,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 1,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": false,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 1.0,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.89
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.0,
+            "transport": 1.0,
+            "malformed": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.48
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.89,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.01,
+            "blocked": 0.91,
+            "recovery": 0.01,
+            "ending": 0.04,
+            "unknown": 0.03
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1480,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 535.6386820785701,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:59.393105+00:00",
+      "finished_at_utc": "2026-10-29T15:31:59.929159+00:00"
+    },
+    {
+      "call": 11,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 2,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 1.0,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.87
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.0,
+            "transport": 1.0,
+            "malformed": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.5
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.87,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.01,
+            "blocked": 0.89,
+            "recovery": 0.01,
+            "ending": 0.06,
+            "unknown": 0.03
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1480,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 448.7069200258702,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:31:59.929192+00:00",
+      "finished_at_utc": "2026-10-29T15:32:00.378359+00:00"
+    },
+    {
+      "call": 12,
+      "event_id": "syn-transport-error-01",
+      "raw_sha256": "c134c50dcb5d9752b7807091d4e3438b181e04e8dcca9d9f9f5bdc8ccd24734b",
+      "source_line_sha256": "8fa4d97c367db72934e2515d6b520c96d8392d7607f4359f7515fcc37e3acc81",
+      "expected_weak_labels": {
+        "failure_category": "transport"
+      },
+      "variant": "payload_reason_error_message",
+      "repetition": 3,
+      "requested_model": "typesafe/jev-latest",
+      "resolved_model": "jev-1.14.0",
+      "predictions": {
+        "activity": "failure",
+        "failure_category": "transport",
+        "retry_loop": "none",
+        "anomaly": true,
+        "phase": "blocked"
+      },
+      "confidence": {
+        "activity": 1.0,
+        "failure_category": 1.0,
+        "retry_loop": 1.0,
+        "anomaly": null,
+        "phase": 0.92
+      },
+      "answer_details": {
+        "activity": {
+          "type": "choice",
+          "choice": "failure",
+          "confidence": 1.0,
+          "probabilities": {
+            "task_request": 0.0,
+            "progress": 0.0,
+            "tool_action": 0.0,
+            "wait": 0.0,
+            "failure": 1.0,
+            "recovery": 0.0,
+            "completion": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "failure_category": {
+          "type": "choice",
+          "choice": "transport",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 0.0,
+            "tool": 0.0,
+            "permission": 0.0,
+            "environment": 0.0,
+            "model": 0.0,
+            "transport": 1.0,
+            "malformed": 0.0,
+            "unknown": 0.0
+          }
+        },
+        "retry_loop": {
+          "type": "choice",
+          "choice": "none",
+          "confidence": 1.0,
+          "probabilities": {
+            "none": 1.0,
+            "retry": 0.0,
+            "loop": 0.0
+          }
+        },
+        "anomaly": {
+          "type": "noul",
+          "noul": 0.55
+        },
+        "phase": {
+          "type": "choice",
+          "choice": "blocked",
+          "confidence": 0.92,
+          "probabilities": {
+            "start": 0.0,
+            "active": 0.01,
+            "blocked": 0.93,
+            "recovery": 0.01,
+            "ending": 0.02,
+            "unknown": 0.03
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 1480,
+        "output_tokens": 276,
+        "complete": true
+      },
+      "rtt_ms": 489.4684510072693,
+      "errors": {
+        "request": null,
+        "dimensions": {}
+      },
+      "started_at_utc": "2026-10-29T15:32:00.378393+00:00",
+      "finished_at_utc": "2026-10-29T15:32:00.868354+00:00"
+    }
+  ]
+}

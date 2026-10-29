@@ -68,9 +68,10 @@ multi-event sessions are complete by construction; six synthetic singleton
 cases are partial records. No native fixture here establishes a complete
 physical session transcript.
 
-`data/annotation-corrections.json` records the source-backed corrections to
-the three resumed Claude labels. `evidence/events-v1.jsonl` preserves the
-pre-correction corpus for audit.
+`data/annotation-corrections.json` records source-contract corrections with
+v1, v2, and v3 labels plus native-type evidence. The snapshots
+`evidence/events-v1.jsonl` and `evidence/events-v2.jsonl` preserve the original
+and first corrected corpus bytes for audit.
 
 The labels are Worker-authored weak annotations. They have not had independent
 human review, and should be treated as an initial benchmark reference rather
@@ -85,10 +86,11 @@ python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
 
 `test_corpus.py` checks original fixture and synthetic source-line hashes,
 exact raw-line preservation, schema enums, unique IDs, strictly increasing
-per-session `event_order`, and that the corrected corpus changes only `gold`
-and `annotation_note` relative to the preserved v1 corpus. It also verifies
-each corrected source record type against its raw line. These checks are
-intended for CI; no local result is claimed here.
+per-session `event_order`, and that v1, v2, and v3 differ only in `gold` and
+`annotation_note` on rows listed in the correction manifest. It also verifies
+corrected source record types against their unchanged raw lines and restricts
+`ending` to complete authored sessions. These checks are intended for CI; no
+local result is claimed here.
 
 ## Native pipeline and PoC seam
 
