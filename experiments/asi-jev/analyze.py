@@ -78,11 +78,11 @@ def main():
         summary = condition["summary"]
         metric = summary["metrics"]["overall"]
         accuracy = [f'{metric[dimension]["accuracy"]:.3f}' for dimension in DIMENSIONS]
-        rtt = summary["latency"]["http_rtt"]
+        rtt = summary["latency"]["provider_http_rtt"]
         latency = "n/a" if rtt["p50_ms"] is None else f'{rtt["p50_ms"]:.1f}/{rtt["p95_ms"]:.1f}'
         cost = summary["cost"]["estimate_usd"]
         lines.append("| " + " | ".join([summary["strategy"], summary["mode"], summary["context"], *accuracy, latency,
-                                        f'{summary["throughput"]["events_per_second_including_remote_wait"]:.2f}',
+                                        f'{summary["throughput"]["events_per_second_end_to_end_sequential"]:.2f}',
                                         str(summary["request_count"]), "unknown" if cost is None else f"{cost:.6f}"]) + " |")
     lines.extend(["", "See comparison.json for precision, recall, macro F1, confusion matrices, strata, phase transition metrics, repeated-label stability, and paired offline comparisons. See failure-cases.jsonl for every disagreement with the weak reference.", ""])
     (args.results / "RESULTS.md").write_text("\n".join(lines))
