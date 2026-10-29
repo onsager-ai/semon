@@ -108,55 +108,79 @@ class CorpusIntegrityTests(unittest.TestCase):
                 self.assertIn(view["retry_loop"], RETRY_LOOPS)
                 self.assertIsInstance(view["anomaly"], bool)
                 self.assertIn(view["phase"], PHASES)
+                if view["phase"] == "ending":
+                    self.assertEqual(event["origin"], "synthetic_adversarial")
+                    self.assertEqual(context["session_scope"], "complete_session")
+                if event["origin"] == "sanitized_fixture":
+                    self.assertNotEqual(view["phase"], "ending")
+
+            native = event["native"]
+            try:
+                native_root = json.loads(native["raw"])
+            except json.JSONDecodeError:
+                native_root = None
+            if isinstance(native_root, dict) and native_root.get("type") == "future_event":
+                for view in event["gold"].values():
+                    self.assertEqual(view["activity"], "unknown")
+                    self.assertEqual(view["failure_category"], "none")
+                    self.assertTrue(view["anomaly"])
 
     def test_annotation_corrections_preserve_all_other_event_fields(self):
-        old_events = read_jsonl(EVIDENCE / "events-v1.jsonl")
-        new_events = read_jsonl(DATA / "events.jsonl")
+        versions = {
+            "v1": read_jsonl(EVIDENCE / "events-v1.jsonl"),
+            "v2": read_jsonl(EVIDENCE / "events-v2.jsonl"),
+            "v3": read_jsonl(DATA / "events.jsonl"),
+        }
         corrections_path = DATA / "annotation-corrections.json"
         correction_doc = json.loads(corrections_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            digest((EVIDENCE / "events-v1.jsonl").read_bytes()),
-            correction_doc["evidence_file"]["sha256"],
-        )
+        self.assertIn("no label was adjusted using model predictions", correction_doc["correction_basis"])
+        for evidence_file in correction_doc["evidence_files"]:
+            evidence_path = ROOT / evidence_file["path"]
+            self.assertEqual(digest(evidence_path.read_bytes()), evidence_file["sha256"])
+
         corrections = {entry["id"]: entry for entry in correction_doc["corrections"]}
-        self.assertEqual(
-            set(corrections),
-            {
-                "fixture-native-claude-parent-014-17",
-                "fixture-native-claude-parent-021-18",
-                "fixture-native-claude-parent-023-19",
-            },
-        )
-        self.assertEqual(len(old_events), len(new_events))
+        by_version = {
+            version: {event["id"]: event for event in events}
+            for version, events in versions.items()
+        }
+        ids = list(by_version["v1"])
+        self.assertEqual(ids, list(by_version["v2"]))
+        self.assertEqual(ids, list(by_version["v3"]))
 
-        for old, new in zip(old_events, new_events, strict=True):
-            self.assertEqual(old["id"], new["id"])
-            correction = corrections.get(old["id"])
-            if correction is None:
-                self.assertEqual(old, new)
-                continue
+        changed_ids = set()
+        for before_name, after_name in (("v1", "v2"), ("v2", "v3")):
+            for event_id in ids:
+                before = by_version[before_name][event_id]
+                after = by_version[after_name][event_id]
+                before_other = {k: v for k, v in before.items() if k not in {"gold", "annotation_note"}}
+                after_other = {k: v for k, v in after.items() if k not in {"gold", "annotation_note"}}
+                self.assertEqual(before_other, after_other)
+                if (before["gold"], before["annotation_note"]) != (after["gold"], after["annotation_note"]):
+                    changed_ids.add(event_id)
+                    self.assertIn(event_id, corrections)
 
-            self.assertEqual(correction["source"]["file"], new["source"]["file"])
-            self.assertEqual(correction["source"]["line"], new["source"]["line"])
-            self.assertEqual(correction["source"]["raw_sha256"], new["native"]["raw_sha256"])
-            self.assertEqual(correction["old"]["gold"], old["gold"])
-            self.assertEqual(correction["old"]["annotation_note"], old["annotation_note"])
-            self.assertEqual(correction["new"]["gold"], new["gold"])
-            self.assertEqual(correction["new"]["annotation_note"], new["annotation_note"])
+        self.assertEqual(changed_ids, set(corrections))
+        for event_id, correction in corrections.items():
+            for version in ("v1", "v2", "v3"):
+                event = by_version[version][event_id]
+                self.assertEqual(event["gold"], correction[version]["gold"])
+                self.assertEqual(event["annotation_note"], correction[version]["annotation_note"])
+            final = by_version["v3"][event_id]
+            self.assertEqual(correction["source"]["file"], final["source"]["file"])
+            self.assertEqual(correction["source"]["line"], final["source"]["line"])
+            self.assertEqual(correction["source"]["raw_sha256"], final["native"]["raw_sha256"])
 
-            old_without_labels = {key: value for key, value in old.items() if key not in {"gold", "annotation_note"}}
-            new_without_labels = {key: value for key, value in new.items() if key not in {"gold", "annotation_note"}}
-            self.assertEqual(old_without_labels, new_without_labels)
-            self.assertEqual(old["native"]["raw"], new["native"]["raw"])
-            self.assertEqual(old["native"]["raw_sha256"], new["native"]["raw_sha256"])
-
-            raw = json.loads(new["native"]["raw"])
+            raw = json.loads(final["native"]["raw"])
             evidence = correction["source_evidence"]
-            self.assertEqual(raw.get("type"), evidence["native_type"])
-            if evidence["native_type"] == "attachment":
+            self.assertEqual(raw.get("type"), evidence["root_type"])
+            if "payload_type" in evidence:
+                self.assertEqual(raw["payload"]["type"], evidence["payload_type"])
+            if "attachment_type" in evidence:
                 self.assertEqual(raw["attachment"]["type"], evidence["attachment_type"])
-            else:
-                self.assertEqual(raw.get("operation"), evidence["operation"])
+            if "operation" in evidence:
+                self.assertEqual(raw["operation"], evidence["operation"])
+            if "message_stop_reason" in evidence:
+                self.assertEqual(raw["message"]["stop_reason"], evidence["message_stop_reason"])
 
 
 if __name__ == "__main__":

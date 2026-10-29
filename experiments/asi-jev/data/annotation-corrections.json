@@ -1,9 +1,18 @@
 {
   "schema_version": 1,
-  "evidence_file": {
-    "path": "experiments/asi-jev/evidence/events-v1.jsonl",
-    "sha256": "c2c2e185fcac2f46c46a0db40827f71253e7dd3d8478ffdcd8abef72866360c4"
-  },
+  "correction_basis": "Source-contract corrections only; no label was adjusted using model predictions or benchmark scores.",
+  "evidence_files": [
+    {
+      "version": "v1",
+      "path": "experiments/asi-jev/evidence/events-v1.jsonl",
+      "sha256": "c2c2e185fcac2f46c46a0db40827f71253e7dd3d8478ffdcd8abef72866360c4"
+    },
+    {
+      "version": "v2",
+      "path": "experiments/asi-jev/evidence/events-v2.jsonl",
+      "sha256": "b15d9fb646846cd8c1aadc04af5a3ece40e65c682e97a88181dbfa9d6f90db9c"
+    }
+  ],
   "corrections": [
     {
       "id": "fixture-native-claude-parent-014-17",
@@ -13,11 +22,10 @@
         "raw_sha256": "d7e3853f69226383f5661a17766b411ea67ad0c67614f1105e3b3232e224066b"
       },
       "source_evidence": {
-        "native_type": "attachment",
-        "attachment_type": "prompt_snapshot",
-        "parent_source_line": 13
+        "root_type": "attachment",
+        "attachment_type": "prompt_snapshot"
       },
-      "old": {
+      "v1": {
         "gold": {
           "streaming": {
             "activity": "completion",
@@ -36,7 +44,26 @@
         },
         "annotation_note": "The full fixture later contains a second user prompt. This completed turn is interim; its streaming prefix cannot establish session end."
       },
-      "new": {
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "active"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "active"
+          }
+        },
+        "annotation_note": "Source line 14 is a prompt_snapshot attachment, not an assistant completion. The selected excerpt omits the assistant record at source line 15 and the later user prompt."
+      },
+      "v3": {
         "gold": {
           "streaming": {
             "activity": "unknown",
@@ -65,10 +92,10 @@
         "raw_sha256": "a5730a43de1f17c12c35951947a1a0d97f4a1939f44f0d39192c3214a84e278d"
       },
       "source_evidence": {
-        "native_type": "queue-operation",
+        "root_type": "queue-operation",
         "operation": "dequeue"
       },
-      "old": {
+      "v1": {
         "gold": {
           "streaming": {
             "activity": "task_request",
@@ -87,7 +114,26 @@
         },
         "annotation_note": ""
       },
-      "new": {
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "progress",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "active"
+          },
+          "offline": {
+            "activity": "progress",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "active"
+          }
+        },
+        "annotation_note": "Source line 21 is a queue-operation dequeue, not a user task request. The next user prompt at source line 22 is not selected."
+      },
+      "v3": {
         "gold": {
           "streaming": {
             "activity": "progress",
@@ -116,11 +162,10 @@
         "raw_sha256": "9a9f6108229c99534341aac08d21bce275a5d5a50503c63b5ebc7e01115054cf"
       },
       "source_evidence": {
-        "native_type": "attachment",
-        "attachment_type": "total_tokens_reminder",
-        "parent_source_line": 22
+        "root_type": "attachment",
+        "attachment_type": "total_tokens_reminder"
       },
-      "old": {
+      "v1": {
         "gold": {
           "streaming": {
             "activity": "completion",
@@ -139,7 +184,26 @@
         },
         "annotation_note": "Last assistant turn in the checked-in resumed fixture; native records do not carry a session-close marker."
       },
-      "new": {
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Source line 23 is a total_tokens_reminder attachment, not an assistant completion. Its parent user record at source line 22 is outside the selected corpus, so phase remains unknown."
+      },
+      "v3": {
         "gold": {
           "streaming": {
             "activity": "unknown",
@@ -159,6 +223,425 @@
         "annotation_note": "Source line 23 is a total_tokens_reminder attachment, not an assistant completion. Its parent user record at source line 22 is outside the selected corpus, so phase remains unknown."
       },
       "reason": "The native record is harness metadata and contains no completion evidence. Its causal parent is omitted from this fixture excerpt, so no session phase can be established."
+    },
+    {
+      "id": "fixture-native-claude-tools-parent-029-10",
+      "source": {
+        "file": "tests/fixtures/compatibility/claude-2.1.288/tools/initial-transcript.jsonl",
+        "line": 29,
+        "raw_sha256": "f3d3901204bb4dd13205cde612367bd4d4274cd9b2fd6e8f712086605d39197b"
+      },
+      "source_evidence": {
+        "root_type": "assistant",
+        "message_stop_reason": "end_turn"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Full fixture ends after this assistant turn; streaming cannot infer session end from stop_reason alone."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Full fixture ends after this assistant turn; streaming cannot infer session end from stop_reason alone."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "This assistant record ends a turn, but the selected fixture excerpt has no session-terminal record; phase remains unknown."
+      },
+      "reason": "Claude stop_reason=end_turn completes the assistant turn only. A fixture boundary or final acknowledgement is not native evidence that the physical session ended."
+    },
+    {
+      "id": "fixture-native-claude-compat-015-14",
+      "source": {
+        "file": "tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl",
+        "line": 15,
+        "raw_sha256": "df042c9318a369ad0b45108886c38f6a0f11c407ab41f77fc73c4e41e139b08c"
+      },
+      "source_evidence": {
+        "root_type": "assistant",
+        "message_stop_reason": "end_turn"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "One user/assistant mock exchange is present; fixture end is not a native session-terminal record."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "One user/assistant mock exchange is present; fixture end is not a native session-terminal record."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "This assistant record ends a turn, but the selected fixture excerpt has no session-terminal record; phase remains unknown."
+      },
+      "reason": "Claude stop_reason=end_turn completes the assistant turn only. A fixture boundary or final acknowledgement is not native evidence that the physical session ended."
+    },
+    {
+      "id": "fixture-native-claude-compat-019-15",
+      "source": {
+        "file": "tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl",
+        "line": 19,
+        "raw_sha256": "196b6c57b233fbde195a614685e5961c2c25986ab8b2f485a7388e33446591d4"
+      },
+      "source_evidence": {
+        "root_type": "cost-state"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Cost-state metadata is not an activity or failure event."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Cost-state metadata is not an activity or failure event."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Cost-state is accounting metadata, not a session-terminal record; phase remains unknown."
+      },
+      "reason": "Cost-state summarizes usage and duration but does not establish that a physical session ended."
+    },
+    {
+      "id": "fixture-native-claude-child-023-25",
+      "source": {
+        "file": "tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl",
+        "line": 23,
+        "raw_sha256": "0c38e6ca33a77dd8559aefaea43f8ff9a693240aa77e8a66d45a1a2e0c9f527c"
+      },
+      "source_evidence": {
+        "root_type": "assistant",
+        "message_stop_reason": "end_turn"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Last assistant turn in the checked-in fork fixture; there is no native session-close marker."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Last assistant turn in the checked-in fork fixture; there is no native session-close marker."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "This assistant record ends a turn, but the selected fixture excerpt has no session-terminal record; phase remains unknown."
+      },
+      "reason": "Claude stop_reason=end_turn completes the assistant turn only. A fixture boundary or final acknowledgement is not native evidence that the physical session ended."
+    },
+    {
+      "id": "fixture-native-codex-compat-013-30",
+      "source": {
+        "file": "tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl",
+        "line": 13,
+        "raw_sha256": "4713799aa02b09a705fca21f6190957013367618b93a09a0b7e06939d3da52f0"
+      },
+      "source_evidence": {
+        "root_type": "event_msg",
+        "payload_type": "task_complete"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Codex task_complete closes this turn, not all future activity in the physical session."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "ending"
+          }
+        },
+        "annotation_note": "Codex task_complete closes this turn, not all future activity in the physical session."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "completion",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": false,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Codex task_complete closes this turn, not the physical session; the selected fixture has no session-terminal marker, so phase remains unknown."
+      },
+      "reason": "Codex task_complete is a durable turn terminal, not a terminal for the physical session. The selected fixture boundary cannot establish session end."
+    },
+    {
+      "id": "syn-future-record-01",
+      "source": {
+        "file": "experiments/asi-jev/data/synthetic-adversarial.jsonl",
+        "line": 27,
+        "raw_sha256": "0ef64bba52485db11836f4f3a93bd1ff15c32867b23643c2ac5ed807780e6251"
+      },
+      "source_evidence": {
+        "root_type": "future_event",
+        "payload_type": "future_activity"
+      },
+      "v1": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "unknown",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "unknown",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Valid JSON but unrecognized record type; unknown activity is not automatically a failure."
+      },
+      "v2": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "unknown",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "unknown",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Valid JSON but unrecognized record type; unknown activity is not automatically a failure."
+      },
+      "v3": {
+        "gold": {
+          "streaming": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          },
+          "offline": {
+            "activity": "unknown",
+            "failure_category": "none",
+            "retry_loop": "none",
+            "anomaly": true,
+            "phase": "unknown"
+          }
+        },
+        "annotation_note": "Valid JSON with an unrecognized record type; activity is unknown and no failure is evident."
+      },
+      "reason": "An unknown native event kind is not itself a failure. Keep activity unknown and anomaly true for the unsupported record shape, while failure_category is none."
     }
   ]
 }

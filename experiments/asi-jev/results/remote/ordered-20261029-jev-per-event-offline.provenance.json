@@ -1,0 +1,31 @@
+{
+  "run_id": "ordered-20261029",
+  "created_at_utc": "2026-10-29T15:33:22.980563+00:00",
+  "python": "3.12.3",
+  "runner_sha256": "d9dda901aecf4b8965c561f63c375905f189c2406b6dc79e0fd2d2a700da7ca9",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+  "corpus_sha256": "b15d9fb646846cd8c1aadc04af5a3ece40e65c682e97a88181dbfa9d6f90db9c",
+  "event_count": 58,
+  "arguments": {
+    "events_path": "experiments/asi-jev/data/events.jsonl",
+    "split": "all",
+    "strategy": "jev",
+    "mode": "per-event",
+    "context": "offline",
+    "repeats": 3,
+    "requested_model": "typesafe/jev-latest",
+    "llm_endpoint_path": null,
+    "timeout_seconds": 20.0,
+    "max_requests": 256,
+    "batch_size": 4,
+    "batch_window_ms": 500.0,
+    "max_context_bytes": 8192,
+    "input_price_per_1m": null,
+    "output_price_per_1m": null
+  },
+  "resolved_models": [
+    "jev-1.14.0"
+  ],
+  "external_specification": "https://api.typesafe.ai/openapi.json",
+  "credentials_and_api_base_recorded": false
+}
