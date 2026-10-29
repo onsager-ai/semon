@@ -1,0 +1,3308 @@
+[
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 496.04045902378857,
+    "payload_bytes": 4909,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 442.7575370064005,
+    "payload_bytes": 5052,
+    "evidence_context_bytes": 317,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1512,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 492.6224530208856,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 514,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1569,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 533.4715460194275,
+    "payload_bytes": 5479,
+    "evidence_context_bytes": 738,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1639,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 444.9661689577624,
+    "payload_bytes": 5619,
+    "evidence_context_bytes": 874,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1681,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 481.643222970888,
+    "payload_bytes": 5783,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1731,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 507.08882499020547,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 560.826244065538,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 507.47789500746876,
+    "payload_bytes": 6366,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1894,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 509.0030630817637,
+    "payload_bytes": 6467,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1926,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 497.4979968974367,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 484.9826559657231,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 544.8220000835136,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 406,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1535,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 490.5925859929994,
+    "payload_bytes": 5247,
+    "evidence_context_bytes": 506,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 524.2689680308104,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 517.1556299319491,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 480.37830099929124,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 534.0255260234699,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 529.1145560331643,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 496.9563400372863,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 489.5216029835865,
+    "payload_bytes": 5015,
+    "evidence_context_bytes": 276,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 513.6558519443497,
+    "payload_bytes": 5117,
+    "evidence_context_bytes": 377,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1538,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 531.9136750185862,
+    "payload_bytes": 5218,
+    "evidence_context_bytes": 477,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1571,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 567.2651180066168,
+    "payload_bytes": 5318,
+    "evidence_context_bytes": 576,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 517.0795139856637,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 495.9436460630968,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 502.8051440604031,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 480.39038700517267,
+    "payload_bytes": 5134,
+    "evidence_context_bytes": 394,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1534,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 490.35071907565,
+    "payload_bytes": 5235,
+    "evidence_context_bytes": 494,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1565,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 472.6764240767807,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 536.0699280863628,
+    "payload_bytes": 4943,
+    "evidence_context_bytes": 205,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 478.47446298692375,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 475.6537629291415,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 495.93970901332796,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 426.35218903888017,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 481.01857490837574,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 450.2716059796512,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 483.6813589790836,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 543.3950249571353,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 579.6326060080901,
+    "payload_bytes": 6510,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1904,
+    "output_tokens": 280,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 461.3436850486323,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 502.0124319707975,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 458.2447790307924,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 441.0362900234759,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 531.5389699535444,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 525.4521060269326,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 491.24730203766376,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 523.0793990194798,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 536.6277099819854,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 486.65928200352937,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 518.0477460380644,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 507.56034604273736,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 444.28418308962137,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 475.1182660693303,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 527.0686469739303,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 488.6715969769284,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 506.5998079953715,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 457.5316780246794,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 449.71652003005147,
+    "payload_bytes": 4909,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 597.1862999722362,
+    "payload_bytes": 5052,
+    "evidence_context_bytes": 317,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1512,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 478.76732202712446,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 514,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1569,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 518.8500420190394,
+    "payload_bytes": 5479,
+    "evidence_context_bytes": 738,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1639,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 517.8786680335179,
+    "payload_bytes": 5619,
+    "evidence_context_bytes": 874,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1681,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 455.61350195202976,
+    "payload_bytes": 5783,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1731,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 524.3969749426469,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 481.19668604340404,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 470.26827500667423,
+    "payload_bytes": 6366,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1894,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 490.51992897875607,
+    "payload_bytes": 6467,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1926,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 552.8017439646646,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 519.9243880342692,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 570.5347589682788,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 406,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1535,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 531.6367109771818,
+    "payload_bytes": 5247,
+    "evidence_context_bytes": 506,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 503.58803500421345,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 492.1003709314391,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 491.318947984837,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 430.4749600123614,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 482.94501192867756,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 463.1933500058949,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 522.9192719561979,
+    "payload_bytes": 5015,
+    "evidence_context_bytes": 276,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 494.47206093464047,
+    "payload_bytes": 5117,
+    "evidence_context_bytes": 377,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1538,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 511.0850050114095,
+    "payload_bytes": 5218,
+    "evidence_context_bytes": 477,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1571,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 514.8698849370703,
+    "payload_bytes": 5318,
+    "evidence_context_bytes": 576,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 447.7428940590471,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 476.5152100007981,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 505.8032039087266,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 465.9802649402991,
+    "payload_bytes": 5134,
+    "evidence_context_bytes": 394,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1534,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 517.7412159973755,
+    "payload_bytes": 5235,
+    "evidence_context_bytes": 494,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1565,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 491.71815696172416,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 451.73560990951955,
+    "payload_bytes": 4943,
+    "evidence_context_bytes": 205,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 501.69424898922443,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 455.64396400004625,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 525.7089500082657,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 480.48598400782794,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 485.6116679729894,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 468.40519295074046,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 491.57521093729883,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 439.9406159063801,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 538.097423966974,
+    "payload_bytes": 6510,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1904,
+    "output_tokens": 280,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 467.13061910122633,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 494.75215503480285,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 470.82368610426784,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 465.3623040067032,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 539.6786089986563,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 497.8295649634674,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 513.9965610578656,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 492.2160820569843,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 487.10633197333664,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 443.80404497496784,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 540.6464749248698,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 507.6195120345801,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 566.5205790428445,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 506.79912499617785,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 469.1723129944876,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 616.9893859187141,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 474.43828999530524,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 537.263663019985,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 0.0
+    },
+    "rtt_ms": 554.8240520292893,
+    "payload_bytes": 4909,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-014-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "1": 0.0
+    },
+    "rtt_ms": 446.99665205553174,
+    "payload_bytes": 5052,
+    "evidence_context_bytes": 317,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1512,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-015-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "2": 0.0
+    },
+    "rtt_ms": 445.9632099606097,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 514,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1569,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "3": 0.0
+    },
+    "rtt_ms": 465.3152460232377,
+    "payload_bytes": 5479,
+    "evidence_context_bytes": 738,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1639,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 0.0
+    },
+    "rtt_ms": 442.10976106114686,
+    "payload_bytes": 5619,
+    "evidence_context_bytes": 874,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1681,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-020-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "5": 0.0
+    },
+    "rtt_ms": 468.4785610297695,
+    "payload_bytes": 5783,
+    "evidence_context_bytes": 1035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1731,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 547.228598035872,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 507.6927209738642,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 0.0
+    },
+    "rtt_ms": 481.8086150335148,
+    "payload_bytes": 6366,
+    "evidence_context_bytes": 1610,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1894,
+    "output_tokens": 272,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "9": 0.0
+    },
+    "rtt_ms": 527.5510438950732,
+    "payload_bytes": 6467,
+    "evidence_context_bytes": 1710,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1926,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 467.78351289685816,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 496.6350750764832,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-003-13"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "12": 0.0
+    },
+    "rtt_ms": 533.5896699689329,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 406,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1535,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "13": 0.0
+    },
+    "rtt_ms": 511.6267619887367,
+    "payload_bytes": 5247,
+    "evidence_context_bytes": 506,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 477.5537330424413,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 0.0
+    },
+    "rtt_ms": 513.1126110209152,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 564.886587089859,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 518.2522779796273,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 473.11678202822804,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-005-20"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 0.0
+    },
+    "rtt_ms": 514.1076090512797,
+    "payload_bytes": 4914,
+    "evidence_context_bytes": 176,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1471,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-016-21"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "20": 0.0
+    },
+    "rtt_ms": 492.17459699139,
+    "payload_bytes": 5015,
+    "evidence_context_bytes": 276,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "21": 0.0
+    },
+    "rtt_ms": 505.8215280296281,
+    "payload_bytes": 5117,
+    "evidence_context_bytes": 377,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1538,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-020-23"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 0.0
+    },
+    "rtt_ms": 514.5305570913479,
+    "payload_bytes": 5218,
+    "evidence_context_bytes": 477,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1571,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-021-24"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "23": 0.0
+    },
+    "rtt_ms": 538.1277910200879,
+    "payload_bytes": 5318,
+    "evidence_context_bytes": 576,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 488.4639319498092,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 486.4403479732573,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 534.7082919906825,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-007-28"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "27": 0.0
+    },
+    "rtt_ms": 526.2646479532123,
+    "payload_bytes": 5134,
+    "evidence_context_bytes": 394,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1534,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "28": 0.0
+    },
+    "rtt_ms": 537.3328300192952,
+    "payload_bytes": 5235,
+    "evidence_context_bytes": 494,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1565,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 0.0
+    },
+    "rtt_ms": 546.9286830630153,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 0.0
+    },
+    "rtt_ms": 509.130651014857,
+    "payload_bytes": 4943,
+    "evidence_context_bytes": 205,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 435.00661000143737,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 477.69517090637237,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 439.3211710266769,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 436.7727879434824,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 479.14183198008686,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 485.0987110985443,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 500.48414000775665,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 429.4032839825377,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-10"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "39": 0.0
+    },
+    "rtt_ms": 521.8427929794416,
+    "payload_bytes": 6510,
+    "evidence_context_bytes": 1747,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1904,
+    "output_tokens": 280,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 0.0
+    },
+    "rtt_ms": 519.1597969969735,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 496.49289704393595,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 0.0
+    },
+    "rtt_ms": 462.2564329765737,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 445.1090870425105,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 0.0
+    },
+    "rtt_ms": 431.75160395912826,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 486.99896305333823,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 0.0
+    },
+    "rtt_ms": 496.6951010283083,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 0.0
+    },
+    "rtt_ms": 448.914026026614,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 0.0
+    },
+    "rtt_ms": 495.79052499029785,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 0.0
+    },
+    "rtt_ms": 483.9984879363328,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 0.0
+    },
+    "rtt_ms": 545.3500999137759,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 0.0
+    },
+    "rtt_ms": 458.6859029950574,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 471.81469399947673,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 481.76324798259884,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 543.4347040718421,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 519.1509700380266,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 564.0930599765852,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "per-event",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 534.4655299559236,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  }
+]
