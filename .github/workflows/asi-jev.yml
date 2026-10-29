@@ -20,6 +20,7 @@ jobs:
       - name: Verify experiment and reproduce deterministic baseline
         run: |
           python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
+          python3 experiments/asi-jev/load_probe.py --help
           python3 experiments/asi-jev/benchmark.py --strategy rules --context prefix --out experiments/asi-jev/results/ci --run-id ci
           python3 experiments/asi-jev/benchmark.py --strategy rules --context offline --out experiments/asi-jev/results/ci --run-id ci
           python3 experiments/asi-jev/analyze.py
