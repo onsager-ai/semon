@@ -213,7 +213,8 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         epilog="Running this probe sends exactly 12 sequential Jev requests; it does not retry.",
     )
-    parser.parse_args(argv)
+    parser.add_argument("--out", type=Path, default=OUTPUT)
+    args = parser.parse_args(argv)
 
     try:
         events, corpus_sha256 = benchmark.load_events(CORPUS, "all")
@@ -249,9 +250,9 @@ def main(argv: list[str] | None = None) -> int:
         },
         "calls": calls,
     }
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    print(f"wrote {OUTPUT.relative_to(ROOT)}")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    print(f"wrote {args.out}")
     return 0
 
 

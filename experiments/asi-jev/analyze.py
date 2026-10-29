@@ -63,7 +63,9 @@ def main():
                           "scoring_reference_corpus_sha256": reference_sha256,
                           "summary": summary, "metrics_against_complete_session_gold": summarize_metrics(offline_reference),
                           "complete_authored_sessions": {"event_count": len(complete_ids),
-                              "metrics": summarize_metrics([row for row in predictions if row["id"] in complete_ids])},
+                              "metrics": summarize_metrics([row for row in predictions if row["id"] in complete_ids]),
+                              "metrics_against_offline_reference": summarize_metrics([
+                                  row for row in offline_reference if row["id"] in complete_ids])},
                           "stability": {"event_dimension_pairs": len(stability),
                                         "pairs_with_different_repeated_labels": sum(len(values) > 1 for values in stability.values())}})
     paired = []

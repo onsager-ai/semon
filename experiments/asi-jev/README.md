@@ -8,7 +8,7 @@ Each JSONL row has an `id`, `split`, `origin`, `source`, `context`, `native`, an
 
 The runner extracts bounded user and assistant text, tool names, sanitized command strings, and tool result text/status from recognized Codex and Claude event envelopes. It excludes system and developer messages, arbitrary tool arguments, and unselected native fields. It hashes each exact raw event for local result provenance. Unknown harnesses and malformed events remain explicit evidence gaps.
 
-`--context prefix` gives a target its same-session history through that event and scores it against `gold.streaming`. `--context offline` gives it same-session history from the complete captured session and scores it against `gold.offline`. Context is capped at 8,192 UTF-8 bytes per target by default; truncation keeps the target event and the newest available history. Jev uses its shared `state` for a single event and attaches distinct prefixes to questions in a microbatch. The TypeSafe API documents that each question is evaluated in isolation with shared state and that question's context.
+`--context prefix` gives a target its same-session history through that event and scores it against `gold.streaming`. `--context offline` gives it all selected same-session rows and scores it against `gold.offline`. Native groups are incomplete fixture excerpts; only three authored sessions (22 events) are complete. Context is capped at 8,192 UTF-8 bytes per target by default; truncation reserves the target, selects the newest whole context rows, and renders them chronologically with the target in its original position. Jev uses its shared `state` for a single event and attaches distinct prefixes to questions in a microbatch. The TypeSafe API documents that each question is evaluated in isolation with shared state and that question's context.
 
 ## Strategies
 
@@ -30,8 +30,7 @@ python3 experiments/asi-jev/benchmark.py \
 Run Jev microbatches with the configured gateway credentials:
 
 ```sh
-MAGPIE_BASE_URL=https://magpie.onsager.ai \
-MAGPIE_API_KEY=… \
+ASI_API_BASE=https://magpie.onsager.ai \
 python3 experiments/asi-jev/benchmark.py \
   --strategy jev --mode microbatch --context prefix \
   --repeats 3 --max-requests 127
@@ -40,8 +39,7 @@ python3 experiments/asi-jev/benchmark.py \
 The same runner accepts `ASI_API_BASE` and `ASI_API_KEY`. The default Jev request model is `typesafe/jev-latest`; every response's resolved model version is recorded. To compare the lightweight LLM, supply its exact model name:
 
 ```sh
-MAGPIE_BASE_URL=https://magpie.onsager.ai \
-MAGPIE_API_KEY=… \
+ASI_API_BASE=https://magpie.onsager.ai \
 python3 experiments/asi-jev/benchmark.py \
   --strategy llm --llm-model wokey/claude-haiku-5-5 \
   --mode per-event --context prefix --repeats 3 --max-requests 256
@@ -58,3 +56,32 @@ The summary reports accuracy, coverage, precision, recall, macro F1, per-class s
 Latency includes provider HTTP P50/P95, per-event compute or HTTP P50/P95, timestamp-derived queue wait, and projected online latency. Request failures retain their measured elapsed time and count as failures; individual malformed or missing answers become dimension-level abstentions. Input/output token counts come from provider usage when complete. Jev cost is a published list-price estimate using the token usage returned by the gateway, not a billed-cost claim; estimates are suppressed when request failures make total usage uncertain. For other models, pass both `--input-price-per-1m` and `--output-price-per-1m` to calculate a user-configured estimate.
 
 The TypeSafe request and response schema is documented in the [official OpenAPI document](https://api.typesafe.ai/openapi.json). Jev published model pricing is listed in the [TypeSafe model documentation](https://docs.typesafe.ai/models).
+
+## Reproduce the measured matrix
+
+Python 3.10+ and its standard library are sufficient. Supply `MAGPIE_API_KEY` or `ASI_API_KEY` securely in the environment; commands below reuse it without copying a key into source or shell history. The recorded endpoint is a gateway, not the direct TypeSafe API. Model aliases may move: retained responses resolved to `jev-1.14.0` and `claude-haiku-5-5`. Each remote condition uses three trials over the same 58 unique events. Request caps below are ceilings, not target counts.
+
+Run CPU-bound tests, corpus aggregation, and rules throughput in CI. On this host `/home/marvin/.cache/thermal-watch/temps.log` was unavailable, so no local tests, builds, typechecks, or computational corpus analysis were run. Stop CPU-bound work at 85 °C or without readings. Network clients processed this small corpus with negligible local CPU use.
+
+```sh
+# In CI, or on a host permitted to run CPU-bound checks:
+python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
+python3 experiments/asi-jev/benchmark.py --strategy rules --context prefix --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy rules --context offline --run-id reproduce --out /tmp/asi-jev-replay
+
+# Network replays: keep output separate from retained measurements.
+export ASI_API_BASE=https://magpie.onsager.ai
+python3 experiments/asi-jev/benchmark.py --strategy jev --mode per-event --context prefix --repeats 3 --max-requests 256 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy jev --mode microbatch --context prefix --repeats 3 --max-requests 127 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy jev --mode event-triggered --context prefix --repeats 3 --max-requests 127 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy jev --mode per-event --context offline --repeats 3 --max-requests 256 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy llm --llm-model wokey/claude-haiku-5-5 --mode per-event --context prefix --repeats 3 --max-requests 256 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/benchmark.py --strategy llm --llm-model wokey/claude-haiku-5-5 --mode per-event --context offline --repeats 3 --max-requests 256 --timeout 20 --run-id reproduce --out /tmp/asi-jev-replay
+python3 experiments/asi-jev/load_probe.py --concurrency 1 2 4 --requests-per-level 12 --out /tmp/asi-jev-load.json
+python3 experiments/asi-jev/projection_probe.py --out /tmp/asi-jev-projection.json
+
+# CI aggregates either the retained matrix (default) or one new matrix:
+python3 experiments/asi-jev/analyze.py --results /tmp/asi-jev-replay
+```
+
+See [REPORT.md](REPORT.md) for the recommendation and limitations, [results/RESULTS.md](results/RESULTS.md) for the matrix, and [results/comparison.json](results/comparison.json) for complete per-class/stratified metrics. `results/ci` preserves the original measured rules timings; workflow reproductions are uploaded separately. Aggregation re-scores saved predictions against the corrected reference after verifying native hashes. Original per-run gold/summary fields remain historical; use `comparison.json` for final scores. Correction snapshots and the superseded initial offline formatter experiment remain in `evidence/`.
