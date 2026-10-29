@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from benchmark import DIMENSIONS, summarize_metrics
+from benchmark import DIMENSIONS, load_events, phase_transition_metrics, summarize_metrics
 
 
 def main():
@@ -16,6 +16,9 @@ def main():
     corpus = {row["id"]: row for row in (
         json.loads(line) for line in args.events.read_text().splitlines() if line.strip()
     )}
+    events, reference_sha256 = load_events(args.events)
+    complete_ids = {event_id for event_id, row in corpus.items()
+                    if row["origin"] == "synthetic_adversarial" and row["context"]["session_scope"] == "complete_session"}
     summaries = []
     cases = []
     trials = {}
@@ -24,6 +27,18 @@ def main():
         stem = path.name.removesuffix(".summary.json")
         predictions = [json.loads(line) for line in path.with_name(stem + ".predictions.jsonl").read_text().splitlines() if line.strip()]
         provenance = json.loads(path.with_name(stem + ".provenance.json").read_text())
+        rescored = []
+        for prediction in predictions:
+            reference = corpus[prediction["id"]]
+            if prediction["native_sha256"] != reference["native"]["raw_sha256"]:
+                raise SystemExit(f"Native input changed for {prediction['id']}; saved predictions cannot be rescored")
+            rescored.append({**prediction, "gold": reference["gold"][prediction["gold_view"]],
+                             "gold_reference_views": reference["gold"]})
+        predictions = rescored
+        summary = {**summary, "metrics": summarize_metrics(predictions),
+                   "phase_transition_boundary": phase_transition_metrics(predictions, events)}
+        if summary["strategy"] == "rules":
+            summary["cost"] = {**summary["cost"], "estimate_usd": 0.0, "basis": "no_provider_requests"}
         # Repeated calls quantify variability, not additional independent events.
         stability = defaultdict(set)
         offline_reference = []
@@ -44,8 +59,11 @@ def main():
         if key in trials:
             raise SystemExit(f"Duplicate condition {key}: select one run per condition before aggregation")
         trials[key] = predictions
-        summaries.append({"trial": stem, "summary_path": str(path), "provenance": provenance,
+        summaries.append({"trial": stem, "original_summary_path": str(path), "provenance": provenance,
+                          "scoring_reference_corpus_sha256": reference_sha256,
                           "summary": summary, "metrics_against_complete_session_gold": summarize_metrics(offline_reference),
+                          "complete_authored_sessions": {"event_count": len(complete_ids),
+                              "metrics": summarize_metrics([row for row in predictions if row["id"] in complete_ids])},
                           "stability": {"event_dimension_pairs": len(stability),
                                         "pairs_with_different_repeated_labels": sum(len(values) > 1 for values in stability.values())}})
     paired = []
@@ -53,21 +71,23 @@ def main():
         if context != "prefix" or (strategy, mode, "offline") not in trials:
             continue
         complete = {(row["id"], row["repetition"]): row for row in trials[(strategy, mode, "offline")]}
-        counts = {dimension: {"paired": 0, "label_changes": 0, "offline_correct_only": 0, "streaming_correct_only": 0} for dimension in DIMENSIONS}
-        for row in rows:
-            other = complete.get((row["id"], row["repetition"]))
-            if other is None:
-                continue
-            for dimension in DIMENSIONS:
-                left, right = row["predictions"].get(dimension), other["predictions"].get(dimension)
-                expected = corpus[row["id"]]["gold"]["offline"][dimension]
-                counts[dimension]["paired"] += 1
-                counts[dimension]["label_changes"] += left != right
-                counts[dimension]["offline_correct_only"] += right == expected and left != expected
-                counts[dimension]["streaming_correct_only"] += left == expected and right != expected
-        paired.append({"strategy": strategy, "mode": mode, "dimensions": counts})
+        for scope, selected in (("all", rows), ("complete_authored_sessions", [row for row in rows if row["id"] in complete_ids])):
+            counts = {dimension: {"paired": 0, "label_changes": 0, "offline_correct_only": 0, "streaming_correct_only": 0} for dimension in DIMENSIONS}
+            for row in selected:
+                other = complete.get((row["id"], row["repetition"]))
+                if other is None:
+                    continue
+                for dimension in DIMENSIONS:
+                    left, right = row["predictions"].get(dimension), other["predictions"].get(dimension)
+                    expected = corpus[row["id"]]["gold"]["offline"][dimension]
+                    counts[dimension]["paired"] += 1
+                    counts[dimension]["label_changes"] += left != right
+                    counts[dimension]["offline_correct_only"] += right == expected and left != expected
+                    counts[dimension]["streaming_correct_only"] += left == expected and right != expected
+            paired.append({"strategy": strategy, "mode": mode, "scope": scope, "dimensions": counts})
     output = {"conditions": summaries, "streaming_vs_offline": paired,
-              "note": "Weak agent annotations; repetitions are not independent corpus samples. Offline-reference scores use the same complete-session reference for comparability."}
+              "scoring_reference_corpus_sha256": reference_sha256,
+              "note": "Weak agent annotations; repetitions are not independent corpus samples. Scores are recomputed against the current corrected reference, after verifying each saved native input hash. Original measured summaries and predictions remain unchanged. Offline-reference scores use the same reference for comparability; fixture excerpts are not complete native streams."}
     args.results.mkdir(parents=True, exist_ok=True)
     (args.results / "comparison.json").write_text(json.dumps(output, indent=2) + "\n")
     (args.results / "failure-cases.jsonl").write_text("".join(json.dumps(row) + "\n" for row in cases))
