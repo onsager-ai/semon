@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "experiments" / "asi-jev" / "data"
+EVIDENCE = ROOT / "experiments" / "asi-jev" / "evidence"
 FIXTURE_REVISION = "893dd56fdc63fd53b7febd597c1381570c01f64b"
 
 ACTIVITIES = {
@@ -107,6 +108,55 @@ class CorpusIntegrityTests(unittest.TestCase):
                 self.assertIn(view["retry_loop"], RETRY_LOOPS)
                 self.assertIsInstance(view["anomaly"], bool)
                 self.assertIn(view["phase"], PHASES)
+
+    def test_annotation_corrections_preserve_all_other_event_fields(self):
+        old_events = read_jsonl(EVIDENCE / "events-v1.jsonl")
+        new_events = read_jsonl(DATA / "events.jsonl")
+        corrections_path = DATA / "annotation-corrections.json"
+        correction_doc = json.loads(corrections_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            digest((EVIDENCE / "events-v1.jsonl").read_bytes()),
+            correction_doc["evidence_file"]["sha256"],
+        )
+        corrections = {entry["id"]: entry for entry in correction_doc["corrections"]}
+        self.assertEqual(
+            set(corrections),
+            {
+                "fixture-native-claude-parent-014-17",
+                "fixture-native-claude-parent-021-18",
+                "fixture-native-claude-parent-023-19",
+            },
+        )
+        self.assertEqual(len(old_events), len(new_events))
+
+        for old, new in zip(old_events, new_events, strict=True):
+            self.assertEqual(old["id"], new["id"])
+            correction = corrections.get(old["id"])
+            if correction is None:
+                self.assertEqual(old, new)
+                continue
+
+            self.assertEqual(correction["source"]["file"], new["source"]["file"])
+            self.assertEqual(correction["source"]["line"], new["source"]["line"])
+            self.assertEqual(correction["source"]["raw_sha256"], new["native"]["raw_sha256"])
+            self.assertEqual(correction["old"]["gold"], old["gold"])
+            self.assertEqual(correction["old"]["annotation_note"], old["annotation_note"])
+            self.assertEqual(correction["new"]["gold"], new["gold"])
+            self.assertEqual(correction["new"]["annotation_note"], new["annotation_note"])
+
+            old_without_labels = {key: value for key, value in old.items() if key not in {"gold", "annotation_note"}}
+            new_without_labels = {key: value for key, value in new.items() if key not in {"gold", "annotation_note"}}
+            self.assertEqual(old_without_labels, new_without_labels)
+            self.assertEqual(old["native"]["raw"], new["native"]["raw"])
+            self.assertEqual(old["native"]["raw_sha256"], new["native"]["raw_sha256"])
+
+            raw = json.loads(new["native"]["raw"])
+            evidence = correction["source_evidence"]
+            self.assertEqual(raw.get("type"), evidence["native_type"])
+            if evidence["native_type"] == "attachment":
+                self.assertEqual(raw["attachment"]["type"], evidence["attachment_type"])
+            else:
+                self.assertEqual(raw.get("operation"), evidence["operation"])
 
 
 if __name__ == "__main__":

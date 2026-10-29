@@ -47,10 +47,30 @@ authored session, a fixture excerpt, or a partial record. `gold`
 contains `streaming` and `offline` views with activity, failure category,
 retry/loop, anomaly, and phase labels. Streaming labels use only the current
 event and earlier events. Offline labels use all corpus events for that
-session. In particular, an assistant turn end does not establish a session
-end; later user prompts make earlier completions interim. `ending` is only
-assigned in the offline view when the complete corpus session ends there.
-`annotation_note` is a top-level field alongside `gold`.
+session; this is offline over selected rows, not a reconstruction of omitted
+native records. In particular, an assistant turn end does not establish a
+session end; later user prompts make earlier completions interim. `ending` is
+only assigned in the offline view when a complete authored corpus session ends
+there. `annotation_note` is a top-level field alongside `gold`.
+
+None of the observed fixture groups is a complete native stream. The Claude
+tools excerpt retains its prompt, tool calls/results, recovery edit, and final
+answer while omitting harness attachments and state records. The baseline and
+fork excerpts retain their user/assistant turns but omit attachment and state
+records. The Codex excerpt retains the response-item message pair and task
+start/complete markers but omits the duplicate `item_completed` message
+carriers, context records, and usage records. The resumed Claude excerpt is
+especially sparse: its selected lines are the first user message, a
+`prompt_snapshot` attachment, a queue dequeue, and a `total_tokens_reminder`
+attachment. It omits both assistant messages and the second user message, so
+those rows cannot demonstrate an observed interim completion. Three synthetic
+multi-event sessions are complete by construction; six synthetic singleton
+cases are partial records. No native fixture here establishes a complete
+physical session transcript.
+
+`data/annotation-corrections.json` records the source-backed corrections to
+the three resumed Claude labels. `evidence/events-v1.jsonl` preserves the
+pre-correction corpus for audit.
 
 The labels are Worker-authored weak annotations. They have not had independent
 human review, and should be treated as an initial benchmark reference rather
@@ -64,9 +84,11 @@ python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
 ```
 
 `test_corpus.py` checks original fixture and synthetic source-line hashes,
-exact raw-line preservation, schema enums, unique IDs, and strictly increasing
-per-session `event_order`. These checks are intended for CI; no local result is
-claimed here.
+exact raw-line preservation, schema enums, unique IDs, strictly increasing
+per-session `event_order`, and that the corrected corpus changes only `gold`
+and `annotation_note` relative to the preserved v1 corpus. It also verifies
+each corrected source record type against its raw line. These checks are
+intended for CI; no local result is claimed here.
 
 ## Native pipeline and PoC seam
 
