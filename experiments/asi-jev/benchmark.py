@@ -862,7 +862,7 @@ def _api_credentials() -> tuple[str, str]:
     return base.rstrip("/"), api_key
 
 
-def _make_prediction_row(event: Event, predictions: dict[str, Any], errors: dict[str, str], strategy: str, mode: str, context_mode: str, repetition: int, model_attempted: bool, queue_wait_ms: float | None, request_rtt_ms: float | None, validated_answers: dict[str, Any] | None = None) -> dict[str, Any]:
+def _make_prediction_row(event: Event, predictions: dict[str, Any], errors: dict[str, str], strategy: str, mode: str, context_mode: str, repetition: int, model_attempted: bool, queue_wait_ms: float | None, request_rtt_ms: float | None, validated_answers: dict[str, Any] | None = None, rule_gate_compute_ms: float | None = None) -> dict[str, Any]:
     gold_view = "streaming" if context_mode == "prefix" else "offline"
     return {
         "event_index": event.index, "id": event.event_id, "split": event.split, "origin": event.origin,
@@ -872,7 +872,9 @@ def _make_prediction_row(event: Event, predictions: dict[str, Any], errors: dict
         "predictions": {d: predictions.get(d) for d in DIMENSIONS},
         "validated_answers": validated_answers or {}, "errors": errors, "model_attempted": model_attempted,
         "logical_queue_wait_ms": queue_wait_ms, "request_rtt_ms": request_rtt_ms,
-        "projected_online_latency_ms": None if request_rtt_ms is None or queue_wait_ms is None else request_rtt_ms + queue_wait_ms,
+        "rule_gate_compute_ms": rule_gate_compute_ms,
+        "projected_online_latency_ms": None if queue_wait_ms is None or (request_rtt_ms is None and rule_gate_compute_ms is None)
+        else queue_wait_ms + (request_rtt_ms or 0.0) + (rule_gate_compute_ms or 0.0),
     }
 
 
@@ -942,11 +944,18 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
     prefixes = {event.index: context_events(event, events, "prefix") for event in events}
     rule_contexts = {event.index: context_events(event, events, args.context) for event in events}
     stream_batches = build_microbatches(events, args.batch_size, args.batch_window_ms) if args.mode == "microbatch" else [([event], {event.index: 0.0}) for event in events]
+    gate_plan: dict[int, tuple[dict[str, Any], bool, float]] = {}
+    if args.strategy != "rules" and args.mode == "event-triggered":
+        for event in events:
+            gate_started = time.perf_counter()
+            rule_prediction = rule_classify(event, prefixes[event.index])
+            triggered = should_trigger_model(rule_prediction)
+            gate_compute_ms = (time.perf_counter() - gate_started) * 1000.0
+            gate_plan[event.index] = (rule_prediction, triggered, gate_compute_ms)
 
     if args.strategy != "rules":
         if args.mode == "event-triggered":
-            triggered = [event for event in events if should_trigger_model(rule_classify(event, prefixes[event.index]))]
-            planned_requests = len(triggered) * repetitions
+            planned_requests = sum(plan[1] for plan in gate_plan.values()) * repetitions
         else:
             planned_requests = len(stream_batches) * repetitions
         if planned_requests > args.max_requests:
@@ -975,12 +984,13 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
                           "throughput_events_per_second": len(events) / run_mode_elapsed, "sequential": True})
         else:
             if args.mode == "event-triggered":
-                triggered_indices = {event.index for event in events if should_trigger_model(rule_classify(event, prefixes[event.index]))}
                 for event in events:
-                    if event.index not in triggered_indices:
-                        rule_prediction = rule_classify(event, prefixes[event.index])
-                        repeat_rows[event.index] = _make_prediction_row(event, rule_prediction, {}, args.strategy, args.mode, args.context, repetition, False, 0.0, 0.0)
-                batches = [([event], {event.index: 0.0}) for event in events if event.index in triggered_indices]
+                    rule_prediction, triggered, gate_compute_ms = gate_plan[event.index]
+                    if not triggered:
+                        repeat_rows[event.index] = _make_prediction_row(event, rule_prediction, {}, args.strategy, args.mode, args.context,
+                                                                        repetition, False, 0.0, None,
+                                                                        rule_gate_compute_ms=gate_compute_ms)
+                batches = [([event], {event.index: 0.0}) for event in events if gate_plan[event.index][1]]
             else:
                 batches = stream_batches
             for batch, waits in batches:
@@ -995,7 +1005,10 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
                         event_errors = errors.get(event.index, {})
                         for dim, code in event_errors.items():
                             failures.append({"repetition": repetition, "event_ids": [event.event_id], "dimension": dim, "code": code})
-                        repeat_rows[event.index] = _make_prediction_row(event, predictions.get(event.index, {}), event_errors, args.strategy, args.mode, args.context, repetition, True, waits[event.index], telemetry["rtt_ms"], details.get(event.index, {}))
+                        gate_compute_ms = gate_plan[event.index][2] if args.mode == "event-triggered" else None
+                        repeat_rows[event.index] = _make_prediction_row(event, predictions.get(event.index, {}), event_errors, args.strategy, args.mode, args.context,
+                                                                        repetition, True, waits[event.index], telemetry["rtt_ms"],
+                                                                        details.get(event.index, {}), gate_compute_ms)
                 except ProviderFailure as exc:
                     failures.append({"repetition": repetition, "event_ids": event_ids, "code": exc.code})
                     calls.append({"repetition": repetition, "event_ids": event_ids, "events": len(batch), "mode": args.mode, "request": True,
@@ -1003,7 +1016,10 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
                                   "evidence_context_bytes": exc.evidence_context_bytes or 0})
                     for event in batch:
                         preds, errs = _all_abstain(exc.code)
-                        repeat_rows[event.index] = _make_prediction_row(event, preds, errs, args.strategy, args.mode, args.context, repetition, True, waits[event.index], exc.rtt_ms)
+                        gate_compute_ms = gate_plan[event.index][2] if args.mode == "event-triggered" else None
+                        repeat_rows[event.index] = _make_prediction_row(event, preds, errs, args.strategy, args.mode, args.context,
+                                                                        repetition, True, waits[event.index], exc.rtt_ms,
+                                                                        rule_gate_compute_ms=gate_compute_ms)
         all_rows.extend(repeat_rows[index] for index in sorted(repeat_rows))
 
     wall_seconds = max(time.perf_counter() - started, 1e-9)
@@ -1012,6 +1028,7 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
     successful_calls = [item for item in request_calls if not item.get("failed")]
     rtts = [float(item["rtt_ms"]) for item in request_calls if isinstance(item.get("rtt_ms"), (int, float))]
     event_compute_or_http = [float(row["request_rtt_ms"]) for row in all_rows if isinstance(row.get("request_rtt_ms"), (int, float))]
+    rule_gate_times = [float(row["rule_gate_compute_ms"]) for row in all_rows if isinstance(row.get("rule_gate_compute_ms"), (int, float))]
     event_latency = [float(row["projected_online_latency_ms"]) for row in all_rows if isinstance(row.get("projected_online_latency_ms"), (int, float))]
     waits = [float(row["logical_queue_wait_ms"]) for row in all_rows if isinstance(row.get("logical_queue_wait_ms"), (int, float))]
     input_tokens = [item["input_tokens"] for item in successful_calls if isinstance(item.get("input_tokens"), int)]
@@ -1045,6 +1062,7 @@ def run_benchmark(args: argparse.Namespace, events: list[Event], corpus_sha256: 
         "metrics": summarize_metrics(all_rows),
         "phase_transition_boundary": phase_transition_metrics(all_rows, events),
         "latency": {"provider_http_rtt": _quantiles(rtts), "per_event_compute_or_http": _quantiles(event_compute_or_http),
+                    "rule_gate_compute": _quantiles(rule_gate_times),
                     "projected_online_event_latency": _quantiles(event_latency),
                     "timestamp_derived_logical_queue_wait": _quantiles(waits),
                     "queue_wait_unknown_event_rows": sum(row.get("logical_queue_wait_ms") is None for row in all_rows),
