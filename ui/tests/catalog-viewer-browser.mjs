@@ -916,7 +916,7 @@ for (const width of [390, 1280])
           // cannot turn the native host into a source-selected reader either.
           for (const path of [
             '/sessions?machine=source-1',
-            '/s/native/shared?machine=source-1',
+            '/session/source-1/shared',
             '/analytics',
             '/',
           ]) {
@@ -1372,7 +1372,7 @@ for (const width of [390, 1280])
           );
         }
         await page.evaluate(() => {
-          history.pushState(null, '', '/trace/native/shared/trace-root?machine=source-1');
+          history.pushState(null, '', '/session/source-1/shared/trace/trace-root');
           dispatchEvent(new PopStateEvent('popstate'));
         });
         stage = 'Trace publication';
@@ -4123,7 +4123,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
     const scrollBefore = await page.locator('#main').evaluate((node) => node.scrollTop);
     await page.evaluate(() => {
       const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
-      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      history.pushState(state, '', '/session/source/one#anchor-turn');
       dispatchEvent(new PopStateEvent('popstate', { state }));
     });
     await withDeadline(firstAnchorStarted, 'first turn anchor request');
@@ -4181,7 +4181,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
     // A stale response for this same turn must not survive a session-list round trip.
     await page.evaluate(() => {
       const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
-      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      history.pushState(state, '', '/session/source/one#anchor-turn');
       dispatchEvent(new PopStateEvent('popstate', { state }));
     });
     await withDeadline(staleAnchorStarted, 'superseded turn anchor request');
@@ -4189,7 +4189,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
     await page.locator('#page [data-id="one"]').waitFor();
     await page.evaluate(() => {
       const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
-      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      history.pushState(state, '', '/session/source/one#anchor-turn');
       dispatchEvent(new PopStateEvent('popstate', { state }));
     });
     await page.getByText('New generation anchor slot', { exact: true }).waitFor();
@@ -4261,7 +4261,7 @@ test('a lost transcript capability cancels a pending turn anchor before any rang
       if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
       return fulfillCatalogStatic(route, url);
     });
-    await page.goto('http://catalog.test/s/claude/one?machine=source#turn=pending-turn');
+    await page.goto('http://catalog.test/session/source/one#pending-turn');
     await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
     await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
     await page.addScriptTag({ content: outputFiles[0].text });
@@ -4986,106 +4986,3 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
-
-for (const hostMode of ['standalone', 'catalog-sources', 'single-source-host'])
-  for (const mode of ['unique', 'missing', 'ambiguous', 'incomplete'])
-    test(`legacy indexed unsent bookmark keeps canonical identity: ${mode} (${hostMode})`, async () => {
-      const browser = await chromium.launch();
-      try {
-        const page = await browser.newPage();
-        const errors = [];
-        page.on('pageerror', (error) => errors.push(String(error)));
-        const selected = [],
-          lookups = [];
-        await page.route('http://catalog.test/**', async (route) => {
-          const url = new URL(route.request().url());
-          if (url.pathname.startsWith('/api/'))
-            assert.equal(url.searchParams.has('t'), false, 'bootstrap credential reached an API');
-          if (url.pathname === '/api/session-locate') {
-            lookups.push(url);
-            assert.equal(url.searchParams.get('sid'), 'unsent:target');
-            assert.equal(url.searchParams.get('machine'), 'source');
-            return route.fulfill({
-              json: {
-                api: 1,
-                unavailable: mode === 'incomplete' ? 1 : 0,
-                matches:
-                  mode === 'missing'
-                    ? []
-                    : [
-                        { source_key: 'source', catalog_key: 'real', harness: 'claude' },
-                        ...(mode === 'ambiguous'
-                          ? [{ source_key: 'source', catalog_key: 'other', harness: 'claude' }]
-                          : []),
-                      ],
-              },
-            });
-          }
-          if (url.pathname === '/api/session-capabilities')
-            return route.fulfill({ json: capabilities(true) });
-          if (url.pathname === '/api/session-sources')
-            return route.fulfill({
-              json: {
-                api: 1,
-                items: [{ source_key: 'source', label: 'Fixture' }],
-                next_cursor: null,
-              },
-            });
-          if (url.pathname === '/api/sessions')
-            return route.fulfill({ json: list([meta('real')]) });
-          if (
-            url.pathname === '/api/session-identity' ||
-            url.pathname === '/api/session-transcript'
-          ) {
-            selected.push(url);
-            assert.equal(url.searchParams.get('sid'), 'real');
-            assert.equal(url.searchParams.get('machine'), 'source');
-            return route.fulfill({
-              json:
-                url.pathname === '/api/session-identity'
-                  ? { api: 1, identity: identity('real') }
-                  : transcript('real', url.searchParams, 1),
-            });
-          }
-          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
-          return fulfillCatalogStatic(route, url);
-        });
-        await page.goto('http://catalog.test/s/native/unsent%3Atarget?machine=source&t=bootstrap');
-        await page.addScriptTag({ content: outputFiles[0].text });
-        const host =
-          hostMode === 'standalone'
-            ? null
-            : {
-                machinesPath: '/machines',
-                ...(hostMode === 'catalog-sources' ? { catalogSources: true } : {}),
-              };
-        await page.evaluate(
-          (value) => (window.app = CatalogViewer.mountViewerApplication(value)),
-          host,
-        );
-        if (mode === 'unique') {
-          await page.locator('#page [data-entry-key="real:0"]').waitFor();
-          assert.equal(new URL(page.url()).pathname, '/session/source/real');
-          assert.equal(selected.length > 0, true);
-        } else {
-          const message =
-            mode === 'incomplete'
-              ? 'The recorded session index is updating. Retrying…'
-              : mode === 'ambiguous'
-                ? 'This bookmark has several recorded origins. Choose a session.'
-                : 'Recorded session not found.';
-          const note = page.locator('#page [role="status"]').filter({ hasText: message });
-          await note.waitFor();
-          assert.ok((await note.innerText()).includes(message));
-          await note.getByRole('button', { name: 'Retry', exact: true }).waitFor();
-          assert.equal(new URL(page.url()).pathname, '/s/native/unsent%3Atarget');
-          assert.deepEqual(selected, [], 'unresolved indexed bookmark selected content');
-        }
-        assert.equal(lookups.length > 0, true);
-        assert.equal(new URL(page.url()).searchParams.has('t'), false);
-        assert.deepEqual(errors, []);
-        await page.evaluate(() => window.app.destroy());
-      } finally {
-        await browser.close();
-      }
-    });

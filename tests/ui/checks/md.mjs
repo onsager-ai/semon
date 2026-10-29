@@ -104,12 +104,9 @@ async function openInstrumented(browser, { base, token, size, dark, path: routeP
       ? r.continue()
       : r.abort(),
   );
-  await page.goto(
-    base + routePath + (routePath.includes('?') ? '&' : '?') + 't=' + token + '&compat=1',
-    {
-      waitUntil: 'load',
-    },
-  );
+  await page.goto(base + routePath + (routePath.includes('?') ? '&' : '?') + 't=' + token, {
+    waitUntil: 'load',
+  });
   await settled(page);
   return page;
 }

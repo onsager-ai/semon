@@ -635,7 +635,7 @@ export async function context(browser, { size = 'phone', dark = false, viewport 
   });
 }
 
-// A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
+// A page on the served viewer at `path` (such as "/" or "/session/local/harbor"), signed in with the token. Only the served
 // origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
 export async function served(browser, opts = {}) {
   const base =

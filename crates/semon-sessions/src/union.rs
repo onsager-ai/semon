@@ -1088,23 +1088,8 @@ impl ViewerCore {
                 etag: None,
             };
         }
-        if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
-            return self.session_page(extras, path, query, deadline);
-        }
-        if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
-            return crate::native_page::reply(path, query, |endpoint, args| {
-                self.respond_with_deadline_mode(
-                    extras,
-                    "GET",
-                    endpoint,
-                    args,
-                    None,
-                    CatalogReadContext {
-                        deadline,
-                        allow_wait: false,
-                    },
-                )
-            });
+        if path.starts_with("/session/") {
+            return self.session_page(path, query);
         }
         self.follow();
         let views = self.views();
@@ -1193,30 +1178,18 @@ impl ViewerCore {
         views[0].1.respond(method, path, query, if_none_match)
     }
 
-    fn session_page(
-        &self,
-        extras: &Extras,
-        path: &str,
-        query: &str,
-        deadline: Instant,
-    ) -> ViewerReply {
-        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
+    fn session_page(&self, path: &str, query: &str) -> ViewerReply {
+        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
         let route = match SessionRoute::parse(path, query) {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
         };
-        let native_requested = route
-            .controls
-            .get("native")
-            .is_some_and(|value| value == "1");
         self.follow();
         let views = self.views();
         let inventory = self.source_inventory(&views);
         let shell = || {
-            let selected = route
-                .source
-                .as_deref()
-                .and_then(|source| inventory.index(source))
+            let selected = inventory
+                .index(&route.source)
                 .and_then(|index| views.get(index))
                 .or_else(|| views.first());
             selected
@@ -1225,7 +1198,6 @@ impl ViewerCore {
         };
         let mut candidates = Vec::<Candidate>::new();
         let mut unavailable = false;
-        let mut unavailable_views = Vec::new();
         let mut work_guards = Vec::new();
         for (index, (internal, view)) in views.iter().enumerate() {
             let source = if internal.is_empty() {
@@ -1233,11 +1205,7 @@ impl ViewerCore {
             } else {
                 internal
             };
-            if route
-                .source
-                .as_ref()
-                .is_some_and(|selected| selected != source)
-            {
+            if route.source != source {
                 continue;
             }
             // Inventory qualification also rejects duplicated or unstable source keys.
@@ -1248,7 +1216,6 @@ impl ViewerCore {
                 Ok(guard) => guard,
                 Err(_) => {
                     unavailable = true;
-                    unavailable_views.push(view);
                     continue;
                 }
             };
@@ -1261,7 +1228,6 @@ impl ViewerCore {
             let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
             if reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0) {
                 unavailable = true;
-                unavailable_views.push(view);
             }
             for candidate in value["matches"].as_array().into_iter().flatten() {
                 if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
@@ -1271,32 +1237,12 @@ impl ViewerCore {
         }
         if unavailable {
             drop(work_guards);
-            if native_requested {
-                // No selected API follows a no-JavaScript retry. Request the
-                // ordinary coalesced source producer after releasing all work
-                // guards; note_catalog_read never waits for that producer.
-                for view in unavailable_views {
-                    let _ = view.note_catalog_read();
-                }
-                // Keep the unavailable observation: rereading the old Catalog
-                // without the producer lock could infer absence from stale rows.
-                let mut arguments = route.controls.clone();
-                if route.legacy_harness.is_some() {
-                    if let Some(source) = &route.source {
-                        arguments.insert("machine".into(), source.clone());
-                    }
-                    if let Some(anchor) = &route.anchor {
-                        arguments.insert("turn".into(), anchor.clone());
-                    }
-                }
-                return crate::native_page::retry_unavailable(path, &arguments);
-            }
             // A valid address can load before its bounded source observation
             // finishes. Keep the shell available so the selected APIs own the
             // retry state and content still waits for exact resolution.
             return shell();
         }
-        let resolution = resolve_bookmark(&route, &candidates);
+        let resolution = resolve(&route, &candidates);
         match resolution {
             Resolution::Valid(index) => {
                 let candidate = &candidates[index];
@@ -1321,21 +1267,6 @@ impl ViewerCore {
                     }
                     if anchor.status != 200 {
                         if anchor.status >= 500 || matches!(anchor.status, 409 | 423 | 429) {
-                            if native_requested {
-                                return crate::native_page::reply(path, query, |endpoint, args| {
-                                    self.respond_with_deadline_mode(
-                                        extras,
-                                        "GET",
-                                        endpoint,
-                                        args,
-                                        None,
-                                        CatalogReadContext {
-                                            deadline,
-                                            allow_wait: false,
-                                        },
-                                    )
-                                });
-                            }
                             return shell();
                         }
                         return anchor;
@@ -1371,86 +1302,24 @@ impl ViewerCore {
                                         != Some("incomplete")
                             });
                     if !exact_anchor {
-                        if native_requested {
-                            return crate::native_page::reply(path, query, |endpoint, args| {
-                                self.respond_with_deadline_mode(
-                                    extras,
-                                    "GET",
-                                    endpoint,
-                                    args,
-                                    None,
-                                    CatalogReadContext {
-                                        deadline,
-                                        allow_wait: false,
-                                    },
-                                )
-                            });
-                        }
                         return shell();
                     }
                     match anchor_body.as_ref().and_then(|value| value.get("slot")) {
                         Some(slot) if slot.is_null() => return text(404, "Not found"),
                         Some(slot) if slot.as_u64().is_some() => {}
                         _ => {
-                            if native_requested {
-                                return crate::native_page::reply(path, query, |endpoint, args| {
-                                    self.respond_with_deadline_mode(
-                                        extras,
-                                        "GET",
-                                        endpoint,
-                                        args,
-                                        None,
-                                        CatalogReadContext {
-                                            deadline,
-                                            allow_wait: false,
-                                        },
-                                    )
-                                });
-                            }
                             return shell();
                         }
                     }
                 }
                 drop(work_guards);
-                if route.legacy_harness.is_some() {
-                    return ViewerReply::redirect(
-                        route.canonical(&candidate.source_key, &candidate.catalog_key),
-                    );
-                }
-                if native_requested {
-                    crate::native_page::reply(path, query, |endpoint, args| {
-                        self.respond_with_deadline_mode(
-                            extras,
-                            "GET",
-                            endpoint,
-                            args,
-                            None,
-                            CatalogReadContext {
-                                deadline,
-                                allow_wait: false,
-                            },
-                        )
-                    })
-                } else if let Some((_, view)) = views.first() {
+                if let Some((_, view)) = views.first() {
                     view.respond("GET", "/", "", None)
                 } else {
                     text(404, "Not found")
                 }
             }
-            Resolution::Ambiguous => crate::native_page::reply(path, query, |endpoint, args| {
-                self.respond_with_deadline_mode(
-                    extras,
-                    "GET",
-                    endpoint,
-                    args,
-                    None,
-                    CatalogReadContext {
-                        deadline,
-                        allow_wait: false,
-                    },
-                )
-            }),
-            Resolution::NotFound | Resolution::Mismatch => text(404, "Not found"),
+            Resolution::Ambiguous | Resolution::NotFound => text(404, "Not found"),
         }
     }
 

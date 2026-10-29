@@ -611,16 +611,7 @@ export default async function analyticsCheck(browser) {
     await page.context().close();
   }
 
-  const legacy = await served(browser, { size: 'desktop', path: '/timeline' });
-  const oldRoute = await legacy.evaluate(() => ({
-    state: history.state?.v,
-    path: location.pathname,
-    title: document.querySelector('#topbar .t')?.textContent,
-  }));
-  const legacyErrors = legacy.errors;
-  await legacy.context().close();
-
-  r.results = { modes, oldRoute, costTwoDays, older, failing };
+  r.results = { modes, costTwoDays, older, failing };
   for (const m of modes) {
     r.expect(m.errors.length === 0, m.mode + ': page errors: ' + m.errors.join(' | '));
     r.expect(
@@ -692,13 +683,5 @@ export default async function analyticsCheck(browser) {
         JSON.stringify(m.allowance),
     );
   }
-  r.expect(
-    legacyErrors.length === 0 &&
-      oldRoute.state === 'analytics' &&
-      oldRoute.path === '/analytics' &&
-      oldRoute.title === 'Analytics',
-    'the old /timeline URL did not resolve to /analytics: ' +
-      JSON.stringify({ ...oldRoute, errors: legacyErrors }),
-  );
   return r.done();
 }

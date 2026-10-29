@@ -1,7 +1,7 @@
 // What only the served viewer does, on the extras fixture (fixture.mjs --extras), phone light unless noted:
 //   - paging: the `backlog` lane (471 entries, one unreadable line) opens on its last page with "Load earlier" and no "Started" divider; each
 //     "Load earlier" adds entries above without moving what was on screen; the first page ends with the "Started"
-//     divider and every one of its 10 turns, with one gap divider where the log lost a line. A deep link (/s/claude/backlog?turn=<an older turn>) lands on that turn,
+//     divider and every one of its 10 turns, with one gap divider where the log lost a line. A deep link (/session/local/backlog#<an older turn>) lands on that turn,
 //     in view, with "Load earlier" above and "Load later" below, and "Load later" reaches the last turn.
 //   - a Codex call with no exit status (deps) draws as neither failed nor succeeded: no failed styling, "Exit unknown ·",
 //     and its group summary counts no failure.
@@ -129,7 +129,7 @@ export default async function (browser) {
   // ---- Command descriptions title Bash steps while the command stays in its details -----------------------------
   {
     const titleText = 'DescriptionOnlySearchWord ' + 'x'.repeat(120);
-    const page = await served(browser, { extras: true, path: '/s/claude/harbor' });
+    const page = await served(browser, { extras: true, path: '/session/local/harbor' });
     let titled;
     let untitled;
     let commandOverride = null;
@@ -344,7 +344,12 @@ export default async function (browser) {
 
     const shotTitle = 'Run queue retry tests';
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
-      const shot = await served(browser, { extras: true, path: '/s/claude/harbor', size, dark });
+      const shot = await served(browser, {
+        extras: true,
+        path: '/session/local/harbor',
+        size,
+        dark,
+      });
       const routeStages = new WeakMap();
       const recordRouteStage = (request, stage, status) => {
         const stages = routeStages.get(request) ?? [];
@@ -852,7 +857,7 @@ export default async function (browser) {
 
   // ---- Steps: no exit status, a long command, View all ------------------------------------------------------------------
   {
-    const page = await served(browser, { extras: true, path: '/s/codex/deps' });
+    const page = await served(browser, { extras: true, path: '/session/local/deps' });
     await page
       .locator('[aria-label="Transcript"] [data-entry-key]')
       .first()
@@ -912,7 +917,7 @@ export default async function (browser) {
     );
 
     const childRequestsSettled = trackChildRequests(page);
-    await page.goto(ENV.extraBase + '/s/claude/harbor', { waitUntil: 'load' });
+    await page.goto(ENV.extraBase + '/session/local/harbor', { waitUntil: 'load' });
     await page
       .locator('[aria-label="Transcript"] [data-entry-key]')
       .first()
@@ -1064,7 +1069,7 @@ export default async function (browser) {
 
   // ---- Code-mode exec: unwrapped operations and its script control -----------------------------------------------
   {
-    const page = await served(browser, { extras: true, path: '/s/codex/code-mode' });
+    const page = await served(browser, { extras: true, path: '/session/local/code-mode' });
     await page
       .locator('[aria-label="Transcript"] [data-entry-key]')
       .first()
@@ -1157,7 +1162,7 @@ export default async function (browser) {
 
   // ---- Yielded Codex command and poll input ---------------------------------------------------------------------
   {
-    const page = await served(browser, { extras: true, path: '/s/codex/yielded-ui' });
+    const page = await served(browser, { extras: true, path: '/session/local/yielded-ui' });
     await page
       .locator('[aria-label="Transcript"] [data-entry-key]')
       .first()
@@ -1238,7 +1243,12 @@ export default async function (browser) {
       ['desktop', true],
     ]) {
       const tag = size + (dark ? '-dark' : '-light');
-      const page = await served(browser, { extras: true, size, dark, path: '/s/codex/codex-cut' });
+      const page = await served(browser, {
+        extras: true,
+        size,
+        dark,
+        path: '/session/local/codex-cut',
+      });
       await page
         .locator('[aria-label="Transcript"] [data-entry-key]')
         .first()
@@ -1352,7 +1362,7 @@ export default async function (browser) {
 
   // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
   {
-    const page = await served(browser, { extras: true, path: '/s/claude/result-card' });
+    const page = await served(browser, { extras: true, path: '/session/local/result-card' });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
     // Wait for the result event itself. Its preview can repeat the independently
     // rendered closing reply; the assertions below qualify the event's count.
@@ -1444,7 +1454,7 @@ export default async function (browser) {
       'Sessions must not render Home inbox cards or navigation',
     );
 
-    await page.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
+    await page.goto(ENV.extraBase + '/session/local/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
@@ -1485,7 +1495,7 @@ export default async function (browser) {
     await blocked.waitForFunction(
       () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
     );
-    await blocked.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
+    await blocked.goto(ENV.extraBase + '/session/local/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
     await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
@@ -1609,52 +1619,6 @@ export default async function (browser) {
           await scan(page, size + ' trace ' + t.slice(0, 20));
         }
       }
-      const realSession = D.SESS[XSS_KEY],
-        source = realSession && D.SOURCES[realSession.machine],
-        key = D.KEYS[XSS_KEY],
-        unsent = 'unsent:' + XSS;
-      if (!source || !key)
-        throw new Error('Payload fixture is missing its source or Catalog key mapping');
-      const unsentPage = await served(browser, {
-        extras: true,
-        size,
-        dark,
-        path: '/s/native/' + encodeURIComponent(unsent) + '?machine=' + encodeURIComponent(source),
-      });
-      await unsentPage.waitForFunction(
-        ({ expectedSource, expectedKey }) => {
-          const parts = location.pathname.split('/');
-          try {
-            return (
-              parts.length === 4 &&
-              parts[1] === 'session' &&
-              decodeURIComponent(parts[2]) === expectedSource &&
-              decodeURIComponent(parts[3]) === expectedKey &&
-              document.querySelector('[aria-label="Transcript"] [data-entry-key]') !== null
-            );
-          } catch {
-            return false;
-          }
-        },
-        { expectedSource: source, expectedKey: key },
-        { timeout: 5000 },
-      );
-      await unsentPage.waitForTimeout(100);
-      await openEverything(unsentPage);
-      await unsentPage.waitForTimeout(80);
-      await scan(unsentPage, size + ' session ' + unsent.slice(0, 20));
-      const owner = canonicalOwner(unsentPage);
-      const traces = await unsentPage.evaluate(() =>
-        [...document.querySelectorAll('.turn-end .link')].map(
-          (b) => b.closest('.turn').dataset.turn,
-        ),
-      );
-      for (const t of traces) {
-        await goto(unsentPage, { v: 'trace', sid: owner, turn: t }, D);
-        await openEverything(unsentPage);
-        await scan(unsentPage, size + ' trace ' + t.slice(0, 20));
-      }
-      await unsentPage.context().close();
       // The payload lane's details menu.
       await goto(page, { v: 'session', id: XSS_KEY }, D);
       await openEverything(page);
@@ -1670,13 +1634,14 @@ export default async function (browser) {
       await page.context().close();
     }
     // The payload lane and the failed send's stub from their real URLs.
-    for (const [id, harness] of [
-      [XSS_KEY, 'claude'],
-      ['unsent:' + XSS, 'claude'],
-    ]) {
+    for (const id of [XSS_KEY]) {
       const page = await served(browser, {
         extras: true,
-        path: '/s/' + harness + '/' + encodeURIComponent(id),
+        path:
+          '/session/' +
+          encodeURIComponent(D.SOURCES[D.SESS[id].machine]) +
+          '/' +
+          encodeURIComponent(D.KEYS[id]),
       });
       await page
         .locator('[aria-label="Transcript"] [data-entry-key]')
