@@ -21,8 +21,6 @@ Hub's authenticated fallback router:
 
 * Transcript: `/session/<source_key>/<catalog_key>`.
 * Transcript anchor: `/session/<source_key>/<catalog_key>#<encoded turn>`.
-  The historical `#turn=<encoded turn>` spelling is read once and normalized
-  with `replaceState`; new links use only the canonical fragment.
 * Trace: `/session/<source_key>/<catalog_key>/trace/<turn>`.
   The turn is mandatory. There is no turnless trace destination.
 
@@ -39,7 +37,7 @@ escapes are rejected. Existing selected-reader keys have a 4096-byte bound.
 
 Canonical queries contain only nonidentity controls, at most once each:
 `harness` (the existing browsing filter), `repo`, `no_repo=1`, `model`, `q`,
-`all_machines=1`, `native=1`, `after`, `generation`, `field_chunk`, `part`.
+`all_machines=1`, `after`, `generation`, `field_chunk`, `part`.
 The filter never resolves or authorizes the selected session. `repo` and
 `no_repo` conflict. Ordinals are nonnegative safe integers; continuation after
 zero requires a generation. Field and part reads require after and generation,
@@ -47,8 +45,7 @@ and conflict with each other. The existing parts are script/output/attachment.
 All deeper selected-read generation, range and custody validation still applies.
 Unknown keys, duplicate keys, invalid encodings and identity parameters
 `machine`, `source`, `sid`, `catalog_key` are malformed on canonical addresses.
-Browsing context and native paging/expansion links remain usable on reload and
-history navigation. Standalone HTTP consumes a successfully authenticated `t` bootstrap credential
+Browsing context remains usable on reload and history navigation. Standalone HTTP consumes a successfully authenticated `t` bootstrap credential
 before route parsing, and the frontend removes it before parsing or history
 normalization. Duplicate or invalid URL credentials fail authentication, including
 with a cookie. Existing Host, cookie, one-time control nonce and write protections
@@ -56,7 +53,7 @@ remain in force. Public route parsers and Hub never accept `t` as a route contro
 API requests still explicitly carry the resolved source and
 Catalog key under their existing selected-read contracts.
 
-## Resolution and compatibility
+## Resolution
 
 Rust `session_route` and UI `lib/sessionRoute` implement the same grammar and
 metadata resolver. Both consume the vectors in
@@ -64,33 +61,17 @@ metadata resolver. Both consume the vectors in
 and UI PR suites. A resolver receives only already-authorized, unrevoked metadata.
 It cannot grant a read, make native IDs authoritative or silently choose another
 source. Outcomes are valid, malformed (400), not_found (404), unauthorized under
-the host's existing denial policy, and legacy-only ambiguous or mismatch.
+the host's existing denial policy, and ambiguous (404; duplicate candidates for
+one source and key).
 An unavailable publication remains unavailable; it is not evidence of absence
-or uniqueness. For syntactically valid direct routes, the enhanced reader shell
+or uniqueness. For syntactically valid direct routes, the reader shell
 remains available while a source observation is pending; selected APIs own its
-retry state and content waits for exact resolution. The no-JavaScript route
-requests the normal source-scoped observation and returns an HTML reload action
-while that observation remains unavailable. Hub validates workspace and source
-authority before returning either response. Selected reads retain their
+retry state and content waits for exact resolution. Hub validates workspace and
+source authority before returning the shell. Selected reads retain their
 generation and custody fences.
 
-Legacy `/s/<native|codex|claude|copilot>/<key>` and
-`/trace/<native|codex|claude|copilot>/<key>/<turn>` are compatibility inputs only.
-An optional single `machine` binds the exact source. Without it, lookup examines
-only authorized sources. Zero exact matches is not_found; multiple matches show
-canonical source choices without content or automatic selection. One match with
-`native` or its actual harness gives HTTP 308 (JS normalization uses replaceState).
-A different harness is a mismatch with no content or redirect. Duplicate machine
-parameters are malformed. Catalog keys are exact; labels and native-ID aliases
-cannot redirect to a different session. The sole existing bookmark exception is
-legacy `unsent:<target>`: the authorized source's complete bookmark index must map
-that target uniquely to a real Catalog key. Missing, incomplete, unavailable or
-ambiguous mappings never auto-select. This exception applies only to legacy and
-bookmark-locate inputs; canonical addresses always require an exact Catalog key. Allowed controls survive the
-redirect. Trace turns stay in the required trace segment, fragments survive HTTP
-redirect inheritance, and old session `?turn=` targets normalize to `#<turn>`.
-
-Retire legacy input only after all first-party producers use this grammar, the
-cross-host direct/history/native matrix passes, and an explicit product decision
-sets a compatibility window and communicates bookmark replacement. No retirement,
-data rewrite, database merge or deletion is authorized by this change.
+The viewer requires JavaScript. The server-rendered `native=1` reader, the
+`compat=1` switch, the `/timeline` alias, the `/m/<id>` client alias, the legacy
+`/s/<harness>/<key>` and `/trace/<harness>/<key>/<turn>` bookmarks and the
+`#turn=<id>` fragment spelling are retired without redirects; they receive the
+ordinary not-found or malformed-address response. Old bookmarks do not resolve.
