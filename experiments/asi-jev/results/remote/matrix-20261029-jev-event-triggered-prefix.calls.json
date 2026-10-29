@@ -1,0 +1,1598 @@
+[
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 545.7354380050674,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 489.3845799379051,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 544.0481470432132,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 515.6322289258242,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 625.2714740112424,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 535.8465089229867,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 470.66263400483876,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 531.7266810452566,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 511.36947504710406,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 494.7015900397673,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 620.5129399895668,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 531.4294999698177,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 489.4731140229851,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 473.9830089965835,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 533.7064008926973,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 482.7621760778129,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 654.4164220103994,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 516.9988579582423,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 519.8926599696279,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 451.8772909650579,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 489.0363879967481,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 542.849336983636,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 623.9223970333114,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 457.74502702988684,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 474.86545995343477,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 565.3034929418936,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 461.61730005405843,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 523.8475659862161,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 514.6323679946363,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 566.9284949544817,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 518.2915918994695,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 431.45436292979866,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 442.187842912972,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 490.5625260435045,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 452.0075019681826,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 491.1939080338925,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 517.0107750454918,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 446.134194964543,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 505.45403896830976,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 546.255991095677,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 501.8044039607048,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 445.8614190807566,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 468.31407595891505,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 470.2054390218109,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 520.1511399354786,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 437.91719793807715,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 454.9739270005375,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 512.6022200565785,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 503.5466159461066,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 505.04482293035835,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 479.9811310367659,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 442.63045699335635,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 523.8697159802541,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 582.4022380402312,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 505.7667481014505,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 508.29807203263044,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-021-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "6": 0.0
+    },
+    "rtt_ms": 480.4396089166403,
+    "payload_bytes": 5959,
+    "evidence_context_bytes": 1207,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1786,
+    "output_tokens": 271,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "7": 0.0
+    },
+    "rtt_ms": 482.52657195553184,
+    "payload_bytes": 6102,
+    "evidence_context_bytes": 1348,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1827,
+    "output_tokens": 274,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 0.0
+    },
+    "rtt_ms": 525.1067889621481,
+    "payload_bytes": 4928,
+    "evidence_context_bytes": 190,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1468,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-002-12"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "11": 0.0
+    },
+    "rtt_ms": 443.39713803492486,
+    "payload_bytes": 5044,
+    "evidence_context_bytes": 305,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1500,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": 0.0
+    },
+    "rtt_ms": 469.07135494984686,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-014-17"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "16": 0.0
+    },
+    "rtt_ms": 523.2476559467614,
+    "payload_bytes": 5025,
+    "evidence_context_bytes": 286,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1504,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-021-18"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "17": 0.0
+    },
+    "rtt_ms": 483.2844620104879,
+    "payload_bytes": 5141,
+    "evidence_context_bytes": 401,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1536,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "18": 0.0
+    },
+    "rtt_ms": 463.071753969416,
+    "payload_bytes": 5252,
+    "evidence_context_bytes": 511,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1568,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "24": 0.0
+    },
+    "rtt_ms": 533.1049709348008,
+    "payload_bytes": 5419,
+    "evidence_context_bytes": 676,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1638,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 0.0
+    },
+    "rtt_ms": 441.6743579786271,
+    "payload_bytes": 4910,
+    "evidence_context_bytes": 172,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1463,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-002-27"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "26": 0.0
+    },
+    "rtt_ms": 528.0894209863618,
+    "payload_bytes": 5018,
+    "evidence_context_bytes": 279,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1494,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "31": 0.0
+    },
+    "rtt_ms": 496.7870080145076,
+    "payload_bytes": 5125,
+    "evidence_context_bytes": 384,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1520,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-03"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "32": 0.0
+    },
+    "rtt_ms": 489.05733204446733,
+    "payload_bytes": 5296,
+    "evidence_context_bytes": 552,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "33": 0.0
+    },
+    "rtt_ms": 475.546529982239,
+    "payload_bytes": 5478,
+    "evidence_context_bytes": 731,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1620,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-05"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 0.0
+    },
+    "rtt_ms": 554.6296229586005,
+    "payload_bytes": 5649,
+    "evidence_context_bytes": 899,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1667,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "35": 0.0
+    },
+    "rtt_ms": 460.945321014151,
+    "payload_bytes": 5831,
+    "evidence_context_bytes": 1078,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1720,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-07"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "36": 0.0
+    },
+    "rtt_ms": 498.94164002034813,
+    "payload_bytes": 6002,
+    "evidence_context_bytes": 1246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1767,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-08"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "37": 0.0
+    },
+    "rtt_ms": 445.4426799202338,
+    "payload_bytes": 6190,
+    "evidence_context_bytes": 1431,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1823,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-09"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 0.0
+    },
+    "rtt_ms": 601.1571600101888,
+    "payload_bytes": 6352,
+    "evidence_context_bytes": 1590,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1868,
+    "output_tokens": 279,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 0.0
+    },
+    "rtt_ms": 554.2592459823936,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 0.0
+    },
+    "rtt_ms": 557.0354340597987,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 0.0
+    },
+    "rtt_ms": 479.9049849389121,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 0.0
+    },
+    "rtt_ms": 747.2201969940215,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 0.0
+    },
+    "rtt_ms": 494.19365799985826,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 0.0
+    },
+    "rtt_ms": 435.3281380608678,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 0.0
+    },
+    "rtt_ms": 489.11040695384145,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 0.0
+    },
+    "rtt_ms": 510.4802770074457,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "event-triggered",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 0.0
+    },
+    "rtt_ms": 429.3923130026087,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  }
+]

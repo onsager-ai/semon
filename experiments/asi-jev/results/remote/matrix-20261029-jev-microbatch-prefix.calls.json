@@ -1,0 +1,1931 @@
+[
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01",
+      "fixture-native-claude-tools-parent-014-02",
+      "fixture-native-claude-tools-parent-015-03",
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 116.99986457824707,
+      "1": 32.99999237060547,
+      "2": 17.999887466430664,
+      "3": 0.0
+    },
+    "rtt_ms": 615.2760280529037,
+    "payload_bytes": 26784,
+    "evidence_context_bytes": 8725,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7297,
+    "output_tokens": 1078,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05",
+      "fixture-native-claude-tools-parent-020-06",
+      "fixture-native-claude-tools-parent-021-07",
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 92.00000762939453,
+      "5": 60.99987030029297,
+      "6": 27.9998779296875,
+      "7": 0.0
+    },
+    "rtt_ms": 687.6753780525178,
+    "payload_bytes": 40639,
+    "evidence_context_bytes": 22320,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11467,
+    "output_tokens": 1080,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09",
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 500.0,
+      "9": 477.9999256134033
+    },
+    "rtt_ms": 636.4052799763158,
+    "payload_bytes": 26055,
+    "evidence_context_bytes": 16600,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7438,
+    "output_tokens": 544,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11",
+      "fixture-native-claude-compat-002-12",
+      "fixture-native-claude-compat-003-13",
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 147.00007438659668,
+      "11": 146.00014686584473,
+      "12": 79.99992370605469,
+      "13": 0.0
+    },
+    "rtt_ms": 611.8012929800898,
+    "payload_bytes": 25069,
+    "evidence_context_bytes": 7035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6697,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": null
+    },
+    "rtt_ms": 440.2256769826636,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16",
+      "fixture-native-claude-parent-014-17",
+      "fixture-native-claude-parent-021-18",
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 468.99986267089844,
+      "16": 439.9998188018799,
+      "17": 38.99979591369629,
+      "18": 0.0
+    },
+    "rtt_ms": 769.0040660090744,
+    "payload_bytes": 24904,
+    "evidence_context_bytes": 6870,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6737,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-005-20",
+      "fixture-native-claude-child-016-21",
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 500.0,
+      "20": 411.9999408721924,
+      "21": 29.999971389770508
+    },
+    "rtt_ms": 626.3397629372776,
+    "payload_bytes": 17777,
+    "evidence_context_bytes": 4145,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 4905,
+    "output_tokens": 824,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-claude-child-020-23",
+      "fixture-native-claude-child-021-24",
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 500.0,
+      "23": 134.00006294250488,
+      "24": 68.00007820129395
+    },
+    "rtt_ms": 636.1272409558296,
+    "payload_bytes": 22322,
+    "evidence_context_bytes": 8645,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6410,
+    "output_tokens": 822,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26",
+      "fixture-native-codex-compat-002-27",
+      "fixture-native-codex-compat-007-28",
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 73.99988174438477,
+      "26": 73.99988174438477,
+      "27": 27.9998779296875,
+      "28": 0.0
+    },
+    "rtt_ms": 625.0477390130982,
+    "payload_bytes": 24729,
+    "evidence_context_bytes": 6695,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6622,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 500.0
+    },
+    "rtt_ms": 486.8800890399143,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-01",
+      "syn-retry-burst-02",
+      "syn-retry-burst-03",
+      "syn-retry-burst-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 224.99990463256836,
+      "31": 149.99985694885254,
+      "32": 74.99980926513672,
+      "33": 0.0
+    },
+    "rtt_ms": 623.4971020603552,
+    "payload_bytes": 27454,
+    "evidence_context_bytes": 9360,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7217,
+    "output_tokens": 1102,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-05",
+      "syn-retry-burst-06",
+      "syn-retry-burst-07",
+      "syn-retry-burst-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 225.00014305114746,
+      "35": 150.00009536743164,
+      "36": 75.00004768371582,
+      "37": 0.0
+    },
+    "rtt_ms": 732.7147229807451,
+    "payload_bytes": 41604,
+    "evidence_context_bytes": 23270,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11227,
+    "output_tokens": 1101,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-retry-burst-09",
+      "syn-retry-burst-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 500.0,
+      "39": 424.9999523162842
+    },
+    "rtt_ms": 589.4557159626856,
+    "payload_bytes": 26160,
+    "evidence_context_bytes": 16685,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7198,
+    "output_tokens": 556,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 500.0
+    },
+    "rtt_ms": 502.6515800273046,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 500.0
+    },
+    "rtt_ms": 504.0470799431205,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 500.0
+    },
+    "rtt_ms": 444.7415879694745,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 500.0
+    },
+    "rtt_ms": 520.690259989351,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 500.0
+    },
+    "rtt_ms": 488.31019608769566,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 500.0
+    },
+    "rtt_ms": 450.266073923558,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 500.0
+    },
+    "rtt_ms": 501.4438880607486,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 500.0
+    },
+    "rtt_ms": 468.72409991919994,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 500.0
+    },
+    "rtt_ms": 457.8169210581109,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 500.0
+    },
+    "rtt_ms": 473.53946208022535,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 500.0
+    },
+    "rtt_ms": 517.0376879395917,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 500.0
+    },
+    "rtt_ms": 497.34857794828713,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 500.0
+    },
+    "rtt_ms": 428.0122700147331,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 500.0
+    },
+    "rtt_ms": 478.63201203290373,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 500.0
+    },
+    "rtt_ms": 514.0308020636439,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 500.0
+    },
+    "rtt_ms": 523.9265700802207,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 500.0
+    },
+    "rtt_ms": 473.16030506044626,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 1,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 500.0
+    },
+    "rtt_ms": 498.8300160039216,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01",
+      "fixture-native-claude-tools-parent-014-02",
+      "fixture-native-claude-tools-parent-015-03",
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 116.99986457824707,
+      "1": 32.99999237060547,
+      "2": 17.999887466430664,
+      "3": 0.0
+    },
+    "rtt_ms": 606.0688850702718,
+    "payload_bytes": 26784,
+    "evidence_context_bytes": 8725,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7297,
+    "output_tokens": 1078,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05",
+      "fixture-native-claude-tools-parent-020-06",
+      "fixture-native-claude-tools-parent-021-07",
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 92.00000762939453,
+      "5": 60.99987030029297,
+      "6": 27.9998779296875,
+      "7": 0.0
+    },
+    "rtt_ms": 694.0790970111266,
+    "payload_bytes": 40639,
+    "evidence_context_bytes": 22320,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11467,
+    "output_tokens": 1080,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09",
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 500.0,
+      "9": 477.9999256134033
+    },
+    "rtt_ms": 591.3987150415778,
+    "payload_bytes": 26055,
+    "evidence_context_bytes": 16600,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7438,
+    "output_tokens": 544,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11",
+      "fixture-native-claude-compat-002-12",
+      "fixture-native-claude-compat-003-13",
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 147.00007438659668,
+      "11": 146.00014686584473,
+      "12": 79.99992370605469,
+      "13": 0.0
+    },
+    "rtt_ms": 667.24235098809,
+    "payload_bytes": 25069,
+    "evidence_context_bytes": 7035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6697,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": null
+    },
+    "rtt_ms": 481.74420394934714,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16",
+      "fixture-native-claude-parent-014-17",
+      "fixture-native-claude-parent-021-18",
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 468.99986267089844,
+      "16": 439.9998188018799,
+      "17": 38.99979591369629,
+      "18": 0.0
+    },
+    "rtt_ms": 652.2770730080083,
+    "payload_bytes": 24904,
+    "evidence_context_bytes": 6870,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6737,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-005-20",
+      "fixture-native-claude-child-016-21",
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 500.0,
+      "20": 411.9999408721924,
+      "21": 29.999971389770508
+    },
+    "rtt_ms": 675.9941240306944,
+    "payload_bytes": 17777,
+    "evidence_context_bytes": 4145,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 4905,
+    "output_tokens": 826,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-claude-child-020-23",
+      "fixture-native-claude-child-021-24",
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 500.0,
+      "23": 134.00006294250488,
+      "24": 68.00007820129395
+    },
+    "rtt_ms": 629.2228070087731,
+    "payload_bytes": 22322,
+    "evidence_context_bytes": 8645,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6410,
+    "output_tokens": 823,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26",
+      "fixture-native-codex-compat-002-27",
+      "fixture-native-codex-compat-007-28",
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 73.99988174438477,
+      "26": 73.99988174438477,
+      "27": 27.9998779296875,
+      "28": 0.0
+    },
+    "rtt_ms": 610.039374907501,
+    "payload_bytes": 24729,
+    "evidence_context_bytes": 6695,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6622,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 500.0
+    },
+    "rtt_ms": 466.7474159505218,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-01",
+      "syn-retry-burst-02",
+      "syn-retry-burst-03",
+      "syn-retry-burst-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 224.99990463256836,
+      "31": 149.99985694885254,
+      "32": 74.99980926513672,
+      "33": 0.0
+    },
+    "rtt_ms": 603.2010220224038,
+    "payload_bytes": 27454,
+    "evidence_context_bytes": 9360,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7217,
+    "output_tokens": 1102,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-05",
+      "syn-retry-burst-06",
+      "syn-retry-burst-07",
+      "syn-retry-burst-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 225.00014305114746,
+      "35": 150.00009536743164,
+      "36": 75.00004768371582,
+      "37": 0.0
+    },
+    "rtt_ms": 678.5744390217587,
+    "payload_bytes": 41604,
+    "evidence_context_bytes": 23270,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11227,
+    "output_tokens": 1101,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-retry-burst-09",
+      "syn-retry-burst-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 500.0,
+      "39": 424.9999523162842
+    },
+    "rtt_ms": 559.9952429765835,
+    "payload_bytes": 26160,
+    "evidence_context_bytes": 16685,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7198,
+    "output_tokens": 556,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 500.0
+    },
+    "rtt_ms": 503.7883899640292,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 500.0
+    },
+    "rtt_ms": 503.2038890058175,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 500.0
+    },
+    "rtt_ms": 443.56315105687827,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 500.0
+    },
+    "rtt_ms": 475.4840020323172,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 500.0
+    },
+    "rtt_ms": 528.819668921642,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 500.0
+    },
+    "rtt_ms": 473.4230519970879,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 500.0
+    },
+    "rtt_ms": 487.6417890191078,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 500.0
+    },
+    "rtt_ms": 481.8203930044547,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 500.0
+    },
+    "rtt_ms": 516.1129750777036,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 500.0
+    },
+    "rtt_ms": 484.7086339723319,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 500.0
+    },
+    "rtt_ms": 504.6678730286658,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 500.0
+    },
+    "rtt_ms": 472.66888909507543,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 500.0
+    },
+    "rtt_ms": 486.7286439985037,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 500.0
+    },
+    "rtt_ms": 497.0780248986557,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 500.0
+    },
+    "rtt_ms": 471.5341560076922,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 500.0
+    },
+    "rtt_ms": 448.40895803645253,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 500.0
+    },
+    "rtt_ms": 441.355012007989,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 2,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 500.0
+    },
+    "rtt_ms": 484.5930270384997,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-003-01",
+      "fixture-native-claude-tools-parent-014-02",
+      "fixture-native-claude-tools-parent-015-03",
+      "fixture-native-claude-tools-parent-016-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "0": 116.99986457824707,
+      "1": 32.99999237060547,
+      "2": 17.999887466430664,
+      "3": 0.0
+    },
+    "rtt_ms": 612.0657220017165,
+    "payload_bytes": 26784,
+    "evidence_context_bytes": 8725,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7297,
+    "output_tokens": 1077,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-019-05",
+      "fixture-native-claude-tools-parent-020-06",
+      "fixture-native-claude-tools-parent-021-07",
+      "fixture-native-claude-tools-parent-024-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "4": 92.00000762939453,
+      "5": 60.99987030029297,
+      "6": 27.9998779296875,
+      "7": 0.0
+    },
+    "rtt_ms": 750.165618956089,
+    "payload_bytes": 40639,
+    "evidence_context_bytes": 22320,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11467,
+    "output_tokens": 1080,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-tools-parent-027-09",
+      "fixture-native-claude-tools-parent-029-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "8": 500.0,
+      "9": 477.9999256134033
+    },
+    "rtt_ms": 626.6978749772534,
+    "payload_bytes": 26055,
+    "evidence_context_bytes": 16600,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7438,
+    "output_tokens": 544,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-001-11",
+      "fixture-native-claude-compat-002-12",
+      "fixture-native-claude-compat-003-13",
+      "fixture-native-claude-compat-015-14"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "10": 147.00007438659668,
+      "11": 146.00014686584473,
+      "12": 79.99992370605469,
+      "13": 0.0
+    },
+    "rtt_ms": 552.0991180092096,
+    "payload_bytes": 25069,
+    "evidence_context_bytes": 7035,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6697,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-compat-019-15"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "14": null
+    },
+    "rtt_ms": 496.4617390651256,
+    "payload_bytes": 5358,
+    "evidence_context_bytes": 616,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1600,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-parent-003-16",
+      "fixture-native-claude-parent-014-17",
+      "fixture-native-claude-parent-021-18",
+      "fixture-native-claude-parent-023-19"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "15": 468.99986267089844,
+      "16": 439.9998188018799,
+      "17": 38.99979591369629,
+      "18": 0.0
+    },
+    "rtt_ms": 591.7932540178299,
+    "payload_bytes": 24904,
+    "evidence_context_bytes": 6870,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6737,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-005-20",
+      "fixture-native-claude-child-016-21",
+      "fixture-native-claude-child-018-22"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "19": 500.0,
+      "20": 411.9999408721924,
+      "21": 29.999971389770508
+    },
+    "rtt_ms": 602.3801090195775,
+    "payload_bytes": 17777,
+    "evidence_context_bytes": 4145,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 4905,
+    "output_tokens": 826,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-claude-child-020-23",
+      "fixture-native-claude-child-021-24",
+      "fixture-native-claude-child-023-25"
+    ],
+    "events": 3,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "22": 500.0,
+      "23": 134.00006294250488,
+      "24": 68.00007820129395
+    },
+    "rtt_ms": 604.8595760948956,
+    "payload_bytes": 22322,
+    "evidence_context_bytes": 8645,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6410,
+    "output_tokens": 823,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-001-26",
+      "fixture-native-codex-compat-002-27",
+      "fixture-native-codex-compat-007-28",
+      "fixture-native-codex-compat-010-29"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "25": 73.99988174438477,
+      "26": 73.99988174438477,
+      "27": 27.9998779296875,
+      "28": 0.0
+    },
+    "rtt_ms": 600.2317309612408,
+    "payload_bytes": 24729,
+    "evidence_context_bytes": 6695,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 6622,
+    "output_tokens": 1095,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "fixture-native-codex-compat-013-30"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "29": 500.0
+    },
+    "rtt_ms": 444.5219940971583,
+    "payload_bytes": 5344,
+    "evidence_context_bytes": 602,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1597,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-01",
+      "syn-retry-burst-02",
+      "syn-retry-burst-03",
+      "syn-retry-burst-04"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "30": 224.99990463256836,
+      "31": 149.99985694885254,
+      "32": 74.99980926513672,
+      "33": 0.0
+    },
+    "rtt_ms": 643.3322059456259,
+    "payload_bytes": 27454,
+    "evidence_context_bytes": 9360,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7217,
+    "output_tokens": 1102,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-05",
+      "syn-retry-burst-06",
+      "syn-retry-burst-07",
+      "syn-retry-burst-08"
+    ],
+    "events": 4,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "34": 225.00014305114746,
+      "35": 150.00009536743164,
+      "36": 75.00004768371582,
+      "37": 0.0
+    },
+    "rtt_ms": 650.0043439446017,
+    "payload_bytes": 41604,
+    "evidence_context_bytes": 23270,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 11227,
+    "output_tokens": 1101,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-retry-burst-09",
+      "syn-retry-burst-10"
+    ],
+    "events": 2,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "38": 500.0,
+      "39": 424.9999523162842
+    },
+    "rtt_ms": 641.5188789833337,
+    "payload_bytes": 26160,
+    "evidence_context_bytes": 16685,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 7198,
+    "output_tokens": 556,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "40": 500.0
+    },
+    "rtt_ms": 582.4249680154026,
+    "payload_bytes": 4986,
+    "evidence_context_bytes": 246,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1477,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "41": 500.0
+    },
+    "rtt_ms": 436.10290403012186,
+    "payload_bytes": 5146,
+    "evidence_context_bytes": 405,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1516,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "42": 500.0
+    },
+    "rtt_ms": 443.55366798117757,
+    "payload_bytes": 5279,
+    "evidence_context_bytes": 537,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1551,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "43": 500.0
+    },
+    "rtt_ms": 482.7523330459371,
+    "payload_bytes": 5389,
+    "evidence_context_bytes": 646,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1582,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "44": 500.0
+    },
+    "rtt_ms": 520.755631965585,
+    "payload_bytes": 5498,
+    "evidence_context_bytes": 754,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1612,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-quoted-wait-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "45": 500.0
+    },
+    "rtt_ms": 486.31514399312437,
+    "payload_bytes": 5639,
+    "evidence_context_bytes": 894,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1646,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "46": 500.0
+    },
+    "rtt_ms": 476.08101600781083,
+    "payload_bytes": 4919,
+    "evidence_context_bytes": 181,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1465,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-02"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "47": 500.0
+    },
+    "rtt_ms": 465.4660039814189,
+    "payload_bytes": 5109,
+    "evidence_context_bytes": 368,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1518,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-03"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "48": 500.0
+    },
+    "rtt_ms": 478.90398593153805,
+    "payload_bytes": 5284,
+    "evidence_context_bytes": 540,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1567,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-04"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "49": 500.0
+    },
+    "rtt_ms": 503.1812480883673,
+    "payload_bytes": 5434,
+    "evidence_context_bytes": 689,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1605,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-05"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "50": 500.0
+    },
+    "rtt_ms": 474.4475339539349,
+    "payload_bytes": 5624,
+    "evidence_context_bytes": 876,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1658,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unrelated-repeat-06"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "51": 500.0
+    },
+    "rtt_ms": 477.05531399697065,
+    "payload_bytes": 5798,
+    "evidence_context_bytes": 1047,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1707,
+    "output_tokens": 277,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-model-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "52": 500.0
+    },
+    "rtt_ms": 485.2649570675567,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-transport-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "53": 500.0
+    },
+    "rtt_ms": 527.2182149346918,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-environment-error-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "54": 500.0
+    },
+    "rtt_ms": 512.1673259418458,
+    "payload_bytes": 4976,
+    "evidence_context_bytes": 236,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1483,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-unknown-failure-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "55": 500.0
+    },
+    "rtt_ms": 497.30419798288494,
+    "payload_bytes": 4920,
+    "evidence_context_bytes": 182,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-future-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "56": 500.0
+    },
+    "rtt_ms": 440.5536900740117,
+    "payload_bytes": 4926,
+    "evidence_context_bytes": 188,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1469,
+    "output_tokens": 276,
+    "usage_complete": true
+  },
+  {
+    "repetition": 3,
+    "event_ids": [
+      "syn-malformed-record-01"
+    ],
+    "events": 1,
+    "mode": "microbatch",
+    "request": true,
+    "queue_wait_ms_by_event_ms": {
+      "57": 500.0
+    },
+    "rtt_ms": 436.27051694784313,
+    "payload_bytes": 4913,
+    "evidence_context_bytes": 175,
+    "resolved_model": "jev-1.14.0",
+    "input_tokens": 1466,
+    "output_tokens": 278,
+    "usage_complete": true
+  }
+]

@@ -1,0 +1,3596 @@
+{
+  "strategy": "jev",
+  "mode": "per-event",
+  "context": "prefix",
+  "requested_model": "typesafe/jev-latest",
+  "resolved_models": [
+    "jev-1.14.0"
+  ],
+  "repetitions": 3,
+  "event_count": 58,
+  "prediction_rows": 174,
+  "request_count": 174,
+  "successful_request_count": 174,
+  "request_failure_count": 0,
+  "failure_record_count": 0,
+  "model_coverage": {
+    "attempted_event_fraction": 1.0,
+    "fully_classified_attempt_fraction": 1.0,
+    "attempted_event_rows": 174,
+    "total_event_rows": 174
+  },
+  "metrics": {
+    "overall": {
+      "activity": {
+        "count": 174,
+        "accuracy": 0.5287356321839081,
+        "coverage": 1.0,
+        "macro_precision": 0.6518780903506143,
+        "macro_recall": 0.5104020979020979,
+        "macro_f1": 0.4889094432699084,
+        "per_class": {
+          "task_request": {
+            "precision": 0.9375,
+            "recall": 0.38461538461538464,
+            "f1": 0.5454545454545454,
+            "support": 39
+          },
+          "progress": {
+            "precision": 0.5,
+            "recall": 0.3333333333333333,
+            "f1": 0.4,
+            "support": 9
+          },
+          "tool_action": {
+            "precision": 0.8085106382978723,
+            "recall": 0.9743589743589743,
+            "f1": 0.8837209302325582,
+            "support": 39
+          },
+          "wait": {
+            "precision": 1.0,
+            "recall": 0.8333333333333334,
+            "f1": 0.9090909090909091,
+            "support": 6
+          },
+          "failure": {
+            "precision": 0.8,
+            "recall": 0.6666666666666666,
+            "f1": 0.7272727272727272,
+            "support": 24
+          },
+          "recovery": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 9
+          },
+          "completion": {
+            "precision": 1.0,
+            "recall": 0.09090909090909091,
+            "f1": 0.16666666666666669,
+            "support": 33
+          },
+          "unknown": {
+            "precision": 0.16901408450704225,
+            "recall": 0.8,
+            "f1": 0.27906976744186046,
+            "support": 15
+          }
+        },
+        "confusion": {
+          "task_request": {
+            "task_request": 15,
+            "progress": 0,
+            "tool_action": 0,
+            "wait": 0,
+            "failure": 0,
+            "recovery": 3,
+            "completion": 0,
+            "unknown": 21,
+            "<abstain>": 0
+          },
+          "progress": {
+            "task_request": 0,
+            "progress": 3,
+            "tool_action": 0,
+            "wait": 0,
+            "failure": 0,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 6,
+            "<abstain>": 0
+          },
+          "tool_action": {
+            "task_request": 0,
+            "progress": 0,
+            "tool_action": 38,
+            "wait": 0,
+            "failure": 1,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "wait": {
+            "task_request": 1,
+            "progress": 0,
+            "tool_action": 0,
+            "wait": 5,
+            "failure": 0,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "failure": {
+            "task_request": 0,
+            "progress": 0,
+            "tool_action": 0,
+            "wait": 0,
+            "failure": 16,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 8,
+            "<abstain>": 0
+          },
+          "recovery": {
+            "task_request": 0,
+            "progress": 0,
+            "tool_action": 9,
+            "wait": 0,
+            "failure": 0,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "completion": {
+            "task_request": 0,
+            "progress": 3,
+            "tool_action": 0,
+            "wait": 0,
+            "failure": 0,
+            "recovery": 3,
+            "completion": 3,
+            "unknown": 24,
+            "<abstain>": 0
+          },
+          "unknown": {
+            "task_request": 0,
+            "progress": 0,
+            "tool_action": 0,
+            "wait": 0,
+            "failure": 3,
+            "recovery": 0,
+            "completion": 0,
+            "unknown": 12,
+            "<abstain>": 0
+          }
+        },
+        "abstain_column": "<abstain>"
+      },
+      "failure_category": {
+        "count": 174,
+        "accuracy": 0.867816091954023,
+        "coverage": 1.0,
+        "macro_precision": 0.39675245098039214,
+        "macro_recall": 0.5529513888888888,
+        "macro_f1": 0.4427884615384615,
+        "per_class": {
+          "none": {
+            "precision": 0.9779411764705882,
+            "recall": 0.9236111111111112,
+            "f1": 0.95,
+            "support": 144
+          },
+          "tool": {
+            "precision": 0.3333333333333333,
+            "recall": 1.0,
+            "f1": 0.5,
+            "support": 3
+          },
+          "permission": {
+            "precision": 0.5294117647058824,
+            "recall": 1.0,
+            "f1": 0.6923076923076924,
+            "support": 9
+          },
+          "environment": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 3
+          },
+          "model": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 3
+          },
+          "transport": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 3
+          },
+          "malformed": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 3
+          },
+          "unknown": {
+            "precision": 0.3333333333333333,
+            "recall": 0.5,
+            "f1": 0.4,
+            "support": 6
+          }
+        },
+        "confusion": {
+          "none": {
+            "none": 133,
+            "tool": 3,
+            "permission": 8,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "tool": {
+            "none": 0,
+            "tool": 3,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "permission": {
+            "none": 0,
+            "tool": 0,
+            "permission": 9,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "environment": {
+            "none": 0,
+            "tool": 3,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "model": {
+            "none": 0,
+            "tool": 0,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 3,
+            "<abstain>": 0
+          },
+          "transport": {
+            "none": 0,
+            "tool": 0,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 3,
+            "<abstain>": 0
+          },
+          "malformed": {
+            "none": 0,
+            "tool": 0,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 3,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "unknown": {
+            "none": 3,
+            "tool": 0,
+            "permission": 0,
+            "environment": 0,
+            "model": 0,
+            "transport": 0,
+            "malformed": 0,
+            "unknown": 3,
+            "<abstain>": 0
+          }
+        },
+        "abstain_column": "<abstain>"
+      },
+      "retry_loop": {
+        "count": 174,
+        "accuracy": 0.9137931034482759,
+        "coverage": 1.0,
+        "macro_precision": 0.6333333333333333,
+        "macro_recall": 0.9691358024691358,
+        "macro_f1": 0.7298505162582832,
+        "per_class": {
+          "none": {
+            "precision": 1.0,
+            "recall": 0.9074074074074074,
+            "f1": 0.9514563106796117,
+            "support": 162
+          },
+          "retry": {
+            "precision": 0.5,
+            "recall": 1.0,
+            "f1": 0.6666666666666666,
+            "support": 6
+          },
+          "loop": {
+            "precision": 0.4,
+            "recall": 1.0,
+            "f1": 0.5714285714285715,
+            "support": 6
+          }
+        },
+        "confusion": {
+          "none": {
+            "none": 147,
+            "retry": 6,
+            "loop": 9,
+            "<abstain>": 0
+          },
+          "retry": {
+            "none": 0,
+            "retry": 6,
+            "loop": 0,
+            "<abstain>": 0
+          },
+          "loop": {
+            "none": 0,
+            "retry": 0,
+            "loop": 6,
+            "<abstain>": 0
+          }
+        },
+        "abstain_column": "<abstain>"
+      },
+      "anomaly": {
+        "count": 174,
+        "accuracy": 0.7586206896551724,
+        "coverage": 1.0,
+        "macro_precision": 0.5882352941176471,
+        "macro_recall": 0.8727272727272728,
+        "macro_f1": 0.5770833333333333,
+        "per_class": {
+          "False": {
+            "precision": 1.0,
+            "recall": 0.7454545454545455,
+            "f1": 0.8541666666666666,
+            "support": 165
+          },
+          "True": {
+            "precision": 0.17647058823529413,
+            "recall": 1.0,
+            "f1": 0.3,
+            "support": 9
+          }
+        },
+        "confusion": {
+          "False": {
+            "False": 123,
+            "True": 42,
+            "<abstain>": 0
+          },
+          "True": {
+            "False": 0,
+            "True": 9,
+            "<abstain>": 0
+          }
+        },
+        "abstain_column": "<abstain>"
+      },
+      "phase": {
+        "count": 174,
+        "accuracy": 0.41954022988505746,
+        "coverage": 1.0,
+        "macro_precision": 0.32242063492063494,
+        "macro_recall": 0.34421296296296294,
+        "macro_f1": 0.32489106753812635,
+        "per_class": {
+          "start": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 24
+          },
+          "active": {
+            "precision": 0.4444444444444444,
+            "recall": 0.4444444444444444,
+            "f1": 0.4444444444444444,
+            "support": 54
+          },
+          "blocked": {
+            "precision": 0.7142857142857143,
+            "recall": 0.5,
+            "f1": 0.588235294117647,
+            "support": 30
+          },
+          "recovery": {
+            "precision": 0.42857142857142855,
+            "recall": 0.6,
+            "f1": 0.5,
+            "support": 15
+          },
+          "ending": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 3
+          },
+          "unknown": {
+            "precision": 0.3472222222222222,
+            "recall": 0.5208333333333334,
+            "f1": 0.4166666666666667,
+            "support": 48
+          }
+        },
+        "confusion": {
+          "start": {
+            "start": 0,
+            "active": 7,
+            "blocked": 0,
+            "recovery": 0,
+            "ending": 0,
+            "unknown": 17,
+            "<abstain>": 0
+          },
+          "active": {
+            "start": 3,
+            "active": 24,
+            "blocked": 3,
+            "recovery": 3,
+            "ending": 0,
+            "unknown": 21,
+            "<abstain>": 0
+          },
+          "blocked": {
+            "start": 0,
+            "active": 3,
+            "blocked": 15,
+            "recovery": 6,
+            "ending": 0,
+            "unknown": 6,
+            "<abstain>": 0
+          },
+          "recovery": {
+            "start": 0,
+            "active": 6,
+            "blocked": 0,
+            "recovery": 9,
+            "ending": 0,
+            "unknown": 0,
+            "<abstain>": 0
+          },
+          "ending": {
+            "start": 0,
+            "active": 0,
+            "blocked": 0,
+            "recovery": 0,
+            "ending": 0,
+            "unknown": 3,
+            "<abstain>": 0
+          },
+          "unknown": {
+            "start": 0,
+            "active": 14,
+            "blocked": 3,
+            "recovery": 3,
+            "ending": 3,
+            "unknown": 25,
+            "<abstain>": 0
+          }
+        },
+        "abstain_column": "<abstain>"
+      }
+    },
+    "split": {
+      "development": {
+        "activity": {
+          "count": 90,
+          "accuracy": 0.32222222222222224,
+          "coverage": 1.0,
+          "macro_precision": 0.325,
+          "macro_recall": 0.38055555555555554,
+          "macro_f1": 0.26475155279503104,
+          "per_class": {
+            "task_request": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 24
+            },
+            "progress": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "tool_action": {
+              "precision": 0.7,
+              "recall": 0.9333333333333333,
+              "f1": 0.8,
+              "support": 15
+            },
+            "wait": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "failure": {
+              "precision": 0.75,
+              "recall": 1.0,
+              "f1": 0.8571428571428571,
+              "support": 3
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "completion": {
+              "precision": 1.0,
+              "recall": 0.1111111111111111,
+              "f1": 0.19999999999999998,
+              "support": 27
+            },
+            "unknown": {
+              "precision": 0.15,
+              "recall": 1.0,
+              "f1": 0.2608695652173913,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 21,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 14,
+              "wait": 0,
+              "failure": 1,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 3,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 6,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 3,
+              "unknown": 24,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 90,
+          "accuracy": 0.9666666666666667,
+          "coverage": 1.0,
+          "macro_precision": 0.1875,
+          "macro_recall": 0.2456896551724138,
+          "macro_f1": 0.20614035087719296,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.9655172413793104,
+              "f1": 0.9824561403508771,
+              "support": 87
+            },
+            "tool": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "permission": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "malformed": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 84,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 90,
+          "accuracy": 1.0,
+          "coverage": 1.0,
+          "macro_precision": 0.3333333333333333,
+          "macro_recall": 0.3333333333333333,
+          "macro_f1": 0.3333333333333333,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 90
+            },
+            "retry": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "loop": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 90,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 90,
+          "accuracy": 0.8222222222222222,
+          "coverage": 1.0,
+          "macro_precision": 0.5,
+          "macro_recall": 0.4111111111111111,
+          "macro_f1": 0.45121951219512196,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.8222222222222222,
+              "f1": 0.9024390243902439,
+              "support": 90
+            },
+            "True": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 74,
+              "True": 16,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 90,
+          "accuracy": 0.34444444444444444,
+          "coverage": 1.0,
+          "macro_precision": 0.3734848484848485,
+          "macro_recall": 0.3904320987654321,
+          "macro_f1": 0.34083430120015484,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 15
+            },
+            "active": {
+              "precision": 0.45,
+              "recall": 0.25,
+              "f1": 0.32142857142857145,
+              "support": 36
+            },
+            "blocked": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "recovery": {
+              "precision": 1.0,
+              "recall": 0.5,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.2909090909090909,
+              "recall": 0.5925925925925926,
+              "f1": 0.39024390243902435,
+              "support": 27
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 15,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 3,
+              "active": 9,
+              "blocked": 3,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 21,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 0,
+              "blocked": 3,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 3,
+              "blocked": 0,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 8,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 3,
+              "unknown": 16,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      },
+      "heldout_challenge": {
+        "activity": {
+          "count": 84,
+          "accuracy": 0.75,
+          "coverage": 1.0,
+          "macro_precision": 0.5514520202020202,
+          "macro_recall": 0.6190476190476191,
+          "macro_f1": 0.5675399826253716,
+          "per_class": {
+            "task_request": {
+              "precision": 0.9375,
+              "recall": 1.0,
+              "f1": 0.967741935483871,
+              "support": 15
+            },
+            "progress": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "tool_action": {
+              "precision": 0.8888888888888888,
+              "recall": 1.0,
+              "f1": 0.9411764705882353,
+              "support": 24
+            },
+            "wait": {
+              "precision": 1.0,
+              "recall": 0.8333333333333334,
+              "f1": 0.9090909090909091,
+              "support": 6
+            },
+            "failure": {
+              "precision": 0.8125,
+              "recall": 0.6190476190476191,
+              "f1": 0.7027027027027026,
+              "support": 21
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "completion": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "unknown": {
+              "precision": 0.2727272727272727,
+              "recall": 0.5,
+              "f1": 0.3529411764705882,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 15,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 24,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 1,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 5,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 13,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 8,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 3,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 3,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 84,
+          "accuracy": 0.7619047619047619,
+          "coverage": 1.0,
+          "macro_precision": 0.3506315987933635,
+          "macro_recall": 0.4199561403508772,
+          "macro_f1": 0.373923782639379,
+          "per_class": {
+            "none": {
+              "precision": 0.9423076923076923,
+              "recall": 0.8596491228070176,
+              "f1": 0.8990825688073394,
+              "support": 57
+            },
+            "tool": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "permission": {
+              "precision": 0.5294117647058824,
+              "recall": 1.0,
+              "f1": 0.6923076923076924,
+              "support": 9
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "malformed": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.3333333333333333,
+              "recall": 0.5,
+              "f1": 0.4,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 49,
+              "tool": 0,
+              "permission": 8,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 9,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 3,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 3,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 84,
+          "accuracy": 0.8214285714285714,
+          "coverage": 1.0,
+          "macro_precision": 0.6333333333333333,
+          "macro_recall": 0.9305555555555555,
+          "macro_f1": 0.7072720561092654,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.7916666666666666,
+              "f1": 0.8837209302325582,
+              "support": 72
+            },
+            "retry": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "loop": {
+              "precision": 0.4,
+              "recall": 1.0,
+              "f1": 0.5714285714285715,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 57,
+              "retry": 6,
+              "loop": 9,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 6,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 6,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 84,
+          "accuracy": 0.6904761904761905,
+          "coverage": 1.0,
+          "macro_precision": 0.6285714285714286,
+          "macro_recall": 0.8266666666666667,
+          "macro_f1": 0.5997067448680351,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.6533333333333333,
+              "f1": 0.7903225806451613,
+              "support": 75
+            },
+            "True": {
+              "precision": 0.2571428571428571,
+              "recall": 1.0,
+              "f1": 0.40909090909090906,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 49,
+              "True": 26,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 84,
+          "accuracy": 0.5,
+          "coverage": 1.0,
+          "macro_precision": 0.35065359477124186,
+          "macro_recall": 0.3955026455026455,
+          "macro_f1": 0.34441338388706805,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 9
+            },
+            "active": {
+              "precision": 0.4411764705882353,
+              "recall": 0.8333333333333334,
+              "f1": 0.576923076923077,
+              "support": 18
+            },
+            "blocked": {
+              "precision": 0.8,
+              "recall": 0.4444444444444444,
+              "f1": 0.5714285714285714,
+              "support": 27
+            },
+            "recovery": {
+              "precision": 0.3333333333333333,
+              "recall": 0.6666666666666666,
+              "f1": 0.4444444444444444,
+              "support": 9
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.5294117647058824,
+              "recall": 0.42857142857142855,
+              "f1": 0.4736842105263158,
+              "support": 21
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 7,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 2,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 0,
+              "active": 15,
+              "blocked": 0,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 3,
+              "blocked": 12,
+              "recovery": 6,
+              "ending": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 3,
+              "blocked": 0,
+              "recovery": 6,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 6,
+              "blocked": 3,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      }
+    },
+    "origin": {
+      "sanitized_fixture": {
+        "activity": {
+          "count": 90,
+          "accuracy": 0.32222222222222224,
+          "coverage": 1.0,
+          "macro_precision": 0.325,
+          "macro_recall": 0.38055555555555554,
+          "macro_f1": 0.26475155279503104,
+          "per_class": {
+            "task_request": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 24
+            },
+            "progress": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "tool_action": {
+              "precision": 0.7,
+              "recall": 0.9333333333333333,
+              "f1": 0.8,
+              "support": 15
+            },
+            "wait": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "failure": {
+              "precision": 0.75,
+              "recall": 1.0,
+              "f1": 0.8571428571428571,
+              "support": 3
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "completion": {
+              "precision": 1.0,
+              "recall": 0.1111111111111111,
+              "f1": 0.19999999999999998,
+              "support": 27
+            },
+            "unknown": {
+              "precision": 0.15,
+              "recall": 1.0,
+              "f1": 0.2608695652173913,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 21,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 14,
+              "wait": 0,
+              "failure": 1,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 3,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 6,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 3,
+              "unknown": 24,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 90,
+          "accuracy": 0.9666666666666667,
+          "coverage": 1.0,
+          "macro_precision": 0.1875,
+          "macro_recall": 0.2456896551724138,
+          "macro_f1": 0.20614035087719296,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.9655172413793104,
+              "f1": 0.9824561403508771,
+              "support": 87
+            },
+            "tool": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "permission": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "malformed": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 84,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 90,
+          "accuracy": 1.0,
+          "coverage": 1.0,
+          "macro_precision": 0.3333333333333333,
+          "macro_recall": 0.3333333333333333,
+          "macro_f1": 0.3333333333333333,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 90
+            },
+            "retry": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "loop": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 90,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 90,
+          "accuracy": 0.8222222222222222,
+          "coverage": 1.0,
+          "macro_precision": 0.5,
+          "macro_recall": 0.4111111111111111,
+          "macro_f1": 0.45121951219512196,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.8222222222222222,
+              "f1": 0.9024390243902439,
+              "support": 90
+            },
+            "True": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 74,
+              "True": 16,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 90,
+          "accuracy": 0.34444444444444444,
+          "coverage": 1.0,
+          "macro_precision": 0.3734848484848485,
+          "macro_recall": 0.3904320987654321,
+          "macro_f1": 0.34083430120015484,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 15
+            },
+            "active": {
+              "precision": 0.45,
+              "recall": 0.25,
+              "f1": 0.32142857142857145,
+              "support": 36
+            },
+            "blocked": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "recovery": {
+              "precision": 1.0,
+              "recall": 0.5,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.2909090909090909,
+              "recall": 0.5925925925925926,
+              "f1": 0.39024390243902435,
+              "support": 27
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 15,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 3,
+              "active": 9,
+              "blocked": 3,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 21,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 0,
+              "blocked": 3,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 3,
+              "blocked": 0,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 8,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 3,
+              "unknown": 16,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      },
+      "synthetic_adversarial": {
+        "activity": {
+          "count": 84,
+          "accuracy": 0.75,
+          "coverage": 1.0,
+          "macro_precision": 0.5514520202020202,
+          "macro_recall": 0.6190476190476191,
+          "macro_f1": 0.5675399826253716,
+          "per_class": {
+            "task_request": {
+              "precision": 0.9375,
+              "recall": 1.0,
+              "f1": 0.967741935483871,
+              "support": 15
+            },
+            "progress": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 3
+            },
+            "tool_action": {
+              "precision": 0.8888888888888888,
+              "recall": 1.0,
+              "f1": 0.9411764705882353,
+              "support": 24
+            },
+            "wait": {
+              "precision": 1.0,
+              "recall": 0.8333333333333334,
+              "f1": 0.9090909090909091,
+              "support": 6
+            },
+            "failure": {
+              "precision": 0.8125,
+              "recall": 0.6190476190476191,
+              "f1": 0.7027027027027026,
+              "support": 21
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "completion": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "unknown": {
+              "precision": 0.2727272727272727,
+              "recall": 0.5,
+              "f1": 0.3529411764705882,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 15,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 24,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 1,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 5,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 13,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 8,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 3,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 3,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 84,
+          "accuracy": 0.7619047619047619,
+          "coverage": 1.0,
+          "macro_precision": 0.3506315987933635,
+          "macro_recall": 0.4199561403508772,
+          "macro_f1": 0.373923782639379,
+          "per_class": {
+            "none": {
+              "precision": 0.9423076923076923,
+              "recall": 0.8596491228070176,
+              "f1": 0.8990825688073394,
+              "support": 57
+            },
+            "tool": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "permission": {
+              "precision": 0.5294117647058824,
+              "recall": 1.0,
+              "f1": 0.6923076923076924,
+              "support": 9
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "malformed": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.3333333333333333,
+              "recall": 0.5,
+              "f1": 0.4,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 49,
+              "tool": 0,
+              "permission": 8,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 9,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 3,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 3,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 84,
+          "accuracy": 0.8214285714285714,
+          "coverage": 1.0,
+          "macro_precision": 0.6333333333333333,
+          "macro_recall": 0.9305555555555555,
+          "macro_f1": 0.7072720561092654,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.7916666666666666,
+              "f1": 0.8837209302325582,
+              "support": 72
+            },
+            "retry": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "loop": {
+              "precision": 0.4,
+              "recall": 1.0,
+              "f1": 0.5714285714285715,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 57,
+              "retry": 6,
+              "loop": 9,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 6,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 6,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 84,
+          "accuracy": 0.6904761904761905,
+          "coverage": 1.0,
+          "macro_precision": 0.6285714285714286,
+          "macro_recall": 0.8266666666666667,
+          "macro_f1": 0.5997067448680351,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.6533333333333333,
+              "f1": 0.7903225806451613,
+              "support": 75
+            },
+            "True": {
+              "precision": 0.2571428571428571,
+              "recall": 1.0,
+              "f1": 0.40909090909090906,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 49,
+              "True": 26,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 84,
+          "accuracy": 0.5,
+          "coverage": 1.0,
+          "macro_precision": 0.35065359477124186,
+          "macro_recall": 0.3955026455026455,
+          "macro_f1": 0.34441338388706805,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 9
+            },
+            "active": {
+              "precision": 0.4411764705882353,
+              "recall": 0.8333333333333334,
+              "f1": 0.576923076923077,
+              "support": 18
+            },
+            "blocked": {
+              "precision": 0.8,
+              "recall": 0.4444444444444444,
+              "f1": 0.5714285714285714,
+              "support": 27
+            },
+            "recovery": {
+              "precision": 0.3333333333333333,
+              "recall": 0.6666666666666666,
+              "f1": 0.4444444444444444,
+              "support": 9
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.5294117647058824,
+              "recall": 0.42857142857142855,
+              "f1": 0.4736842105263158,
+              "support": 21
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 7,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 2,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 0,
+              "active": 15,
+              "blocked": 0,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 3,
+              "blocked": 12,
+              "recovery": 6,
+              "ending": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 3,
+              "blocked": 0,
+              "recovery": 6,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 6,
+              "blocked": 3,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      }
+    },
+    "harness": {
+      "claude-code": {
+        "activity": {
+          "count": 144,
+          "accuracy": 0.5694444444444444,
+          "coverage": 1.0,
+          "macro_precision": 0.538563829787234,
+          "macro_recall": 0.5905448717948718,
+          "macro_f1": 0.5074623842440796,
+          "per_class": {
+            "task_request": {
+              "precision": 0.9375,
+              "recall": 0.4166666666666667,
+              "f1": 0.5769230769230769,
+              "support": 36
+            },
+            "progress": {
+              "precision": 0.5,
+              "recall": 0.5,
+              "f1": 0.5,
+              "support": 6
+            },
+            "tool_action": {
+              "precision": 0.8085106382978723,
+              "recall": 0.9743589743589743,
+              "f1": 0.8837209302325582,
+              "support": 39
+            },
+            "wait": {
+              "precision": 1.0,
+              "recall": 0.8333333333333334,
+              "f1": 0.9090909090909091,
+              "support": 6
+            },
+            "failure": {
+              "precision": 0.9375,
+              "recall": 1.0,
+              "f1": 0.967741935483871,
+              "support": 15
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 9
+            },
+            "completion": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 27
+            },
+            "unknown": {
+              "precision": 0.125,
+              "recall": 1.0,
+              "f1": 0.2222222222222222,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 15,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 18,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 38,
+              "wait": 0,
+              "failure": 1,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 1,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 5,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 15,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 9,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 3,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 3,
+              "completion": 0,
+              "unknown": 21,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 144,
+          "accuracy": 0.9027777777777778,
+          "coverage": 1.0,
+          "macro_precision": 0.23284313725490197,
+          "macro_recall": 0.3643410852713178,
+          "macro_f1": 0.2684716599190283,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.9147286821705426,
+              "f1": 0.9554655870445344,
+              "support": 129
+            },
+            "tool": {
+              "precision": 0.3333333333333333,
+              "recall": 1.0,
+              "f1": 0.5,
+              "support": 3
+            },
+            "permission": {
+              "precision": 0.5294117647058824,
+              "recall": 1.0,
+              "f1": 0.6923076923076924,
+              "support": 9
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "malformed": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 118,
+              "tool": 3,
+              "permission": 8,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 9,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 3,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 144,
+          "accuracy": 0.8958333333333334,
+          "coverage": 1.0,
+          "macro_precision": 0.6333333333333333,
+          "macro_recall": 0.962121212121212,
+          "macro_f1": 0.7259514247466056,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 0.8863636363636364,
+              "f1": 0.9397590361445783,
+              "support": 132
+            },
+            "retry": {
+              "precision": 0.5,
+              "recall": 1.0,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "loop": {
+              "precision": 0.4,
+              "recall": 1.0,
+              "f1": 0.5714285714285715,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 117,
+              "retry": 6,
+              "loop": 9,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 6,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 6,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 144,
+          "accuracy": 0.7638888888888888,
+          "coverage": 1.0,
+          "macro_precision": 0.5,
+          "macro_recall": 0.3819444444444444,
+          "macro_f1": 0.4330708661417323,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.7638888888888888,
+              "f1": 0.8661417322834646,
+              "support": 144
+            },
+            "True": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 110,
+              "True": 34,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 144,
+          "accuracy": 0.4375,
+          "coverage": 1.0,
+          "macro_precision": 0.3173992673992674,
+          "macro_recall": 0.3632575757575758,
+          "macro_f1": 0.3346854082998661,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 21
+            },
+            "active": {
+              "precision": 0.46153846153846156,
+              "recall": 0.5,
+              "f1": 0.48000000000000004,
+              "support": 48
+            },
+            "blocked": {
+              "precision": 0.7142857142857143,
+              "recall": 0.625,
+              "f1": 0.6666666666666666,
+              "support": 24
+            },
+            "recovery": {
+              "precision": 0.42857142857142855,
+              "recall": 0.6,
+              "f1": 0.5,
+              "support": 15
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.3,
+              "recall": 0.45454545454545453,
+              "f1": 0.3614457831325301,
+              "support": 33
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 7,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 14,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 0,
+              "active": 24,
+              "blocked": 3,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 18,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 3,
+              "blocked": 15,
+              "recovery": 6,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 6,
+              "blocked": 0,
+              "recovery": 9,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 12,
+              "blocked": 3,
+              "recovery": 3,
+              "ending": 0,
+              "unknown": 15,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      },
+      "codex": {
+        "activity": {
+          "count": 30,
+          "accuracy": 0.3333333333333333,
+          "coverage": 1.0,
+          "macro_precision": 0.18885869565217392,
+          "macro_recall": 0.1597222222222222,
+          "macro_f1": 0.14943910256410256,
+          "per_class": {
+            "task_request": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "progress": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "tool_action": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "wait": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "failure": {
+              "precision": 0.25,
+              "recall": 0.1111111111111111,
+              "f1": 0.15384615384615383,
+              "support": 9
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "completion": {
+              "precision": 1.0,
+              "recall": 0.5,
+              "f1": 0.6666666666666666,
+              "support": 6
+            },
+            "unknown": {
+              "precision": 0.2608695652173913,
+              "recall": 0.6666666666666666,
+              "f1": 0.37500000000000006,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "task_request": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "progress": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "tool_action": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "wait": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "failure": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 1,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 8,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "completion": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 0,
+              "recovery": 0,
+              "completion": 3,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "task_request": 0,
+              "progress": 0,
+              "tool_action": 0,
+              "wait": 0,
+              "failure": 3,
+              "recovery": 0,
+              "completion": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "failure_category": {
+          "count": 30,
+          "accuracy": 0.7,
+          "coverage": 1.0,
+          "macro_precision": 0.2708333333333333,
+          "macro_recall": 0.3125,
+          "macro_f1": 0.28863636363636364,
+          "per_class": {
+            "none": {
+              "precision": 0.8333333333333334,
+              "recall": 1.0,
+              "f1": 0.9090909090909091,
+              "support": 15
+            },
+            "tool": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "permission": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "environment": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "model": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "transport": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "malformed": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 3
+            },
+            "unknown": {
+              "precision": 0.3333333333333333,
+              "recall": 0.5,
+              "f1": 0.4,
+              "support": 6
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 15,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "tool": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "permission": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "environment": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "model": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "transport": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "malformed": {
+              "none": 0,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 3,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "none": 3,
+              "tool": 0,
+              "permission": 0,
+              "environment": 0,
+              "model": 0,
+              "transport": 0,
+              "malformed": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "retry_loop": {
+          "count": 30,
+          "accuracy": 1.0,
+          "coverage": 1.0,
+          "macro_precision": 0.3333333333333333,
+          "macro_recall": 0.3333333333333333,
+          "macro_f1": 0.3333333333333333,
+          "per_class": {
+            "none": {
+              "precision": 1.0,
+              "recall": 1.0,
+              "f1": 1.0,
+              "support": 30
+            },
+            "retry": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "loop": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            }
+          },
+          "confusion": {
+            "none": {
+              "none": 30,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "retry": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            },
+            "loop": {
+              "none": 0,
+              "retry": 0,
+              "loop": 0,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "anomaly": {
+          "count": 30,
+          "accuracy": 0.7333333333333333,
+          "coverage": 1.0,
+          "macro_precision": 0.7647058823529411,
+          "macro_recall": 0.8095238095238095,
+          "macro_f1": 0.7285067873303168,
+          "per_class": {
+            "False": {
+              "precision": 1.0,
+              "recall": 0.6190476190476191,
+              "f1": 0.7647058823529412,
+              "support": 21
+            },
+            "True": {
+              "precision": 0.5294117647058824,
+              "recall": 1.0,
+              "f1": 0.6923076923076924,
+              "support": 9
+            }
+          },
+          "confusion": {
+            "False": {
+              "False": 13,
+              "True": 8,
+              "<abstain>": 0
+            },
+            "True": {
+              "False": 0,
+              "True": 9,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        },
+        "phase": {
+          "count": 30,
+          "accuracy": 0.3333333333333333,
+          "coverage": 1.0,
+          "macro_precision": 0.07575757575757576,
+          "macro_recall": 0.1111111111111111,
+          "macro_f1": 0.09009009009009007,
+          "per_class": {
+            "start": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 3
+            },
+            "active": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "blocked": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 6
+            },
+            "recovery": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "ending": {
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0,
+              "support": 0
+            },
+            "unknown": {
+              "precision": 0.45454545454545453,
+              "recall": 0.6666666666666666,
+              "f1": 0.5405405405405405,
+              "support": 15
+            }
+          },
+          "confusion": {
+            "start": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "active": {
+              "start": 3,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 3,
+              "<abstain>": 0
+            },
+            "blocked": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 6,
+              "<abstain>": 0
+            },
+            "recovery": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "ending": {
+              "start": 0,
+              "active": 0,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 0,
+              "unknown": 0,
+              "<abstain>": 0
+            },
+            "unknown": {
+              "start": 0,
+              "active": 2,
+              "blocked": 0,
+              "recovery": 0,
+              "ending": 3,
+              "unknown": 10,
+              "<abstain>": 0
+            }
+          },
+          "abstain_column": "<abstain>"
+        }
+      }
+    }
+  },
+  "phase_transition_boundary": {
+    "overall": {
+      "tp": 28,
+      "fp": 33,
+      "fn": 50,
+      "pairs": 132,
+      "covered_pairs": 132,
+      "precision": 0.45901639344262296,
+      "recall": 0.358974358974359,
+      "f1": 0.4028776978417266,
+      "coverage": 1.0
+    },
+    "by_split": {
+      "development": {
+        "tp": 14,
+        "fp": 18,
+        "fn": 37,
+        "pairs": 75,
+        "covered_pairs": 75,
+        "precision": 0.4375,
+        "recall": 0.27450980392156865,
+        "f1": 0.3373493975903615,
+        "coverage": 1.0
+      },
+      "heldout_challenge": {
+        "tp": 14,
+        "fp": 15,
+        "fn": 13,
+        "pairs": 57,
+        "covered_pairs": 57,
+        "precision": 0.4827586206896552,
+        "recall": 0.5185185185185185,
+        "f1": 0.5,
+        "coverage": 1.0
+      }
+    },
+    "by_origin": {
+      "sanitized_fixture": {
+        "tp": 14,
+        "fp": 18,
+        "fn": 37,
+        "pairs": 75,
+        "covered_pairs": 75,
+        "precision": 0.4375,
+        "recall": 0.27450980392156865,
+        "f1": 0.3373493975903615,
+        "coverage": 1.0
+      },
+      "synthetic_adversarial": {
+        "tp": 14,
+        "fp": 15,
+        "fn": 13,
+        "pairs": 57,
+        "covered_pairs": 57,
+        "precision": 0.4827586206896552,
+        "recall": 0.5185185185185185,
+        "f1": 0.5,
+        "coverage": 1.0
+      }
+    },
+    "by_harness": {
+      "claude-code": {
+        "tp": 23,
+        "fp": 27,
+        "fn": 49,
+        "pairs": 120,
+        "covered_pairs": 120,
+        "precision": 0.46,
+        "recall": 0.3194444444444444,
+        "f1": 0.3770491803278688,
+        "coverage": 1.0
+      },
+      "codex": {
+        "tp": 5,
+        "fp": 6,
+        "fn": 1,
+        "pairs": 12,
+        "covered_pairs": 12,
+        "precision": 0.45454545454545453,
+        "recall": 0.8333333333333334,
+        "f1": 0.5882352941176471,
+        "coverage": 1.0
+      }
+    },
+    "definition": "A boundary is a change in the phase label between adjacent events in one session and repetition. An abstained phase predicts no boundary; coverage counts pairs with both phases predicted."
+  },
+  "latency": {
+    "provider_http_rtt": {
+      "p50_ms": 495.8651170018129,
+      "p95_ms": 556.9248192419764
+    },
+    "per_event_compute_or_http": {
+      "p50_ms": 495.8651170018129,
+      "p95_ms": 556.9248192419764
+    },
+    "rule_gate_compute": {
+      "p50_ms": null,
+      "p95_ms": null
+    },
+    "projected_online_event_latency": {
+      "p50_ms": 495.8651170018129,
+      "p95_ms": 556.9248192419764
+    },
+    "timestamp_derived_logical_queue_wait": {
+      "p50_ms": 0.0,
+      "p95_ms": 0.0
+    },
+    "queue_wait_unknown_event_rows": 0,
+    "queue_wait_included_in_http_rtt": false
+  },
+  "throughput": {
+    "events_per_second_end_to_end_sequential": 2.0076528321961273,
+    "wall_seconds": 86.66837075096555,
+    "request_workers": 1,
+    "capacity_scaling_measured": false,
+    "measured_without_simulated_queue_sleep": true
+  },
+  "usage": {
+    "input_tokens": 277257,
+    "output_tokens": 47997,
+    "calls_with_incomplete_usage": 0
+  },
+  "cost": {
+    "estimate_usd": 0.011644794,
+    "successful_response_subtotal_estimate_usd": 0.011644794,
+    "basis": "published_list_price_estimate",
+    "unknown_cost_for_failed_requests": false,
+    "input_usd_per_million": 0.042,
+    "output_usd_per_million": 0.0,
+    "billing_cost_known": false,
+    "price_source": "https://docs.typesafe.ai/models"
+  },
+  "privacy": {
+    "raw_native_bytes_sent": 0,
+    "request_body_bytes": 932223,
+    "allowlisted_evidence_context_bytes": 106848,
+    "excluded_fields": [
+      "source",
+      "gold",
+      "split",
+      "annotation_note",
+      "session_id",
+      "event_order",
+      "timestamp",
+      "native raw line",
+      "native headers",
+      "system/developer prompts",
+      "unselected tool arguments",
+      "unselected full tool output"
+    ],
+    "context_bytes_cap_per_event": 8192,
+    "prefix_microbatch": {
+      "jev_question_context_isolation": "The provider documents each question as isolated to shared state plus that question; every question gets only its target prefix.",
+      "llm_enabled": false,
+      "llm_reason": "The shared chat prompt cannot isolate sibling targets."
+    }
+  }
+}

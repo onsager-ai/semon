@@ -1,0 +1,10 @@
+[
+  {
+    "repetition": 1,
+    "request": false,
+    "events": 58,
+    "wall_seconds": 0.0021823849999975664,
+    "throughput_events_per_second": 26576.428998579388,
+    "sequential": true
+  }
+]
