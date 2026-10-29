@@ -83,15 +83,11 @@ export default async function switchCheck(browser) {
         );
         fail = ids[8];
         await page.evaluate(
-          ({ id, machine, harness }) => {
-            history.pushState(
-              { v: 'session', id },
-              '',
-              '/s/' + harness + '/' + id + '?machine=' + machine,
-            );
+          ({ id, machine }) => {
+            history.pushState({ v: 'session', id }, '', '/session/' + machine + '/' + id);
             dispatchEvent(new PopStateEvent('popstate'));
           },
-          { id: fail, machine: seen[0].source, harness: D.SESS[fail].harness },
+          { id: fail, machine: seen[0].source },
         );
         await page
           .getByRole('button', { name: 'Retry selected transcript', exact: false })

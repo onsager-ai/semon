@@ -57,7 +57,7 @@ try {
       'Native first input through isolated launch authority; no Catalog identity or seeded transcript',
     );
   } else {
-    await page.goto(base + '/s/codex/' + encodeURIComponent(sessionId) + '?machine=local');
+    await page.goto(base + '/session/local/' + encodeURIComponent(sessionId));
     await page.locator('section[aria-label="Transcript"]').waitFor();
     await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
     const panel = page.getByRole('region', { name: 'Conversation controls' });

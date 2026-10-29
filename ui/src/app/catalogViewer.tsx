@@ -2,10 +2,7 @@ import {
   sessionPath,
   tracePath,
   parseSessionRoute,
-  canonicalSessionHash,
   sessionHashTurn,
-  canonicalSessionRoute,
-  resolveSessionBookmark,
   type SessionRoute,
 } from '../lib/sessionRoute';
 import { compareCatalogKeys } from '../lib/catalogIdentity';
@@ -290,9 +287,7 @@ export function createCatalogViewer(
     sourceCursor: string | null = null,
     sourcesUpdating = false,
     sourcesNote = '',
-    sourcesRetryDelay = 1000,
-    locating = false;
-  let bookmarkMatches: { source_key: string; catalog_key: string; harness: string }[] = [];
+    sourcesRetryDelay = 1000;
   let pinView: SelectedView | null = null,
     pinUntil = 0;
   const cacheKey = (key: string) => JSON.stringify([capabilities.source_key, key]);
@@ -934,8 +929,8 @@ export function createCatalogViewer(
     return viewerHost?.pages &&
       url.origin === location.origin &&
       (viewerHost.pages.match(url) ||
-        ['/', '/sessions', '/analytics', '/timeline'].includes(url.pathname) ||
-        /^\/(session|s|trace)\//.test(url.pathname))
+        ['/', '/sessions', '/analytics'].includes(url.pathname) ||
+        url.pathname.startsWith('/session/'))
       ? url
       : null;
   }
@@ -4024,13 +4019,6 @@ export function createCatalogViewer(
         note: sourcesNote,
         more: sourceCursor !== null,
         machinesHref: machinesHref(),
-        bookmarks: bookmarkMatches.map((item) => {
-          const route = parseSessionRoute(location.pathname, location.search);
-          return {
-            ...item,
-            href: canonicalSessionRoute(route, item.source_key, item.catalog_key) + location.hash,
-          };
-        }),
       },
       {
         select(key) {
@@ -4118,7 +4106,6 @@ export function createCatalogViewer(
   // Source metadata has no transcript bodies and a bounded retained cache.
   async function showSources() {
     if (disposed) return;
-    bookmarkMatches = [];
     if (!sourcesOpen) saveSource();
     leaveScreen();
     navigation.route = { v: 'sessions' };
@@ -4127,18 +4114,6 @@ export function createCatalogViewer(
     shell.closeDrawer(true);
     drawSources();
     if (!sourceItems.length) await loadSources(false);
-  }
-  function showBookmarkOutcome(
-    message: string,
-    matches: { source_key: string; catalog_key: string; harness: string }[],
-  ) {
-    leaveScreen();
-    navigation.route = { v: 'sessions' };
-    sourcesOpen = true;
-    sourcesUpdating = false;
-    bookmarkMatches = matches;
-    sourcesNote = message;
-    drawSources();
   }
   async function switchSource(key: string, push = true, fromChooser = push) {
     if (disposed) return;
@@ -4244,93 +4219,7 @@ export function createCatalogViewer(
       }
     }
   }
-  async function locateBookmark(key: string, sourceKey?: string) {
-    if (locating) return;
-    locating = true;
-    const path = location.pathname,
-      search = location.search;
-    const route = parseSessionRoute(path, search);
-    const legacyMachine = route.legacyHarness ? new URLSearchParams(search).get('machine') : null;
-    const selectedSource = route.source ?? sourceKey ?? legacyMachine ?? undefined;
-    const lookupRoute = selectedSource ? { ...route, source: selectedSource } : route;
-    const current = () => !disposed && location.pathname === path && location.search === search;
-    const retry = () =>
-      scope.timeout(() => {
-        if (current()) void locateBookmark(key, sourceKey);
-      }, 1000);
-    try {
-      const reply = object(
-        await api(
-          '/api/session-locate?' +
-            new URLSearchParams({
-              sid: key,
-              ...(selectedSource ? { machine: selectedSource } : {}),
-            }),
-        ),
-      );
-      if (!current()) return;
-      if (
-        reply.api !== 1 ||
-        !Array.isArray(reply.matches) ||
-        !Number.isSafeInteger(reply.unavailable) ||
-        Number(reply.unavailable) < 0
-      )
-        throw Error('Bookmark lookup unavailable');
-      const candidates = reply.matches.map((value) => {
-        const match = object(value);
-        return {
-          source_key: text(match.source_key),
-          catalog_key: text(match.catalog_key),
-          harness: text(match.harness),
-        };
-      });
-      const resolved = resolveSessionBookmark(lookupRoute, candidates);
-      if (resolved.outcome === 'valid' && reply.unavailable === 0) {
-        const match = resolved.candidate;
-        history.replaceState(
-          history.state,
-          '',
-          canonicalSessionRoute(lookupRoute, match.source_key, match.catalog_key) +
-            (route.anchor ? '' : location.hash),
-        );
-        fromLocation();
-      } else {
-        const matches = (resolved.outcome === 'ambiguous' ? reply.matches : [])
-          .slice(0, 100)
-          .map((value) => {
-            const match = object(value);
-            return {
-              source_key: text(match.source_key),
-              catalog_key: text(match.catalog_key),
-              harness: typeof match.harness === 'string' ? match.harness : 'native',
-            };
-          });
-        const message =
-          Number(reply.unavailable) > 0
-            ? 'The recorded session index is updating. Retrying…'
-            : reply.matches.length > 1
-              ? 'This bookmark has several recorded origins. Choose a session.'
-              : resolved.outcome === 'mismatch'
-                ? 'This bookmark does not match the recorded harness.'
-                : 'Recorded session not found.';
-        showBookmarkOutcome(message, matches);
-        if (Number(reply.unavailable) > 0) retry();
-      }
-    } catch (error) {
-      if (current()) {
-        showBookmarkOutcome(readError(error), []);
-        if (retryable(error)) retry();
-      }
-    } finally {
-      locating = false;
-    }
-  }
   function fromLocation(keepOverview = false) {
-    if (/^\/(session|s|trace)(?:\/|$)/.test(location.pathname)) {
-      const hash = canonicalSessionHash(location.hash);
-      if (hash !== location.hash)
-        history.replaceState(history.state, '', location.pathname + location.search + hash);
-    }
     const url = new URL(location.href);
     if (viewerHost?.pages?.match(url)) {
       void showHostPage(url);
@@ -4343,7 +4232,7 @@ export function createCatalogViewer(
       return;
     }
     let sessionRoute: SessionRoute | null = null;
-    if (/^\/(session|s|trace)(?:\/|$)/.test(location.pathname)) {
+    if (/^\/session(?:\/|$)/.test(location.pathname)) {
       try {
         sessionRoute = parseSessionRoute(location.pathname, location.search);
       } catch {
@@ -4354,17 +4243,12 @@ export function createCatalogViewer(
         goList(false);
         return;
       }
-      if (sessionRoute.legacyHarness) {
-        showBookmarkOutcome('Resolving recorded session…', []);
-        void locateBookmark(sessionRoute.key, sessionRoute.source ?? undefined);
-        return;
-      }
     }
     if (location.pathname === '/') {
       history.replaceState({ v: 'sessions' }, '', '/sessions' + location.search + location.hash);
     }
     const queryParams = new URLSearchParams(location.search);
-    const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
+    const machineBookmark = location.pathname.match(/^\/machines\/([^/]+)$/);
     if (machineBookmark && !viewerHost?.nativePage) {
       let key: string;
       try {
@@ -4386,20 +4270,13 @@ export function createCatalogViewer(
       goOverview('machines', false);
       return;
     }
-    if (location.pathname === '/analytics' || location.pathname === '/timeline') {
+    if (location.pathname === '/analytics') {
       goOverview('analytics', false);
       return;
     }
     const machine = sessionRoute?.source ?? queryParams.get('machine');
-    if (
-      queryParams.get('choose_source') === '1' ||
-      (viewerHost?.catalogSources && !machine && /^\/(s|trace)\//.test(location.pathname))
-    ) {
-      void showSources().then(() => {
-        const parts = location.pathname.split('/');
-        if ((parts[1] === 's' || parts[1] === 'trace') && parts[3])
-          void locateBookmark(decodeURIComponent(parts[3]));
-      });
+    if (queryParams.get('choose_source') === '1') {
+      void showSources();
       void overview.refresh();
       return;
     }

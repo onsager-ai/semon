@@ -157,7 +157,7 @@ export default async function copiedUsageCheck(browser) {
           ...server,
           size,
           dark,
-          path: '/s/claude/native-claude-child',
+          path: '/session/local/native-claude-child',
         });
         try {
           await page.click('#more-btn');

@@ -216,7 +216,7 @@ const state = (page) =>
 async function scheme(browser, srv, lane, name, opts, r, full) {
   const R = { name },
     tag = name + ': ';
-  const page = await open(browser, srv, '/s/claude/faults', opts);
+  const page = await open(browser, srv, '/session/local/faults', opts);
   try {
     const capability = await (await srv.request('/api/session-capabilities')).json();
     const query = new URLSearchParams({

@@ -236,7 +236,7 @@ async function backgroundScreenshots(browser, r) {
     ['desktop', true],
   ]) {
     const tag = (size === 'phone' ? '390' : '1280') + '-' + (dark ? 'dark' : 'light');
-    const page = await served(browser, { extras: true, size, dark, path: '/s/claude/bgcmd' });
+    const page = await served(browser, { extras: true, size, dark, path: '/session/local/bgcmd' });
     try {
       await page.waitForFunction(() => document.querySelectorAll('.step[data-tid]').length === 4);
       await page.locator('.tsum').click();

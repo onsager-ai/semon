@@ -58,7 +58,7 @@ export default async function deepLinkLive(browser) {
         assert.equal(page.url(), url, 'Collection controls preserve the permalink');
         assert.equal(await page.locator('#page [aria-label="Conversation controls"]').count(), 0);
         const unavailable = new URL(page.url());
-        unavailable.hash = 'turn=unrecorded-native-turn';
+        unavailable.hash = 'unrecorded-native-turn';
         await page.goto(unavailable.href);
         await page
           .getByText('This recorded turn is unavailable in the retained history.', { exact: true })

@@ -9,6 +9,7 @@ import type {
   Turn,
 } from '../domain/types';
 import { clock, tok } from '../domain/format';
+import { tracePath } from '../lib/sessionRoute';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
 import { parseRecordedRelationship } from '../domain/relationships';
@@ -805,13 +806,7 @@ export function renderCausalTrace(
       observation: data.observation,
       continuations: data.frontier.map((branch) => ({
         label: data.sessions[branch.catalog_key]?.name ?? 'Recorded branch',
-        href:
-          '/trace/native/' +
-          encodeURIComponent(branch.catalog_key) +
-          '/' +
-          encodeURIComponent(branch.turn) +
-          '?' +
-          new URLSearchParams({ machine: data.source }),
+        href: tracePath(data.source, branch.catalog_key, branch.turn),
       })),
     },
     {

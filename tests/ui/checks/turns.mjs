@@ -678,10 +678,12 @@ export default async function turnsCheck(browser) {
     };
     // Start navigation without awaiting the intentionally held transcript.
     await anchorPage.evaluate(
-      ({ sid, turn, harness, machine }) => {
-        const url = new URL('/s/' + harness + '/' + encodeURIComponent(sid), location.href);
-        url.searchParams.set('machine', machine);
-        url.hash = 'turn=' + encodeURIComponent(turn);
+      ({ sid, turn, machine }) => {
+        const url = new URL(
+          '/session/' + encodeURIComponent(machine) + '/' + encodeURIComponent(sid),
+          location.href,
+        );
+        url.hash = encodeURIComponent(turn);
         history.pushState(
           { v: 'session', id: sid, turn },
           '',
@@ -692,7 +694,6 @@ export default async function turnsCheck(browser) {
       {
         sid,
         turn: started.id,
-        harness: D.SESS[started.sid].harness,
         machine: D.SOURCES?.[D.SESS[started.sid].machine] ?? D.SESS[started.sid].machine,
       },
     );
