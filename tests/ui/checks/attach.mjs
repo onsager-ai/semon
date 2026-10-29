@@ -144,7 +144,11 @@ export default async function attachCheck(browser) {
 
   // ---- The API: references in the page JSON, bytes by reference, validation -------------------------------------------
   {
-    const page = await served(browser, { extras: true, size: 'desktop', path: '/session/local/' + SID });
+    const page = await served(browser, {
+      extras: true,
+      size: 'desktop',
+      path: '/session/local/' + SID,
+    });
     await page.waitForFunction(() => document.querySelectorAll('button.attach').length === 4);
     const api = await page.evaluate(attachmentApi, SID);
     R.api = api;

@@ -5369,7 +5369,10 @@ mod tests {
                 "{path}"
             );
         }
-        assert_eq!(core.respond("GET", "/s/claude/lane-alpha", "", None).status, 404);
+        assert_eq!(
+            core.respond("GET", "/s/claude/lane-alpha", "", None).status,
+            404
+        );
         assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
         // DIR is only read.
         assert_eq!(contents(&dir), before);

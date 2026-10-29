@@ -344,7 +344,12 @@ export default async function (browser) {
 
     const shotTitle = 'Run queue retry tests';
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
-      const shot = await served(browser, { extras: true, path: '/session/local/harbor', size, dark });
+      const shot = await served(browser, {
+        extras: true,
+        path: '/session/local/harbor',
+        size,
+        dark,
+      });
       const routeStages = new WeakMap();
       const recordRouteStage = (request, stage, status) => {
         const stages = routeStages.get(request) ?? [];
@@ -1238,7 +1243,12 @@ export default async function (browser) {
       ['desktop', true],
     ]) {
       const tag = size + (dark ? '-dark' : '-light');
-      const page = await served(browser, { extras: true, size, dark, path: '/session/local/codex-cut' });
+      const page = await served(browser, {
+        extras: true,
+        size,
+        dark,
+        path: '/session/local/codex-cut',
+      });
       await page
         .locator('[aria-label="Transcript"] [data-entry-key]')
         .first()
