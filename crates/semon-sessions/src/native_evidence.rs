@@ -4010,12 +4010,43 @@ mod catalog_owner_tests {
         let db = cold_search_connection(&options);
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         cold_search_claim(&db, &path, 100);
+        let generation: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let captured_options = options.clone();
         let changed = path.clone();
+        let hook_revisions = std::rc::Rc::new(std::cell::Cell::new(None));
+        let captured_revisions = hook_revisions.clone();
         crate::events::BEFORE_CATALOG_PUBLICATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let db = cold_search_connection(&captured_options);
-                cold_search_claim(&db, &changed, 101);
+                let config = captured_options
+                    .source
+                    .config(&captured_options.cache)
+                    .unwrap();
+                let mut journal = config.source_observations().unwrap();
+                let claims = journal.claims(std::slice::from_ref(&changed)).unwrap();
+                let before = claims[0].1.expect("the prepared source has a pending claim");
+                let operation = crate::storage::source_observations::SourceOperation::capture(
+                    config.namespace.as_str(),
+                    "invalidate",
+                    &serde_json::to_vec(&claims).unwrap(),
+                );
+                assert_eq!(
+                    journal.invalidate(&operation, &claims).unwrap(),
+                    crate::storage::source_observations::SourceMutationReceipt::Applied
+                );
+                let after = journal.claims(std::slice::from_ref(&changed)).unwrap()[0]
+                    .1
+                    .unwrap();
+                assert!(
+                    after > before,
+                    "the hook must change the actual prepared claim"
+                );
+                captured_revisions.set(Some((before, after)));
             }));
         });
         let evidence = NativeEvidence::new(options.clone());
@@ -4026,6 +4057,22 @@ mod catalog_owner_tests {
             Ok(_) => panic!("the changed claim must refuse publication"),
         };
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let (_, changed_revision) = hook_revisions.get().expect("publication hook must run");
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            changed_revision,
+            "refused publication must leave the new claim pending"
+        );
+        assert_eq!(
+            db.query_row("SELECT value FROM meta WHERE key='catalog_generation'", [], |row| row.get::<_, String>(0)).unwrap(),
+            generation,
+            "the changed claim must fence the Catalog generation"
+        );
         assert_eq!(
             lock(&evidence.catalog_search).tickets[0].waiting,
             BTreeSet::from([path])
@@ -4061,6 +4108,10 @@ mod catalog_owner_tests {
                 .join("sessions/2026/10/01/rollout-audit.jsonl");
             cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
+        // HTTP demand starts the real producer. Pin both Work fences while
+        // inspecting admission so it cannot finish and acknowledge the claims.
+        let first_work = lock(&first.work);
+        let second_work = lock(&second.work);
         let sources = Arc::new(SessionSources::from_evidence(vec![
             ("first".into(), first.clone()),
             ("second".into(), second.clone()),
@@ -4105,6 +4156,16 @@ mod catalog_owner_tests {
                 .collect::<Vec<_>>(),
             vec![("audit".into(), Some("codex".into()))]
         );
+        for evidence in [&first, &second] {
+            let db = cold_search_connection(&evidence.options);
+            let path = evidence
+                .options
+                .codex_home
+                .join("sessions/2026/10/01/rollout-audit.jsonl");
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)", [path.to_string_lossy().as_ref()], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        drop(first_work);
+        drop(second_work);
         core.close();
         fs::remove_dir_all(first_root).unwrap();
         fs::remove_dir_all(second_root).unwrap();
