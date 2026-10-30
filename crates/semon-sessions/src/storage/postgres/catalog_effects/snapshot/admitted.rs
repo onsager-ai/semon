@@ -11,16 +11,18 @@ fn unavailable<T>() -> io::Result<T> {
     Err(failed(StorageError::NamespaceUpgradePending))
 }
 
+struct RowRuntimeEvidence {
+    binding: crate::storage::QueryRuntimeBinding,
+    observations: Option<crate::storage::selected::PresentationObservations>,
+    semantic_row_runtime: Option<String>,
+    semantic_global_runtime: Option<String>,
+}
+
 impl Snapshot<'_, '_> {
     fn row_runtime_binding_with_observations(
         &self,
         row: &CatalogRow,
-    ) -> io::Result<
-        Option<(
-            crate::storage::QueryRuntimeBinding,
-            Option<crate::storage::selected::PresentationObservations>,
-        )>,
-    > {
+    ) -> io::Result<Option<RowRuntimeEvidence>> {
         self.require_current()?;
         let mut tx = self
             .tx
@@ -34,7 +36,6 @@ impl Snapshot<'_, '_> {
         let current_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
         metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
-        let mut operation_binding = None;
         for original in [&current_metadata, &retained_metadata] {
             if row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                 && original == &retained_metadata
@@ -87,26 +88,64 @@ impl Snapshot<'_, '_> {
                 9 => {
                     let observations =
                         serde_json::from_value(values[4].clone()).map_err(io::Error::other)?;
-                    return Ok(Some((current, observations)));
+                    return Ok(Some(RowRuntimeEvidence {
+                        binding: current,
+                        observations: Some(observations),
+                        semantic_row_runtime: None,
+                        semantic_global_runtime: None,
+                    }));
                 }
                 8 if values[7].is_object() => {
-                    // Semantic publications authenticate observations in the
-                    // selected-root manifest, not the generic request tuple.
-                    operation_binding = Some(current.clone());
+                    // The ordinary semantic publisher's receipt authenticates
+                    // its global runtime and each exact published row. That
+                    // publisher does not emit selected-root manifests.
+                    let semantic = &values[7];
+                    if semantic.as_object().is_none_or(|fields| {
+                        fields.len() != 5
+                            || !fields.contains_key("runtime")
+                            || !fields.contains_key("withdrawals")
+                            || !fields.contains_key("prior_owners")
+                            || !fields.contains_key("retired_owners")
+                            || !fields.contains_key("lifecycle_authority")
+                    }) || !semantic["withdrawals"].is_array()
+                        || !semantic["prior_owners"].is_object()
+                        || !semantic["retired_owners"].is_array()
+                    {
+                        return Err(failed(StorageError::ScopeChanged));
+                    }
+                    let semantic_global_runtime = semantic["runtime"]
+                        .as_str()
+                        .filter(|runtime| !runtime.is_empty())
+                        .ok_or_else(|| failed(StorageError::ScopeChanged))?
+                        .to_owned();
+                    let semantic_row_runtime = original["query"]["runtime"]
+                        .as_str()
+                        .filter(|runtime| !runtime.is_empty())
+                        .ok_or_else(|| failed(StorageError::ScopeChanged))?
+                        .to_owned();
+                    return Ok(Some(RowRuntimeEvidence {
+                        binding: current,
+                        observations: None,
+                        semantic_row_runtime: Some(semantic_row_runtime),
+                        semantic_global_runtime: Some(semantic_global_runtime),
+                    }));
                 }
                 8 if values[7].is_null() => {
                     // This current generic request has no captured runtime
                     // observations; do not substitute a semantic manifest.
-                    return Ok(Some((current, None)));
+                    return Ok(Some(RowRuntimeEvidence {
+                        binding: current,
+                        observations: None,
+                        semantic_row_runtime: None,
+                        semantic_global_runtime: None,
+                    }));
                 }
                 _ => return Err(failed(StorageError::ScopeChanged)),
             }
         }
         let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),&current_metadata,&retained_metadata]).map_err(sqlstate::error).map_err(failed)?;
         let Some(value) = rows.into_iter().next() else {
-            return operation_binding
-                .map(|binding| Some((binding, None)))
-                .ok_or_else(|| failed(StorageError::ScopeChanged));
+            return Err(failed(StorageError::ScopeChanged));
         };
         let decode = |at: usize| -> io::Result<String> {
             text(
@@ -153,7 +192,12 @@ impl Snapshot<'_, '_> {
         .map_err(failed)?;
         let binding = crate::storage::proof_codec::observation_binding(record, &current, row)
             .map_err(failed)?;
-        Ok(Some((binding, observations)))
+        Ok(Some(RowRuntimeEvidence {
+            binding,
+            observations,
+            semantic_row_runtime: None,
+            semantic_global_runtime: None,
+        }))
     }
 }
 
@@ -164,14 +208,31 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         row: &CatalogRow,
         runtime: &str,
     ) -> io::Result<Option<String>> {
-        let Some((binding, Some(observations))) =
-            self.row_runtime_binding_with_observations(row)?
-        else {
+        let Some(evidence) = self.row_runtime_binding_with_observations(row)? else {
             return Err(failed(StorageError::ScopeChanged));
         };
-        let captured = observations
-            .runtime_for(row)
+        let captured = evidence
+            .semantic_row_runtime
+            .clone()
+            .or_else(|| {
+                evidence
+                    .observations
+                    .as_ref()
+                    .and_then(|observations| observations.runtime_for(row))
+            })
             .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+        let captured_global = match (
+            evidence.semantic_global_runtime.as_deref(),
+            evidence
+                .observations
+                .as_ref()
+                .and_then(|observations| observations.runtime.as_deref()),
+        ) {
+            (Some(runtime), None) => Some(evidence.binding.witness(runtime)?),
+            (None, Some(runtime)) => Some(runtime.to_owned()),
+            (None, None) => None,
+            (Some(_), Some(_)) => return Err(failed(StorageError::ScopeChanged)),
+        };
         let mut tx = self
             .tx
             .lock()
@@ -193,15 +254,15 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
                         .scope(row, &cwds)?
                 };
-                let fresh = binding.witness(&scoped)?;
+                let fresh = evidence.binding.witness(&scoped)?;
                 if fresh != captured {
                     return Err(failed(StorageError::ScopeChanged));
                 }
                 Ok(Some(fresh))
             }
             None => {
-                let current_global = binding.witness(runtime)?;
-                if observations.runtime.as_deref() != Some(current_global.as_str()) {
+                let current_global = evidence.binding.witness(runtime)?;
+                if captured_global.as_deref() != Some(current_global.as_str()) {
                     return Err(failed(StorageError::ScopeChanged));
                 }
                 Ok(Some(captured))
@@ -226,7 +287,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         row: &CatalogRow,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
         self.row_runtime_binding_with_observations(row)
-            .map(|result| result.map(|(binding, _)| binding))
+            .map(|result| result.map(|evidence| evidence.binding))
     }
 
     fn require_current(&self) -> io::Result<()> {

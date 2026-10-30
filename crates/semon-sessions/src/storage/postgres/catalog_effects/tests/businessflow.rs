@@ -1781,6 +1781,130 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
     }
     let retained_host = body_host(&options, &prepared.rows);
+    // The semantic publisher receipt is the real producer output. Corrupt
+    // each persisted receipt boundary, call the admitted selected reader, and
+    // restore the receipt before testing the next mutation.
+    let (operation_id, payload) = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let rows = tx.driver.query(
+                "SELECT operation_id,payload FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2",
+                &[&namespace.as_str().as_bytes(), &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            assert_eq!(rows.len(), 1, "semantic publisher receipt must be unique");
+            Ok((rows[0].get::<_, Vec<u8>>(0), rows[0].get::<_, Vec<u8>>(1)))
+        })
+        .unwrap();
+    let mut read_admitted_session = || {
+        let mut reader = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
+        ));
+        reader.call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":prepared.rows[0].key}),
+            1790812802000,
+            &query_store,
+            &retained_host,
+            None,
+        )
+    };
+    assert!(
+        read_admitted_session().is_ok(),
+        "the real semantic receipt admits its published selected row"
+    );
+    let mut receipt_mutation = |column: &str,
+                                lookup_generation: &[u8],
+                                changed: &[u8],
+                                restore_generation: &[u8],
+                                original: &[u8],
+                                label: &str| {
+        let sql = match column {
+            "operation_id" => "UPDATE semon_pg_native_catalog_operations SET operation_id=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+            "payload" => "UPDATE semon_pg_native_catalog_operations SET payload=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+            "generation" => "UPDATE semon_pg_native_catalog_operations SET generation=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver.execute(
+                    sql,
+                    &[&namespace.as_str().as_bytes(), &lookup_generation, &changed],
+                ).map_err(sqlstate::error)
+            }).unwrap(),
+            1
+        );
+        let refused = read_admitted_session();
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver.execute(
+                    sql,
+                    &[&namespace.as_str().as_bytes(), &restore_generation, &original],
+                ).map_err(sqlstate::error)
+            }).unwrap(),
+            1,
+            "restore the real semantic receipt after {label}"
+        );
+        assert!(refused.is_err(), "admitted selected reader must refuse {label}");
+    };
+    let mut changed_operation_id = operation_id.clone();
+    changed_operation_id[0] ^= 1;
+    receipt_mutation(
+        "operation_id",
+        generation.as_bytes(),
+        &changed_operation_id,
+        generation.as_bytes(),
+        &operation_id,
+        "a changed operation id",
+    );
+    let mut changed_payload = payload.clone();
+    changed_payload[0] ^= 1;
+    receipt_mutation(
+        "payload",
+        generation.as_bytes(),
+        &changed_payload,
+        generation.as_bytes(),
+        &payload,
+        "a changed receipt payload",
+    );
+    let mut changed_semantic_payload: serde_json::Value =
+        serde_json::from_slice(&payload).unwrap();
+    changed_semantic_payload[4]["runtime"] =
+        serde_json::json!("changed but well-formed captured global witness");
+    let changed_semantic_payload = serde_json::to_vec(&changed_semantic_payload).unwrap();
+    let changed_semantic_operation = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&changed_semantic_payload).to_vec()
+    };
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(tx.driver.execute(
+                "UPDATE semon_pg_native_catalog_operations SET operation_id=$3,payload=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+                &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &changed_semantic_operation, &changed_semantic_payload],
+            ).map_err(sqlstate::error)?, 1);
+        Ok(())
+    })
+    .unwrap();
+    let refused_derived_generation = read_admitted_session();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(tx.driver.execute(
+            "UPDATE semon_pg_native_catalog_operations SET operation_id=$3,payload=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+            &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &operation_id, &payload],
+        ).map_err(sqlstate::error)?, 1);
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        refused_derived_generation.is_err(),
+        "a well-formed rehashed payload still needs its derived generation"
+    );
+    let mut changed_generation = generation.as_bytes().to_vec();
+    changed_generation[0] = if changed_generation[0] == b'0' { b'1' } else { b'0' };
+    receipt_mutation(
+        "generation",
+        generation.as_bytes(),
+        &changed_generation,
+        &changed_generation,
+        generation.as_bytes(),
+        "a changed receipt generation",
+    );
     for since in recent_windows {
         let mut recent_options = options.clone();
         recent_options.all = false;
