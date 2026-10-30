@@ -8941,9 +8941,11 @@ fn build_sources_inner(
     let presentation = presentation
         .map(|observations| {
             let rows = catalog.as_deref().expect("publication catalog");
-            let cohort = rows.iter().chain(staged_relationships.into_iter().flat_map(
-                |context| context.endpoints.values().map(|endpoint| &endpoint.row),
-            ));
+            let cohort = rows.iter().chain(
+                staged_relationships
+                    .into_iter()
+                    .flat_map(|context| context.endpoints.values().map(|endpoint| &endpoint.row)),
+            );
             let mut observations = observations.with_publication_authority(
                 options,
                 runtime_binding.as_ref(),
@@ -8959,14 +8961,15 @@ fn build_sources_inner(
             if let Some(relationships) = staged_relationships {
                 for endpoint in relationships.endpoints.values().take(128 - rows.len()) {
                     let row = &endpoint.row;
-                    let observed = builder
-                        .cache
-                        .runtime_source_cwds(&row.sources)
-                        .and_then(|cwds| {
-                            observations
-                                .runtime_observation(row, &cwds)
-                                .map(|runtime| (runtime, cwds))
-                        });
+                    let observed =
+                        builder
+                            .cache
+                            .runtime_source_cwds(&row.sources)
+                            .and_then(|cwds| {
+                                observations
+                                    .runtime_observation(row, &cwds)
+                                    .map(|runtime| (runtime, cwds))
+                            });
                     if let Ok((runtime, cwds)) = observed {
                         observations.capture_runtime(row, &cwds, runtime)?;
                     }

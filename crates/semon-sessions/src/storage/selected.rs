@@ -413,9 +413,13 @@ impl PresentationObservations {
     ) -> Self {
         let runtime = crate::native_evidence::query_runtime_generation(options).ok();
         let scoped = crate::native_evidence::RuntimeObservations::new(options);
-        let mut observations = Self::capture_inputs(options, binding, rows, recorded, runtime, scoped);
+        let mut observations =
+            Self::capture_inputs(options, binding, rows, recorded, runtime, scoped);
         if observations.source_runtime.as_ref().is_some_and(|initial| {
-            crate::native_evidence::query_runtime_generation(options).ok().as_ref() != Some(initial)
+            crate::native_evidence::query_runtime_generation(options)
+                .ok()
+                .as_ref()
+                != Some(initial)
         }) {
             observations.source_runtime = None;
             observations.runtime = None;
@@ -497,7 +501,10 @@ impl PresentationObservations {
                 }
             }
         }
-        if recorded.as_ref().is_some_and(|head| head.validate().is_err()) {
+        if recorded
+            .as_ref()
+            .is_some_and(|head| head.validate().is_err())
+        {
             facts_known = false;
             selection_known = false;
             machine_label = None;
@@ -555,7 +562,9 @@ impl PresentationObservations {
             return if saved == &runtime {
                 Ok(())
             } else {
-                Err(io::Error::other("presentation runtime observation conflicts"))
+                Err(io::Error::other(
+                    "presentation runtime observation conflicts",
+                ))
             };
         }
         // Bound exact dependency observations, including distinct final rows
