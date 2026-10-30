@@ -2194,8 +2194,7 @@ impl EventCache {
             query: interest.query,
             ranges: &ranges,
         };
-        let paths =
-            snapshot.catalog_search_paths(&lookup, limit)?;
+        let paths = snapshot.catalog_search_paths(&lookup, limit)?;
         Ok(
             Self::qualified_catalog_search_inputs(options, &paths, interest.harness, limit)
                 .ok_or_else(|| {

@@ -1,16 +1,16 @@
 //! Focused reads of the published metadata catalog. This path never opens the
 //! EventCache, discovers native log files, loads transcript bodies or constructs
 //! a model. Runtime labels reuse the shared native observation fence.
+use crate::events::EventCache;
 use crate::{
     Options,
     model::summary::{CATALOG_VERSION, CatalogRow, CatalogSource},
     viewer::{ViewerReply, decoded, query_value},
 };
-use crate::events::EventCache;
 use rusqlite::{Connection, OpenFlags};
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
 use std::{io, time::UNIX_EPOCH};
 
 const MAX_LIMIT: usize = 100;
@@ -781,7 +781,8 @@ pub(crate) fn page_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
-    match crate::storage::read_local_catalog_page_with_search(options, machine, &request, on_search) {
+    match crate::storage::read_local_catalog_page_with_search(options, machine, &request, on_search)
+    {
         Ok(reply) => reply,
         Err(_) => error(
             503,
@@ -840,7 +841,6 @@ pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
     transaction.commit().map_err(io::Error::other)?;
     Ok(true)
 }
-
 
 pub(crate) fn read_page_snapshot(
     options: &Options,
