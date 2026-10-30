@@ -914,11 +914,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         );
     }
     let binding = pg.query_runtime_binding().unwrap().unwrap();
-    let runtime = binding
-        .witness(&crate::native_evidence::query_runtime_generation(&options).unwrap())
-        .unwrap();
+    let observations = crate::native_evidence::RuntimeObservations::new(&options);
     for row in &prepared.rows {
         if let Some(query) = &row.query {
+            let cwds = pg.runtime_source_cwds(&row.sources).unwrap();
+            let runtime = binding
+                .witness(&observations.scope(row, &cwds).unwrap())
+                .unwrap();
             assert_eq!(query["runtime"].as_str(), Some(runtime.as_str()));
         }
     }
@@ -969,8 +971,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(current_binding.stream_epoch, binding.stream_epoch);
         let current_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
         assert_eq!(current_runtime, stage_runtime, "staged runtime changed");
-        let expected_runtime = current_binding.witness(&current_runtime).unwrap();
+        let observations = crate::native_evidence::RuntimeObservations::new(&options);
         for row in &model.prepared().rows {
+            let cwds = pg.runtime_source_cwds(&row.sources).unwrap();
+            let expected_runtime = current_binding
+                .witness(&observations.scope(row, &cwds).unwrap())
+                .unwrap();
             assert!(
                 row.query.as_ref().is_some_and(
                     |query| query["runtime"].as_str() == Some(expected_runtime.as_str())
