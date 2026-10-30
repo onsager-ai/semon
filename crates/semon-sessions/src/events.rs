@@ -3683,6 +3683,7 @@ fn scan_file_with_mode(
                     format!("{}:{attempt}", operation.id).as_bytes(),
                 )
             });
+            let prepare_started = cache.scan_measurements.start();
             let prepared = cache
                 .store
                 .as_mut()
@@ -3698,6 +3699,9 @@ fn scan_file_with_mode(
                         })?,
                     harness,
                 );
+            cache
+                .scan_measurements
+                .record("prepare_file", prepare_started, 1);
             match prepared {
                 Err(StoreError::Configured(crate::storage::StorageError::Conflict))
                     if host_operation.is_some() && !last =>
