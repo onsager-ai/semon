@@ -4030,6 +4030,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     journal.invalidate(&invalidate, &expected_claims).unwrap();
     let revisions = journal.claims(&paths).unwrap();
+    // SelectedUpgrade intentionally hides FIFO while its marked claim exists.
+    // Capture the complete fixture queue before installing that marker.
+    let pending_before = journal.pending_catalog_sources(256, None).unwrap();
+    assert_eq!(
+        pending_before.tier,
+        crate::storage::source_observations::CatalogPendingTier::Fifo
+    );
+    assert!(
+        pending_before.paths.len() < 256,
+        "fixture FIFO snapshot must be complete"
+    );
+    assert!(pending_before.paths.contains(&selected_path));
+    assert!(pending_before.paths.contains(&unrelated_path));
+    let expected_fifo_after = pending_before
+        .paths
+        .iter()
+        .filter(|path| *path != &selected_path)
+        .cloned()
+        .collect::<Vec<_>>();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         tx.driver.execute(
             "UPDATE semon_pg_native_catalog_recipe_headers SET version=5 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
@@ -4038,10 +4057,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Ok(())
     }).unwrap();
     assert!(crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
+    let selected_pending = journal.pending_catalog_sources(64, None).unwrap();
     assert_eq!(
-        journal.pending_catalog_sources(64, None).unwrap().paths,
-        vec![selected_path.clone()]
+        selected_pending.tier,
+        crate::storage::source_observations::CatalogPendingTier::SelectedUpgrade
     );
+    assert_eq!(selected_pending.paths, vec![selected_path.clone()]);
     assert_eq!(
         journal.claims(&paths).unwrap(),
         revisions,
@@ -4051,9 +4072,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (upgraded, _, _, _) = stage_publish(&mut reopened, &bulk[..1], 1790812811000);
     assert_ne!(upgraded, retired);
     assert!(!crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
+    let pending_after = journal.pending_catalog_sources(256, None).unwrap();
     assert_eq!(
-        journal.pending_catalog_sources(64, None).unwrap().paths,
-        vec![unrelated_path]
+        pending_after.tier,
+        crate::storage::source_observations::CatalogPendingTier::Fifo
+    );
+    assert_eq!(pending_after.paths, expected_fifo_after);
+    let first_fifo_page = journal.pending_catalog_sources(64, None).unwrap();
+    assert_eq!(
+        first_fifo_page.tier,
+        crate::storage::source_observations::CatalogPendingTier::Fifo
+    );
+    assert_eq!(
+        first_fifo_page.paths,
+        expected_fifo_after.iter().take(64).cloned().collect::<Vec<_>>()
     );
     assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
     assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
