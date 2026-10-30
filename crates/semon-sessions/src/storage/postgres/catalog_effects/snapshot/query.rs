@@ -99,6 +99,109 @@ fn cohort_page(
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
+
+fn retained_window(
+    row: &crate::model::summary::CatalogRow,
+    generation: &str,
+    cutoff: i64,
+) -> Result<(Part, bool), StorageError> {
+    let saved = row
+        .query
+        .as_ref()
+        .ok_or_else(|| cohort_scope_changed("retained_query_missing"))?;
+    let selected = &saved["selected"];
+    let edges = selected["edges"]
+        .as_array()
+        .ok_or_else(|| cohort_scope_changed("retained_query_edges_missing"))?;
+    let turns = selected["turns"]
+        .as_array()
+        .ok_or_else(|| cohort_scope_changed("retained_query_turns_missing"))?;
+    let mut timed_edges = BTreeSet::new();
+    for recipe in edges {
+        let id = recipe["id"]
+            .as_str()
+            .ok_or_else(|| cohort_scope_changed("retained_query_edge_id_missing"))?;
+        let edge = &recipe["query"];
+        if edge["at"].as_i64().is_some_and(|at| at >= cutoff)
+            || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
+            || edge["status"]
+                .as_str()
+                .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
+        {
+            timed_edges.insert(id.to_owned());
+        }
+    }
+    let mut kept_turns = BTreeSet::new();
+    let mut kept_edges = timed_edges.clone();
+    for recipe in turns {
+        let turn = &recipe["query"];
+        let keep = turn["last"] == serde_json::json!(true)
+            || turn["last"] == serde_json::json!(1)
+            || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
+            || turn["start"]
+                .as_str()
+                .is_some_and(|id| timed_edges.contains(id));
+        if !keep {
+            continue;
+        }
+        let id = recipe["id"]
+            .as_str()
+            .ok_or_else(|| cohort_scope_changed("retained_query_turn_id_missing"))?;
+        kept_turns.insert(id.to_owned());
+        if let Some(id) = turn["start"].as_str() {
+            kept_edges.insert(id.to_owned());
+        }
+        if let Some(sent) = turn["sent"].as_array() {
+            kept_edges.extend(sent.iter().filter_map(|id| id.as_str().map(str::to_owned)));
+        }
+    }
+    let member = saved["last"].as_i64().is_some_and(|last| last >= cutoff)
+        || matches!(saved["state"].as_str(), Some("work" | "wait"))
+        || !kept_edges.is_empty();
+    let mut rows = BTreeMap::new();
+    if member {
+        let summaries = saved["rows"]
+            .as_object()
+            .ok_or_else(|| cohort_scope_changed("retained_query_rows_missing"))?;
+        rows.insert(
+            row.key.clone(),
+            summaries
+                .get(&row.key)
+                .cloned()
+                .ok_or_else(|| cohort_scope_changed("retained_query_owner_missing"))?,
+        );
+        for recipe in edges {
+            let Some(id) = recipe["id"].as_str() else {
+                return Err(cohort_scope_changed("retained_query_edge_id_missing"));
+            };
+            if !kept_edges.contains(id) {
+                continue;
+            }
+            for endpoint in ["from", "to"]
+                .into_iter()
+                .filter_map(|field| recipe["query"][field].as_str())
+                .filter(|endpoint| *endpoint != "you")
+            {
+                rows.entry(endpoint.to_owned())
+                    .or_insert_with(|| summaries.get(endpoint).cloned().unwrap_or_default());
+            }
+        }
+    }
+    Ok((
+        Part {
+            generation: generation.to_owned(),
+            runtime: saved["runtime"].as_str().unwrap_or_default().to_owned(),
+            rows,
+            owners: BTreeMap::new(),
+            content: BTreeMap::new(),
+            witnesses: Vec::new(),
+            edges: kept_edges,
+            turns: kept_turns,
+        },
+        member,
+    ))
+}
+
 impl QueryCatalogStore for QueryCatalog {
     fn selected_body(
         &self,
@@ -111,28 +214,77 @@ impl QueryCatalogStore for QueryCatalog {
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
-        let runtime_observation = (!self.captured)
-            .then(|| {
+        if self.captured && !self.options.all {
+            return Err(unavailable(StorageError::InvalidArguments));
+        }
+        let needs_window = !self.options.all && !self.options.scan_window;
+        let (selected_current, retained_window) = with_admitted_snapshot(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.generation,
+            |snapshot| {
+                let current = snapshot.catalog(key, false)?.is_some_and(|row| {
+                    row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                });
+                let retained_window_data = if needs_window && !current {
+                    let history = snapshot.owner(key)?.is_some();
+                    snapshot
+                        .selected(key, history, 0, 1)?
+                        .map(|(row, _, _)| {
+                            snapshot
+                                .row_runtime_binding(&row)
+                                .map_err(|_| StorageError::ScopeChanged)?
+                                .ok_or(StorageError::ScopeChanged)?;
+                            let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+                            if !crate::model::summary::query_observation_matches(
+                                saved,
+                                &row.sources,
+                                false,
+                                None,
+                            )
+                            .map_err(|_| StorageError::ScopeChanged)?
+                            {
+                                return Err(StorageError::ScopeChanged);
+                            }
+                            retained_window(
+                                &row,
+                                &self.generation,
+                                now.saturating_sub(
+                                    i64::try_from(self.options.since.as_millis())
+                                        .unwrap_or(i64::MAX),
+                                ),
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                Ok((current, retained_window_data))
+            },
+        )
+        .map_err(unavailable)?;
+        let runtime_observation = if selected_current {
+            Some(
                 super::super::super::current_sources::Runtime::open(
                     &self.pool,
                     &self.namespace,
                     &self.control,
                     &self.options,
                 )
-            })
-            .transpose()
-            .map_err(unavailable)?;
+                .map_err(unavailable)?,
+            )
+        } else {
+            None
+        };
         let runtime = runtime_observation
             .as_ref()
             .map(|observation| observation.generation(&self.options))
             .transpose()
             .map_err(|error| QueryError::io(&error))?;
-        if self.captured && !self.options.all {
-            return Err(unavailable(StorageError::InvalidArguments));
-        }
-        // Use the same qualified window closure as listing. Its generation is
-        // immutable; the selected snapshot below also fences its runtime.
-        let window = if !self.options.all && !self.options.scan_window {
+        // Current owners use the qualified cohort window. A retained-only
+        // owner derives its cutoff from the exact history row admitted above.
+        let window = if needs_window && selected_current {
             let part = self.read_cohort(namespace, now, &mut (8 * 1024 * 1024))?;
             if part.generation != self.generation
                 || Some(part.runtime.as_str()) != runtime.as_deref()
@@ -140,6 +292,14 @@ impl QueryCatalogStore for QueryCatalog {
                 return Err(unavailable(StorageError::ScopeChanged));
             }
             if !part.rows.contains_key(key) {
+                return Err(QueryError::unknown_session(key));
+            }
+            Some(part)
+        } else if needs_window {
+            let Some((part, member)) = retained_window_data else {
+                return Err(QueryError::unknown_session(key));
+            };
+            if !member {
                 return Err(QueryError::unknown_session(key));
             }
             Some(part)
@@ -162,6 +322,17 @@ impl QueryCatalogStore for QueryCatalog {
                 let current = snapshot.catalog(key, false)?.is_some_and(|row| {
                     row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                 });
+                // The admitted generation is immutable. Rechecking membership
+                // here keeps pre-window classification tied to this snapshot.
+                if current != selected_current {
+                    return Err(StorageError::ScopeChanged);
+                }
+                if current
+                    && let (Some(window), Some(runtime)) = (&window, runtime.as_deref())
+                    && window.runtime != runtime
+                {
+                    return Err(unavailable(StorageError::ScopeChanged));
+                }
                 let (row, header, _) = snapshot
                     .selected(key, history, 0, 1)
                     .inspect_err(|_error| {
@@ -177,11 +348,9 @@ impl QueryCatalogStore for QueryCatalog {
                 } else {
                     // Historical summaries retain observation provenance;
                     // their stored byte custody does not require live CWDs.
-                    if runtime.is_some() {
-                        snapshot.row_runtime_binding(&row)
-                            .map_err(|_| StorageError::ScopeChanged)?
-                            .ok_or(StorageError::ScopeChanged)?;
-                    }
+                    snapshot.row_runtime_binding(&row)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                        .ok_or(StorageError::ScopeChanged)?;
                     None
                 };
                 if !crate::model::summary::query_observation_matches(
@@ -274,6 +443,7 @@ impl QueryCatalogStore for QueryCatalog {
                     let mut summary = crate::query::transcript::render_session(
                         &self.options,
                         key,
+                        current,
                         &context,
                         &records,
                         now,
