@@ -944,64 +944,6 @@ pub(crate) fn complete_relocation(
     tx.commit().map_err(io::Error::other)
 }
 
-/// Reuse semantic discovery's exact native identity hints to schedule pending
-/// cold sources. Hints never establish an identity or a searchable Catalog row:
-/// the ordinary producer still qualifies the complete source component.
-pub(crate) fn pending_catalog_identity_sources(
-    options: &crate::Options,
-    id: &str,
-    harness: Option<&str>,
-) -> io::Result<Vec<crate::Input>> {
-    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = store
-        .connection
-        .unchecked_transaction()
-        .map_err(io::Error::other)?;
-    require_current_sql(&tx).map_err(io::Error::other)?;
-    let mut paths = std::collections::BTreeSet::new();
-    let basename = format!("{id}.jsonl");
-    for kind in ["nativeall", "claudeid", "copilotid", "headerid"] {
-        let value = if kind == "claudeid" { &basename } else { id };
-        let mut statement = tx
-            .prepare(semantic_stage::catalog_identity_path_query(kind))
-            .map_err(io::Error::other)?;
-        let candidates = statement
-            .query_map(params![value, "", 64], |row| row.get::<_, String>(0))
-            .map_err(io::Error::other)?;
-        for candidate in candidates {
-            let candidate = candidate.map_err(io::Error::other)?;
-            let path = if kind == "headerid" {
-                candidate
-                    .strip_prefix("native_codex_header:")
-                    .expect("header identity selector")
-            } else {
-                &candidate
-            };
-            let Some(input) = crate::native_evidence::catalog_input(Path::new(path), options)
-            else {
-                continue;
-            };
-            if harness.is_some_and(|harness| input.root.as_str() != harness) {
-                continue;
-            }
-            let pending: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
-                [path],
-                |row| row.get(0),
-            ).map_err(io::Error::other)?;
-            if pending {
-                paths.insert(input);
-                if paths.len() == 64 {
-                    return Ok(paths.into_iter().collect());
-                }
-            }
-        }
-    }
-    tx.commit().map_err(io::Error::other)?;
-    Ok(paths.into_iter().collect())
-}
-
 /// Selected upgrade demand shares the producer's durable invalidation queue.
 /// Existing revisions stay intact, including an in-flight producer's claim.
 pub(crate) fn prioritize_projection_sources(
@@ -2362,6 +2304,51 @@ impl IndexStore for SqliteStore {
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
         read_append_evidence(&self.connection, path).map_err(failure)
+    }
+
+    fn pending_catalog_identity_paths(&self, id: &str) -> Result<Vec<String>, StoreError> {
+        let tx = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        let selected_pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;')",
+            [],
+            |row| row.get(0),
+        ).map_err(failure)?;
+        if selected_pending {
+            tx.commit().map_err(failure)?;
+            return Ok(Vec::new());
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        let basename = format!("{id}.jsonl");
+        for kind in ["nativeall", "claudeid", "copilotid", "headerid"] {
+            let value = if kind == "claudeid" { &basename } else { id };
+            let mut statement = tx
+                .prepare(semantic_stage::catalog_identity_path_query(kind))
+                .map_err(failure)?;
+            let candidates = statement
+                .query_map(params![value, "", 64], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            for candidate in candidates {
+                let candidate = candidate.map_err(failure)?;
+                let path = if kind == "headerid" {
+                    candidate
+                        .strip_prefix("native_codex_header:")
+                        .expect("header identity selector")
+                } else {
+                    &candidate
+                };
+                let pending: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                    [path],
+                    |row| row.get(0),
+                ).map_err(failure)?;
+                if pending {
+                    paths.insert(path.to_owned());
+                }
+            }
+        }
+        tx.commit().map_err(failure)?;
+        Ok(paths.into_iter().collect())
     }
 
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
@@ -6910,6 +6897,8 @@ mod tests {
         let (options, rows, _) = catalog_native_fixture(&root, 2, true);
         let selected = &rows[1];
         let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let search_source = &rows[0].sources[0];
+        let search_path = search_source.path.to_string_lossy().into_owned();
         let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
         db.execute(
@@ -6919,6 +6908,7 @@ mod tests {
         .unwrap();
         let tx = db.unchecked_transaction().unwrap();
         invalidate_catalog_source(&tx, "/unrelated/first.jsonl", "changed").unwrap();
+        invalidate_catalog_source(&tx, &search_path, "changed").unwrap();
         invalidate_catalog_source(&tx, &path, "changed").unwrap();
         tx.commit().unwrap();
         let revision: i64 = db
@@ -6934,6 +6924,13 @@ mod tests {
             store.pending_catalog_sources(64).unwrap(),
             vec![path.clone()]
         );
+        assert!(
+            store
+                .pending_catalog_identity_paths(&search_source.native_id)
+                .unwrap()
+                .is_empty(),
+            "search hints must defer to explicit projection upgrades"
+        );
         assert_eq!(
             db.query_row(
                 "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
@@ -6945,6 +6942,7 @@ mod tests {
         );
         drop(store);
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some((&search_source.native_id, None)));
         let upgraded = (0..128).any(|_| {
             evidence
                 .refresh_catalog(
@@ -6964,6 +6962,15 @@ mod tests {
         assert!(
             upgraded,
             "ordinary producer must complete the selected upgrade"
+        );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&search_path],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "competing search publication must not precede the selected upgrade"
         );
         eprintln!("slot_upgrade stage=producer selected_first=true version=6");
         drop(db);

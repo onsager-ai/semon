@@ -458,10 +458,12 @@ impl NativeEvidence {
         let preferred = if cache.session_catalog_generation().is_some() {
             let interest = lock(&self.catalog_search).take();
             if let Some((id, harness)) = interest {
-                crate::events::store::pending_catalog_identity_sources(
+                cache.pending_catalog_identity_sources(
                     &self.options,
-                    &id,
-                    harness.as_deref(),
+                    crate::events::CatalogSearchInterest {
+                        query: &id,
+                        harness: harness.as_deref(),
+                    },
                 )?
             } else {
                 Vec::new()
