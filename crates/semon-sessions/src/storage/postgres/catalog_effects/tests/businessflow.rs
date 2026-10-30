@@ -2854,6 +2854,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
         cache.begin_semantic_stage(&paths, &runtime).unwrap();
         loop {
             let batch = cache.semantic_batch(64).unwrap().unwrap();
@@ -3684,7 +3685,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (retired, retired_batch, retired_model, _) =
         stage_publish(&mut reopened, &rollout, 1790812810000);
     assert!(retired_model.prepared().rows.is_empty(), "zero-row batch");
-    assert_eq!(retired_batch.runtime, runtime);
+    assert_eq!(
+        retired_batch.runtime,
+        crate::native_evidence::query_runtime_generation(&facts_options).unwrap()
+    );
     assert_ne!(retired, caught);
     let codex_keys = prepared
         .rows

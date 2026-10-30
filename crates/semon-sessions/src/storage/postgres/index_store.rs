@@ -89,6 +89,10 @@ impl NativeIndex {
             ledger,
             self.control.clone(),
         )
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("PG_INDEX_REFUSED summary error_kind={:?}", _error.kind());
+        })
         .map_err(read_error)
     }
 }

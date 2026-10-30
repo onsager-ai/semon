@@ -267,9 +267,11 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
-      - name: Real PostgreSQL and existing session regressions
+      - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && matrix.suite == 'regression' && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls
+        # The focused job runs the complete storage::postgres module above.
+        # Together the two required jobs retain the full feature-enabled suite.
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres
       - name: TLS service diagnostics
         if: failure()
         run: docker logs semon-pg-tls
