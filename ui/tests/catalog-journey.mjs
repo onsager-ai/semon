@@ -16,15 +16,15 @@ await writeFile(
   JSON.stringify({ pid: process.pid, phase: fixture.phase ?? null }),
 );
 const browser = await chromium.launch();
+const errors = [],
+  requests = [],
+  responses = [];
 try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const page = await context.newPage(),
     cdp = await context.newCDPSession(page);
   await cdp.send('Performance.enable');
-  const errors = [],
-    requests = [],
-    responses = [],
-    fieldTexts = [];
+  const fieldTexts = [];
   const captures = new Set(),
     fieldCaptures = new Set();
   let bundle = null;
@@ -232,6 +232,7 @@ try {
     JSON.stringify({
       ok: false,
       error: error.message,
+      stack: error.stack,
       requests,
       responses,
       page_errors: errors,
