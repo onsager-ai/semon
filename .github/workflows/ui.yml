@@ -13,6 +13,10 @@ on:
         description: Compare recovery live refresh with the pinned recovery baseline
         type: boolean
         default: false
+      native_foundation_measurement:
+        description: Compare the pre-foundation reference and selected reader on identical native fixtures
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [main]
@@ -31,6 +35,7 @@ concurrency:
 jobs:
   foundation:
     name: UI types and generated assets
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -82,6 +87,7 @@ jobs:
   build:
     name: viewer test binaries
     needs: foundation
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     # Manual diagnostics also build the pinned recovery baseline.
     timeout-minutes: ${{ inputs.refresh_diagnostics && 25 || 15 }}
@@ -160,6 +166,7 @@ jobs:
   checks:
     name: viewer / ${{ matrix.suite }}
     needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
@@ -478,15 +485,133 @@ jobs:
           path: tests/ui/out
           if-no-files-found: warn
 
+  native-foundation-measurement:
+    name: native foundation same-fixture measurement
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_foundation_measurement }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-native-measurement-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-native-measurement-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Build the candidate with the fixture clock
+        run: |
+          cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
+          cp target/debug/semon "$RUNNER_TEMP/semon-candidate"
+
+      - name: Build the selected pre-foundation reference
+        env:
+          SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
+        run: |
+          git fetch --no-tags --depth=1 origin "$SOURCE_REFERENCE"
+          git worktree add --detach "$RUNNER_TEMP/native-foundation-reference" "$SOURCE_REFERENCE"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked \
+            --manifest-path "$RUNNER_TEMP/native-foundation-reference/Cargo.toml" \
+            -p semon-store --bin semon --features semon-sessions/test-clock
+          cp target/debug/semon "$RUNNER_TEMP/semon-reference"
+
+      - name: Measure focused multi-machine reads and archived tail scope in Source
+        env:
+          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
+        run: |
+          mkdir -p "$MEASUREMENT_OUT"
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib ordinary_multi_machine_focused_query_reuses_published_ownership \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee "$MEASUREMENT_OUT/source-multi-machine.log"
+          cargo test --locked -p semon-sessions --lib selected_transcript_tail_scope_measurement \
+            -- --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$MEASUREMENT_OUT/source-tail-scope.log"
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install Playwright and Chromium
+        working-directory: tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Compare selected transcript tail reads on copied native fixtures
+        env:
+          SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
+          SOURCE_CANDIDATE: ${{ github.sha }}
+          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
+        run: |
+          python3 scripts/focused-read-comparison.py \
+            --baseline-binary "$RUNNER_TEMP/semon-reference" \
+            --baseline-revision "$SOURCE_REFERENCE" \
+            --candidate-binary "$RUNNER_TEMP/semon-candidate" \
+            --candidate-revision "$SOURCE_CANDIDATE" \
+            --counts 0,256,2048 \
+            --output "$MEASUREMENT_OUT"
+
+      - name: Run the candidate browser journey
+        env:
+          SOURCE_CANDIDATE: ${{ github.sha }}
+          BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
+        run: |
+          python3 scripts/catalog-journey.py \
+            --binary "$RUNNER_TEMP/semon-candidate" \
+            --source-revision "$SOURCE_CANDIDATE" \
+            --counts 0,2048 \
+            --output "$BROWSER_MEASUREMENT_OUT"
+
+      - name: Retain focused-read, source and browser evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-foundation-measurement-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/native-foundation-measurement/focused-read-comparison.json
+            ${{ runner.temp }}/native-foundation-measurement/source-multi-machine.log
+            ${{ runner.temp }}/native-foundation-measurement/source-tail-scope.log
+            ${{ runner.temp }}/native-foundation-browser/server-results.json
+            ${{ runner.temp }}/native-foundation-browser/*-first-import.json
+            ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json
+            ${{ runner.temp }}/native-foundation-browser/*-browser.log
+          if-no-files-found: warn
+          retention-days: 14
+
   browser:
     name: viewer browser checks
     if: ${{ always() }}
-    needs: [foundation, build, checks]
+    needs: [foundation, build, checks, native-foundation-measurement]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every suite to pass
+      - name: Require the selected workflow path to pass
         env:
+          MEASUREMENT_ENABLED: ${{ inputs.native_foundation_measurement && 'true' || 'false' }}
+          REFRESH_DIAGNOSTICS_ENABLED: ${{ inputs.refresh_diagnostics && 'true' || 'false' }}
           FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
-        run: test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          MEASUREMENT_RESULT: ${{ needs.native-foundation-measurement.result }}
+        run: |
+          if [ "$MEASUREMENT_ENABLED" = true ]; then
+            test "$MEASUREMENT_RESULT" = success
+          fi
+          if [ "$MEASUREMENT_ENABLED" != true ] || [ "$REFRESH_DIAGNOSTICS_ENABLED" = true ]; then
+            test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          fi
