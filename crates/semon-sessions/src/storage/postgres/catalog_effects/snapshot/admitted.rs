@@ -1,6 +1,7 @@
 //! Ordinary Catalog renderer adapter over one acknowledged immutable generation.
 use super::*;
 use crate::{catalog::Request, storage::catalog::CatalogSnapshot};
+use crate::storage::source_observations::CatalogSearchLookup;
 use std::io;
 
 fn failed(error: StorageError) -> io::Error {
@@ -147,19 +148,52 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         self.require_current()?;
-        Ok(match key {
-            "catalog_generation" => Some(self.generation.clone()),
-            "catalog_version" => Some(crate::model::summary::CATALOG_VERSION.to_string()),
-            // Completeness is not inferred from successful metadata staging.
-            "catalog_completeness" => Some("partial".into()),
-            // Search counts/documents/memberships are effects of the same
-            // admitted generation operation; carried owners included.
-            "search_version" => Some(crate::catalog_search::VERSION.to_string()),
-            "search_generation_current" | "search_generation_retained_history" => {
-                Some(self.generation.clone())
+        let value = if key == "catalog_backfill_state" {
+            let mut tx = self
+                .tx
+                .lock()
+                .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+            tx.check().map_err(failed)?;
+            let rows = tx
+                .driver
+                .query(
+                    "SELECT backfill_state FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                    &[&tx.namespace.as_str().as_bytes()],
+                )
+                .map_err(sqlstate::error)
+                .map_err(failed)?;
+            rows.first()
+                .map(|row| row.try_get::<_, Option<String>>(0).map_err(|_| failed(StorageError::ScopeChanged)))
+                .transpose()?
+                .flatten()
+        } else {
+            match key {
+                "catalog_generation" => Some(self.generation.clone()),
+                "catalog_version" => Some(crate::model::summary::CATALOG_VERSION.to_string()),
+                // Completeness is not inferred from successful metadata staging.
+                "catalog_completeness" => Some("partial".into()),
+                // Search counts/documents/memberships are effects of the same
+                // admitted generation operation; carried owners included.
+                "search_version" => Some(crate::catalog_search::VERSION.to_string()),
+                "search_generation_current" | "search_generation_retained_history" => {
+                    Some(self.generation.clone())
+                }
+                _ => None,
             }
-            _ => None,
-        })
+        };
+        Ok(value)
+    }
+    fn catalog_search_paths(
+        &self,
+        lookup: &CatalogSearchLookup<'_>,
+        limit: usize,
+    ) -> io::Result<Vec<String>> {
+        self.require_current()?;
+        let mut tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        super::catalog_search_paths(&mut tx, lookup, limit).map_err(failed)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         self.require_current()?;

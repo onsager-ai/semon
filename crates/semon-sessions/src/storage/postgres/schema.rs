@@ -212,6 +212,9 @@ impl PgPool {
                     revision bigint NOT NULL CHECK(revision>0),
                     reason text NOT NULL,
                     observed_at bigint NOT NULL,
+                    search_path_digest bytea GENERATED ALWAYS AS (sha256(source_path)) STORED NOT NULL,
+                    search_filename_digest bytea GENERATED ALWAYS AS (sha256(decode(translate(substring(encode(source_path,'escape') from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))) STORED NOT NULL,
+                    search_copilot_digest bytea GENERATED ALWAYS AS (sha256(decode(translate(substring(CASE WHEN length(encode(source_path,'escape')) >= 13 THEN substring(encode(source_path,'escape') from 1 for length(encode(source_path,'escape'))-13) ELSE '' END from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))) STORED NOT NULL,
                     PRIMARY KEY(namespace_digest,source_path)
                 );
                 CREATE INDEX semon_pg_source_pending ON semon_pg_source_invalidations(namespace_digest,revision,source_path);

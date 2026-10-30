@@ -32,12 +32,7 @@ impl InboxTransaction for Inbox<'_, '_> {
     }
 
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        self.0.check()?;
-        let changed = self.0.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key_digest) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace AND semon_pg_native_meta.key=excluded.key", &[&self.0.namespace.as_str().as_bytes(), &key.as_bytes(), &value]).map_err(sqlstate::error)?;
-        if changed != 1 {
-            return Err(StorageError::ScopeChanged);
-        }
-        Ok(())
+        super::native_keys::put_meta(self.0, key.as_bytes(), value)
     }
 }
 

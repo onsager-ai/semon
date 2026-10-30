@@ -232,6 +232,8 @@ pub(crate) fn catalog_page(
     options: &crate::Options,
     source: &str,
     request: &crate::catalog::Request,
+    admit_search: bool,
+    admission: &mut Option<crate::catalog::CatalogSearchAdmission>,
 ) -> Result<crate::ViewerReply, super::StorageError> {
     let control = &control.for_selected_read();
     let generation = configured_generation(config, pool, control)?;
@@ -241,8 +243,15 @@ pub(crate) fn catalog_page(
         control,
         &generation,
         |snapshot| {
-            crate::catalog::read_page_snapshot(options, source, request, snapshot)
-                .map_err(|_| super::StorageError::Unavailable)
+            crate::catalog::read_page_snapshot_with_search(
+                options,
+                source,
+                request,
+                snapshot,
+                admit_search,
+                admission,
+            )
+            .map_err(|_| super::StorageError::Unavailable)
         },
     )
 }
