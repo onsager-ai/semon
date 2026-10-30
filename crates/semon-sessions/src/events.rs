@@ -35,8 +35,8 @@ pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 pub(crate) mod reported_rows;
 pub(crate) mod store;
-pub(crate) mod tree_rows;
 pub(crate) mod tree_proof;
+pub(crate) mod tree_rows;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 

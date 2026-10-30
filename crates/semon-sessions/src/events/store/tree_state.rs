@@ -765,9 +765,18 @@ mod namespace_tests {
         }
         let mut oracle = Sha256::new();
         for (domain, sql) in [
-            ("semon.tree.witness.4.labels", "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label"),
-            ("semon.tree.witness.4.models", "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.model',model)"),
-            ("semon.tree.witness.4.tools", "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.tool',tool_id)"),
+            (
+                "semon.tree.witness.4.labels",
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            ),
+            (
+                "semon.tree.witness.4.models",
+                "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.model',model)",
+            ),
+            (
+                "semon.tree.witness.4.tools",
+                "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.tool',tool_id)",
+            ),
         ] {
             oracle.update(domain.as_bytes());
             let mut statement = c.prepare(sql).unwrap();
@@ -780,7 +789,16 @@ mod namespace_tests {
         }
         let mut models = ["m\0", "m🦀", "Z"];
         models.sort_unstable();
-        let actual = digest(labels, models, [("t\0", Some(odd), false), ("t🦀", Some("n"), false), ("u", Some("closed"), true), ("v", None, false)]);
+        let actual = digest(
+            labels,
+            models,
+            [
+                ("t\0", Some(odd), false),
+                ("t🦀", Some("n"), false),
+                ("u", Some("closed"), true),
+                ("v", None, false),
+            ],
+        );
         assert_eq!(actual, format!("tree4:{:x}", oracle.finalize()));
     }
 
@@ -899,14 +917,34 @@ mod namespace_tests {
             tx.rollback().unwrap();
             assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
         }
-        let encoded: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        let encoded: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                [tree_summary_key(path)],
+                |row| row.get(0),
+            )
+            .unwrap();
         let mut old: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         old["projection_witness"] = "unversioned-old-witness".into();
         let old = serde_json::to_string(&old).unwrap();
-        db.execute("UPDATE meta SET value=?1 WHERE namespace=semon_namespace() AND key=?2", params![old, tree_summary_key(path)]).unwrap();
+        db.execute(
+            "UPDATE meta SET value=?1 WHERE namespace=semon_namespace() AND key=?2",
+            params![old, tree_summary_key(path)],
+        )
+        .unwrap();
         let mut statement = db.prepare(native_metadata_value(&db).unwrap()).unwrap();
-        assert!(read_tree_summary(&db, &mut statement, path, &ledger).unwrap().is_none());
-        let retained: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        assert!(
+            read_tree_summary(&db, &mut statement, path, &ledger)
+                .unwrap()
+                .is_none()
+        );
+        let retained: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                [tree_summary_key(path)],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(retained, old, "unsupported witness remains untouched");
         assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
     }

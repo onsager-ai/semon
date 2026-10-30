@@ -69,12 +69,18 @@ pub(super) fn capture(c: &Connection, id: i64, rows: &TreeRows<'_>) -> rusqlite:
     fn encode<T: serde::Serialize>(v: &T) -> rusqlite::Result<String> {
         serde_json::to_string(v).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
     }
-    row(c,id,"labels","codex_turn",encode(&["codex_turn", rows.codex_turn.as_str()])?)?;
+    row(
+        c,
+        id,
+        "labels",
+        "codex_turn",
+        encode(&["codex_turn", rows.codex_turn.as_str()])?,
+    )?;
     for (key, value) in rows.labels() {
-        row(c,id,"labels",key,encode(&[key,value])?)?;
+        row(c, id, "labels", key, encode(&[key, value])?)?;
     }
     for model in rows.models {
-        row(c,id,"models",model,encode(&[model.as_str()])?)?;
+        row(c, id, "models", model, encode(&[model.as_str()])?)?;
     }
     // Read back actual heap state. Closing retains the previous name; hashing
     // the input NULL would authenticate a different row from the physical one.
@@ -85,7 +91,7 @@ pub(super) fn capture(c: &Connection, id: i64, rows: &TreeRows<'_>) -> rusqlite:
                 crate::selected_read::row(r,64)?;
                 r.get(0)
             })?;
-        row(c,id,"tools",tool,encoded)?;
+        row(c, id, "tools", tool, encoded)?;
     }
     Ok(())
 }

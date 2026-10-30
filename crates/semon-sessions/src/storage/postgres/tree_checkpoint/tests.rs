@@ -421,13 +421,28 @@ pub(crate) fn parser_fixture_keys(harness: &str, long_path: bool, long_keys: boo
     let long_key = |domain: &str| {
         let mut key = format!("{domain}\0🦀");
         for block in 0..60 {
-            key.push_str(&format!("{:x}", Sha256::digest(format!("tree134-{domain}-{block}"))));
+            key.push_str(&format!(
+                "{:x}",
+                Sha256::digest(format!("tree134-{domain}-{block}"))
+            ));
         }
         key
     };
-    let model = if long_keys { long_key("model") } else { "claude-🦀".into() };
-    let tool = if long_keys { long_key("tool") } else { "tool\0🦀".into() };
-    let name = if long_keys { long_key("name") } else { "Bash'\0🦀".into() };
+    let model = if long_keys {
+        long_key("model")
+    } else {
+        "claude-🦀".into()
+    };
+    let tool = if long_keys {
+        long_key("tool")
+    } else {
+        "tool\0🦀".into()
+    };
+    let name = if long_keys {
+        long_key("name")
+    } else {
+        "Bash'\0🦀".into()
+    };
     let body = match harness {
         "claude" => format!(
             "{}\n{}\n{}\n",
