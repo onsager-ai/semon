@@ -1031,6 +1031,8 @@ mod tests {
                 Ok(())
             }).unwrap();
             let facts_path = options.facts.as_ref().unwrap();
+            let mut bound_options = options.clone();
+            bound_options.source = options.source.clone().with_store(config.clone()).unwrap();
             let mut changed = original_facts.clone();
             changed.hostname = "changed-transfer-runtime".into();
             std::fs::write(facts_path, serde_json::to_vec(&changed).unwrap()).unwrap();
@@ -1038,30 +1040,22 @@ mod tests {
                 &pool,
                 &config.namespace,
                 &control,
-                &options,
+                &bound_options,
             )
             .unwrap();
             assert!(
                 ordinary(&config).is_err(),
                 "new authoritative runtime must not rebind old Query observations"
             );
-            crate::write_facts(facts_path, &original_facts, &options.source).unwrap();
+            crate::write_facts(facts_path, &original_facts, &bound_options.source).unwrap();
             super::super::super::current_sources::prepare(
                 &pool,
                 &config.namespace,
                 &control,
-                &options,
+                &bound_options,
             )
             .unwrap();
             assert_eq!(ordinary(&config).unwrap(), forward_ordinary);
-            let mut bound_options = options.clone();
-            bound_options.source = crate::storage::HostSource::new(
-                config.namespace.clone(),
-                manifest.stream_epoch.clone(),
-            )
-            .unwrap()
-            .with_store(config.clone())
-            .unwrap();
             let query =
                 crate::storage::configured_query_catalog(&bound_options, config.clone()).unwrap();
             assert!(
