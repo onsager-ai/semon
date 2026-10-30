@@ -991,7 +991,10 @@ mod tests {
             ).map_err(sqlstate::error)?, 1);
             Ok(())
         }).unwrap();
-        assert!(refused_manifest.is_err(), "admitted reader must refuse a changed real selected-root manifest");
+        assert!(
+            refused_manifest.is_err(),
+            "admitted reader must refuse a changed real selected-root manifest"
+        );
         assert_eq!(ordinary(&config).unwrap(), forward_ordinary);
         let listed = forward_ordinary.0["sessions"].as_array().unwrap();
         assert_eq!(listed.len(), 2);

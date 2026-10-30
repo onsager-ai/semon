@@ -2246,9 +2246,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         })
         .unwrap();
     let read_admitted_session = || {
-        let mut reader = crate::Query::from_sources(std::sync::Arc::new(
-            crate::SessionSources::with_machines(vec![(namespace.as_str().into(), options.clone())]),
-        ));
+        let mut reader =
+            crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+                vec![(namespace.as_str().into(), options.clone())],
+            )));
         reader.call_bound_selected_at(
             "get_session",
             &serde_json::json!({"id":prepared.rows[0].key}),
@@ -2263,38 +2264,57 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "the real semantic receipt admits its published selected row"
     );
     let receipt_mutation = |column: &str,
-                                lookup_generation: &[u8],
-                                changed: &[u8],
-                                restore_generation: &[u8],
-                                original: &[u8],
-                                label: &str| {
+                            lookup_generation: &[u8],
+                            changed: &[u8],
+                            restore_generation: &[u8],
+                            original: &[u8],
+                            label: &str| {
         let sql = match column {
-            "operation_id" => "UPDATE semon_pg_native_catalog_operations SET operation_id=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
-            "payload" => "UPDATE semon_pg_native_catalog_operations SET payload=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
-            "generation" => "UPDATE semon_pg_native_catalog_operations SET generation=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+            "operation_id" => {
+                "UPDATE semon_pg_native_catalog_operations SET operation_id=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2"
+            }
+            "payload" => {
+                "UPDATE semon_pg_native_catalog_operations SET payload=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2"
+            }
+            "generation" => {
+                "UPDATE semon_pg_native_catalog_operations SET generation=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2"
+            }
             _ => unreachable!(),
         };
         assert_eq!(
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-                tx.driver.execute(
-                    sql,
-                    &[&namespace.as_str().as_bytes(), &lookup_generation, &changed],
-                ).map_err(sqlstate::error)
-            }).unwrap(),
+                tx.driver
+                    .execute(
+                        sql,
+                        &[&namespace.as_str().as_bytes(), &lookup_generation, &changed],
+                    )
+                    .map_err(sqlstate::error)
+            })
+            .unwrap(),
             1
         );
         let refused = read_admitted_session();
         assert_eq!(
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-                tx.driver.execute(
-                    sql,
-                    &[&namespace.as_str().as_bytes(), &restore_generation, &original],
-                ).map_err(sqlstate::error)
-            }).unwrap(),
+                tx.driver
+                    .execute(
+                        sql,
+                        &[
+                            &namespace.as_str().as_bytes(),
+                            &restore_generation,
+                            &original,
+                        ],
+                    )
+                    .map_err(sqlstate::error)
+            })
+            .unwrap(),
             1,
             "restore the real semantic receipt after {label}"
         );
-        assert!(refused.is_err(), "admitted selected reader must refuse {label}");
+        assert!(
+            refused.is_err(),
+            "admitted selected reader must refuse {label}"
+        );
     };
     let mut changed_operation_id = operation_id.clone();
     changed_operation_id[0] ^= 1;
@@ -2316,8 +2336,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         &payload,
         "a changed receipt payload",
     );
-    let mut changed_semantic_payload: serde_json::Value =
-        serde_json::from_slice(&payload).unwrap();
+    let mut changed_semantic_payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
     assert_eq!(changed_semantic_payload.as_array().unwrap().len(), 9);
     assert!(changed_semantic_payload[8].is_object());
     changed_semantic_payload[4]["runtime"] =
@@ -2349,7 +2368,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "a well-formed rehashed payload still needs its derived generation"
     );
     let mut changed_generation = generation.as_bytes().to_vec();
-    changed_generation[0] = if changed_generation[0] == b'0' { b'1' } else { b'0' };
+    changed_generation[0] = if changed_generation[0] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
     receipt_mutation(
         "generation",
         generation.as_bytes(),
@@ -3051,8 +3074,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .unwrap();
     assert_eq!(
-        index_ahead_read,
-        expected_bodies[&index_ahead_key]["body"],
+        index_ahead_read, expected_bodies[&index_ahead_key]["body"],
         "authenticated old Catalog row stays readable while Index is ahead"
     );
     let append_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
