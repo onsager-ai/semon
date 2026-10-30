@@ -1233,6 +1233,9 @@ pub(crate) fn render_session(
         .ok_or_else(|| unavailable("Selected Query unavailable"))?;
     let selected = &saved["selected"];
     let mut summary = saved["rows"][key]["summary"].clone();
+    if !summary.is_object() || !selected["session"]["busy"].is_array() {
+        return Err(unavailable("Selected Query recipe unavailable"));
+    }
     if !current {
         summary["alive"] = Value::Null;
         summary["run"] = Value::Null;
@@ -1243,9 +1246,6 @@ pub(crate) fn render_session(
             summary["state"] = json!("unknown");
             summary["open_question"] = Value::Null;
         }
-    }
-    if !summary.is_object() || !selected["session"]["busy"].is_array() {
-        return Err(unavailable("Selected Query recipe unavailable"));
     }
     summary["busy"] = selected["session"]["busy"].clone();
     if !options.all && !options.scan_window {
