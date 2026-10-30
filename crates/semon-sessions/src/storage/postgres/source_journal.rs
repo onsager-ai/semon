@@ -7,6 +7,8 @@ use super::{
 use crate::storage::{
     LogicalSourceNamespace, StorageError,
     source_observations::{
+        CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
+        CatalogSearchLookup,
         SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims, SourceIntent,
         SourceMutationReceipt, SourceObservationStore, SourceOperation, selected_projection_paths,
         validate_intent, validate_paths,
@@ -388,6 +390,125 @@ impl SourceObservationStore for PgSourceJournal {
             rows.iter().map(|row| {
                 String::from_utf8(row.try_get(0).map_err(|_| StorageError::Unavailable)?).map_err(|_| StorageError::Unavailable)
             }).collect()
+        })
+    }
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
+        let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidArguments)?;
+        self.read(|tx| {
+            tx.check()?;
+            let namespace = tx.namespace.as_str().as_bytes();
+            if let Some(marker) = super::native_keys::read_meta(
+                tx,
+                SELECTED_PROJECTION_KEY.as_bytes(),
+                SELECTED_PROJECTION_BYTES,
+            )? {
+                let paths = selected_projection_paths(&marker)?;
+                let encoded = paths
+                    .iter()
+                    .map(|path| path.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                let rows = tx
+                    .driver
+                    .query(
+                        "SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=ANY($2::bytea[]) ORDER BY revision,source_path LIMIT $3",
+                        &[&namespace, &encoded, &limit],
+                    )
+                    .map_err(sqlstate::error)?;
+                if !rows.is_empty() {
+                    return Ok(CatalogPendingBatch {
+                        tier: CatalogPendingTier::SelectedUpgrade,
+                        paths: rows
+                            .into_iter()
+                            .map(|row| {
+                                String::from_utf8(row.get(0))
+                                    .map_err(|_| StorageError::ScopeChanged)
+                            })
+                            .collect::<Result<_, _>>()?,
+                        fallback: Vec::new(),
+                        search_checked: false,
+                    });
+                }
+            }
+
+            let excluded = search.map_or(&[][..], |search| search.excluded);
+            validate_paths(excluded)?;
+            let excluded = excluded
+                .iter()
+                .map(|path| path.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let fallback = tx
+                .driver
+                .query(
+                    "SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path <> ALL($2::bytea[]) ORDER BY revision,source_path LIMIT $3",
+                    &[&namespace, &excluded, &limit],
+                )
+                .map_err(sqlstate::error)?
+                .into_iter()
+                .map(|row| {
+                    String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+                return Ok(CatalogPendingBatch {
+                    tier: CatalogPendingTier::Fifo,
+                    paths: fallback,
+                    fallback: Vec::new(),
+                    search_checked: false,
+                });
+            }
+
+            let Some(search) = search else {
+                return Ok(CatalogPendingBatch {
+                    tier: CatalogPendingTier::Fifo,
+                    paths: fallback,
+                    fallback: Vec::new(),
+                    search_checked: false,
+                });
+            };
+            let paths = if let Some(retry) = &search.retry {
+                super::catalog_effects::snapshot::catalog_search_paths(
+                    tx,
+                    retry,
+                    limit.min(CATALOG_SEARCH_LIMIT as i64) as usize,
+                )?
+            } else {
+                validate_paths(search.paths)?;
+                let encoded = search
+                    .paths
+                    .iter()
+                    .map(|path| path.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                tx.driver
+                    .query(
+                        "SELECT i.source_path FROM unnest($2::bytea[]) AS p(path) JOIN semon_pg_source_invalidations i ON i.source_path=p.path WHERE i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 ORDER BY i.source_path LIMIT $3",
+                        &[&namespace, &encoded, &(limit.min(CATALOG_SEARCH_LIMIT as i64))],
+                    )
+                    .map_err(sqlstate::error)?
+                    .into_iter()
+                    .map(|row| {
+                        String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if paths.is_empty() {
+                Ok(CatalogPendingBatch {
+                    tier: CatalogPendingTier::Fifo,
+                    paths: fallback,
+                    fallback: Vec::new(),
+                    search_checked: true,
+                })
+            } else {
+                Ok(CatalogPendingBatch {
+                    tier: CatalogPendingTier::SearchHint,
+                    paths,
+                    fallback,
+                    search_checked: true,
+                })
+            }
         })
     }
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {

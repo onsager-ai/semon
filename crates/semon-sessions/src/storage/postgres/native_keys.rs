@@ -17,6 +17,36 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("cwd_digest", "sha256(cwd)", true),
         ],
         "meta" => &[("key_digest", "sha256(key)", false)],
+        "catalog_sources" => &[(
+            "search_native_digest",
+            "semon_pg_native_digest(namespace,convert_to(translate((convert_from(metadata,'UTF8')::jsonb->'native_id')::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'UTF8'),'catalog.search.native'::text)",
+            true,
+        )],
+        "catalog_search_headers" => &[
+            (
+                "source_path_digest",
+                "semon_pg_native_digest(namespace,source_path,'catalog.search.path'::text)",
+                false,
+            ),
+            (
+                "folded_id_digest",
+                "semon_pg_native_digest(namespace,folded_id,'catalog.search.header'::text)",
+                false,
+            ),
+        ],
+        "source_invalidations" => &[
+            ("search_path_digest", "sha256(source_path)", false),
+            (
+                "search_filename_digest",
+                "sha256(decode(translate(substring(encode(source_path,'escape') from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))",
+                false,
+            ),
+            (
+                "search_copilot_digest",
+                "sha256(decode(translate(substring(CASE WHEN length(encode(source_path,'escape')) >= 13 THEN substring(encode(source_path,'escape') from 1 for length(encode(source_path,'escape'))-13) ELSE '' END from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))",
+                false,
+            ),
+        ],
         // Namespace is the leading fixed-width PK component. Keeping it out
         // of the second component gives both engines the same witness order
         // when a current logical source is moved between physical stores.
@@ -112,18 +142,72 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
     }
 }
 
+const CODEX_HEADER_PREFIX: &[u8] = b"native_codex_header:";
+
+fn ascii_fold(value: &str) -> Vec<u8> {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_uppercase() {
+                byte.to_ascii_lowercase()
+            } else {
+                byte
+            }
+        })
+        .collect()
+}
+
+fn project_codex_header(
+    tx: &mut PgTxn<'_>,
+    key: &[u8],
+    value: Option<&[u8]>,
+) -> Result<(), StorageError> {
+    let Some(path) = key.strip_prefix(CODEX_HEADER_PREFIX) else {
+        return Ok(());
+    };
+    if path.is_empty() || path.len() > 4096 {
+        return Err(StorageError::InvalidArguments);
+    }
+    let folded_id = value
+        .map(|value| {
+            let record: crate::events::native_aux::CodexHeaderRecord =
+                serde_json::from_slice(value).map_err(|_| StorageError::ScopeChanged)?;
+            Ok::<_, StorageError>(record.header.id.as_deref().map(ascii_fold))
+        })
+        .transpose()?
+        .flatten();
+    let namespace = tx.namespace.as_str().as_bytes();
+    if let Some(folded_id) = folded_id {
+        let changed = tx.driver.execute(
+            "INSERT INTO semon_pg_native_catalog_search_headers(namespace,source_path,folded_id) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path_digest) DO UPDATE SET folded_id=excluded.folded_id WHERE semon_pg_native_catalog_search_headers.namespace=excluded.namespace AND semon_pg_native_catalog_search_headers.source_path=excluded.source_path",
+            &[&namespace, &path, &folded_id],
+        ).map_err(sqlstate::error)?;
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+    } else {
+        tx.driver.execute(
+            "DELETE FROM semon_pg_native_catalog_search_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1,$2,'catalog.search.path'::text) AND source_path=$2",
+            &[&namespace, &path],
+        ).map_err(sqlstate::error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn put_meta(tx: &mut PgTxn<'_>, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
     tx.check()?;
     let changed = tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key_digest) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace AND semon_pg_native_meta.key=excluded.key", &[&tx.namespace.as_str().as_bytes(),&key,&value]).map_err(sqlstate::error)?;
     if changed != 1 {
         return Err(StorageError::ScopeChanged);
     }
+    project_codex_header(tx, key, Some(value))?;
     tx.check()
 }
 
 pub(super) fn delete_meta(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<(), StorageError> {
     tx.check()?;
     tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND semon_pg_native_key_matches(key,key_digest,$2)", &[&tx.namespace.as_str().as_bytes(),&key]).map_err(sqlstate::error)?;
+    project_codex_header(tx, key, None)?;
     tx.check()
 }
 
