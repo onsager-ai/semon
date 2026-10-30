@@ -33,6 +33,32 @@ fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
     value
 }
 
+fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::PreparedSources {
+    crate::model::PreparedSources {
+        base_generation: saved.base_generation.clone(),
+        claims: saved.claims.clone(),
+        rows: saved.rows.clone(),
+        transcripts: saved
+            .transcripts
+            .iter()
+            .map(|projection| crate::slot_projection::Projection {
+                key: projection.key.clone(),
+                slots: projection.slots.clone(),
+                repair: projection.repair,
+            })
+            .collect(),
+        pids: saved.pids.clone(),
+        lineage_dependencies: saved.lineage_dependencies.clone(),
+        message_dependencies: saved.message_dependencies.clone(),
+        relationships: saved.relationships.clone(),
+        indexed_sources: saved.indexed_sources.clone(),
+        removed_sources: saved.removed_sources.clone(),
+        indexed_native_parents: saved.indexed_native_parents.clone(),
+        withdrawals: saved.withdrawals.clone(),
+        withdrawal_fence: saved.withdrawal_fence.clone(),
+    }
+}
+
 fn withdrawal_preflight(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
@@ -1042,6 +1068,77 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             );
         }
         if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let saved = model.prepared();
+            let scopes = saved
+                .rows
+                .iter()
+                .map(|row| row.query.as_ref().unwrap()["runtime"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(
+                scopes.len() > 1,
+                "publication must exercise differing row scopes"
+            );
+            for case in [
+                "tampered_query",
+                "missing_query",
+                "missing_capture",
+                "global_drift",
+            ] {
+                let mut altered = copy_prepared(saved);
+                let key = altered.rows[0].key.clone();
+                match case {
+                    "tampered_query" => {
+                        altered.rows[0].query.as_mut().unwrap()["runtime"] =
+                            serde_json::json!("tampered scoped observation");
+                    }
+                    "missing_query" => {
+                        altered.rows[0]
+                            .query
+                            .as_mut()
+                            .unwrap()
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("runtime");
+                    }
+                    "missing_capture" => {
+                        let mut capture = serde_json::to_value(
+                            altered.relationships.presentation.as_ref().unwrap(),
+                        )
+                        .unwrap();
+                        capture["runtime_rows"].as_object_mut().unwrap().remove(&key);
+                        altered.relationships.presentation =
+                            Some(serde_json::from_value(capture).unwrap());
+                    }
+                    "global_drift" => {
+                        altered
+                            .relationships
+                            .presentation
+                            .as_mut()
+                            .unwrap()
+                            .runtime = Some("different global observation".into());
+                    }
+                    _ => unreachable!(),
+                }
+                // Record this exact altered witness first, so rejection cannot
+                // be explained by the independent staged-model equality gate.
+                assert_eq!(
+                    pg.record_semantic_batch(&batch, &altered).unwrap(),
+                    Outcome::Written,
+                    "{case} witness records under the same stage and claims"
+                );
+                assert_eq!(
+                    pg.publish_semantic_catalog(&batch, &altered)
+                        .unwrap_err()
+                        .to_string(),
+                    StorageError::ScopeChanged.to_string(),
+                    "{case} must fail runtime qualification"
+                );
+                assert_eq!(pg.session_catalog_generation(), batch.base_generation);
+            }
+            assert_eq!(
+                pg.record_semantic_batch(&batch, saved).unwrap(),
+                Outcome::Written
+            );
             let mut mismatched = batch.clone();
             mismatched
                 .context
@@ -1116,29 +1213,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Some(generation.as_str())
     );
     let saved = semantic_model.prepared();
-    let mut altered = crate::model::PreparedSources {
-        base_generation: saved.base_generation.clone(),
-        claims: saved.claims.clone(),
-        rows: saved.rows.clone(),
-        transcripts: saved
-            .transcripts
-            .iter()
-            .map(|projection| crate::slot_projection::Projection {
-                key: projection.key.clone(),
-                slots: projection.slots.clone(),
-                repair: projection.repair,
-            })
-            .collect(),
-        pids: saved.pids.clone(),
-        lineage_dependencies: saved.lineage_dependencies.clone(),
-        message_dependencies: saved.message_dependencies.clone(),
-        relationships: saved.relationships.clone(),
-        indexed_sources: saved.indexed_sources.clone(),
-        removed_sources: saved.removed_sources.clone(),
-        indexed_native_parents: saved.indexed_native_parents.clone(),
-        withdrawals: saved.withdrawals.clone(),
-        withdrawal_fence: saved.withdrawal_fence.clone(),
-    };
+    let mut altered = copy_prepared(saved);
     let claim = &mut altered.claims.first_mut().unwrap().1;
     *claim = Some(claim.unwrap_or(0) + 1);
     assert_eq!(
