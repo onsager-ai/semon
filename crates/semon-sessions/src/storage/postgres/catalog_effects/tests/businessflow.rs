@@ -1138,6 +1138,71 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     row.sources.len()
                 );
             }
+            let (row, endpoint) = saved
+                .rows
+                .iter()
+                .find_map(|row| {
+                    batch.context.endpoints.values().find_map(|endpoint| {
+                        (endpoint.row.key == row.key
+                            && endpoint.row.query.is_none()
+                            && crate::retention::source_generation(&endpoint.row.sources).unwrap()
+                                == crate::retention::source_generation(&row.sources).unwrap()
+                            && crate::native_evidence::runtime::dependencies(row, &Default::default())
+                                != crate::native_evidence::runtime::dependencies(
+                                    &endpoint.row,
+                                    &Default::default(),
+                                ))
+                        .then_some((row, &endpoint.row))
+                    })
+                })
+                .expect("native fixture must contain a queryless endpoint with different dependencies");
+            let cwds = pg.runtime_source_cwds(&row.sources).unwrap();
+            let row_runtime = captured.runtime_observation(row, &cwds).unwrap();
+            let endpoint_runtime = captured.runtime_observation(endpoint, &cwds).unwrap();
+            assert_ne!(row_runtime, endpoint_runtime);
+            let replayed: crate::storage::selected::PresentationObservations =
+                serde_json::from_value(serde_json::to_value(captured).unwrap()).unwrap();
+            for observations in [captured, &replayed] {
+                assert_eq!(observations.runtime_for(row), Some(row_runtime.clone()));
+                assert_eq!(
+                    observations.runtime_for(endpoint),
+                    Some(endpoint_runtime.clone())
+                );
+            }
+            let mut wrong_native = row.clone();
+            wrong_native
+                .native_ids
+                .push("uncaptured native dependency".into());
+            assert_eq!(replayed.runtime_for(&wrong_native), None);
+            let mut wrong_query = row.clone();
+            wrong_query.query.as_mut().unwrap()["rows"]["uncaptured query dependency"] =
+                serde_json::json!({});
+            assert_eq!(replayed.runtime_for(&wrong_query), None);
+            let mut wrong_generation = row.clone();
+            wrong_generation.sources[0].prefix_sha256[0] ^= 1;
+            assert_eq!(replayed.runtime_for(&wrong_generation), None);
+            let mut different_saved_runtime = row.clone();
+            different_saved_runtime.query.as_mut().unwrap()["runtime"] =
+                serde_json::json!("not dependency identity");
+            assert_eq!(
+                replayed.runtime_for(&different_saved_runtime),
+                Some(row_runtime.clone())
+            );
+            let mut conflicting = captured.clone();
+            assert!(
+                conflicting
+                    .capture_runtime(row, &cwds, endpoint_runtime.clone())
+                    .is_err()
+            );
+            let mut different_cwds = cwds.clone();
+            different_cwds.insert("different source repository".into());
+            assert!(
+                conflicting
+                    .capture_runtime(row, &different_cwds, row_runtime.clone())
+                    .is_err()
+            );
+            assert_eq!(conflicting.runtime_for(row), Some(row_runtime));
+            assert_eq!(conflicting.runtime_for(endpoint), Some(endpoint_runtime));
             let scopes = saved
                 .rows
                 .iter()
@@ -1151,6 +1216,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "tampered_query",
                 "missing_query",
                 "missing_capture",
+                "tampered_capture",
+                "wrong_dependencies",
+                "wrong_generation",
                 "global_drift",
             ] {
                 let mut altered = copy_prepared(saved);
@@ -1178,6 +1246,38 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             .as_object_mut()
                             .unwrap()
                             .remove(&key);
+                        altered.relationships.presentation =
+                            Some(serde_json::from_value(capture).unwrap());
+                    }
+                    "tampered_capture" | "wrong_dependencies" | "wrong_generation" => {
+                        let mut capture = serde_json::to_value(
+                            altered.relationships.presentation.as_ref().unwrap(),
+                        )
+                        .unwrap();
+                        let cohorts = capture["runtime_rows"][&key].as_object_mut().unwrap();
+                        let source =
+                            crate::retention::source_generation(&altered.rows[0].sources).unwrap();
+                        if case == "wrong_generation" {
+                            let scopes = cohorts.remove(&source).unwrap();
+                            cohorts.insert("different source generation".into(), scopes);
+                        } else {
+                            let scopes = cohorts.get_mut(&source).unwrap().as_object_mut().unwrap();
+                            let cwds = pg.runtime_source_cwds(&altered.rows[0].sources).unwrap();
+                            let dependency = crate::native_evidence::runtime::dependency_identity(
+                                &altered.rows[0],
+                                &cwds,
+                            )
+                            .unwrap();
+                            if case == "wrong_dependencies" {
+                                let runtime = scopes.remove(&dependency).unwrap();
+                                scopes.insert("different dependency identity".into(), runtime);
+                            } else {
+                                scopes.insert(
+                                    dependency,
+                                    serde_json::json!("tampered captured scope"),
+                                );
+                            }
+                        }
                         altered.relationships.presentation =
                             Some(serde_json::from_value(capture).unwrap());
                     }
