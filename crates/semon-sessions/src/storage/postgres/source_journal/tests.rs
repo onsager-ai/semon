@@ -555,6 +555,7 @@ fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
                 &crate::slot_projection::Publication {
                     rows: std::slice::from_ref(&row),
                     transcripts: None,
+                    observations: None,
                 },
             )
         },
@@ -600,6 +601,7 @@ fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
                 &crate::slot_projection::Publication {
                     rows: std::slice::from_ref(&escaped),
                     transcripts: None,
+                    observations: None,
                 },
             )?;
             assert_eq!(
@@ -807,6 +809,7 @@ fn pg_source_finish_generation_fixture_is_real_but_native_pg_publisher_remains_u
             &crate::slot_projection::Publication {
                 rows: &[],
                 transcripts: None,
+                observations: None,
             },
             None,
         )
