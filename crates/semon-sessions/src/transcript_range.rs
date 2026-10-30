@@ -437,7 +437,7 @@ pub(crate) fn error_generation(projection: &str, session: &Value) -> String {
     )
 }
 
-fn entry_generation(stored: &str) -> String {
+pub(crate) fn entry_generation(stored: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "{:x}",
@@ -480,7 +480,8 @@ pub(crate) fn observation(
 }
 
 struct Selection {
-    proof_db: Arc<crate::events::store::chunk_proofs::Snapshot>,
+    render_time: Option<i64>,
+    proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
     session: Value,
     generation: String,
@@ -508,6 +509,22 @@ pub(crate) fn read(
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    read_inner(options, source_key, query, provider, mode, None, before_read)
+}
+
+fn read_inner(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    bound: Option<(
+        &dyn crate::storage::selected::SelectedSnapshotStore,
+        &crate::storage::selected::HostSourceBinding,
+        &crate::SelectedReadControl,
+    )>,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     for name in [
@@ -650,6 +667,100 @@ pub(crate) fn read(
     };
     if let Err(reply) = before_read() {
         return Ok(reply);
+    }
+    if let Some((lease, host, control)) = bound {
+        let selected = lease.open_selected(options, host, control)?;
+        if selected.row.key != key {
+            return Ok(unavailable());
+        }
+        let catalog = crate::storage::selected::ImmutableCatalog {
+            row: &selected.row,
+            witness: &selected.witness,
+            snapshot: &selected.snapshot,
+        };
+        let scope = if history {
+            crate::CatalogReadScope::RetainedHistory
+        } else {
+            crate::CatalogReadScope::Current
+        };
+        let Some((identity, session)) =
+            catalog::catalog_selection_in_snapshot(options, source_key, &key, scope, &catalog)
+                .map_err(|_| invalid())?
+        else {
+            return Ok(unavailable());
+        };
+        let generation = entry_generation(&selected.witness.header_generation);
+        if argument("generation").is_some_and(|expected| expected != generation) {
+            return Ok(stale(ProjectionFence::ProjectionGeneration));
+        }
+        if argument("errors_generation")
+            .is_some_and(|expected| expected != error_generation(&generation, &session))
+        {
+            return Ok(stale(ProjectionFence::ErrorsGeneration));
+        }
+        let total = selected.witness.total;
+        let first = after.unwrap_or_else(|| total.saturating_sub(limit));
+        if first > total {
+            return Ok(catalog::error(
+                400,
+                "invalid_range",
+                "The slot address exceeds this projection.",
+                false,
+            ));
+        }
+        let end = first.saturating_add(limit).min(total);
+        let start = first.saturating_sub(1);
+        let slots = selected.slots[start..end.saturating_add(1).min(total)].to_vec();
+        let context = crate::storage::selected::range_context(
+            &selected.witness.context,
+            &key,
+            &slots[first - start..end - start],
+            &selected.row.sources,
+        )?;
+        let sources = selected
+            .row
+            .sources
+            .iter()
+            .map(|source| (source.path.clone(), source.clone()))
+            .collect();
+        // A lease authenticates the presentation inputs, not a distinct clock.
+        // Keep active-call elapsed rendering on the same current clock as the
+        // ordinary range path below.
+        let render_time = None;
+        let selection = Selection {
+            render_time,
+            proof_db: None,
+            identity,
+            session,
+            generation,
+            total,
+            first,
+            end,
+            start,
+            slots,
+            sources,
+            history_incomplete: false,
+            context,
+        };
+        let records = selected.sources.reader_with_mode(provider, mode);
+        let controlled = crate::storage::selected::Controlled {
+            reader: &records,
+            control,
+        };
+        let result = present(
+            options,
+            selection,
+            requested_part,
+            field_chunk,
+            None,
+            mode,
+            Some(&controlled),
+        );
+        // Presentation can tolerate malformed records, but cannot hide a Raw
+        // revision failure, cancelled request, revoked admission or lease.
+        records.finish()?;
+        lease.finish_selected(control)?;
+        return result;
     }
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -816,7 +927,10 @@ pub(crate) fn read(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
-        proof_db: crate::events::store::chunk_proofs::Snapshot::new(connection),
+        render_time: None,
+        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(
+            connection,
+        )),
         identity,
         session,
         generation,
@@ -829,7 +943,55 @@ pub(crate) fn read(
         history_incomplete,
         context,
     };
-    if !matches!(requested_part, SelectedPart::Transcript) && selection.end != selection.first + 1 {
+    present(
+        options,
+        selection,
+        requested_part,
+        field_chunk,
+        provider,
+        mode,
+        None,
+    )
+}
+
+/// Private configured reader: exact durable proof identity accompanies the
+/// ordinary product reply without changing its serialized presentation.
+#[allow(dead_code)]
+pub(crate) fn read_bound(
+    lease: &dyn crate::storage::selected::SelectedSnapshotStore,
+    options: &Options,
+    host: &crate::storage::selected::HostSourceBinding,
+    query: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    control: &crate::SelectedReadControl,
+) -> io::Result<(crate::storage::proof_lifetime::ReaderSnapshot, ViewerReply)> {
+    control.check()?;
+    host.validate(lease.snapshot())?;
+    let reply = read_inner(
+        options,
+        &host.source_key,
+        query,
+        provider,
+        mode,
+        Some((lease, host, control)),
+        || Ok(()),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
+    lease.finish_selected(control)?;
+    Ok((lease.snapshot().clone(), reply))
+}
+
+fn present(
+    options: &Options,
+    selection: Selection,
+    part: SelectedPart,
+    field_chunk: Option<usize>,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    reader: Option<&dyn SessionSourceReader>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    if !matches!(part, SelectedPart::Transcript) && selection.end != selection.first + 1 {
         return Ok(catalog::error(
             400,
             "invalid_arguments",
@@ -846,9 +1008,11 @@ pub(crate) fn read(
                 false,
             ));
         }
-        return Ok(render_field(options, selection, provider, chunk, mode));
+        return Ok(render_field_with_reader(
+            options, selection, provider, chunk, mode, reader,
+        ));
     }
-    Ok(render(options, selection, provider, mode, requested_part))
+    Ok(render_with_reader(options, selection, provider, mode, part, reader))
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
@@ -1393,12 +1557,13 @@ fn invalid() -> io::Error {
     )
 }
 
-fn render(
+fn render_with_reader(
     options: &Options,
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
     part: SelectedPart,
+    verified: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
     let attachment = match part {
         SelectedPart::Attachment(index) => Some(index),
@@ -1420,7 +1585,7 @@ fn render(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -1440,7 +1605,7 @@ fn render(
         mode,
         routes: std::sync::Mutex::default(),
     };
-    let reader: &dyn SessionSourceReader = &composite;
+    let reader: &dyn SessionSourceReader = verified.unwrap_or(&composite);
     // Presentation deliberately tolerates malformed records and unavailable
     // archive bytes. A rejected source generation is different: never replace
     // accepted content with empty entries under the same projection proof.
@@ -1729,7 +1894,7 @@ fn render(
                 &slots,
                 slot,
                 index,
-                crate::model::now_ms(),
+                selection.render_time.unwrap_or_else(crate::model::now_ms),
             )
             .unwrap_or_else(|| json!({"k":"end"}))
         };
@@ -1979,12 +2144,13 @@ pub(crate) fn session_entry_field_with_gate(
     session_transcript_range_with_gate(options, source_key, query, reader, mode, before_read)
 }
 
-fn render_field(
+fn render_field_with_reader(
     options: &Options,
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     chunk: usize,
     mode: SessionSourceReadMode,
+    verified: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
     let saved = &selection.slots[selection.first - selection.start];
     let (Some(field), Some(file)) = (&saved.field, &saved.file) else {
@@ -2024,7 +2190,7 @@ fn render_field(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -2040,7 +2206,7 @@ fn render_field(
         mode,
         routes: std::sync::Mutex::default(),
     };
-    let reader: &dyn SessionSourceReader = &composite;
+    let reader: &dyn SessionSourceReader = verified.unwrap_or(&composite);
     let result = (|| -> io::Result<(String, bool, usize, Value)> {
         let reference = references.get(&file.path).ok_or_else(invalid)?;
         if field.checkpoints.first() != Some(&field.start)
