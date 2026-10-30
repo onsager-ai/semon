@@ -3613,7 +3613,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             crate::model::now_ms(),
         )
     };
-    assert!(read().unwrap().is_some(), "exact history recipe must qualify");
+    assert!(
+        read().unwrap().is_some(),
+        "exact history recipe must qualify"
+    );
     let facts_path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(facts_path).unwrap();
     facts.hostname = "changed-without-publication".into();
@@ -6800,13 +6803,12 @@ fn captured_family_qualifies_a_current_relative_outside_its_initial_cohort() {
     observations.capture_runtime(&parent, runtime).unwrap();
     assert_eq!(observations.captured_source_count(), 1);
     let context = CapturedContext::capture(
-        &super::selected::Context::owned(&tx),
+        &crate::storage::sqlite::selected::Context::owned(&tx),
         &parent,
         &[],
         &mut |relative| {
-            observations.capture_relative_status(relative, || {
-                runtime_source_cwds(&tx, &relative.sources)
-            })
+            observations
+                .capture_relative_status(relative, || runtime_source_cwds(&tx, &relative.sources))
         },
     )
     .unwrap();
@@ -6854,9 +6856,8 @@ fn captured_runtime_keeps_two_source_generations_of_the_same_owner() {
         runtime_binding.as_ref(),
         std::iter::once(&old),
     );
-    let old_status = observations.capture_relative_status(&old, || {
-        runtime_source_cwds(&db, &old.sources)
-    });
+    let old_status =
+        observations.capture_relative_status(&old, || runtime_source_cwds(&db, &old.sources));
     assert_eq!(old_status["observation"], "current");
     let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
     writeln!(raw, "{}", json!({"type":"assistant","sessionId":"capture-cohort","uuid":"capture-answer","parentUuid":"capture-cohort","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"second cohort"}]}})).unwrap();
@@ -6867,9 +6868,8 @@ fn captured_runtime_keeps_two_source_generations_of_the_same_owner() {
         crate::retention::source_generation(&old.sources).unwrap(),
         crate::retention::source_generation(&new.sources).unwrap()
     );
-    let new_status = observations.capture_relative_status(&new, || {
-        runtime_source_cwds(&db, &new.sources)
-    });
+    let new_status =
+        observations.capture_relative_status(&new, || runtime_source_cwds(&db, &new.sources));
     assert_eq!(new_status["observation"], "current");
     assert_eq!(
         observations.capture_relative_status(&old, || {
