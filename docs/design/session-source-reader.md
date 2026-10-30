@@ -259,11 +259,52 @@ it never becomes an empty source or a complete partial success. Capacity and
 source-unavailable responses remain distinct. The hosted adapter adds bounded
 request admission, a deadline and the existing Catalog publication coordinator.
 
+## Cold Catalog search scheduling
+
+A valid partial Catalog read in the draining phase checks pending identity hints
+inside its existing read transaction, after machine authorization. The shared
+indexed selector uses physical source-root ranges for the requested harness;
+the EventCache facade checks the full native path allowlist. This reads metadata
+only, without acquiring producer Work or opening native bodies. Before the first
+readable generation, ordinary cold discovery owns progress and no search is
+declared fulfilled. Complete Catalog reads perform no hint lookup.
+
+Only qualified pending paths enter the 64-ticket scheduling queue. Healthy
+nonmatching, published-only and rejected-harness searches occupy no ticket, in
+either order relative to another tab's live search. Lookup failures remain
+explicit retry interests. A full queue of admitted or unknown interests returns
+retryable `catalog_search_busy`, rather than silently dropping a new search.
+Repeated positive admission refreshes the ticket ID while preserving its waiting
+paths, so an older acknowledgement cannot erase renewed demand for the same path.
+
+Selected projection upgrades precede search tickets; first publication still
+uses the newest discovered cohort. The producer filters one ticket's admitted
+paths against pending claims and fetches its selected/FIFO fallback once in the
+same transaction. Successfully exhausted interests retire; lookup errors and
+selected-priority deferral retain them. Round robin applies to admitted live or
+unknown interests, rather than historical keystrokes. A peer-completed ticket
+retires when its next bounded pending-path probe observes no remaining claims.
+
+After successful publication and concurrent-source requeue, completed source
+claims acknowledge demand even when an empty, invalid, deleted or folded source
+produced no Catalog row. Deferred publication, byte checkpoints that remain
+pending and failed publication fences retain demand. Completion closes admission;
+only actual cold recovery reopens a fresh epoch.
+
+The scheduling shortcut covers ASCII identity matches. Generic Catalog metadata
+search retains its Unicode lowercase substring semantics; other identities use
+ordinary FIFO. The header hint's NOCASE index is distinct from the semantic
+frontier's BINARY index: native Codex header IDs are preserved verbatim, including
+mixed ASCII case. A full raw candidate cohort containing unqualified in-root
+paths is unknown and explicitly refuses qualification; it is never reported as
+a successful empty identity lookup.
+
 ## Current Semon storage contract
 
-The Event Index initializes schema 33 with parser/cache version 29 in one
+The Event Index initializes schema 34 with parser/cache version 29 in one
 transaction, including pricing fingerprints and native usage readiness default
-0. Schema 33 fences the retired proof/tree/usage representations as one contract.
+0. Schema 34 includes the scheduling indexes and fences the retired proof/tree/usage
+representations as one contract.
 Normal writable producer opens (complete and scoped/background) automatically
 clear a recognized obsolete Semon index and initialize the current empty schema;
 normal native collection then reindexes supported original sources. This is

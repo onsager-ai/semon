@@ -1428,9 +1428,6 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
-        if let Some(request) = &request {
-            view.evidence.note_catalog_search(request.search_interest());
-        }
         let mut refresh_error = None;
         let mut reply = match path {
             "/api/session-locate" => {
@@ -1572,16 +1569,30 @@ impl ViewerCore {
                     selected_entry: true,
                 },
             ),
-            _ => crate::catalog::page_with_gate(
-                view.options(),
-                key,
-                request.expect("catalog route parsed request"),
-                || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                },
-            ),
+            _ => {
+                let epoch = std::cell::Cell::new(None);
+                let mut on_search = |admission: crate::catalog::CatalogSearchAdmission| {
+                    view.evidence.note_catalog_search_result(
+                        epoch
+                            .get()
+                            .expect("Catalog read gate captured search epoch"),
+                        Some((&admission.query, admission.harness.as_deref())),
+                        admission.paths,
+                    )
+                };
+                crate::catalog::page_with_gate(
+                    view.options(),
+                    key,
+                    request.expect("catalog route parsed request"),
+                    || {
+                        refresh_error =
+                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                        epoch.set(Some(view.evidence.catalog_search_epoch()));
+                        Ok(())
+                    },
+                    Some(&mut on_search),
+                )
+            }
         };
         if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
             if path == "/api/session-capabilities" {

@@ -1014,6 +1014,18 @@ pub(crate) struct CatalogSearchInterest<'a> {
     pub(crate) harness: Option<&'a str>,
 }
 
+/// Physical selector values; native roots and harness authority are supplied
+/// and checked by the cache facade, never inferred by SQLite.
+pub(crate) struct CatalogSearchLookup<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) ranges: &'a [(String, String); 3],
+}
+
+pub(crate) struct CatalogPendingSearch<'a> {
+    pub(crate) paths: &'a [String],
+    pub(crate) retry: Option<CatalogSearchLookup<'a>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogPendingTier {
     SelectedUpgrade,
@@ -1024,6 +1036,8 @@ pub(crate) enum CatalogPendingTier {
 pub(crate) struct CatalogPendingBatch {
     pub(crate) tier: CatalogPendingTier,
     pub(crate) paths: Vec<String>,
+    pub(crate) fallback: Vec<String>,
+    pub(crate) search_checked: bool,
 }
 
 /// Where the event index persists between runs: the narrow interface the
@@ -1113,7 +1127,7 @@ pub(crate) trait IndexStore: Send {
     fn pending_catalog_sources(
         &self,
         limit: usize,
-        search: Option<&str>,
+        search: Option<&CatalogPendingSearch<'_>>,
     ) -> Result<CatalogPendingBatch, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
@@ -1666,7 +1680,7 @@ impl EventCache {
     pub(crate) fn prioritized_catalog_sources(
         &self,
         limit: usize,
-        search: Option<&str>,
+        search: Option<&CatalogPendingSearch<'_>>,
     ) -> io::Result<CatalogPendingBatch> {
         self.store
             .as_ref()
@@ -1675,14 +1689,77 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
-    pub(crate) fn prioritized_catalog_inputs(
-        &self,
+    pub(crate) fn catalog_search_ranges(
         options: &crate::Options,
+        harness: Option<&str>,
+    ) -> [(String, String); 3] {
+        [
+            crate::InputRoot::Claude,
+            crate::InputRoot::Codex,
+            crate::InputRoot::Copilot,
+        ]
+        .map(|root| {
+            if harness.is_some_and(|harness| harness != root.as_str()) {
+                return (String::new(), String::new());
+            }
+            let home = root.home(options).to_string_lossy();
+            let home = home.trim_end_matches('/');
+            (format!("{home}/"), format!("{home}0"))
+        })
+    }
+
+    pub(crate) fn catalog_search_lookup<'a>(
+        interest: &CatalogSearchInterest<'a>,
+        ranges: &'a [(String, String); 3],
+    ) -> CatalogSearchLookup<'a> {
+        let query = interest.query;
+        CatalogSearchLookup { query, ranges }
+    }
+
+    pub(crate) fn catalog_search_sources(
+        connection: &rusqlite::Connection,
+        options: &crate::Options,
+        interest: CatalogSearchInterest<'_>,
         limit: usize,
+    ) -> io::Result<Vec<String>> {
+        // The shortcut is ASCII only; Catalog's Unicode substring semantics
+        // remain independent and all other identities continue through FIFO.
+        if !interest.query.is_ascii() {
+            return Ok(Vec::new());
+        }
+        let ranges = Self::catalog_search_ranges(options, interest.harness);
+        let lookup = Self::catalog_search_lookup(&interest, &ranges);
+        let paths =
+            store::catalog_search_paths(connection, &lookup, limit).map_err(io::Error::other)?;
+        let bounded = paths.len() == limit.min(64);
+        let count = paths.len();
+        let qualified: Vec<_> = paths
+            .into_iter()
+            .filter(|path| {
+                crate::native_evidence::catalog_input(Path::new(path), options).is_some_and(
+                    |input| {
+                        interest
+                            .harness
+                            .is_none_or(|harness| input.root.as_str() == harness)
+                    },
+                )
+            })
+            .collect();
+        if bounded && qualified.len() < count {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog search candidates exceed qualified source bounds",
+            ));
+        }
+        Ok(qualified)
+    }
+
+    pub(crate) fn catalog_pending_inputs(
+        options: &crate::Options,
+        mut batch: CatalogPendingBatch,
         interest: Option<CatalogSearchInterest<'_>>,
-    ) -> io::Result<(CatalogPendingTier, Vec<crate::Input>)> {
-        let mut batch = self
-            .prioritized_catalog_sources(limit, interest.as_ref().map(|interest| interest.query))?;
+    ) -> io::Result<(CatalogPendingTier, Vec<crate::Input>, Option<Vec<String>>)> {
+        let mut checked = batch.search_checked.then(Vec::new);
         if batch.tier == CatalogPendingTier::SearchHint {
             let inputs: Vec<_> = batch
                 .paths
@@ -1699,12 +1776,25 @@ impl EventCache {
                     )
                 })
                 .collect();
+            if batch.paths.len() == 64 && inputs.len() < batch.paths.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Catalog search candidates exceed qualified source bounds",
+                ));
+            }
             if !inputs.is_empty() {
-                return Ok((batch.tier, inputs));
+                checked = Some(
+                    inputs
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect(),
+                );
+                return Ok((batch.tier, inputs, checked));
             }
             // A physical identity match does not grant source authority. A
             // rejected hint must still allow the ordinary producer to drain.
-            batch = self.prioritized_catalog_sources(limit, None)?;
+            batch.paths = batch.fallback;
+            batch.tier = CatalogPendingTier::Fifo;
         }
         let inputs = batch
             .paths
@@ -1715,7 +1805,7 @@ impl EventCache {
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;
-        Ok((batch.tier, inputs))
+        Ok((batch.tier, inputs, checked))
     }
 
     pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
