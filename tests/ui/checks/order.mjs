@@ -62,12 +62,27 @@ export default async function orderCheck(browser) {
         new URLSearchParams({ machine: source, scope: 'retained_history', limit: '60' });
       let revision = 0;
       const published = async (key) => {
+        let latest;
         for (let attempt = 0; attempt < 200; attempt++) {
           const value = await (await fixture.request(catalog)).json();
+          latest = value;
           if (value.items?.[0]?.key === key) return;
           await page.waitForTimeout(50);
         }
-        assert.fail('Native publication did not admit ' + key);
+        assert.fail(
+          'Native publication did not admit ' +
+            key +
+            '\nCatalog: ' +
+            JSON.stringify({
+              generation: latest?.generation,
+              completeness: latest?.completeness,
+              refresh: latest?.refresh,
+              first: latest?.items?.[0]?.key,
+              error: latest?.error,
+            }) +
+            '\nNative fixture output:\n' +
+            fixture.diagnostics(),
+        );
       };
       const drawn = async () => {
         const previous = revision;

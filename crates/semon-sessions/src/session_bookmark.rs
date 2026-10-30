@@ -1,8 +1,6 @@
 //! Metadata-only permalink normalization into the canonical native reader.
-use crate::{Options, catalog, events::EventCache, viewer::ViewerReply};
-use rusqlite::{Connection, OpenFlags};
+use crate::{Options, catalog, viewer::ViewerReply};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 /// The host authorizes one Source before calling this function. Legacy failed
 /// send bookmarks resolve to real originating sessions, never virtual readers.
@@ -23,11 +21,37 @@ pub(crate) fn session_bookmark_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
+    let binding = match crate::storage::local_navigation_binding(options, source) {
+        Ok(binding) => binding,
+        Err(_) => return catalog::error(400, "invalid_arguments", "Invalid source.", false),
+    };
+    with_binding_sid(options, source, &sid, &binding)
+}
+
+pub(crate) fn with_binding(
+    options: &Options,
+    source: &str,
+    query: &str,
+    binding: &crate::storage::NativeReaderBinding,
+) -> ViewerReply {
+    let sid = match parse_session_bookmark_query(source, query) {
+        Ok(sid) => sid,
+        Err(reply) => return reply,
+    };
+    with_binding_sid(options, source, &sid, binding)
+}
+
+fn with_binding_sid(
+    options: &Options,
+    source: &str,
+    sid: &str,
+    binding: &crate::storage::NativeReaderBinding,
+) -> ViewerReply {
     let selected = format!(
         "sid={}&scope=retained_history&limit=1",
-        crate::viewer::percent_encode(&sid)
+        crate::viewer::percent_encode(sid)
     );
-    let page = crate::session_catalog_page(options, source, &selected);
+    let page = binding.bookmark_page(options, source, &selected);
     let Ok(value) = serde_json::from_slice::<Value>(&page.body) else {
         return page;
     };
@@ -45,7 +69,7 @@ pub(crate) fn session_bookmark_with_gate(
     if page.status != 404 {
         return page;
     }
-    let readiness = crate::session_catalog_page(options, source, "scope=retained_history&limit=1");
+    let readiness = binding.bookmark_page(options, source, "scope=retained_history&limit=1");
     if readiness.status != 200 {
         return readiness;
     }
@@ -56,22 +80,14 @@ pub(crate) fn session_bookmark_with_gate(
     let Some(target) = sid.strip_prefix("unsent:") else {
         return reply(Vec::new(), unavailable);
     };
-    let lookup = || -> rusqlite::Result<Vec<String>> {
-        let connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(Duration::from_millis(100))?;
-        connection.prepare("SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE target=?1 ORDER BY session_key LIMIT 3")?
-            .query_map([target], |row| row.get(0))?.collect()
-    };
-    let Ok(keys) = lookup() else {
+    let store = crate::storage::navigation_store(binding.clone());
+    let Ok(keys) = store.bookmarked_target_keys(target) else {
         return reply(Vec::new(), 1);
     };
     let mut matches = Vec::new();
     let mut unavailable = unavailable;
     for key in keys {
-        match crate::session_catalog_history_identity(options, source, &key) {
+        match binding.bookmark_identity(options, source, &key) {
             Ok(Some(identity)) => matches
                 .push(json!({"source_key":source,"catalog_key":key,"harness":identity.harness})),
             Ok(None) => {}

@@ -77,6 +77,11 @@ fn wait_for_catalog_read(
     deadline: Instant,
     allow_wait: bool,
 ) -> Result<Option<io::Error>, ViewerReply> {
+    if crate::storage::is_postgres_selected(view.options()) {
+        view.wait_until_initial_catalog(deadline)
+            .map_err(|_| catalog_unavailable())?;
+        return Ok(None);
+    }
     if allow_wait {
         view.wait_until_initial_catalog(deadline)
             .map_err(|_| catalog_unavailable())?;
@@ -1811,6 +1816,7 @@ mod tests {
             std::fs::create_dir_all(&proc_root).unwrap();
             std::fs::write(proc_root.join("locks"), "").unwrap();
             Options {
+                source: crate::Options::default().source,
                 claude_home: home.join("claude"),
                 claude_json: home.join(".claude.json"),
                 codex_home: home.join("codex"),
@@ -1896,7 +1902,42 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "native ownership publication did not finish"
+                "native ownership publication did not finish; source states: {:?}",
+                core.views()
+                    .iter()
+                    .map(|(key, view)| {
+                        let selected = crate::catalog::qualified_current_identity(
+                            view.options(),
+                            key,
+                            "replacement",
+                        );
+                        let query =
+                            selected
+                                .as_ref()
+                                .ok()
+                                .and_then(|row| row.as_ref())
+                                .map(|row| {
+                                    crate::overview_repair::local_query_target(
+                                        view.options(),
+                                        &row.catalog_key,
+                                        crate::model::now_ms(),
+                                    )
+                                    .map(|target| target.is_some())
+                                    .map_err(|error| error.kind())
+                                });
+                        let identity = match selected {
+                            Ok(Some(_)) => "present",
+                            Ok(None) => "absent",
+                            Err(_) => "unavailable",
+                        };
+                        (
+                            key.clone(),
+                            view.catalog_observation_pending(),
+                            identity,
+                            query,
+                        )
+                    })
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -1952,6 +1993,7 @@ mod tests {
             std::fs::write(proc_root.join("locks"), "").unwrap();
             Options {
                 claude_home,
+                source: crate::Options::default().source,
                 claude_json: home.join(".claude.json"),
                 codex_home,
                 copilot_home: home.join("copilot"),
@@ -2091,6 +2133,7 @@ mod tests {
     fn nav_override_only_accepts_a_known_item_and_same_origin_path() {
         let root = std::env::temp_dir().join("semon-account-test");
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

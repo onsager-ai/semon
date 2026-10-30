@@ -1,5 +1,8 @@
 # Retained native projections
 
+See the [native storage contract and partial port inventory](session-storage-contract.md)
+for the #478 backend boundary and explicit remaining work.
+
 A missing local source is an observation failure, rather than proof that a
 session never existed. Catalog format 3 records `current` or `retained`
 lifecycle. Full native publication still checks the captured collection
@@ -9,12 +12,83 @@ retain their metadata and source mappings; their lifecycle changes atomically
 with the collection generation. Native event-cache ledgers can retire without
 removing the original catalog provenance or versioned transcript recipes.
 
+Current-format transfer enumerates reachable immutable prefixes even after their
+live file rows retire. Export selects an exact live ledger header or its exact
+retained header, as the normal Native reader does. Retiring an owner moves its
+selected proof reference from Current to History in the publication transaction.
+`TransferInbox::admit_catalog_from` requires the actual completed frozen source
+capture and the exact applied target checkpoint. Its destination operation keeps
+the original publication receipts and retained rows, and commits a new import
+receipt with the Catalog head CAS. It neither replays completed producer staging
+nor creates reader leases or acknowledges pending claims. This Catalog-scoped
+effect reports partial completeness; full inventory, catchup, fenced ownership
+cutover and qualified rollback remain separate unqualified obligations.
+
+Ordinary imported Catalog/Query reads preserve the producer's runtime fingerprint
+and validate its per-row selected proof, original receipt and presentation root
+under the destination's current admission grant. They compare that original
+binding with the current authoritative runtime instead of changing stored
+observations. Re-enrollment cannot revive the old import grant. SQLite records
+eligibility for the applied Catalog/query closure separately from full-source
+completeness, which remains partial. A real native component publication may
+inherit an exact qualified imported listing base after affected query/projection
+work and claim acknowledgements leave no invalidations. Local publishers mint
+separate exact-row observation authority only for their actual outputs; transport
+and carry never mint it. Later local heads therefore cannot replace the original
+import grants for carried observations, even when admission counters coincide.
+Forward and reverse reads with authorized
+originals and absent local Raw remain subject to exact-revision CI qualification.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when
 current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
+
+SQLite semantic catch-up accepts a removed path only with its durable ordinary
+producer removal invalidation and no remaining live ledger. An exact index
+retained by the ordinary removal writer remains historical custody; staging
+captures and rechecks its ledger without making it a live source. Index preparation
+observes physical absence under its existing Source locks before recording it;
+the write transaction consumes that observation with the exact claim/ledger CAS.
+Each later reduction and publication rechecks the persisted evidence and exact
+claim/ledger, without filesystem I/O under the SQL write lock.
+This completes the existing staged path and retains outgoing owners through the
+ordinary custody publication; it does not fabricate a Facts admission withdrawal.
+The ordinary SQLite metadata audit records physically absent, ledgered sources
+through the existing removal writer after its physical observations, retaining
+its Source locks and read snapshot through the ledger comparison and write.
+PostgreSQL staging likewise consumes prepared physical absence with durable
+removal evidence; an unledgered missing path alone cannot authorize retirement.
+PostgreSQL Facts-admission withdrawals retain exact process-local Facts/path
+fence provenance with the prepared model. Before each record or publication,
+the adapter acquires the existing shared Facts and sorted negative Source locks
+and revalidates the complete physical witness before opening its SQL writer.
+The live guard remains outside the transaction callback through commit or
+rollback, then releases even if the prepared model is retained. The SQL stage
+rechecks persisted Facts selection and its existing exact claims, runtime,
+epoch, model and Catalog witnesses without physical withdrawal I/O. Completed
+publication replay still qualifies its original request and acknowledgement.
+This exclusion covers cooperating SourceChange writers sharing the lock
+domain. Advisory locks do not exclude arbitrary external writers; non-Unix
+shared locks retain their existing no-op behavior and exclusive SourceChange
+writes remain unsupported. SQLite's existing physical validation is unchanged.
+Completed PostgreSQL native relocation keeps the old path's exact removal claim
+until qualified successor publication acknowledges it. Re-observing that removed
+path during semantic staging is a metadata-only no-op only when both exact native
+ledgers, identities and immutable proof headers still qualify the recorded move.
+The relocation transaction retains its verbatim original request under the old
+path together with its exact hashed acknowledgement; an appended successor may
+advance the semantic relocation witness without rewriting that receipt. A retired
+marker alone cannot bypass the active-stage withdrawal guard or grant archive
+custody. This qualifies the ordinary PostgreSQL producer only. Transfer of the
+complete relocation authority, including its original receipt, acknowledgement,
+retired ledger and mutable semantic witness, remains unqualified.
+Resumed primitive indexing also sends physically absent, ledgered inputs through
+the ordinary removal writer before recording. If that advances a claim, the
+producer yields its old preparation. The next qualified negative primitive pins
+the exact removal claim and retained ledger for later reduction checks.
 
 Pending slot outcomes record the absence of a final native result, separately
 from a recorded result with unknown exit status. Recipes never store live flags
@@ -59,6 +133,15 @@ MCP transfers its selection snapshot to the request-owned proof readers and
 retains its later metadata publication checks. The last proof reader drop
 rolls back and closes the connection, releasing its WAL pin on every exit path.
 
+Retained selected Query fields use the embedded recipes of their qualified
+history Catalog and source-generation header. A newer Current publication may
+replace the mutable Query header for the same native owner; that header cannot
+invalidate the independently retained recipe. Selected fields and search recheck
+the complete relationship context after rendering. PostgreSQL selected reads
+also check the namespace/epoch-bound runtime observation before rendering and
+recheck runtime inputs afterward. Search eligibility traverses long recipes in
+64-slot pages under the existing transaction and metadata budgets.
+
 Index mutation preserves the outgoing path proof only while Current or
 retained-history source vectors reference its exact ledger. The reference
 decision, copy and replacement are one transaction. The next path mutation
@@ -100,13 +183,21 @@ retained metadata. They never inherit writer liveness or archive read authority.
 Parser 29 qualifies those lifecycle facts; current-source tree repair restores
 them from verified source slices without importing retired Semon storage.
 
-Semon reads only its current schema and parser contract. Normal writable
-producers discard recognized obsolete derived indexes and rebuild from supported
-native sources under the [current storage contract](session-source-reader.md#current-semon-storage-contract).
-This also discards obsolete derived references, recipes and proof metadata;
-archive objects and native bytes remain untouched. Missing original source bytes
-cannot be reconstructed from a discarded index. Future, foreign and ambiguous
-stores remain refused without reset; focused readers never invalidate storage.
+Semon reads only its current schema and parser contract. Producers and focused
+readers refuse unsupported existing state without reset under the
+[current storage contract](session-source-reader.md#current-semon-storage-contract).
+Retained references, recipes, proofs, reported facts and archive custody remain
+untouched, including when original native bytes are absent. Fresh empty stores
+initialize; current stores reopen without repair DDL.
+Selected handoff recipes capture both endpoints' observed field descriptors
+before publication. Retaining one endpoint therefore does not depend on the
+other endpoint continuing to publish that relationship. Each descriptor binds
+its exact consumed source witness; a later Current source cannot silently
+replace that witness during rendering. Existing selected context, host, proof
+and byte budgets still apply.
+This work remains under qualification: complete PostgreSQL business flow,
+current-format transfer/reverse and the full paired host regression are required
+before backend readiness can be claimed.
 Physical-corruption recovery is unchanged. Unsupported individual recipe versions
 in a current store remain explicitly unavailable; they are never interpreted as
 current versions.
@@ -120,7 +211,7 @@ global producer work. This change protects provenance and bounds indexed reads;
 it does not claim that the subsequent dirty-lineage producer is complete.
 
 Current verification covers cold initialization, incremental writes and restart,
-obsolete-index rebuild, future/foreign version refusal without changing original
+unsupported-state refusal, current-store concurrent reopen without changing original
 bytes or custody, native source
 reappearance, interrupted lifecycle retirement with the dirty observation still
 pending, and provider-rendered ranges when local source ledgers are absent.

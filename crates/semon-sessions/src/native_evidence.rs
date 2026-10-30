@@ -22,6 +22,7 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    pub(crate) store_config: Option<crate::storage::StoreConfig>,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
@@ -235,6 +236,25 @@ impl SessionSources {
         )
     }
 
+    /// Host-authorized physical placement for each independent Source. A
+    /// configured backend error never falls back to the machine's cache path.
+    pub fn with_configured_machines(
+        machines: Vec<(String, Options, crate::storage::StoreConfig)>,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let machines = machines
+            .into_iter()
+            .map(|(key, options, config)| {
+                if options.source.namespace()? != config.namespace {
+                    return Err(crate::storage::StorageError::NamespaceMismatch);
+                }
+                let mut options = options;
+                options.source = options.source.with_store(config)?;
+                Ok((key, NativeEvidence::new(options)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_evidence(machines))
+    }
+
     /// Adopt existing Catalog evidence owners without closing their producers,
     /// reopening indexes or creating a second writer. The host transfers their
     /// lifecycle ownership into this machine set: retiring or closing this set
@@ -443,8 +463,17 @@ impl SessionSources {
 impl NativeEvidence {
     /// Construction is lazy: no source, cache or refresh worker is opened.
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        let config = options.source.selected_store().cloned();
+        Self::with_store(options, config)
+    }
+
+    fn with_store(
+        options: Options,
+        store_config: Option<crate::storage::StoreConfig>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             options,
+            store_config,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
@@ -453,6 +482,46 @@ impl NativeEvidence {
             audit_request: AtomicU64::new(0),
             audit_completed: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn query_catalog(
+        &self,
+    ) -> Result<Box<dyn crate::storage::query::QueryCatalogStore>, crate::storage::StorageError>
+    {
+        match &self.store_config {
+            Some(config) => crate::storage::configured_query_catalog(&self.options, config.clone()),
+            None => {
+                crate::storage::local_query_catalog(&self.options, self.options.source.namespace()?)
+            }
+        }
+    }
+
+    pub(crate) fn query_runtime(&self) -> io::Result<String> {
+        #[cfg(feature = "postgres")]
+        if let Some(crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool, control },
+            namespace,
+            ..
+        }) = &self.store_config
+        {
+            return crate::storage::postgres::current_sources::Runtime::open(
+                pool,
+                namespace,
+                control,
+                &self.options,
+            )
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!("transfer_query_stage pg_runtime_open_refused");
+                io::Error::other(error)
+            })?
+            .generation(&self.options)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("transfer_query_stage pg_runtime_generation_refused");
+            });
+        }
+        query_runtime_generation(&self.options)
     }
 
     pub(crate) fn request_metadata_audit_if_idle(&self) {
@@ -490,25 +559,27 @@ impl NativeEvidence {
             return;
         };
         let epoch = self.catalog_search_epoch();
-        let paths = (|| {
-            let connection = crate::events::store::catalog_probe_connection(&EventCache::path(
-                &self.options.cache,
-            ))
-            .map_err(|_| ())?;
-            let draining: bool = connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
-            if !draining {
-                return Ok(Vec::new());
-            }
-            EventCache::catalog_search_sources(
-                &connection,
-                &self.options,
-                crate::events::CatalogSearchInterest { query, harness },
-                CATALOG_SEARCH_CAPACITY,
-            )
-            .map_err(|_| ())
-        })();
+        let mut request = crate::catalog::Request::parse("").unwrap();
+        request.q = Some(query.to_owned());
+        request.harness = harness.map(str::to_owned);
+        let mut accepted = true;
+        let mut observed = false;
+        let mut on_search = |admission: crate::catalog::CatalogSearchAdmission| {
+            observed = true;
+            accepted = self.note_catalog_search_result(epoch, interest, admission.paths);
+            accepted
+        };
+        let reply = crate::storage::read_local_catalog_page_with_search(
+            &self.options,
+            "test",
+            &request,
+            Some(&mut on_search),
+        );
+        if !observed && !matches!(reply, Ok(ref reply) if reply.status == 200) {
+            accepted = self.note_catalog_search_result(epoch, interest, Err(()));
+        }
         assert!(
-            self.note_catalog_search_result(epoch, interest, paths),
+            accepted,
             "test search admission exceeds the pending-path capacity"
         );
     }
@@ -572,7 +643,11 @@ impl NativeEvidence {
             .as_ref()
             .and_then(|cache| cache.session_catalog_generation());
         if work.audit.is_some()
-            && !crate::events::store::note_catalog_audit(&self.options, generation.as_deref(), now)?
+            && !work
+                .events
+                .as_mut()
+                .expect("event cache initialized")
+                .note_catalog_audit(generation.as_deref(), now)?
         {
             return Ok(true);
         }
@@ -624,29 +699,36 @@ impl NativeEvidence {
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
-            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
-                Ok(cache) => cache,
-                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                    return Err(io::Error::other(error));
-                }
-                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
-            });
+            work.events = Some(match &self.store_config {
+                Some(config) => EventCache::open_configured(config).map_err(io::Error::other),
+                None => EventCache::open_scoped(&self.options.cache, &self.options.source)
+                    .map_err(io::Error::other),
+            }?);
         }
         let cache = work.events.as_mut().expect("event cache initialized");
+        #[cfg(feature = "postgres")]
+        if self.store_config.as_ref().is_some_and(|config| {
+            matches!(
+                config.backend,
+                crate::storage::StoreBackend::Postgres { .. }
+            )
+        }) {
+            // Facts consumption belongs to this producer, before any semantic
+            // transaction. Later runtime checks reuse its bounded PG header.
+            cache.prepare_facts_authority(&self.options)?;
+        }
         // The index commits each file's change as it reads it: nothing is
         // left to save.
         let mut dirty = false;
         if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty)?;
         }
         Ok(())
     }
 
-    /// Advance cold candidate discovery without reading native bodies. The
-    /// latest page is published after discovery finishes, so a flat directory's
-    /// enumeration order cannot displace recent sessions with old history.
-    /// Workers yield after 512 entries or 64 accepted candidates; only the 64
-    /// newest candidates remain resident between steps.
+    /// Advance cold candidate discovery without reading native bodies. Workers
+    /// yield after 512 entries or 64 accepted candidates; only the 64 newest
+    /// candidates remain resident between steps.
     pub(crate) fn prepare_catalog(
         &self,
         work: &mut Work,
@@ -655,7 +737,10 @@ impl NativeEvidence {
         let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_total");
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        let state = cache.backfill_state()?;
+        let state = cache.backfill_state().inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=backfill_state");
+        })?;
         if !cache.is_scoped() {
             work.cold_catalog = None;
             return Ok(CatalogPreparation::Reconcile);
@@ -676,10 +761,14 @@ impl NativeEvidence {
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
+            let discovery_started = crate::native_timing::enabled().then(Instant::now);
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
-                crate::events::store::discover_recovery_sources(&self.options)?
+                cache.discover_recovery_sources().inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=recovery_page");
+                })?
             };
             let page = {
                 let _timing =
@@ -687,14 +776,20 @@ impl NativeEvidence {
                 discovery.cursor.next(&self.options, 64, 512)?
             };
             debug_assert!(page.examined <= 512);
+            let candidates = page.inputs.len();
             {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "discovery_publication");
-                cache.discover_catalog_sources(
-                    &self.options,
-                    &page.inputs,
-                    page.complete && recovery_complete,
-                )?;
+                cache
+                    .discover_catalog_sources(
+                        &self.options,
+                        &page.inputs,
+                        page.complete && recovery_complete,
+                    )
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("native catalog phase=discovery_publication");
+                    })?;
             }
             for input in page.inputs {
                 if !input.path.ends_with(".jsonl") {
@@ -710,6 +805,13 @@ impl NativeEvidence {
                     discovery.newest.pop_last();
                 }
             }
+            discovery.timing.page(
+                &self.options.cache,
+                discovery_started,
+                page.examined,
+                candidates,
+                (page.complete, recovery_complete),
+            );
             if !page.complete || !recovery_complete {
                 return Ok(CatalogPreparation::Pending);
             }
@@ -851,7 +953,10 @@ impl NativeEvidence {
                     attempted_ticket.as_ref(),
                 );
                 cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
+                if let Some(prepared) = prepared.inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=cold_component");
+                })? {
                     prepared
                 } else {
                     let paths = seeds
@@ -863,11 +968,8 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if self.begin_catalog_stage(
-                        cache,
-                        &paths,
-                        &query_runtime_generation(&self.options)?,
-                    )? != crate::events::Outcome::Written
+                    if self.begin_catalog_stage(cache, &paths, &self.query_runtime()?)?
+                        != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -881,7 +983,12 @@ impl NativeEvidence {
                 }
             };
             discovery.pids.extend(prepared.pids.iter().copied());
-            let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
+            let (outcome, _) = cache
+                .publish_partial_catalog_fenced(&prepared)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=cold_partial_publication");
+                })?;
             if outcome == crate::events::Outcome::Deferred {
                 cache.end_scan();
                 cache.release_published_indexes();
@@ -979,7 +1086,7 @@ impl NativeEvidence {
         if !cache.is_scoped() {
             return Ok(false);
         }
-        let runtime = query_runtime_generation(&self.options)?;
+        let runtime = self.query_runtime()?;
         match self.begin_catalog_stage(cache, &[], &runtime)? {
             crate::events::Outcome::Conflict => return Ok(false),
             crate::events::Outcome::Written => {}
@@ -993,6 +1100,14 @@ impl NativeEvidence {
         let Some(batch) = cache.semantic_batch(64)? else {
             return Ok(false);
         };
+        #[cfg(test)]
+        eprintln!(
+            "native_stage phase={:?} epoch={} revision={} sources={}",
+            batch.phase,
+            batch.epoch,
+            batch.source_revision,
+            batch.paths.len()
+        );
         work.pending_sources = true;
         // Runtime/facts qualification also covers scalar reductions and the
         // durable final acknowledgement, which may have no selected sources.
@@ -1007,11 +1122,7 @@ impl NativeEvidence {
             }
             return Ok(true);
         }
-        let mut paths: BTreeSet<_> = batch.paths.iter().cloned().collect();
-        if batch.phase == Phase::Relations {
-            paths.extend(batch.context.parent_paths(&batch.paths));
-            paths.extend(batch.context.companions.iter().cloned());
-        }
+        let paths: BTreeSet<_> = batch.paths.iter().cloned().collect();
         if paths.len() > 64 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -1037,25 +1148,10 @@ impl NativeEvidence {
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                 .extend_sources(&self.options, &inputs);
         }
-        let prepared = if batch.phase == Phase::Indexing {
-            model::prepare_semantic_index_sources(&catalog_options, cache, &inputs, now)
-        } else if batch.phase == Phase::Identity {
-            model::prepare_semantic_identity_sources(
-                &catalog_options,
-                cache,
-                &inputs,
-                &batch.context,
-                now,
-            )
+        let prepared = if batch.phase == Phase::Publication {
+            cache.prepare_semantic_model_batch(&catalog_options, &inputs, &batch, now)
         } else {
-            model::prepare_staged_sources(
-                &catalog_options,
-                cache,
-                &inputs,
-                &batch.context,
-                batch.phase == Phase::Relations,
-                now,
-            )
+            model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now)
         };
         cache.scan_byte_budget = None;
         let prepared = match prepared {
@@ -1068,16 +1164,30 @@ impl NativeEvidence {
                 work.texts.release_published_derivations();
                 return Ok(true);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Some(repair) = error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<crate::events::TreeProjectionRepair>())
+                {
+                    repair.queue(cache)?;
+                }
+                return Err(error);
+            }
         };
+        let prepared = prepared.prepared();
         if let Some(discovery) = &mut work.cold_catalog {
             discovery.pids.extend(prepared.pids.iter().copied());
         }
         let (outcome, generation) = if batch.phase == Phase::Publication {
-            cache.publish_semantic_catalog(&batch, &prepared)?
+            cache.publish_semantic_catalog(&batch, prepared)?
         } else {
-            (cache.record_semantic_batch(&batch, &prepared)?, None)
+            (cache.record_semantic_batch(&batch, prepared)?, None)
         };
+        #[cfg(test)]
+        eprintln!(
+            "native_stage outcome={outcome:?} generation={}",
+            generation.is_some()
+        );
         if outcome == crate::events::Outcome::Deferred {
             cache.end_scan();
             cache.release_published_indexes();
@@ -1098,8 +1208,8 @@ impl NativeEvidence {
         }
         if batch.phase == Phase::Publication {
             work.observed_catalog_generation = generation;
-            crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
-            self.acknowledge_catalog_search(cache, &prepared);
+            crate::events::store::requeue_concurrent_sources(&self.options, prepared)?;
+            self.acknowledge_catalog_search(cache, prepared);
             cache.publish_session_descriptions();
         }
         cache.end_scan();
@@ -1164,8 +1274,12 @@ impl NativeEvidence {
         let prepared = loop {
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
-            let component =
-                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?;
+            let component = cache
+                .catalog_component_paths(&selected, &keys, &native_parents, &self.options)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=component_lookup_before");
+                })?;
             measurements.record("lookup_before", started, selected.len());
             let Some(component) = component else {
                 break None;
@@ -1188,7 +1302,11 @@ impl NativeEvidence {
             }
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
-            let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+            let prepared =
+                model::prepare_sources(&options, cache, &selected, now).inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("native catalog phase=component_prepare");
+                })?;
             measurements.record("model_prepare_inclusive", started, selected.len());
             let dependencies: BTreeSet<_> = prepared
                 .rows
@@ -1275,6 +1393,20 @@ impl NativeEvidence {
     /// Refresh an existing current owner through the shared Catalog producer.
     /// Cold discovery and unsupported role/identity changes still reconcile.
     pub(crate) fn local_query_target(&self, key: &str, now: i64) -> io::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        if let Some(crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres { pool, control },
+            ..
+        }) = &self.store_config
+        {
+            return crate::storage::postgres::navigation::query_target(
+                self.store_config.as_ref().expect("configured source"),
+                pool,
+                control,
+                key,
+            )
+            .map_err(io::Error::other);
+        }
         if let Some(target) = crate::overview_repair::local_query_target(&self.options, key, now)? {
             return Ok(Some(target));
         }
@@ -1342,6 +1474,10 @@ impl NativeEvidence {
         now: i64,
         mut before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        #[cfg(test)]
+        let cold_diagnostic = work.cold_catalog.is_some() || work.catalog_snapshot.is_none();
+        #[cfg(test)]
+        let timing = crate::native_timing::enabled();
         // Keep the existing receiver facts fence through derivation and the
         // Catalog commit. A newly indexed source has no published owner yet;
         // otherwise a facts writer could miss that dependency in the gap after
@@ -1354,13 +1490,48 @@ impl NativeEvidence {
             .transpose()?;
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
-        self.prepare_events(work, now)?;
+        #[cfg(test)]
+        let prepare_events_started = timing.then(std::time::Instant::now);
+        self.prepare_events(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=prepare_events");
+        })?;
+        #[cfg(test)]
+        let prepare_events_us =
+            prepare_events_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        let tree_repair_started = timing.then(std::time::Instant::now);
         work.tree_repair_pending = work
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_tree_repair(&self.options)?;
-        if self.advance_semantic_stage(work, now, &mut before_build)? {
+            .advance_tree_repair(&self.options)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=tree_repair");
+            })?;
+        #[cfg(test)]
+        let tree_repair_us = tree_repair_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        let semantic_stage_started = timing.then(std::time::Instant::now);
+        let semantic_stage_pending = self
+            .advance_semantic_stage(work, now, &mut before_build)
+            .inspect_err(|_| {
+                #[cfg(test)]
+                eprintln!("native catalog phase=stage_resume");
+            })?;
+        #[cfg(test)]
+        let semantic_stage_us =
+            semantic_stage_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        if timing && cold_diagnostic {
+            let producer =
+                crate::native_timing::id(&crate::events::EventCache::path(&self.options.cache));
+            eprintln!(
+                "semon sessions native: producer={producer} phase=cold_refresh_wrapper prepare_events_us={prepare_events_us} tree_repair_us={tree_repair_us} advance_semantic_stage_us={semantic_stage_us}"
+            );
+        }
+        if semantic_stage_pending {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
                 if let Some(discovery) = work.cold_catalog.take() {
@@ -1441,7 +1612,7 @@ impl NativeEvidence {
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
-                    &query_runtime_generation(&self.options)?,
+                    &self.query_runtime()?,
                 )?;
                 if let Some(last) = last {
                     audit.after = last;
@@ -1520,11 +1691,7 @@ impl NativeEvidence {
                         let sources_pending = !cache.pending_catalog_sources(1)?.is_empty();
                         if controlled && !sources_pending {
                             let generation = cache.session_catalog_generation();
-                            if !crate::events::store::note_catalog_audit(
-                                &self.options,
-                                generation.as_deref(),
-                                now,
-                            )? {
+                            if !cache.note_catalog_audit(generation.as_deref(), now)? {
                                 audit_pending = true;
                             }
                         }
@@ -1551,11 +1718,8 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if self.begin_catalog_stage(
-                cache,
-                &staged_paths,
-                &query_runtime_generation(&self.options)?,
-            )? != crate::events::Outcome::Written
+            if self.begin_catalog_stage(cache, &staged_paths, &self.query_runtime()?)?
+                != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -1644,11 +1808,8 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if self.begin_catalog_stage(
-                    cache,
-                    &staged_paths,
-                    &query_runtime_generation(&self.options)?,
-                )? != crate::events::Outcome::Written
+                if self.begin_catalog_stage(cache, &staged_paths, &self.query_runtime()?)?
+                    != crate::events::Outcome::Written
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
@@ -1676,7 +1837,10 @@ impl NativeEvidence {
             work.pending_sources = true;
             return Ok(false);
         }
-        match self.prepare_catalog(work, now)? {
+        match self.prepare_catalog(work, now).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("native catalog phase=cold_prepare");
+        })? {
             CatalogPreparation::Pending => return Ok(false),
             CatalogPreparation::PublishedPending => {
                 before_build()?;
@@ -1691,7 +1855,14 @@ impl NativeEvidence {
                     before_build()?;
                 }
                 let cache = work.events.as_mut().expect("event cache initialized");
-                if cache.finish_catalog_backfill(&generation)? != crate::events::Outcome::Written {
+                if cache
+                    .finish_catalog_backfill(&generation)
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("native catalog phase=finish_backfill table=meta");
+                    })?
+                    != crate::events::Outcome::Written
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "backfill completion changed",
@@ -1757,7 +1928,13 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.tree_repair_pending
+        #[cfg(test)]
+        let cold_diagnostic = work.cold_catalog.is_some();
+        #[cfg(test)]
+        let timing = crate::native_timing::enabled();
+        #[cfg(test)]
+        let started = timing.then(std::time::Instant::now);
+        let pending = work.tree_repair_pending
             || work
                 .events
                 .as_ref()
@@ -1765,7 +1942,17 @@ impl NativeEvidence {
             || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
-            || self.audit_request.load(Ordering::Acquire) != work.audit_revision
+            || self.audit_request.load(Ordering::Acquire) != work.audit_revision;
+        #[cfg(test)]
+        if timing && cold_diagnostic {
+            let elapsed_us = started.map_or(0, |started| started.elapsed().as_micros());
+            let producer =
+                crate::native_timing::id(&crate::events::EventCache::path(&self.options.cache));
+            eprintln!(
+                "semon sessions native: producer={producer} phase=cold_catalog_pending elapsed_us={elapsed_us}"
+            );
+        }
+        pending
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
@@ -1867,6 +2054,7 @@ struct ColdCatalog {
     pids: BTreeSet<u32>,
     snapshot: Option<Snapshot>,
     started: bool,
+    timing: crate::native_timing::ColdDiscoveryProgress,
     newest: BTreeSet<(
         std::cmp::Reverse<Option<std::time::SystemTime>>,
         crate::inputs::Input,
@@ -1942,6 +2130,30 @@ pub(crate) fn recorded_runtime_fingerprint_excluding(
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(facts, active)).map_err(io::Error::other)?)
+    ))
+}
+
+/// Files that contribute to recorded runtime independently of immutable Facts.
+/// Lifecycle validation observes these stamps without parsing the manifest.
+pub(crate) fn recorded_activity_generation(options: &Options) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut active = BTreeMap::new();
+    watch_tree(
+        &options.claude_home.join("sessions"),
+        &[".json"],
+        &mut active,
+    );
+    let active = active
+        .into_iter()
+        .filter(|(path, _)| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|(path, stamp)| (path, stamp.map(|stamp| stamp.generation)))
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&active).map_err(io::Error::other)?)
     ))
 }
 
@@ -2453,6 +2665,24 @@ impl Snapshot {
 mod catalog_owner_tests {
     use super::*;
 
+    fn cold_search_connection(options: &Options) -> rusqlite::Connection {
+        let config = options.source.config(&options.cache).unwrap();
+        crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection()
+    }
+
+    fn cold_search_claim(db: &rusqlite::Connection, path: &str, revision: i64) {
+        let tx = db.unchecked_transaction().unwrap();
+        // Preserve the test's explicit FIFO order while keeping the namespace
+        // journal at least as new as every claim, as real invalidation does.
+        tx.execute("UPDATE storage_source_journal SET revision=max(revision,?1) WHERE namespace=semon_namespace()", [revision]).unwrap();
+        tx.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,?2,'changed',0) ON CONFLICT(namespace,source_path) DO UPDATE SET revision=excluded.revision", rusqlite::params![path, revision]).unwrap();
+        tx.commit().unwrap();
+    }
+
     fn cold_search_reader() -> (
         PathBuf,
         Arc<NativeEvidence>,
@@ -2477,8 +2707,8 @@ mod catalog_owner_tests {
         let initial = NativeEvidence::new(options.clone());
         drain_catalog(&initial, &std::cell::Cell::new(0));
         drop(initial);
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        let db = cold_search_connection(&options);
+        db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         let evidence = NativeEvidence::new(options);
         let core =
             crate::ViewerCore::from_sources(Arc::new(SessionSources::from_evidence(vec![(
@@ -2499,7 +2729,7 @@ mod catalog_owner_tests {
             .join(format!("sessions/2026/10/01/{id}.jsonl"));
         fs::write(&path, format!("{{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{{\"id\":\"{id}\"}}}}\n")).unwrap();
         let path = path.to_string_lossy().into_owned();
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [&path]).unwrap();
+        cold_search_claim(db, &path, 100);
         path
     }
 
@@ -2508,7 +2738,7 @@ mod catalog_owner_tests {
         for exact_first in [false, true] {
             let (root, evidence, core, db) = cold_search_reader();
             let selected = pending_search_source(&evidence, &db, "selected");
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+            cold_search_claim(&db, "/unrelated/first.jsonl", 1);
             let mut work = lock(&evidence.work);
             if exact_first {
                 assert_eq!(
@@ -2628,7 +2858,7 @@ mod catalog_owner_tests {
                     .to_string_lossy()
                     .into_owned(),
             ] {
-                db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
+                cold_search_claim(&db, &path, 1);
             }
         }
         let mut work = lock(&evidence.work);
@@ -2667,7 +2897,7 @@ mod catalog_owner_tests {
             .join("projects/project/selected.jsonl");
         fs::create_dir_all(selected.parent().unwrap()).unwrap();
         fs::write(&selected, serde_json::json!({"type":"user","uuid":"selected-message","sessionId":"selected","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"selected"}}).to_string()+"\n").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [selected.to_string_lossy().as_ref()]).unwrap();
+        cold_search_claim(&db, selected.to_string_lossy().as_ref(), 100);
         let ordinary = pending_search_source(&evidence, &db, "ordinary");
         let runtime = crate::Input {
             root: crate::InputRoot::Claude,
@@ -2684,15 +2914,7 @@ mod catalog_owner_tests {
         intent
             .complete(fs::metadata(&runtime_path).unwrap().len())
             .unwrap();
-        let index: String = db
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name='catalog_search_header'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        db.execute_batch("DROP INDEX catalog_search_header")
-            .unwrap();
+        let lookup_fault = crate::storage::sqlite::source_journal::CatalogSearchFault::new();
         let mut work = lock(&evidence.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
@@ -2701,7 +2923,7 @@ mod catalog_owner_tests {
         );
         assert_eq!(lock(&evidence.catalog_search).tickets.len(), 1);
         assert!(lock(&evidence.catalog_search).tickets[0].waiting.is_empty());
-        db.execute_batch(&index).unwrap();
+        drop(lookup_fault);
         evidence.prepare_events(&mut work, model::now_ms()).unwrap();
         let generation = work.events.as_ref().unwrap().session_catalog_generation();
         assert!(matches!(
@@ -2761,7 +2983,7 @@ mod catalog_owner_tests {
             .join("projects/project/selected.jsonl");
         fs::create_dir_all(claude.parent().unwrap()).unwrap();
         fs::write(&claude, serde_json::json!({"type":"user","uuid":"selected-message","sessionId":"selected","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"selected"}}).to_string()+"\n").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [claude.to_string_lossy().as_ref()]).unwrap();
+        cold_search_claim(&db, claude.to_string_lossy().as_ref(), 100);
         for index in 0..63 {
             let path = evidence
                 .options
@@ -2769,7 +2991,7 @@ mod catalog_owner_tests {
                 .join(format!("sessions/native-{index:03}/selected.jsonl"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":format!("selected-native-{index:03}")}}).to_string()+"\n").unwrap();
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
         for index in 0..2 {
             pending_search_source(&evidence, &db, &format!("ordinary-{index}"));
@@ -2837,7 +3059,7 @@ mod catalog_owner_tests {
                 .options
                 .codex_home
                 .join(format!("aaa/{index}/selected.jsonl"));
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 1);
         }
         let mut work = lock(&evidence.work);
         assert_eq!(
@@ -2953,7 +3175,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_discarded_fifo_json_does_not_displace_hint() {
         let (root, evidence, core, db) = cold_search_reader();
         let selected = pending_search_source(&evidence, &db, "selected");
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.json',1,'changed',0)", []).unwrap();
+        cold_search_claim(&db, "/unrelated/first.json", 1);
         let mut work = lock(&evidence.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
@@ -3081,7 +3303,7 @@ mod catalog_owner_tests {
             .unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id IN ('selected-parent','related-child')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         for path in [&parent, &child] {
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
+            cold_search_claim(&db, path, 1);
         }
         let ordinary = pending_search_source(&evidence, &db, "ordinary-independent");
         fs::write(&parent, "{invalid}\n").unwrap();
@@ -3138,7 +3360,7 @@ mod catalog_owner_tests {
             .prepare_catalog(&mut work, model::now_ms())
             .unwrap();
         for path in [&parent, &child] {
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
+            cold_search_claim(&db, path, 1);
         }
         let ordinary = pending_search_source(&evidence, &db, "ordinary-independent");
         let mut renewed_paths = vec![parent.clone()];
@@ -3297,7 +3519,7 @@ mod catalog_owner_tests {
     #[test]
     fn cold_catalog_search_deleted_source_rowless_publication_acknowledges_claim() {
         let (root, evidence, core, db) = cold_search_reader();
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+        cold_search_claim(&db, "/unrelated/first.jsonl", 1);
         let mut work = lock(&evidence.work);
         let path = pending_search_source(&evidence, &db, "deleted");
         assert_eq!(
@@ -3358,7 +3580,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_unqualified_empty_and_invalid_sources_keep_pending_demand() {
         for (id, bytes) in [("empty", ""), ("invalid", "{invalid}\n")] {
             let (root, evidence, core, db) = cold_search_reader();
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+            cold_search_claim(&db, "/unrelated/first.jsonl", 1);
             let mut work = lock(&evidence.work);
             let path = pending_search_source(&evidence, &db, id);
             fs::write(&path, bytes).unwrap();
@@ -3428,7 +3650,7 @@ mod catalog_owner_tests {
             .unwrap();
         let evidence = NativeEvidence::new(options.clone());
         let mut work = lock(&evidence.work);
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let db = cold_search_connection(&options);
         let sidecar_pending = || {
             db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
@@ -3498,8 +3720,9 @@ mod catalog_owner_tests {
         let evidence = NativeEvidence::new(options.clone());
         let mut work = lock(&evidence.work);
         evidence.prepare_events(&mut work, model::now_ms()).unwrap();
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','draining'); INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/outside/allowlist.jsonl',1,'changed',0);").unwrap();
+        let db = cold_search_connection(&options);
+        db.execute_batch("UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
+        cold_search_claim(&db, "/outside/allowlist.jsonl", 1);
         work.cold_catalog = Some(ColdCatalog {
             newest: BTreeSet::from([(std::cmp::Reverse(None), input.clone())]),
             ..Default::default()
@@ -3604,27 +3827,19 @@ mod catalog_owner_tests {
         drop(log);
         let selected_path = selected.full_path(&options).to_string_lossy().into_owned();
         let ordinary_path = ordinary.full_path(&options).to_string_lossy().into_owned();
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        let db = cold_search_connection(&options);
+        db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         for (path, revision) in [(&ordinary_path, 100), (&selected_path, 101)] {
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,?2,'changed',0)", rusqlite::params![path, revision]).unwrap();
+            cold_search_claim(&db, path, revision);
         }
         for index in 0..63 {
             let path = options
                 .codex_home
                 .join(format!("sessions/2026/10/01/ordinary-{index:03}.jsonl"));
             fs::write(&path, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":format!("ordinary-{index:03}")}}).to_string()+"\n").unwrap();
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
-        let index: String = db
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name='catalog_search_header'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        db.execute_batch("DROP INDEX catalog_search_header")
-            .unwrap();
+        let lookup_fault = crate::storage::sqlite::source_journal::CatalogSearchFault::new();
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("selected", Some("codex"))));
         let mut work = lock(&evidence.work);
@@ -3648,10 +3863,10 @@ mod catalog_owner_tests {
             )
             .unwrap(),
             64,
-            "the reserved FIFO turn runs even while the hint lookup index is missing"
+            "the reserved FIFO turn runs even while the hint lookup fails"
         );
         assert_eq!(lock(&evidence.catalog_search).tickets.len(), 1);
-        db.execute_batch(&index).unwrap();
+        drop(lookup_fault);
         assert!(matches!(
             evidence
                 .prepare_catalog(&mut work, model::now_ms())
@@ -3733,10 +3948,10 @@ mod catalog_owner_tests {
         }
         drop(log);
         let path = path.to_string_lossy().into_owned();
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        let db = cold_search_connection(&options);
+        db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         for (pending, revision) in [("/unrelated/first.jsonl", 100), (path.as_str(), 101)] {
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,?2,'changed',0)", rusqlite::params![pending, revision]).unwrap();
+            cold_search_claim(&db, pending, revision);
         }
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("selected", Some("claude"))));
@@ -3792,19 +4007,48 @@ mod catalog_owner_tests {
         drop(initial);
         append_audit_record(&options, &input);
         let path = input.full_path(&options).to_string_lossy().into_owned();
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [&path]).unwrap();
-        let cache_path = EventCache::path(&options.cache);
+        let db = cold_search_connection(&options);
+        db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
+        cold_search_claim(&db, &path, 100);
+        let generation: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let captured_options = options.clone();
         let changed = path.clone();
+        let hook_revisions = std::rc::Rc::new(std::cell::Cell::new(None));
+        let captured_revisions = hook_revisions.clone();
         crate::events::BEFORE_CATALOG_PUBLICATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let db = rusqlite::Connection::open(cache_path).unwrap();
-                db.execute(
-                    "UPDATE session_catalog_invalidations SET revision=101 WHERE source_path=?1",
-                    [changed],
-                )
-                .unwrap();
+                let config = captured_options
+                    .source
+                    .config(&captured_options.cache)
+                    .unwrap();
+                let mut journal = config.source_observations().unwrap();
+                let claims = journal.claims(std::slice::from_ref(&changed)).unwrap();
+                let before = claims[0]
+                    .1
+                    .expect("the prepared source has a pending claim");
+                let operation = crate::storage::source_observations::SourceOperation::capture(
+                    config.namespace.as_str(),
+                    "invalidate",
+                    &serde_json::to_vec(&claims).unwrap(),
+                );
+                assert_eq!(
+                    journal.invalidate(&operation, &claims).unwrap(),
+                    crate::storage::source_observations::SourceMutationReceipt::Applied
+                );
+                let after = journal.claims(std::slice::from_ref(&changed)).unwrap()[0]
+                    .1
+                    .unwrap();
+                assert!(
+                    after > before,
+                    "the hook must change the actual prepared claim"
+                );
+                captured_revisions.set(Some((before, after)));
             }));
         });
         let evidence = NativeEvidence::new(options.clone());
@@ -3815,6 +4059,27 @@ mod catalog_owner_tests {
             Ok(_) => panic!("the changed claim must refuse publication"),
         };
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let (_, changed_revision) = hook_revisions.get().expect("publication hook must run");
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            changed_revision,
+            "refused publication must leave the new claim pending"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            generation,
+            "the changed claim must fence the Catalog generation"
+        );
         assert_eq!(
             lock(&evidence.catalog_search).tickets[0].waiting,
             BTreeSet::from([path])
@@ -3842,14 +4107,18 @@ mod catalog_owner_tests {
         lock(&first.catalog_search).open();
         lock(&second.catalog_search).open();
         for evidence in [&first, &second] {
-            let db = rusqlite::Connection::open(EventCache::path(&evidence.options.cache)).unwrap();
-            db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+            let db = cold_search_connection(&evidence.options);
+            db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
             let path = evidence
                 .options
                 .codex_home
                 .join("sessions/2026/10/01/rollout-audit.jsonl");
-            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
+        // HTTP demand starts the real producer. Pin both Work fences while
+        // inspecting admission so it cannot finish and acknowledge the claims.
+        let first_work = lock(&first.work);
+        let second_work = lock(&second.work);
         let sources = Arc::new(SessionSources::from_evidence(vec![
             ("first".into(), first.clone()),
             ("second".into(), second.clone()),
@@ -3894,6 +4163,16 @@ mod catalog_owner_tests {
                 .collect::<Vec<_>>(),
             vec![("audit".into(), Some("codex".into()))]
         );
+        for evidence in [&first, &second] {
+            let db = cold_search_connection(&evidence.options);
+            let path = evidence
+                .options
+                .codex_home
+                .join("sessions/2026/10/01/rollout-audit.jsonl");
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)", [path.to_string_lossy().as_ref()], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        drop(first_work);
+        drop(second_work);
         core.close();
         fs::remove_dir_all(first_root).unwrap();
         fs::remove_dir_all(second_root).unwrap();
@@ -3903,7 +4182,7 @@ mod catalog_owner_tests {
     fn semantic_conflict_diagnostics_are_bounded_and_do_not_include_native_inputs() {
         let (root, options, input) = audit_fixture();
         let evidence = NativeEvidence::new(options.clone());
-        let cache = EventCache::open_scoped(&options.cache).unwrap();
+        let cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let mut batch = model::relation_stage::Batch {
             epoch: 7,
             phase: model::relation_stage::Phase::Indexing,
@@ -4009,8 +4288,14 @@ mod catalog_owner_tests {
         fs::write(unrelated.full_path(&options), "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"unrelated\"}}\n").unwrap();
         let evidence = NativeEvidence::new(options.clone());
         drain_catalog(&evidence, &std::cell::Cell::new(0));
+        // A completed publication advances the head. Start this separate
+        // producer operation with a fresh admitted head, rather than asking
+        // the old stage handle to seize a successor generation.
+        evidence.retire();
+        let evidence = NativeEvidence::new(options.clone());
         {
             let mut work = lock(&evidence.work);
+            work.events = Some(EventCache::open_scoped(&options.cache, &options.source).unwrap());
             assert_eq!(
                 work.events
                     .as_mut()
@@ -4023,11 +4308,16 @@ mod catalog_owner_tests {
                 crate::events::Outcome::Written
             );
         }
-        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let unrelated_key: String = db.query_row("SELECT session_key FROM session_catalog_sources WHERE native_id='unrelated' LIMIT 1", [], |row| row.get(0)).unwrap();
         assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
         db.execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_semantic_recipe'",
+            "UPDATE main.storage_semantic_profiles SET recipe=?1 WHERE namespace=semon_namespace()",
             ["unsupported-semantic-recipe"],
         )
         .unwrap();
@@ -4041,10 +4331,22 @@ mod catalog_owner_tests {
             let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
                 .unwrap_err();
-            assert!(error.to_string().contains("unsupported semantic recipe"));
-            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
-            assert!(EventCache::open_scoped(&options.cache).is_err());
-            assert!(EventCache::open(&options.cache).is_err());
+            assert!(
+                error
+                    .to_string()
+                    .contains(&crate::storage::StorageError::NamespaceUpgradePending.to_string())
+            );
+            assert_eq!(
+                work.events
+                    .as_ref()
+                    .unwrap()
+                    .qualified_catalog()
+                    .unwrap_err()
+                    .to_string(),
+                crate::storage::StorageError::NamespaceUpgradePending.to_string()
+            );
+            assert!(EventCache::open_scoped(&options.cache, &options.source).is_err());
+            assert!(EventCache::open(&options.cache, &options.source).is_err());
             assert_eq!(
                 crate::native_timing::cleanup_tests::snapshot(&db),
                 before,

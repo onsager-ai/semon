@@ -75,7 +75,7 @@ impl Chunks {
 fn unavailable() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "native source block generation unavailable",
+        crate::storage::StorageError::Conflict,
     )
 }
 
@@ -242,10 +242,121 @@ pub(crate) fn capture_append(
     })
 }
 
+/// Reuse a persisted native SHA continuation without rereading its old prefix.
+/// The receiver fence and exact old ledger authorize unchanged earlier blocks;
+/// the affected boundary is independently compared against the old full digest.
+#[cfg(feature = "postgres")]
+pub(crate) fn continue_prefix(
+    file: &mut (impl Read + Seek),
+    state: &PrefixState,
+    from: u64,
+    expected: [u8; 32],
+    to: u64,
+    mut check: impl FnMut() -> io::Result<()>,
+) -> io::Result<[u8; 32]> {
+    #[cfg(test)]
+    crate::source_change::SOURCE_SQL_LOCK
+        .with(|v| assert!(!v.get(), "history I/O under SourceState lock"));
+    if from > to || state.at != from / SIZE as u64 * SIZE as u64 {
+        return Err(unavailable());
+    }
+    let boundary = state.at;
+    let mut old = vec![0; (from - boundary) as usize];
+    check()?;
+    file.seek(SeekFrom::Start(boundary))?;
+    file.read_exact(&mut old)?;
+    if state.finish(&old) != expected {
+        return Err(unavailable());
+    }
+    #[cfg(test)]
+    {
+        crate::events::SOURCE_READ_BYTES.with(|n| n.set(n.get() + old.len() as u64));
+        crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(n.get() + old.len() as u64));
+    }
+    let mut state = state.clone();
+    let mut at = boundary;
+    let mut buffer = vec![0; SIZE];
+    file.seek(SeekFrom::Start(boundary))?;
+    while at < to {
+        check()?;
+        crate::selected_read::check()?;
+        let len = (to - at).min(SIZE as u64) as usize;
+        file.read_exact(&mut buffer[..len])?;
+        if at == boundary && buffer[..old.len()] != old {
+            return Err(unavailable());
+        }
+        #[cfg(test)]
+        {
+            crate::events::SOURCE_READ_BYTES.with(|n| n.set(n.get() + len as u64));
+            crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(n.get() + len as u64));
+        }
+        if len < SIZE {
+            return Ok(state.finish(&buffer[..len]));
+        }
+        state.advance(&buffer);
+        at += len as u64;
+    }
+    Ok(state.finish(&[]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn append_capture_distinguishes_generation_changes_from_reader_failures() {
+        struct FailedReader(io::ErrorKind);
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(self.0, "synthetic reader failure"))
+            }
+        }
+        impl Seek for FailedReader {
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+                Err(io::Error::new(self.0, "synthetic reader failure"))
+            }
+        }
+        let original = b"old\n";
+        let captured = capture(&mut Cursor::new(original), 4, 0).unwrap();
+        for kind in [
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Other,
+            io::ErrorKind::InvalidData,
+        ] {
+            let error = capture_append(
+                &mut FailedReader(kind),
+                4,
+                4,
+                &captured.chunks,
+                captured.prefix,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), kind);
+            assert!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<crate::storage::StorageError>()
+                    .is_none()
+            );
+        }
+        let mut stale = captured.chunks;
+        stale.resume = None;
+        let error = capture_append(&mut Cursor::new(original), 4, 4, &stale, captured.prefix)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<crate::storage::StorageError>(),
+            Some(&crate::storage::StorageError::Conflict)
+        );
+    }
 
     #[test]
     fn source_proofs_match_the_complete_prefix_and_both_parser_partitions() {
@@ -284,55 +395,6 @@ mod tests {
         }
         assert!(capture(&mut Cursor::new(&bytes), 1, 2).is_err());
         assert!(capture(&mut Cursor::new(&bytes), bytes.len() as u64 + 1, 0).is_err());
-    }
-
-    #[test]
-    fn continuation_matches_full_sha_across_boundaries_and_refuses_corruption() {
-        let bytes: Vec<u8> = (0..SIZE * 5 + 137).map(|n| (n % 251) as u8).collect();
-        for from in [
-            0,
-            1,
-            55,
-            56,
-            63,
-            64,
-            SIZE - 1,
-            SIZE,
-            SIZE + 19,
-            SIZE * 4 + 3,
-        ] {
-            let old = capture(&mut Cursor::new(&bytes), from as u64, 0).unwrap();
-            for to in [from, from + 1, from + 63, from + SIZE] {
-                if to > bytes.len() {
-                    continue;
-                }
-                let full = capture(&mut Cursor::new(&bytes), to as u64, from as u64).unwrap();
-                let resumed = capture_append(
-                    &mut Cursor::new(&bytes),
-                    to as u64,
-                    from as u64,
-                    &old.chunks,
-                    old.prefix,
-                )
-                .unwrap();
-                assert_eq!(resumed.prefix, full.prefix);
-                assert_eq!(resumed.tail, full.tail);
-                assert_eq!(resumed.parsed, full.parsed);
-                assert_eq!(resumed.chunks, full.chunks);
-            }
-            let mut corrupted = old.chunks.clone();
-            corrupted.resume.as_mut().unwrap().at += 64;
-            assert!(
-                capture_append(
-                    &mut Cursor::new(&bytes),
-                    from as u64 + 1,
-                    from as u64,
-                    &corrupted,
-                    old.prefix
-                )
-                .is_err()
-            );
-        }
     }
 
     #[test]

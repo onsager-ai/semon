@@ -73,7 +73,8 @@ fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
         ));
     }
     let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -237,7 +238,7 @@ fn admitted(options: Options) -> Arc<SessionSources> {
 }
 
 fn catalog_generation(home: &Home) -> Option<String> {
-    crate::events::EventCache::open_scoped(&home.options.cache)
+    crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
         .unwrap()
         .session_catalog_generation()
 }
@@ -246,7 +247,8 @@ fn catalog_generation(home: &Home) -> Option<String> {
 fn native_producer_catalog_rejects_rewrites_after_indexing() {
     let home = Home::new("catalog-derivation");
     home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let mut texts = crate::model::Texts::default();
     crate::model::observe_catalog(&home.options, &mut cache, &mut false, &mut texts, NOW).unwrap();
     let generation = catalog_generation(&home);
@@ -272,7 +274,8 @@ fn native_producer_catalog_rejects_rewrites_after_indexing() {
 fn native_producer_scoped_preparation_rejects_deleted_evidence() {
     let home = Home::new("scoped-derivation");
     home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let input = crate::inputs::Input {
         root: crate::inputs::InputRoot::Claude,
         path: "projects/-work-proj/lead.jsonl".to_owned(),
@@ -526,7 +529,9 @@ fn metadata_and_selected_session_reads_do_not_hydrate_unrelated_prompt_history()
             .claude_home
             .join("projects/-work-proj/history.jsonl");
         let original = fs::read(&path).unwrap();
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -582,7 +587,8 @@ fn limited_search_reads_prompt_briefs_only_when_their_slots_are_visited() {
     history.extend((0..128).map(|_| human("lead", ts(1, 1), &"x".repeat(64 * 1024))));
     history.push(human("lead", ts(1, 2), "selected needle"));
     home.top("lead", &history);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -678,7 +684,9 @@ fn native_projection_reuse_rebuilds_unqualified_and_corrupt_recipes_from_evidenc
                 human("lead", ts(1, 1), "later evidence"),
             ],
         );
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         let observe = |cache: &mut crate::events::EventCache| {
             crate::model::observe_catalog(
                 &home.options,
@@ -1040,6 +1048,7 @@ impl Home {
         ));
         fs::create_dir_all(&root).unwrap();
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -1899,7 +1908,7 @@ fn ids_of(answer: &Value) -> Vec<&str> {
 
 /// Whether the event index holds a file's index: whether a build read it.
 fn indexed(home: &Home, file: &str) -> bool {
-    crate::events::EventCache::open(&home.options.cache)
+    crate::events::EventCache::open(&home.options.cache, &home.options.source)
         .unwrap()
         .paths()
         .any(|path| path.ends_with(file))
@@ -2404,7 +2413,7 @@ fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
         ])
     );
     let path = home.root.join("facts.json");
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     assert_no_secrets("the facts file", &fs::read_to_string(&path).unwrap());
     assert_eq!(crate::read_facts(&path).unwrap(), facts);
     // A mirror: the same logs, the recorded facts, and no /proc at all.
@@ -3125,7 +3134,9 @@ fn selected_query_uses_original_generations_without_workspace_preparation_or_res
             let id = format!("unrelated-{n}");
             home.top(&id, &[human(&id, ts(1, 0), &"unrelated".repeat(8192))]);
         }
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -3210,7 +3221,9 @@ fn selected_transcript_tail_scope_measurement() {
             vec![text("fixed selected tail")],
         ));
         home.top("lead", &records);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -3328,7 +3341,8 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
             }
         }
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -3373,7 +3387,8 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
 #[test]
 fn ordinary_windowed_paging_reuses_a_complete_in_window_native_context() {
     let home = fixture();
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -3425,7 +3440,8 @@ fn focused_recorded_id_suffixes_preserve_native_global_identity() {
         &[human("literal@peer", ts(1, 0), "Literal at sign")],
     );
     for options in [&home.options, &peer.options] {
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         crate::model::observe_catalog(
             options,
             &mut cache,
@@ -3523,7 +3539,9 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
     for damaged in ["observation", "proofs"] {
         let home = Home::new("invalid-transcript-observation");
         home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -3595,7 +3613,9 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
     for (fault, expected_stage) in [(1, Some("page_hash")), (2, None), (3, None)] {
         let home = Home::new("selected-query-fences");
         home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -3669,7 +3689,9 @@ fn selected_query_preserves_the_independent_tool_reference_and_union_labels() {
             }
             // Publish through the actual native producer. Focused Query must
             // consume its source identity and recipes without preparing a union.
-            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            let mut cache =
+                crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                    .unwrap();
             crate::model::observe_catalog(
                 &home.options,
                 &mut cache,
@@ -3749,8 +3771,11 @@ impl crate::SessionSourceReader for PublishingArchive<'_> {
                     &[human("unrelated-arrival", ts(2, 0), "unrelated")],
                 );
             }
-            let mut cache =
-                crate::events::EventCache::open_scoped(&self.home.options.cache).unwrap();
+            let mut cache = crate::events::EventCache::open_scoped(
+                &self.home.options.cache,
+                &self.home.options.source,
+            )
+            .unwrap();
             crate::model::observe_catalog(
                 &self.home.options,
                 &mut cache,
@@ -3884,7 +3909,8 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4020,7 +4046,8 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4096,7 +4123,8 @@ fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sou
         let id = format!("unrelated-{n}");
         home.top(&id, &[human(&id, ts(1, 0), "Unrelated history")]);
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4168,7 +4196,8 @@ fn focused_query_keeps_cross_harness_and_literal_native_identity_collision_conte
             ),
         ],
     );
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4234,7 +4263,8 @@ fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
             json!({"id":"same-id"}),
         )],
     );
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4264,7 +4294,9 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
                 let id = format!("unrelated-{n}");
                 home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
             }
-            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            let mut cache =
+                crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                    .unwrap();
             crate::model::observe_catalog(
                 &home.options,
                 &mut cache,
@@ -4316,8 +4348,11 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
                 peer.top(&id, &[human(&id, ts(12, 0), "unrelated peer history")]);
             }
             for home in [&selected, &peer] {
-                let mut cache =
-                    crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+                let mut cache = crate::events::EventCache::open_scoped(
+                    &home.options.cache,
+                    &home.options.source,
+                )
+                .unwrap();
                 crate::model::observe_catalog(
                     &home.options,
                     &mut cache,
@@ -4375,7 +4410,8 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
 fn ordinary_single_machine_focus_does_not_qualify_a_provisional_native_identity() {
     let home = Home::new("provisional-owner");
     home.top("lead", &[human("lead", ts(12, 0), "observed Claude owner")]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4429,7 +4465,9 @@ fn ordinary_multi_machine_focus_does_not_infer_absence_from_partial_discovery() 
     first.top("lead", &[human("lead", ts(12, 0), "selected evidence")]);
     second.top("peer", &[human("peer", ts(12, 0), "other evidence")]);
     for home in [&first, &second] {
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -4470,7 +4508,9 @@ fn ordinary_multi_machine_focused_query_refuses_qualified_duplicate_owners() {
             "duplicate",
             &[human("duplicate", ts(12, 0), "native evidence")],
         );
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -4506,7 +4546,9 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
             let id = format!("unrelated-{n}");
             home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
         }
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -4582,7 +4624,8 @@ fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context
         let id = format!("unrelated-{n}");
         home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4685,7 +4728,8 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             )
             .unwrap();
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4729,11 +4773,53 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             );
         }
     }
-    let reference = crate::session_query_sources(&home.options, "child")
+    // Keep the full-index case above intact. A second admitted cache starts
+    // without the excluded parent, so its ledger is absent by construction
+    // rather than deleted from under indexed event rows and their proofs.
+    let parent_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/parent.jsonl");
+    let held_parent_path = home.root.join("held-parent.jsonl");
+    fs::rename(&parent_path, &held_parent_path).unwrap();
+    let missing_parent_observer_options = Options {
+        cache: home.root.join("missing-parent-index"),
+        ..home.options.clone()
+    };
+    let missing_parent_query_options = Options {
+        scan_window: true,
+        ..missing_parent_observer_options.clone()
+    };
+    let mut missing_parent_cache = crate::events::EventCache::open_scoped(
+        &missing_parent_observer_options.cache,
+        &missing_parent_observer_options.source,
+    )
+    .unwrap();
+    crate::model::observe_catalog(
+        &missing_parent_observer_options,
+        &mut missing_parent_cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(missing_parent_cache);
+
+    // Capture the whole-file answers before restoring the excluded raw parent.
+    // Query setup cannot discover that file and accidentally fill the missing
+    // ledger before the ProviderOnly assertion.
+    let expected: [Value; 2] = ["get_session", "read_transcript"].map(|tool| {
+        Query::from_sources(admitted(missing_parent_query_options.clone()))
+            .call_optional_at(tool, &json!({"id":"child"}), NOW)
+            .unwrap()
+    });
+    let reference = crate::session_query_sources(&missing_parent_query_options, "child")
         .unwrap()
         .into_iter()
         .find(|source| source.native_id == "child")
         .unwrap();
+    // This reader accepts only the child and panics if an excluded source is
+    // requested.
     let archive = SelectedArchive {
         bytes: Arc::from(fs::read(home.options.claude_home.join(&reference.path)).unwrap()),
         source: reference,
@@ -4741,26 +4827,35 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
         read_bytes: AtomicU64::new(0),
         fault: 0,
     };
-    // Missing excluded ledgers cannot force archive-body fallback. This reader
-    // accepts only the child and panics if any excluded source is requested.
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
-    db.execute(
-        "DELETE FROM files WHERE path=?1",
-        [home
-            .options
-            .claude_home
-            .join("projects/-work-proj/parent.jsonl")
-            .to_str()
-            .unwrap()],
+
+    let config = missing_parent_observer_options
+        .source
+        .config(&missing_parent_observer_options.cache)
+        .unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        crate::events::EventCache::path(&missing_parent_observer_options.cache),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .unwrap();
-    for tool in ["get_session", "read_transcript"] {
+    let parent_path_text = parent_path.to_str().unwrap();
+    let assert_parent_ledger_absent = || {
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.files WHERE namespace=?1 AND path=?2",
+                rusqlite::params![config.namespace.as_str(), parent_path_text],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "excluded parent unexpectedly acquired a ledger");
+    };
+    assert_parent_ledger_absent();
+    fs::rename(&held_parent_path, &parent_path).unwrap();
+    assert_parent_ledger_absent();
+
+    for (tool, expected) in ["get_session", "read_transcript"].into_iter().zip(expected) {
         let args = json!({"id":"child"});
-        let expected =
-            Query::from_sources(admitted(options.clone())).call_optional_at(tool, &args, NOW);
         assert_eq!(
-            Query::from_sources(admitted(options.clone())).call_selected_at(
+            Query::from_sources(admitted(missing_parent_query_options.clone())).call_selected_at(
                 "local",
                 "child",
                 tool,
@@ -4769,11 +4864,12 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
                 crate::SessionSourceReadMode::ProviderOnly,
                 NOW
             ),
-            expected
+            Ok(expected)
         );
+        assert_parent_ledger_absent();
     }
     let before = archive.calls.load(Ordering::Relaxed);
-    let error = Query::from_sources(admitted(options))
+    let error = Query::from_sources(admitted(missing_parent_query_options))
         .call_selected_at(
             "local",
             "outside",
@@ -4827,7 +4923,8 @@ fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_change
             ),
         ],
     );
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4900,7 +4997,8 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
     let mut shipped = assistant("second", ts(1, 1), vec![text("Shipped.")]);
     shipped["session_id"] = json!("first");
     home.top("second", &[resumed, shipped]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -5325,7 +5423,9 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             )
             .unwrap();
         }
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -5460,7 +5560,9 @@ fn catalog_search_selected_work_stays_fixed_as_unrelated_history_grows() {
         }
         prior = unrelated;
         // Existing native publication is shared by both read paths.
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &options,
             &mut cache,
@@ -5615,7 +5717,9 @@ fn focused_tail_summary_and_stopped_search_do_not_prepare_growing_selected_histo
             vec![text("fixed tail needle")],
         ));
         home.top("lead", &records);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -5719,7 +5823,9 @@ fn virtual_pages_do_not_prepare_growing_physical_owner_history() {
         );
         lines.extend([assistant("lead",ts(23,58),vec![tool("send","SendMessage",json!({"to":"remote","message":"fixed virtual context"}))]),json!({"type":"user","sessionId":"lead","timestamp":ts(23,59),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},"toolUseResult":{"success":true,"message":"sent"}})]);
         home.top("lead", &lines);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -5817,7 +5923,9 @@ fn clipped_relationship_pages_and_details_use_only_returned_recipes() {
             assistant("lead", ts(23, 59), vec![text("fixed recent tail")]),
         ]);
         home.top("lead", &lines);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -5908,7 +6016,9 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
         }
         records.push(assistant("lead", ts(23, 59), vec![text("fixed tail")]));
         home.top("lead", &records);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -5985,7 +6095,9 @@ fn selected_late_search_scans_content_without_eager_index_or_slot_preparation() 
         }));
         records.push(assistant("lead", ts(23, 59), vec![text("fixed tail")]));
         home.top("lead", &records);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -6070,7 +6182,8 @@ fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
             json!({"type":"user","sessionId":sid,"timestamp":ts(1,minute),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":lost,"content":"missing"}]},"toolUseResult":{"success":false,"message":"missing"}}),
         ]);
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,

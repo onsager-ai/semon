@@ -220,6 +220,7 @@ impl Home {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -251,7 +252,7 @@ impl Home {
     }
 
     fn built(&self, now: i64) -> model::QueryData {
-        let mut cache = EventCache::open_scoped(&self.options.cache).unwrap();
+        let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
         build_query(
             &self.options,
             &mut cache,
@@ -3485,6 +3486,7 @@ fn print_sample_tx() {
     let root = PathBuf::from(env::var("SEMON_SAMPLE_HOME").unwrap());
     let now: i64 = env::var("SEMON_SAMPLE_NOW").unwrap().parse().unwrap();
     let options = Options {
+        source: crate::Options::default().source,
         claude_home: root.join("claude"),
         claude_json: root.join(".claude.json"),
         codex_home: root.join("codex"),

@@ -4,7 +4,7 @@ use crate::{
     Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
     model::summary::CatalogRow,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -15,7 +15,7 @@ use std::{
 
 const SOURCES_MAX: usize = 64;
 const BYTES_MAX: u64 = 64 * 1024 * 1024;
-const CANDIDATES: &str = "SELECT substr(key,17) FROM meta WHERE key>'overview_needed:'||?2 AND key<'overview_needed;' ORDER BY key LIMIT ?1";
+const CANDIDATES: &str = "SELECT substr(key,17) FROM main.meta WHERE namespace=semon_namespace() AND key>'overview_needed:'||?2 AND key<'overview_needed;' ORDER BY key LIMIT ?1";
 type EvidenceRead<'a> =
     Box<dyn Fn(&Path, &crate::native_record::Record) -> io::Result<Vec<u8>> + 'a>;
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
@@ -315,19 +315,62 @@ fn selected_observation_error(error: io::Error) -> crate::ViewerReply {
     )
 }
 fn connection(options: &Options) -> io::Result<Connection> {
-    let db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(failure)?;
-    crate::events::store::require_current(&db)?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    let db = binding.connection().map_err(failure)?;
     crate::selected_read::install(&db)?;
     Ok(db)
 }
+
+fn transaction<'a>(
+    db: &'a mut Connection,
+    options: &Options,
+) -> io::Result<rusqlite::Transaction<'a>> {
+    let tx = db.transaction().map_err(failure)?;
+    let binding = crate::storage::local_navigation_binding(options, "").map_err(failure)?;
+    binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(failure)?;
+    Ok(tx)
+}
+
+fn writer_connection(
+    options: &Options,
+) -> io::Result<(
+    crate::events::store::configured::NativeOwnership,
+    Connection,
+)> {
+    let config = options.source.config(&options.cache).map_err(failure)?;
+    let owner =
+        crate::events::store::configured::NativeOwnership::restore(&config).map_err(failure)?;
+    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+        .connection()
+        .map_err(failure)?;
+    db.create_scalar_function(
+        "semon_semantic_publisher",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(1_i64),
+    )
+    .map_err(failure)?;
+    crate::selected_read::install(&db)?;
+    db.busy_timeout(Duration::ZERO).map_err(failure)?;
+    Ok((owner, db))
+}
+
+fn validate_writer(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &crate::events::store::configured::NativeOwnership,
+) -> io::Result<()> {
+    let binding = crate::storage::NativeReaderBinding::Semantic(owner.clone());
+    binding
+        .validate(tx, &owner.config().namespace)
+        .map_err(failure)?;
+    Ok(())
+}
+
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
-    let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
+    let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
     text.map(|text| {
         crate::selected_read::charge(512, text.len())?;
         serde_json::from_str(&text).map_err(failure)
@@ -335,10 +378,6 @@ fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     .transpose()
 }
 fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
-    let has_tables = db.query_row("SELECT count(*)=2 FROM sqlite_schema WHERE name IN ('session_overview','session_trace_headers')",[],|row|row.get::<_,bool>(0)).map_err(failure)?;
-    if !has_tables {
-        return Ok(false);
-    }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     if !projection_ready(db, row)? {
         return Ok(false);
@@ -350,20 +389,10 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
     {
         return Ok(false);
     }
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_overview o JOIN session_trace_headers t USING(session_key) WHERE o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_overview o JOIN main.session_trace_headers t USING(namespace,session_key) WHERE o.namespace=semon_namespace() AND o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
 }
 
 fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
-    let exists = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_slot_projections')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(failure)?;
-    if !exists {
-        return Ok(false);
-    }
     if crate::history_projection::catalog(db, &row.key)
         .map_err(failure)?
         .is_some()
@@ -371,20 +400,30 @@ fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return crate::history_projection::qualified(db, row).map_err(failure);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
-    db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
 }
 
 /// Demand an ordinary producer upgrade for an exact selected owner. This only
 /// schedules work; publication still requires the producer's source proofs.
 pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
-    let db = connection(options)?;
-    let Some(row) = catalog(&db, key)? else {
+    options
+        .source
+        .config(&options.cache)
+        .map_err(failure)?
+        .request_projection_upgrade(options, key)
+}
+
+pub(crate) fn request_sqlite_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
+    let mut db = connection(options)?;
+    let tx = transaction(&mut db, options)?;
+    let Some(row) = catalog(&tx, key)? else {
         return Ok(false);
     };
-    if projection_ready(&db, &row)? {
+    if projection_ready(&tx, &row)? {
         return Ok(false);
     }
     source_refs(options, std::slice::from_ref(&row))?;
+    tx.commit().map_err(failure)?;
     crate::events::store::prioritize_projection_sources(options, &row.sources)?;
     Ok(true)
 }
@@ -436,7 +475,7 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
     {
         add(row);
     }
-    let mut related=db.prepare("SELECT session_key FROM session_catalog WHERE parent_key=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related=db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
     let mut count = 0;
     for sid in related
         .query_map([key], |row| row.get::<_, String>(0))
@@ -459,7 +498,7 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
     } else {
         // Far-end and unsent sessions have no native transcript. Resolve their
         // owner through indexed handoff endpoints, never a workspace scan.
-        let mut statement = db.prepare("SELECT session_key FROM (SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1 UNION SELECT session_key FROM session_trace_bookmarks WHERE target=?2) ORDER BY session_key LIMIT 65").map_err(failure)?;
+        let mut statement = db.prepare("SELECT session_key FROM (SELECT session_key FROM main.session_trace_edges WHERE namespace=semon_namespace() AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM main.session_trace_edges WHERE namespace=semon_namespace() AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1 UNION SELECT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?2) ORDER BY session_key LIMIT 65").map_err(failure)?;
         let owners = statement
             .query_map(rusqlite::params![key, key.strip_prefix("unsent:")], |row| {
                 row.get::<_, String>(0)
@@ -505,8 +544,8 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
     let mut pending: std::collections::BTreeSet<_> =
         selected.rows.iter().map(|row| row.key.clone()).collect();
     let mut visited = std::collections::BTreeSet::new();
-    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 UNION SELECT session_key AS endpoint FROM session_catalog WHERE parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
-    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT session_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
     while let Some(owner) = pending.pop_first() {
         if !visited.insert(owner.clone()) {
             continue;
@@ -593,7 +632,7 @@ pub fn overview_repair_sources(
     key: &str,
 ) -> io::Result<Option<Vec<crate::SessionSourceRef>>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let rows = selection(&tx, key)?.rows;
     if ready(&tx, &rows[0])? {
         return Ok(None);
@@ -608,7 +647,7 @@ pub fn session_query_sources(
     key: &str,
 ) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selected = query_selection(&tx, key)?;
     if selected.incomplete {
         return Err(io::Error::new(
@@ -623,7 +662,7 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
     // A provisional discovery cannot prove a global native identity. In
     // particular, an unobserved harness may introduce a canonical-ID collision.
     if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness' AND value='complete')",
         [],
         |row| row.get::<_, bool>(0),
     ).map_err(failure)? {
@@ -635,7 +674,7 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
             // A complete Catalog's namespace can differ from the CLI's file
             // window. Resolve original native IDs through the existing index;
             // query_selection then includes every identity collision owner.
-            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
             let owners = aliases
                 .query_map([key], |row| row.get::<_, String>(0))
                 .map_err(failure)?
@@ -683,7 +722,7 @@ pub(crate) fn query_window_context_current(
     now: i64,
 ) -> io::Result<bool> {
     if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness' AND value='complete')",
         [],
         |row| row.get::<_, bool>(0),
     ).map_err(failure)? {
@@ -722,7 +761,7 @@ pub(crate) fn local_query_inputs(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((_, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -756,7 +795,7 @@ pub(crate) fn local_query_target(
         return Ok(None);
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let Some((key, selected)) = local_query_selection(&tx, key)? else {
         return Ok(None);
     };
@@ -785,7 +824,10 @@ pub(crate) fn local_query_target(
     Ok(ready.then_some(key))
 }
 
-fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
+pub(crate) fn source_refs(
+    options: &Options,
+    rows: &[CatalogRow],
+) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut selected = BTreeMap::new();
     for row in rows {
         let home = match row.harness.as_str() {
@@ -839,18 +881,9 @@ pub(crate) fn candidates_after(
             "Invalid overview migration batch",
         ));
     }
-    let db = connection(options)?;
-    // Older schemas migrate through their owning producer, never raw SQL here.
-    if !db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_catalog')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(failure)?
-    {
-        return Ok(Vec::new());
-    }
+    let mut connection = connection(options)?;
+    let db = transaction(&mut connection, options)?;
+    // Current-format selected candidates share this admitted read snapshot.
     let mut statement = db.prepare(CANDIDATES).map_err(failure)?;
     statement
         .query_map(rusqlite::params![limit as i64, after], |row| {
@@ -900,18 +933,16 @@ pub fn repair_session_overview_with_control(
         ));
     }
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = selection(&tx, key)?;
     let rows = selection.rows;
     if ready(&tx, &rows[0])? {
         tx.commit().map_err(failure)?;
-        let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
-        crate::selected_read::install(&writable)?;
-        writable.busy_timeout(Duration::ZERO).map_err(failure)?;
+        let (owner, mut writable) = writer_connection(options)?;
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
-        crate::events::store::require_current(&tx)?;
+        validate_writer(&tx, &owner)?;
         let Some(current) = catalog(&tx, key)? else {
             return Err(publication_changed());
         };
@@ -919,7 +950,7 @@ pub fn repair_session_overview_with_control(
             return Err(publication_changed());
         }
         tx.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("overview_needed:{key}")],
         )
         .map_err(failure)?;
@@ -930,7 +961,7 @@ pub fn repair_session_overview_with_control(
     let upgrade = !projection_ready(&tx, &rows[0])?;
     let generation: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -995,24 +1026,19 @@ pub fn repair_session_overview_with_control(
             "Native migration owner unavailable",
         ));
     }
-    // Qualify through the current schema owner. It preserves independent
-    // current/history membership; the publication below does not touch either.
-    crate::events::store::open_selected(&EventCache::path(&options.cache)).map_err(failure)?;
     crate::selected_read::check()?;
     #[cfg(test)]
     if let Some(hook) = BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
-    crate::selected_read::install(&writable)?;
-    writable.busy_timeout(Duration::ZERO).map_err(failure)?;
+    let (owner, mut writable) = writer_connection(options)?;
     let tx = writable
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failure)?;
-    crate::events::store::require_current(&tx)?;
+    validate_writer(&tx, &owner)?;
     let current: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -1028,6 +1054,15 @@ pub fn repair_session_overview_with_control(
             return Err(publication_changed());
         }
     }
+    let trace_store = if repaired.iter().any(|row| row.trace.is_some()) {
+        Some(
+            crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+                .map_err(failure)?,
+        )
+    } else {
+        None
+    };
     for row in &repaired {
         crate::selected_read::check()?;
         if let Some(summary) = &row.overview {
@@ -1035,7 +1070,11 @@ pub fn repair_session_overview_with_control(
                 .map_err(failure)?;
         }
         if let Some(trace) = &row.trace {
-            crate::causal_trace::publish(&tx, row, trace).map_err(failure)?;
+            let trace_store = trace_store
+                .as_ref()
+                .ok_or(rusqlite::Error::InvalidQuery)
+                .map_err(failure)?;
+            crate::causal_trace::publish_owned(&tx, trace_store, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
             let table = if crate::history_projection::catalog(&tx, &row.key)
@@ -1046,7 +1085,7 @@ pub fn repair_session_overview_with_control(
             } else {
                 "session_catalog"
             };
-            tx.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
+            tx.execute(&format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE namespace=semon_namespace() AND session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
         }
         if upgrade {
             let projection = transcripts
@@ -1059,7 +1098,7 @@ pub fn repair_session_overview_with_control(
             publish_projection(&tx, row, projection)?;
         }
         tx.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("overview_needed:{}", row.key)],
         )
         .map_err(failure)?;
@@ -1094,18 +1133,18 @@ fn publish_projection(
         "session_slots"
     };
     if history {
-        tx.execute("INSERT OR REPLACE INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+        tx.execute("INSERT OR REPLACE INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(semon_namespace(),?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
     } else {
-        tx.execute("INSERT OR REPLACE INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+        tx.execute("INSERT OR REPLACE INTO main.session_slot_projections(namespace,session_key,generation,source_generation,version,total) VALUES(semon_namespace(),?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
     }
     tx.execute(
-        &format!("DELETE FROM {slots} WHERE session_key=?1"),
+        &format!("DELETE FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1"),
         [&row.key],
     )
     .map_err(failure)?;
     let mut put = tx
         .prepare(&format!(
-            "INSERT INTO {slots}(session_key,slot,metadata) VALUES(?1,?2,?3)"
+            "INSERT INTO main.{slots}(namespace,session_key,slot,metadata) VALUES(semon_namespace(),?1,?2,?3)"
         ))
         .map_err(failure)?;
     for (slot, text) in texts.iter().enumerate() {
@@ -1191,8 +1230,8 @@ fn with_records<T>(
         for row in rows {
             let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
             let projection_version = crate::slot_projection::VERSION;
-            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
-            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
             if !history && !current {
                 continue;
             }
@@ -1201,7 +1240,7 @@ fn with_records<T>(
             } else {
                 "session_slots"
             };
-            let mut statement=tx.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.field') IS NOT NULL ORDER BY slot LIMIT 4096")).map_err(failure)?;
+            let mut statement=tx.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND json_extract(metadata,'$.field') IS NOT NULL ORDER BY slot LIMIT 4096")).map_err(failure)?;
             for text in statement
                 .query_map([&row.key], |r| {
                     crate::selected_read::row(r, 512)?;
@@ -1407,7 +1446,7 @@ pub(crate) fn with_query<T>(
     let _scope = crate::selected_read::Scope::ensure();
     crate::selected_read::check()?;
     let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let selection = query_selection(&tx, key)?;
     if selection.incomplete {
         return Err(io::Error::new(
@@ -1437,7 +1476,7 @@ pub(crate) fn with_query<T>(
         crate::model::query_history(options, &rows, native, now)
     })?;
     let result = read(data);
-    let tx = db.transaction().map_err(failure)?;
+    let tx = transaction(&mut db, options)?;
     let current = query_selection(&tx, key)?;
     let footprint = |rows: &[CatalogRow]| -> BTreeMap<_, _> {
         rows.iter()

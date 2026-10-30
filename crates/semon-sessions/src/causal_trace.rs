@@ -2,32 +2,15 @@
 //! readers follow one requested turn, never a workspace model or native body.
 use crate::{
     Options,
-    events::EventCache,
     model::{Handoff, Session, Turn},
+    storage::catalog::CatalogSnapshot,
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS session_trace_turns(session_key TEXT NOT NULL,turn_id TEXT NOT NULL,start_id TEXT,metadata TEXT NOT NULL,PRIMARY KEY(session_key,turn_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_starts ON session_trace_turns(session_key,start_id,turn_id);
-CREATE TABLE IF NOT EXISTS session_trace_edges(session_key TEXT NOT NULL,edge_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(session_key,edge_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_edge_identity ON session_trace_edges(edge_id,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_from ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_to ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END,session_key);
-CREATE INDEX IF NOT EXISTS session_trace_query_at ON session_trace_edges(json_extract(metadata,'$.at'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_query_done ON session_trace_edges(json_extract(metadata,'$.done'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_query_status ON session_trace_edges(json_extract(metadata,'$.status'),session_key,edge_id);
-CREATE INDEX IF NOT EXISTS session_trace_turn_query_at ON session_trace_turns(session_key,json_extract(metadata,'$.at'),turn_id);
-CREATE INDEX IF NOT EXISTS session_trace_turn_query_last ON session_trace_turns(session_key,turn_id) WHERE json_extract(metadata,'$.last')=1;
-CREATE TABLE IF NOT EXISTS session_trace_bookmarks(target TEXT NOT NULL,session_key TEXT NOT NULL,edge_id TEXT NOT NULL,PRIMARY KEY(target,session_key,edge_id)) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmarks(session_key);
-";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
@@ -38,6 +21,18 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    pub(crate) fn selected_query_recipe(
+        &self,
+        summary: &crate::overview::Summary,
+    ) -> Option<Value> {
+        self.query
+            .as_ref()
+            .map(|query| query.selected_recipe(summary))
+    }
+    pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> String {
+        String::from_utf8(generation_bytes(&publication_session(row, self), self))
+            .expect("JSON trace publication witness")
+    }
     /// Reuse the producer's recorded edge ownership; never infer a parent turn
     /// from timing, session order or a body scan in a read request.
     pub(crate) fn with_origin_turns(
@@ -229,19 +224,6 @@ pub(crate) fn family_costs<'a>(
     }
     costs
 }
-pub(crate) fn publish(
-    tx: &Transaction<'_>,
-    row: &crate::model::summary::CatalogRow,
-    projection: &Projection,
-) -> rusqlite::Result<()> {
-    publish_measured(
-        tx,
-        row,
-        projection,
-        &mut crate::native_timing::Measurements::default(),
-    )
-}
-
 fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
     serde_json::to_vec(&(
         session,
@@ -252,20 +234,30 @@ fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
     .expect("owned trace projection")
 }
 
-pub(crate) fn publish_measured(
+pub(crate) fn publish_owned(
     tx: &Transaction<'_>,
+    trace_store: &crate::storage::sqlite::trace::TraceWriter<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<()> {
+    let mut measurements = crate::native_timing::Measurements::default();
+    let record = publication_record(row, projection, &mut measurements)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if row.query.is_some()
+        && let Some(query) = &projection.query
+    {
+        query.publish(tx, row, &record.0)?;
+    }
+    publish_record(trace_store, row, projection, record, &mut measurements)
+}
+
+fn publication_record(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
     measurements: &mut crate::native_timing::Measurements,
-) -> rusqlite::Result<()> {
-    let total_started = measurements.start();
+) -> std::io::Result<(String, String, String)> {
     let started = measurements.start();
-    let mut session = projection.session.clone();
-    session["content_generation"] = json!(
-        row.overview
-            .as_ref()
-            .map(crate::overview::content_generation)
-    );
+    let session = publication_session(row, projection);
     measurements.record("trace_session", started, 1);
     let started = measurements.start();
     let digest = format!(
@@ -274,76 +266,92 @@ pub(crate) fn publish_measured(
     );
     measurements.record("trace_digest", started, 1);
     let started = measurements.start();
-    let source = crate::retention::source_generation(&row.sources)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let source = crate::retention::source_generation(&row.sources)?;
     measurements.record("trace_source_generation", started, 1);
-    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
-        query.publish(tx, row, summary, &digest)?;
-    }
+    Ok((digest, source, session.to_string()))
+}
 
-    let changed = {
-        let started = measurements.start();
-        let mut statement=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?;
-        measurements.record("trace_header_prepare", started, 1);
-        let started = measurements.start();
-        let parameters = params![row.key, digest, source, session.to_string()];
-        measurements.record("trace_header_serialization", started, 1);
-        let started = measurements.start();
-        let changed = statement.execute(parameters)?;
-        measurements.record("trace_header_sql", started, 1);
-        changed
-    };
-    if changed == 0 {
-        measurements.record("trace_total_inclusive", total_started, 1);
+fn publication_session(row: &crate::model::summary::CatalogRow, projection: &Projection) -> Value {
+    let mut session = projection.session.clone();
+    session["content_generation"] = json!(
+        row.overview
+            .as_ref()
+            .map(crate::overview::content_generation)
+    );
+    session
+}
+
+/// The publisher qualifies the immutable trace context. Selected Query recipes
+/// travel in the same fenced Catalog row; this never writes backend-local meta.
+pub(crate) fn is_published<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> Result<bool, P::Error> {
+    let (digest, source, _) = publication_record(
+        row,
+        projection,
+        &mut crate::native_timing::Measurements::default(),
+    )
+    .map_err(P::invalid)?;
+    store.matches_header(&row.key, &digest, &source)
+}
+
+pub(crate) fn publish_with_store<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> Result<(), P::Error> {
+    let mut measurements = crate::native_timing::Measurements::default();
+    let total_started = measurements.start();
+    let record = publication_record(row, projection, &mut measurements).map_err(P::invalid)?;
+    publish_record(store, row, projection, record, &mut measurements)?;
+    measurements.record("trace_total_inclusive", total_started, 1);
+    Ok(())
+}
+
+fn publish_record<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+    (digest, source, metadata): (String, String, String),
+    measurements: &mut crate::native_timing::Measurements,
+) -> Result<(), P::Error> {
+    let started = measurements.start();
+    let changed = store.header(&row.key, &digest, &source, &metadata)?;
+    measurements.record("trace_header_sql", started, 1);
+    if !changed {
         return Ok(());
     }
     let started = measurements.start();
-    tx.prepare_cached("DELETE FROM session_trace_turns WHERE session_key=?1")?
-        .execute([&row.key])?;
-    tx.prepare_cached("DELETE FROM session_trace_edges WHERE session_key=?1")?
-        .execute([&row.key])?;
-    measurements.record("trace_turn_edge_removal", started, 2);
-    let started = measurements.start();
-    let mut turns = tx.prepare_cached("INSERT INTO session_trace_turns VALUES(?1,?2,?3,?4)")?;
-    measurements.record("trace_turn_prepare", started, 1);
+    store.clear(&row.key)?;
+    measurements.record("trace_turn_edge_removal", started, 3);
     for turn in &projection.turns {
         let started = measurements.start();
-        let parameters = params![
-            row.key,
-            turn["id"].as_str(),
-            turn["start"].as_str(),
-            turn.to_string()
-        ];
+        let metadata = turn.to_string();
         measurements.record("trace_turn_serialization", started, 1);
         let started = measurements.start();
-        turns.execute(parameters)?;
+        store.turn(
+            &row.key,
+            turn["id"].as_str(),
+            turn["start"].as_str(),
+            &metadata,
+        )?;
         measurements.record("trace_turn_sql", started, 1);
     }
-    let started = measurements.start();
-    let mut edges = tx.prepare_cached("INSERT INTO session_trace_edges VALUES(?1,?2,?3)")?;
-    measurements.record("trace_edge_prepare", started, 1);
     for edge in &projection.edges {
         let started = measurements.start();
-        let parameters = params![row.key, edge["id"].as_str(), edge.to_string()];
+        let metadata = edge.to_string();
         measurements.record("trace_edge_serialization", started, 1);
         let started = measurements.start();
-        edges.execute(parameters)?;
+        store.edge(&row.key, edge["id"].as_str(), &metadata)?;
         measurements.record("trace_edge_sql", started, 1);
     }
     let started = measurements.start();
-    tx.prepare_cached("DELETE FROM session_trace_bookmarks WHERE session_key=?1")?
-        .execute([&row.key])?;
-    measurements.record("trace_bookmark_removal", started, 1);
-    let started = measurements.start();
-    let mut bookmarks =
-        tx.prepare_cached("INSERT INTO session_trace_bookmarks VALUES(?1,?2,?3)")?;
-    measurements.record("trace_bookmark_prepare", started, 1);
-    let started = measurements.start();
     for (target, edge) in &projection.bookmarks {
-        bookmarks.execute(params![target, row.key, edge])?;
+        store.bookmark(&row.key, target, edge)?;
     }
     measurements.record("trace_bookmark_sql", started, projection.bookmarks.len());
-    measurements.record("trace_total_inclusive", total_started, 1);
     Ok(())
 }
 
@@ -379,287 +387,25 @@ pub(crate) fn update_current_observation(
             Sha256::digest(json!([version, metadata]).to_string().as_bytes())
         );
         tx.execute(
-            "UPDATE session_trace_headers SET metadata=?2,generation=?3 WHERE session_key=?1",
+            "UPDATE main.session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
             params![key, text, generation],
         )?;
     }
     Ok(())
 }
 
-/// Exact selected metadata only; list pages never load usage breakdowns. These
-/// recorded facts grant neither runtime authority nor native control custody.
-pub(crate) fn selected_details(
-    tx: &Transaction<'_>,
-    key: &str,
-    sources: &[crate::model::summary::CatalogSource],
-    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
-) -> rusqlite::Result<Option<Value>> {
-    if !tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_trace_headers')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )? {
-        return Ok(None);
-    }
-    let expected = crate::retention::source_generation(sources)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let encoded: Option<(Option<String>, bool)> = tx.query_row(
-        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_set(json_extract(metadata,'$.details'),'$.busy',json_extract(metadata,'$.busy'),'$.content_generation',json_extract(metadata,'$.content_generation')) ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",
-        params![key, expected], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional()?;
-    encoded
-        .and_then(|(text, current)| text.map(|text| (text, current)))
-        .map(|(text, current)| {
-            let mut value: Value = serde_json::from_str(&text)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            value["live_observation"] = json!(current);
-            value["family"] = selected_family(tx, key, relative_status)?;
-            Ok(value)
-        })
-        .transpose()
-}
-
-/// Indexed, body-free relatives of the selected owner. This never walks an
-/// unrelated workspace. A truncated family retains an explicit unknown total.
+#[cfg(test)]
 fn selected_family(
     tx: &Transaction<'_>,
     key: &str,
     relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Value> {
-    let mut bytes = 0;
-    let incomplete = std::cell::Cell::new(false);
-    let mut compact = tx.prepare("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost'),'_status_catalog',json_set(COALESCE(h.metadata,c.metadata),'$.lifecycle',c.lifecycle)) ELSE NULL END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1")?;
-    let mut read = |sid: &str| -> rusqlite::Result<Option<Value>> {
-        let text: Option<String> = compact
-            .query_row([sid], |row| row.get(0))
-            .optional()?
-            .flatten();
-        let Some(text) = text else {
-            incomplete.set(true);
-            return Ok(None);
-        };
-        bytes += text.len();
-        if text.len() > 65536 || bytes > 1048576 {
-            incomplete.set(true);
-            return Ok(None);
-        }
-        let mut row: Value = serde_json::from_str(&text)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        // Qualification uses the same bounded published scope as the relative.
-        // Private native paths and Query recipes never enter the UI response.
-        let scope = row
-            .as_object_mut()
-            .and_then(|row| row.remove("_status_catalog"))
-            .and_then(|value| {
-                serde_json::from_value::<crate::model::summary::CatalogRow>(value).ok()
-            });
-        row["status"] = scope
-            .filter(|scope| scope.key == sid && row["harness"] == scope.harness)
-            .map(|scope| relative_status(&scope))
-            .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
-        Ok(Some(row))
-    };
-    let mut ancestors = Vec::new();
-    let mut seen = BTreeSet::from([key.to_owned()]);
-    let mut parent = read(key)?.and_then(|row| row["parent"].as_str().map(str::to_owned));
-    while let Some(sid) = parent.take() {
-        if ancestors.len() >= 32 || !seen.insert(sid.clone()) {
-            incomplete.set(true);
-            break;
-        }
-        let Some(row) = read(&sid)? else {
-            break;
-        };
-        parent = row["parent"].as_str().map(str::to_owned);
-        ancestors.push(row);
-    }
-    ancestors.reverse();
-    let mut statement = tx.prepare("WITH RECURSIVE family(session_key) AS (VALUES(?1) UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.session_key LIMIT 101) SELECT session_key FROM family WHERE session_key!=?1")?;
-    let mut runs = Vec::new();
-    for sid in statement.query_map([key], |row| row.get::<_, String>(0))? {
-        let sid = sid?;
-        if seen.contains(&sid) {
-            incomplete.set(true);
-            continue;
-        }
-        if runs.len() >= 99 {
-            incomplete.set(true);
-            break;
-        }
-        if let Some(row) = read(&sid)? {
-            runs.push(row);
-        }
-    }
-    Ok(
-        json!({"state":if incomplete.get() {"incomplete"} else {"complete"},"ancestors":ancestors,"runs":runs}),
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::owned(tx),
+        key,
+        relative_status,
     )
-}
-
-/// Relationships for the issued native range only. This shares the producer's
-/// causal projection; it never constructs a graph or reads native bodies.
-pub(crate) fn range_context(
-    tx: &Transaction<'_>,
-    key: &str,
-    slots: &[crate::slot_projection::SavedSlot],
-    sources: &[crate::model::summary::CatalogSource],
-) -> rusqlite::Result<Value> {
-    let mut ids = BTreeSet::new();
-    let turn_ids: BTreeSet<_> = slots
-        .iter()
-        .filter_map(|slot| slot.turn.as_deref())
-        .collect();
-    for slot in slots {
-        if let crate::slot_projection::Recipe::H { id } = &slot.recipe {
-            ids.insert(id.clone());
-        }
-    }
-    if !ids.is_empty() || !turn_ids.is_empty() {
-        let expected = crate::retention::source_generation(sources)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let published: Option<String> = tx
-            .query_row(
-                "SELECT source_generation FROM session_trace_headers WHERE session_key=?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if published.as_deref() != Some(&expected) {
-            return Ok(
-                json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
-            );
-        }
-    }
-    let mut missing = tx.query_row("SELECT COALESCE(json_extract(metadata,'$.relationships_incomplete'),0) FROM session_trace_headers WHERE session_key=?1", [key], |row|row.get::<_,bool>(0)).optional()?.unwrap_or(false);
-    let mut turns = Vec::new();
-    let mut bytes = 0;
-    for id in turn_ids {
-        let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",params![key,id],|row|row.get(0)).optional()?;
-        let Some(encoded) = encoded else {
-            missing = true;
-            continue;
-        };
-        bytes += encoded.len();
-        if bytes > 4 * 1024 * 1024 {
-            missing = true;
-            break;
-        }
-        let turn: Value = serde_json::from_str(&encoded)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if turn["sent"].as_array().is_none_or(|sent| sent.len() > 1000) {
-            missing = true;
-            continue;
-        }
-        if let Some(start) = turn["start"].as_str() {
-            ids.insert(start.to_owned());
-        }
-        turns.push(turn);
-    }
-    let mut edges = Vec::new();
-    let mut owners = BTreeSet::new();
-    let mut participants = BTreeSet::new();
-    for id in ids {
-        let encoded: Option<String> = tx.query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
-            params![key,id], |row|row.get(0)).optional()?;
-        let Some(encoded) = encoded else {
-            missing = true;
-            continue;
-        };
-        bytes += encoded.len();
-        if bytes > 4 * 1024 * 1024 {
-            missing = true;
-            break;
-        }
-        let mut edge: Value = serde_json::from_str(&encoded)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        for field in ["brief_session", "result_session"] {
-            if let Some(owner) = edge[field].as_str() {
-                owners.insert(owner.to_owned());
-            }
-        }
-        for field in ["from", "to"] {
-            if let Some(sid) = edge[field].as_str().filter(|sid| *sid != "you") {
-                participants.insert(sid.to_owned());
-            }
-        }
-        if let Some(target) = edge["to"].as_str() {
-            let found: Vec<String> = tx.prepare("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2")?
-                .query_map(params![target,id],|row|row.get(0))?.collect::<Result<_,_>>()?;
-            if found.len() == 1 {
-                edge["target_turn"] = json!(found[0]);
-            }
-        }
-        edges.push(edge);
-    }
-    let mut sessions = BTreeMap::new();
-    if participants.len() > 201 {
-        missing = true;
-    }
-    for sid in participants.into_iter().take(201) {
-        let metadata:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'activity',json_extract(metadata,'$.details.activity'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1",[&sid],|row|row.get(0)).optional()?.flatten();
-        if let Some(metadata) = metadata {
-            bytes += metadata.len();
-            if metadata.len() > 65536 || bytes > 4 * 1024 * 1024 {
-                missing = true;
-                continue;
-            }
-            sessions.insert(
-                sid,
-                serde_json::from_str::<Value>(&metadata)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
-            );
-        } else {
-            missing = true;
-        }
-    }
-    for edge in &edges {
-        if edge["kind"] == "spawn"
-            && let Some(target) = edge["to"].as_str()
-            && let Some(session) = sessions.get(target)
-            && session["state"] == "work"
-            && session["live_observation"] == 1
-            && !session["activity"].is_null()
-        {
-            owners.insert(target.to_owned());
-        }
-    }
-    let mut previews = BTreeMap::new();
-    if owners.len() > 128 {
-        missing = true;
-    }
-    for sid in owners.into_iter().take(128) {
-        let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        let Some((generation, Some(content))) = header else {
-            missing = true;
-            continue;
-        };
-        let metadata = crate::history_projection::catalog(tx, &sid)?.or(tx
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                [&sid],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?);
-        let Some(metadata) = metadata else {
-            missing = true;
-            continue;
-        };
-        let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if row.key != sid
-            || crate::retention::source_generation(&row.sources)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
-                != generation
-            || content.len() != 64
-        {
-            missing = true;
-            continue;
-        }
-        previews.insert(sid, content);
-    }
-    Ok(
-        json!({"state":if missing {"incomplete"} else {"complete"},"turns":turns,"handoffs":edges,"sessions":sessions,"previews":previews}),
-    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 #[derive(Serialize)]
@@ -795,29 +541,42 @@ pub(crate) fn session_causal_trace_with_gate(
         return reply;
     }
     let read = || -> Result<Value, u16> {
-        let identity = crate::session_catalog_history_identity(options, source_key, &key)
-            .map_err(|_| 503u16)?
-            .ok_or(404u16)?;
-        // One bounded status capture for every peer, using the Catalog owner's
-        // source/facts/PID/runtime qualification. These are observations only.
-        let runtime_generation = crate::native_evidence::query_runtime_generation(options).ok();
-        let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
-        let recorded = options
-            .facts
-            .as_ref()
-            .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|_| 503u16)?;
+        let binding =
+            crate::storage::local_navigation_binding(options, source_key).map_err(|_| 503u16)?;
+        let mut db = binding.connection().map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
         let tx = db.transaction().map_err(|_| 503u16)?;
-        crate::events::store::require_current(&tx).map_err(|_| 503u16)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)
+            .map_err(|_| 503u16)?;
+        snapshot.require_current().map_err(|_| 503u16)?;
+        let runtime_generation = snapshot.runtime_generation(options).ok();
+        let runtime_binding = snapshot.runtime_binding();
+        let runtime_observations = match (runtime_binding.as_ref(), runtime_generation.as_deref()) {
+            (Some(binding), Some(runtime)) => {
+                crate::native_evidence::RuntimeObservations::bound(binding, runtime).ok()
+            }
+            (Some(_), None) => None,
+            (None, _) => Some(crate::native_evidence::RuntimeObservations::new(options)),
+        };
+        let recorded = options
+            .facts
+            .as_ref()
+            .and_then(|path| snapshot.facts_authority(path).ok());
+        let selected = crate::catalog::catalog_selection_in_snapshot(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            &snapshot,
+        )
+        .map_err(|_| 503u16)?;
+        let Some((identity, _)) = selected else {
+            return Err(404);
+        };
         let generation: String = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -849,19 +608,19 @@ pub(crate) fn session_causal_trace_with_gate(
                 frontier.push(json!({"catalog_key":sid,"turn":tid}));
                 continue;
             }
-            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",params![sid,tid],|row|row.get(0)).optional().map_err(|_|503u16)?;
+            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1 AND turn_id=?2",params![sid,tid],|row|row.get(0)).optional().map_err(|_|503u16)?;
             let Some(encoded) = encoded else {
                 missing.other = true;
                 continue;
             };
             let turn = decode(encoded)?;
             if !sessions.contains_key(&sid) {
-                let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
+                let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
                 let metadata = crate::history_projection::catalog(&tx, &sid)
                     .map_err(|_| 503u16)?
                     .or(tx
                         .query_row(
-                            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                             [&sid],
                             |row| row.get::<_, String>(0),
                         )
@@ -879,7 +638,7 @@ pub(crate) fn session_causal_trace_with_gate(
                 versions.push(json!([sid, version]));
                 let current: Option<String> = tx
                     .query_row(
-                        "SELECT lifecycle FROM session_catalog WHERE session_key=?1",
+                        "SELECT lifecycle FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                         [&sid],
                         |row| row.get(0),
                     )
@@ -893,7 +652,7 @@ pub(crate) fn session_causal_trace_with_gate(
             if let Some(start) = turn["start"].as_str()
                 && !edges.contains_key(start)
             {
-                let incoming:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",params![sid,start],|row|row.get(0)).optional().map_err(|_|503u16)?;
+                let incoming:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,start],|row|row.get(0)).optional().map_err(|_|503u16)?;
                 if let Some(text) = incoming {
                     edges.insert(start.to_string(), decode(text)?);
                 } else {
@@ -906,12 +665,12 @@ pub(crate) fn session_causal_trace_with_gate(
             }
             for id in ids {
                 let id = id.as_str().ok_or(503u16)?;
-                let encoded:String=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",params![sid,id],|row|row.get(0)).map_err(|_|503u16)?;
+                let encoded:String=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,id],|row|row.get(0)).map_err(|_|503u16)?;
                 let edge = decode(encoded)?;
                 if matches!(edge["kind"].as_str(), Some("spawn" | "relay"))
                     && let Some(target) = edge["to"].as_str()
                 {
-                    let mut starts=tx.prepare("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2").map_err(|_|503u16)?;
+                    let mut starts=tx.prepare("SELECT turn_id FROM main.session_trace_turns WHERE namespace=semon_namespace() AND session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2").map_err(|_|503u16)?;
                     let found = starts
                         .query_map(params![target, id], |row| row.get::<_, String>(0))
                         .map_err(|_| 503u16)?
@@ -952,7 +711,7 @@ pub(crate) fn session_causal_trace_with_gate(
         for sid in related.into_iter().take(128) {
             let header: Option<(String, String, Option<String>)> = tx
                 .query_row(
-                    "SELECT generation,source_generation,CASE WHEN ?2 THEN CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END ELSE NULL END FROM session_trace_headers WHERE session_key=?1",
+                    "SELECT generation,source_generation,CASE WHEN ?2 THEN CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END ELSE NULL END FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
                     params![sid, relay_peers.contains(&sid)],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
@@ -976,7 +735,7 @@ pub(crate) fn session_causal_trace_with_gate(
                 .map_err(|_| 503u16)?
                 .or(tx
                     .query_row(
-                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
+                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                         [&sid],
                         |row| row.get::<_, Option<String>>(0),
                     )
@@ -997,12 +756,32 @@ pub(crate) fn session_causal_trace_with_gate(
             }
             versions.push(json!([sid, version]));
             if relay_peers.contains(&sid) {
-                let status = crate::catalog::relative_status(
-                    options,
-                    &runtime_observations,
-                    recorded.as_ref(),
-                    &row,
-                );
+                let status = match snapshot.row_runtime_binding(&row) {
+                    Ok(Some(binding)) => runtime_generation
+                        .as_deref()
+                        .and_then(|runtime| {
+                            crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
+                                .ok()
+                        })
+                        .map(|observations| {
+                            crate::catalog::relative_status(
+                                options,
+                                &observations,
+                                recorded.as_deref(),
+                                &row,
+                            )
+                        }),
+                    Ok(None) => runtime_observations.as_ref().map(|observations| {
+                        crate::catalog::relative_status(
+                            options,
+                            observations,
+                            recorded.as_deref(),
+                            &row,
+                        )
+                    }),
+                    Err(_) => None,
+                }
+                .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
                 missing.other |= status["observation"] == "unavailable";
                 let mut summary = trace_participant_summary(&row, status);
                 if summary.observed_extent.status["observation"] != "unavailable" {
@@ -1034,12 +813,12 @@ pub(crate) fn session_causal_trace_with_gate(
         let mut previews = BTreeMap::new();
         let mut previews_incomplete = owners.len() > 128;
         for sid in preview_order.into_iter().take(128) {
-            let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|503u16)?;
+            let header:Option<(String,Option<String>)>=tx.query_row("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|503u16)?;
             let Some((source, Some(content))) = header else {
                 previews_incomplete = true;
                 continue;
             };
-            let metadata=crate::history_projection::catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
+            let metadata=crate::history_projection::catalog(&tx,&sid).map_err(|_|503u16)?.or(tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|row.get::<_,String>(0)).optional().map_err(|_|503u16)?);
             let Some(metadata) = metadata else {
                 previews_incomplete = true;
                 continue;
@@ -1057,12 +836,10 @@ pub(crate) fn session_causal_trace_with_gate(
         }
         // A changed runtime cannot advertise a current observation from the
         // earlier capture. Custody drift rejects the response, as in Catalog.
-        if runtime_generation.as_ref().is_none_or(|before| {
-            crate::native_evidence::query_runtime_generation(options)
-                .ok()
-                .as_ref()
-                != Some(before)
-        }) {
+        if runtime_generation
+            .as_ref()
+            .is_none_or(|before| snapshot.runtime_generation(options).ok().as_ref() != Some(before))
+        {
             for summary in participant_summaries.values_mut() {
                 if summary.observed_extent.status["observation"] == "current" {
                     summary.observed_extent.status =
@@ -1085,6 +862,8 @@ pub(crate) fn session_causal_trace_with_gate(
             "{:x}",
             Sha256::digest(json!([generation, versions]).to_string().as_bytes())
         );
+        drop(recorded);
+        drop(snapshot);
         tx.commit().map_err(|_| 503u16)?;
         Ok(
             json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing.incomplete(),"incomplete_only_missing_receiving_turns":incomplete_only_missing_receiving_turns,"previews_incomplete":previews_incomplete}),
@@ -1317,7 +1096,7 @@ mod generation_tests {
     }
 
     #[test]
-    fn publication_keeps_legacy_digest_and_unchanged_relationship_rows() {
+    fn publication_keeps_digest_and_unchanged_relationship_rows() {
         let projection = populated_projection();
         let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "key":"owner", "name":"fixture", "harness":"codex", "kind":"session",
@@ -1339,15 +1118,46 @@ mod generation_tests {
                 .map(crate::overview::content_generation)
         );
         let expected = format!("{:x}", Sha256::digest(legacy_bytes(&session, &projection)));
-        // This publisher uses only its trace schema, without Event Index/WAL initialization.
-        let mut connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        let tx = connection.transaction().unwrap();
-        publish(&tx, &row, &projection).unwrap();
-        tx.commit().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "semon-trace-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let database = root.join("trace.sqlite3");
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: database.clone(),
+            },
+            namespace: crate::storage::LogicalSourceNamespace::new("trace-publication").unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        config.create_native_store().unwrap();
+        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+        drop(crate::storage::sqlite::configured_index::open_semantic(capability).unwrap());
+        let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let connection =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(owner.clone())
+                .connection()
+                .unwrap();
+        row.trace = Some(projection.clone());
+        let rows = [row];
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: None,
+        };
+        let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
+        let (outcome, generation) = writer
+            .publish_catalog(&publication, None, None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
         let saved: (String, String) = connection
             .query_row(
-                "SELECT generation,metadata FROM session_trace_headers WHERE session_key='owner'",
+                "SELECT generation,metadata FROM session_trace_headers WHERE namespace='trace-publication' AND session_key='owner'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1358,18 +1168,30 @@ mod generation_tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(rows, (1, 1, 2));
-        let changes: i64 = connection
-            .query_row("SELECT total_changes()", [], |row| row.get(0))
+        // Count actual trace effects across the ordinary publisher's separate
+        // connection; Catalog observation bookkeeping is independent of trace.
+        connection
+            .execute_batch("CREATE TABLE trace_effects(writes INTEGER NOT NULL); INSERT INTO trace_effects VALUES(0);")
             .unwrap();
-        let tx = connection.transaction().unwrap();
-        publish(&tx, &row, &projection).unwrap();
-        tx.commit().unwrap();
+        for table in crate::storage::sqlite::trace::TABLES {
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                connection.execute_batch(&format!("CREATE TRIGGER audit_{table}_{operation} AFTER {operation} ON {table} BEGIN UPDATE trace_effects SET writes=writes+1; END;")).unwrap();
+            }
+        }
+        let (outcome, _) = writer
+            .publish_catalog(&publication, generation.as_deref(), None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
         assert_eq!(
             connection
-                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT writes FROM trace_effects", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
-            changes
+            0
         );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1514,8 +1336,13 @@ mod relative_tests {
     fn selected_relatives_keep_activity_times_from_their_published_metadata() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,parent_key TEXT,harness TEXT,metadata TEXT,lifecycle TEXT DEFAULT 'current');
-             CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);",
+            "CREATE TABLE session_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,parent_key TEXT,harness TEXT,metadata TEXT,lifecycle TEXT DEFAULT 'current',PRIMARY KEY(namespace,session_key));
+             CREATE TABLE session_history_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT,PRIMARY KEY(namespace,session_key));",
+        )
+        .unwrap();
+        crate::storage::sqlite::catalog_namespace::register(
+            &db,
+            &crate::storage::LogicalSourceNamespace::new("relatives").unwrap(),
         )
         .unwrap();
         for (key, parent, last) in [
@@ -1526,7 +1353,7 @@ mod relative_tests {
             let metadata =
                 json!({"name":key,"kind":"session","parent":parent,"last":last,"cost":{"usd":1}});
             db.execute(
-                "INSERT INTO session_catalog(session_key,parent_key,harness,metadata) VALUES(?1,?2,'claude',?3)",
+                "INSERT INTO session_catalog(namespace,session_key,parent_key,harness,metadata) VALUES('relatives',?1,?2,'claude',?3)",
                 params![key, parent, metadata.to_string()],
             )
             .unwrap();
@@ -1534,7 +1361,7 @@ mod relative_tests {
         let saved =
             json!({"name":"child","kind":"session","parent":"root","last":25,"cost":{"usd":1}});
         db.execute(
-            "INSERT INTO session_history_catalog VALUES('child',?1)",
+            "INSERT INTO session_history_catalog VALUES('relatives','child',?1)",
             [saved.to_string()],
         )
         .unwrap();

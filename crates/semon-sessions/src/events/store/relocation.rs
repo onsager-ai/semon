@@ -4,8 +4,8 @@ use super::*;
 
 // Pinned SQLite otherwise scans unrelated current sources to obtain DISTINCT
 // path order. Constrain the lookup to native identity using the existing index.
-const ORIGINAL_CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
-const CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+const ORIGINAL_CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+const CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
 
 fn candidate_paths(
     connection: &Connection,
@@ -81,16 +81,7 @@ fn report_candidate_plan(
     true
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogRelocation {
-    version: u32,
-    new_path: String,
-    native_id: String,
-    prior: Ledger,
-    catalog_before: Option<Ledger>,
-    after: Ledger,
-}
+use crate::events::native_commit::CatalogRelocation;
 fn catalog_key(path: &str) -> String {
     format!("native_catalog_relocation:{path}")
 }
@@ -112,7 +103,7 @@ fn catalog_evidence(
     connection: &Connection,
     old: &str,
 ) -> rusqlite::Result<Option<CatalogRelocation>> {
-    let value: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",[catalog_key(old)],|row|row.get(0)).optional()?;
+    let value: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1",[catalog_key(old)],|row|row.get(0)).optional()?;
     Ok(value
         .flatten()
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -152,29 +143,36 @@ pub(super) fn advance(
     append: bool,
 ) -> rusqlite::Result<()> {
     let olds = connection
-        .prepare("SELECT old_path FROM catalog_relocation_candidates WHERE new_path=?1")?
+        .prepare("SELECT old_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND new_path=?1")?
         .query_map([path], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for old in olds {
         let proof = catalog_evidence(connection, &old)?;
-        if let Some(mut proof) = proof.filter(|proof| append && Some(&proof.after) == expected) {
-            proof.after = next.clone();
+        let encoded = proof.as_ref().map(json).transpose()?;
+        if let Some(encoded) = crate::events::native_commit::advance_relocation(
+            encoded.as_deref(),
+            expected,
+            next,
+            append,
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+        {
             connection.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-                params![catalog_key(&old), json(&proof)?],
+                "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+                params![catalog_key(&old), encoded],
             )?;
         } else {
-            connection.execute("DELETE FROM meta WHERE key=?1", [catalog_key(&old)])?;
+            connection.execute(native_metadata_delete(connection)?, [catalog_key(&old)])?;
         }
     }
     Ok(())
 }
 pub(super) fn acknowledge(connection: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
-    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM catalog_relocation_candidates c JOIN session_catalog_invalidations i ON i.source_path=c.old_path OR i.source_path=c.new_path WHERE c.old_path=?1)",[path],|row|row.get(0))?;
+    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_relocation_candidates c JOIN main.session_catalog_invalidations i ON i.namespace=c.namespace AND (i.source_path=c.old_path OR i.source_path=c.new_path) WHERE c.namespace=semon_namespace() AND c.old_path=?1)",[path],|row|row.get(0))?;
     if !pending {
-        connection.execute("DELETE FROM meta WHERE key=?1", [catalog_key(path)])?;
+        connection.execute(native_metadata_delete(connection)?, [catalog_key(path)])?;
         connection.execute(
-            "DELETE FROM catalog_relocation_candidates WHERE old_path=?1",
+            "DELETE FROM main.catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1",
             [path],
         )?;
     }
@@ -188,7 +186,11 @@ pub(super) fn reuse(
     native_id: &str,
     file: &mut crate::sealed::LogFile,
     measurements: &mut crate::native_timing::Measurements,
+    writer: &configured::Writer,
 ) -> Result<Option<String>, StoreError> {
+    writer
+        .validate(&store.connection)
+        .map_err(StoreError::Configured)?;
     let started = measurements.start();
     let (candidates, steps) =
         candidate_paths(&store.connection, native_id, path, started.is_some()).map_err(failure)?;
@@ -203,20 +205,13 @@ pub(super) fn reuse(
     let [old] = candidates.as_slice() else {
         return Ok(None);
     };
-    fn namespace(path: &str) -> Option<(&str, bool)> {
-        path.rsplit_once("/archived_sessions/")
-            .map(|(root, _)| (root, true))
-            .or_else(|| {
-                path.rsplit_once("/sessions/")
-                    .map(|(root, _)| (root, false))
-            })
-    }
-    let (Some((root, archived)), Some((old_root, old_archived))) =
-        (namespace(path), namespace(old))
-    else {
+    let (Some((root, archived)), Some((old_root, old_archived))) = (
+        crate::events::native_commit::relocation_namespace(path),
+        crate::events::native_commit::relocation_namespace(old),
+    ) else {
         return Ok(None);
     };
-    let candidate: bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM catalog_relocation_candidates WHERE old_path=?1 AND new_path=?2 AND native_id=?3)",params![old,path,native_id],|row|row.get(0)).map_err(failure)?;
+    let candidate: bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1 AND new_path=?2 AND native_id=?3)",params![old,path,native_id],|row|row.get(0)).map_err(failure)?;
     if root != old_root
         || archived == old_archived
         || (!candidate
@@ -231,13 +226,16 @@ pub(super) fn reuse(
     if stat.size < prior.offset {
         return Ok(None);
     }
-    let Some((_, metadata)) = store.read_tree(old, &prior.stat).map_err(failure)? else {
+    let metadata = writer
+        .tree(old, &prior.stat)
+        .map_err(StoreError::Configured)?;
+    let Some((_, metadata)) = metadata else {
         return Ok(None);
     };
     let header = read_codex_header(
         &mut store
             .connection
-            .prepare(NATIVE_METADATA_VALUE)
+            .prepare(native_metadata_value(&store.connection).map_err(failure)?)
             .map_err(failure)?,
         old,
         &prior,
@@ -246,7 +244,7 @@ pub(super) fn reuse(
     if header.as_ref().and_then(|header| header.id.as_deref()) != Some(native_id) {
         return Ok(None);
     }
-    let proof: Option<Option<String>>=store.connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",[path],|row|row.get(0)).optional().map_err(failure)?;
+    let proof: Option<Option<String>>=store.connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM main.session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",[path],|row|row.get(0)).optional().map_err(failure)?;
     let trusted = proof
         .flatten()
         .and_then(|text| {
@@ -279,7 +277,7 @@ pub(super) fn reuse(
     }
     // Catalog can lag a committed append. Qualify only its selected older
     // consumed prefix, outside the SQLite writer reservation, when necessary.
-    let previous = store.connection.query_row("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c USING(session_key) WHERE s.lifecycle='current' AND s.source_path=?1 LIMIT 1",[old],|row|row.get::<_,Option<String>>(0)).optional().map_err(failure)?.flatten().and_then(|text|serde_json::from_str::<crate::model::summary::CatalogRow>(&text).ok()).and_then(|row|row.sources.into_iter().find(|source|source.path.to_str()==Some(old) && source.native_id==native_id)).map(|source|source_ledger(&source));
+    let previous = store.connection.query_row("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c USING(namespace,session_key) WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 LIMIT 1",[old],|row|row.get::<_,Option<String>>(0)).optional().map_err(failure)?.flatten().and_then(|text|serde_json::from_str::<crate::model::summary::CatalogRow>(&text).ok()).and_then(|row|row.sources.into_iter().find(|source|source.path.to_str()==Some(old) && source.native_id==native_id)).map(|source|source_ledger(&source));
     let catalog_before = match previous {
         Some(previous) if previous != prior && previous.offset <= prior.offset => {
             let (prefix, _) = super::super::consumed_hashes(file, previous.offset)
@@ -301,6 +299,7 @@ pub(super) fn reuse(
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failure)?;
+    writer.validate(&tx).map_err(StoreError::Configured)?;
     if ledger_row(&tx, old)
         .map_err(failure)?
         .map(|(_, ledger)| ledger)
@@ -313,8 +312,9 @@ pub(super) fn reuse(
     let Some(chunks) = chunk_proofs::read(&tx, old, &prior).map_err(failure)? else {
         return Ok(None);
     };
+    chunk_proofs::preserve(&tx, old).map_err(failure)?;
     tx.execute(
-        "UPDATE files SET path=?1,dev=?2,ino=?3,size=?4,mtime_ns=?5,ctime_ns=?6 WHERE path=?7",
+        "UPDATE main.files SET path=?1,dev=?2,ino=?3,size=?4,mtime_ns=?5,ctime_ns=?6 WHERE namespace=semon_namespace() AND path=?7",
         params![
             path,
             int(relocated.stat.dev),
@@ -333,12 +333,12 @@ pub(super) fn reuse(
     let normalized_usage =
         native_usage::relocate(&tx, old, path, &prior, &relocated).map_err(failure)?;
     tx.execute(
-        "UPDATE native_tree_headers SET source_path=?2 WHERE source_path=?1",
+        "UPDATE main.native_tree_headers SET source_path=?2 WHERE namespace=semon_namespace() AND source_path=?1",
         params![old, path],
     )
     .map_err(failure)?;
     tx.execute(
-        "UPDATE native_tree_repairs SET source_path=?2 WHERE source_path=?1",
+        "UPDATE main.native_tree_repairs SET source_path=?2 WHERE namespace=semon_namespace() AND source_path=?1",
         params![old, path],
     )
     .map_err(failure)?;
@@ -363,18 +363,18 @@ pub(super) fn reuse(
             after: *stat,
         };
         tx.execute(
-            "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
+            "INSERT OR REPLACE INTO main.session_source_mutations VALUES(semon_namespace(),?1,?2)",
             params![path, json(&evidence).map_err(failure)?],
         )
         .map_err(failure)?;
     }
     tx.execute(
-        "INSERT OR IGNORE INTO catalog_relocation_candidates VALUES(?1,?2,?3)",
+        "INSERT OR IGNORE INTO main.catalog_relocation_candidates VALUES(semon_namespace(),?1,?2,?3)",
         params![old, path, native_id],
     )
     .map_err(failure)?;
     tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+        "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
         params![
             catalog_key(old),
             json(&CatalogRelocation {
@@ -389,9 +389,10 @@ pub(super) fn reuse(
         ],
     )
     .map_err(failure)?;
-    invalidate_catalog_source(&tx, old, "removed").map_err(failure)?;
-    invalidate_catalog_source(&tx, path, "changed").map_err(failure)?;
-    tx.commit().map_err(failure)?;
+    invalidate_bound_catalog_source(&tx, old, "removed").map_err(failure)?;
+    invalidate_bound_catalog_source(&tx, path, "changed").map_err(failure)?;
+    tx.commit()
+        .map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
     Ok(Some(old.clone()))
 }
 
@@ -408,7 +409,7 @@ mod tests {
         path: &str,
     ) {
         connection.execute(
-            "INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(semon_namespace(),?1,?2,?3,?4,?5)",
             params![key, lifecycle, harness, id, path],
         ).unwrap();
     }
@@ -445,7 +446,12 @@ mod tests {
         let mut baseline = None;
         for unrelated in [0, 256, 2048] {
             let mut connection = Connection::open_in_memory().unwrap();
-            connection.execute_batch(SCHEMA).unwrap();
+            connection.execute_batch(COMPOSITE_CATALOG_SCHEMA).unwrap();
+            crate::storage::sqlite::catalog_namespace::register(
+                &connection,
+                &crate::storage::LogicalSourceNamespace::new("relocation-current").unwrap(),
+            )
+            .unwrap();
             {
                 let transaction = connection.transaction().unwrap();
                 for index in 0..unrelated {

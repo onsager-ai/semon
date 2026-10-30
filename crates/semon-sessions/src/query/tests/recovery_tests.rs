@@ -10,7 +10,8 @@ use std::{collections::BTreeMap, sync::mpsc, time::Instant};
 fn publish(home: &Home) {
     crate::model::observe_catalog(
         &home.options,
-        &mut crate::events::EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+            .unwrap(),
         &mut false,
         &mut crate::model::Texts::default(),
         NOW,
@@ -18,10 +19,13 @@ fn publish(home: &Home) {
     .unwrap();
 }
 
-fn shared_home(prefix: usize) -> (Home, String) {
+fn shared_home(prefix: usize, leading_user: bool) -> (Home, String) {
     let home = Home::new("recovery-shared");
     for sid in ["first", "second"] {
-        let mut records = vec![human(sid, ts(1, 0), "shared owner prompt")];
+        let mut records = Vec::new();
+        if leading_user {
+            records.push(human(sid, ts(1, 0), "shared owner prompt"));
+        }
         records.extend((0..prefix).map(|n| {
             assistant(
                 sid,
@@ -161,7 +165,7 @@ fn process_io() -> Option<(u64, u64)> {
 #[test]
 fn recovery_shared_owner_fallback_scope_measurement() {
     for prefix in [0, 128, 1024] {
-        let (home, stub) = shared_home(prefix);
+        let (home, stub) = shared_home(prefix, true);
         let mut oracle = Query::from_sources(admitted(home.options.clone()));
         let mut cases = Vec::new();
         for key in [&stub, "unsent:missing"] {
@@ -249,7 +253,7 @@ struct HeldProvider {
 /// at a private test allowance. It changes no production limit or release gate.
 #[test]
 fn recovery_large_shared_owner_preparation_budget_measurement() {
-    let (home, key) = shared_home(8192);
+    let (home, key) = shared_home(8192, true);
     let mut oracle = Query::from_sources(admitted(home.options.clone()));
     let complete_args = json!({"id":key,"after":0,"limit":10});
     let complete = oracle
@@ -386,8 +390,12 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-call","content":output}]}}));
         home.top("long", &records);
         publish(&home);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let config = home.options.source.config(&home.options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let source_path: String = db
             .query_row(
                 "SELECT source_path FROM session_catalog_sources WHERE session_key='long' LIMIT 1",
@@ -402,7 +410,19 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         let before = generations();
         assert_eq!(before.0, before.1);
         assert_eq!(before.0, before.2);
-        db.execute_batch("UPDATE session_slot_projections SET version=5 WHERE session_key='long'; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        let mut journal = config.source_observations().unwrap();
+        let paths: Vec<String> = Vec::new();
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            config.namespace.as_str(),
+            "discover",
+            &serde_json::to_vec(&(&paths, true)).unwrap(),
+        );
+        journal.discover(&operation, &paths, true).unwrap();
+        assert_eq!(
+            journal.backfill_state().unwrap().as_deref(),
+            Some("draining")
+        );
+        db.execute_batch("UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='long'; INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_completeness'),'catalog_completeness','partial');").unwrap();
         crate::invalidate_session_sources(
             &home.options,
             &[crate::Input {
@@ -597,7 +617,7 @@ impl crate::SessionSourceReader for HeldProvider {
 
 #[test]
 fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
-    let (home, key) = shared_home(1024);
+    let (home, key) = shared_home(1024, true);
     let sources = admitted(home.options.clone());
     let mut reference = Query::from_sources(sources.clone());
     let expected_metadata = reference
@@ -710,20 +730,9 @@ fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
 #[test]
 fn recovery_selected_preparation_terminal_failures_never_replay_or_publish() {
     for failure in ["before", "deadline", "decode", "cpu", "rows", "bytes"] {
-        let (home, key) = shared_home(128);
-        if failure == "cpu" {
-            // No leading user record: native marker lookup reaches the first
-            // assistant without provider I/O. Cancel inside event ordering.
-            for sid in ["first", "second"] {
-                let path = home
-                    .options
-                    .claude_home
-                    .join(format!("projects/-work-proj/{sid}.jsonl"));
-                let text = fs::read_to_string(&path).unwrap();
-                fs::write(path, text.split_once('\n').unwrap().1).unwrap();
-            }
-            publish(&home);
-        }
+        // Without a leading user record, marker lookup reaches the first
+        // assistant without provider I/O; cancel inside event ordering.
+        let (home, key) = shared_home(128, failure != "cpu");
         let args = json!({"id":key});
         let expected = Query::from_sources(admitted(home.options.clone()))
             .call_at("get_session", &args, NOW)
@@ -856,14 +865,18 @@ fn recovery_selected_sql_progress_observes_request_cancellation() {
 #[test]
 fn recovery_selected_repair_cancellation_rolls_back_publication() {
     for ready in [true, false] {
-        let (home, _) = shared_home(16);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let (home, _) = shared_home(16, true);
+        let config = home.options.source.config(&home.options.cache).unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         if !ready {
-            db.execute("UPDATE session_catalog SET metadata=json_remove(metadata,'$.query') WHERE session_key='first'", []).unwrap();
+            db.execute("UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'", []).unwrap();
         }
         db.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('overview_needed:first','1')",
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
             [],
         )
         .unwrap();
@@ -934,9 +947,13 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
 
 #[test]
 fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
-    let (home, _) = shared_home(128);
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let (home, _) = shared_home(128, true);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let encoded: String = db
         .query_row(
             "SELECT metadata FROM session_catalog WHERE session_key='first'",
@@ -946,7 +963,7 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
         .unwrap();
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).unwrap();
     db.execute(
-        "UPDATE files SET head_sha256=zeroblob(32) WHERE path=?1",
+        "UPDATE main.files SET head_sha256=zeroblob(32) WHERE namespace=semon_namespace() AND path=?1",
         [row.sources[0].path.to_str().unwrap()],
     )
     .unwrap();
