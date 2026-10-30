@@ -28,8 +28,8 @@ pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
 pub(crate) mod semantic_stage;
-pub(crate) mod tree_state;
 mod tree_capture;
+pub(crate) mod tree_state;
 
 use std::{
     collections::BTreeMap,
@@ -13060,7 +13060,9 @@ mod tests {
         let raw = root.join("native.jsonl");
         fs::write(&raw, b"authoritative native bytes\n").unwrap();
         let config = StoreConfig {
-            backend: StoreBackend::Sqlite { database: path.clone() },
+            backend: StoreBackend::Sqlite {
+                database: path.clone(),
+            },
             namespace: LogicalSourceNamespace::new("custody").unwrap(),
             expected_stream_epoch: Some("a".repeat(64)),
         };
@@ -13079,14 +13081,26 @@ INSERT INTO meta VALUES('archive-custody','independent authority');"#).unwrap();
         }
         assert!(complete);
         drop(crate::storage::sqlite::configured_index::open(&config).unwrap());
-        db.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
-        let paths = [path.clone(), sibling(&path, "-wal"), sibling(&path, "-shm"), raw];
+        db.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
+        let paths = [
+            path.clone(),
+            sibling(&path, "-wal"),
+            sibling(&path, "-shm"),
+            raw,
+        ];
         let state = catalog_state(&db);
-        let before = paths.iter().map(|path| fs::read(path).unwrap()).collect::<Vec<_>>();
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
         assert!(crate::storage::sqlite::configured_index::open(&config).is_err());
         assert!(configured::NativeOwnership::admit(&config).is_err());
         for scoped in [false, true] {
-            assert!(matches!(SqliteStore::attempt_scoped(&path, scoped), Err(Unopened::Unsupported(_))));
+            assert!(matches!(
+                SqliteStore::attempt_scoped(&path, scoped),
+                Err(Unopened::Unsupported(_))
+            ));
         }
         assert!(SqliteStore::attempt_selected(&path).is_err());
         assert!(focused_connection(&path).is_err());
@@ -13096,9 +13110,28 @@ INSERT INTO meta VALUES('archive-custody','independent authority');"#).unwrap();
             assert_eq!(&actual, bytes);
         }
         assert_eq!(catalog_state(&db), state);
-        assert_eq!(db.query_row("SELECT count(*) FROM reported_runs", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(db.query_row("SELECT metadata FROM session_history_catalog", [], |row| row.get::<_, String>(0)).unwrap(), "{\"custody\":\"retained custody\"}");
-        assert_eq!(db.query_row("SELECT value FROM meta WHERE key='archive-custody'", [], |row| row.get::<_, String>(0)).unwrap(), "independent authority");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM reported_runs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT metadata FROM session_history_catalog", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "{\"custody\":\"retained custody\"}"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='archive-custody'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "independent authority"
+        );
         drop(db);
         fs::remove_dir_all(root).unwrap();
     }
@@ -13580,8 +13613,15 @@ INSERT INTO meta VALUES('archive-custody','independent authority');"#).unwrap();
                 rows.models.iter().map(String::as_str),
                 rows.tools
                     .iter()
-                    .filter(|(id, _)| !rows.closed_tools.contains(*id))
-                    .map(|(id, name)| (id.as_str(), name.as_str())),
+                    .map(|(id, name)| {
+                        (id.as_str(), Some(name.as_str()), rows.closed_tools.contains(id))
+                    })
+                    .chain(
+                        rows.closed_tools
+                            .iter()
+                            .filter(|id| !rows.tools.contains_key(*id))
+                            .map(|id| (id.as_str(), None, true)),
+                    ),
             );
             assert_eq!(
                 tree_state::witness(&store.connection, &path, &ledger).unwrap(),

@@ -213,15 +213,27 @@ mod tests {
             roots.push(root);
         }
         let selected = key("tool", &0u32.to_be_bytes());
-        assert_eq!(lookup(&mut store, roots[0], selected), Ok(Some(value(&0u32.to_be_bytes()))));
+        assert_eq!(
+            lookup(&mut store, roots[0], selected),
+            Ok(Some(value(&0u32.to_be_bytes())))
+        );
         assert_eq!(lookup(&mut store, root, key("tool", b"absent")), Ok(None));
         let before = store.writes;
-        assert_eq!(update(&mut store, root, selected, value(&0u32.to_be_bytes())), Ok(root));
+        assert_eq!(
+            update(&mut store, root, selected, value(&0u32.to_be_bytes())),
+            Ok(root)
+        );
         assert_eq!(store.writes, before);
         let changed = update(&mut store, root, selected, value("changed\0😀".as_bytes())).unwrap();
         assert!(store.writes - before <= 257);
-        assert_eq!(lookup(&mut store, changed, selected), Ok(Some(value("changed\0😀".as_bytes()))));
-        assert_eq!(lookup(&mut store, root, selected), Ok(Some(value(&0u32.to_be_bytes()))));
+        assert_eq!(
+            lookup(&mut store, changed, selected),
+            Ok(Some(value("changed\0😀".as_bytes())))
+        );
+        assert_eq!(
+            lookup(&mut store, root, selected),
+            Ok(Some(value(&0u32.to_be_bytes())))
+        );
         store.nodes.get_mut(&changed).unwrap()[1] ^= 1;
         assert!(lookup(&mut store, changed, selected).is_err());
     }
