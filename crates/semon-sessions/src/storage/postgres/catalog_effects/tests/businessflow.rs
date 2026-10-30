@@ -3113,24 +3113,88 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .values()
             .any(|body| body.to_string().contains("sanitized continuation"))
     );
-    // This handle still names the earlier generation, where the selected row
-    // is Current and must pass its live runtime qualification. The immutable
-    // captured-generation path below retains its separate authority.
-    let stale_current = query
-        .call_bound_selected_at(
-            "read_transcript",
-            &serde_json::json!({"id":prepared.rows[0].key,"limit":100}),
-            1790812802000,
-            &query_store,
-            &retained_host,
-            None,
-        )
-        .unwrap_err();
-    assert_eq!(stale_current.code, "unavailable");
-    assert_eq!(
-        stale_current.message,
-        StorageError::ScopeChanged.to_string(),
-        "the old Current row's runtime receipt must not be refreshed in place"
+    // The old generation keeps its original Current row receipts. Only rows
+    // whose exact source cohort includes the appended file lose current
+    // runtime qualification; unrelated source cohorts retain their witnesses.
+    let mut changed_source_rows = 0;
+    let mut unchanged_source_rows = 0;
+    for row in &prepared.rows {
+        let args = serde_json::json!({"id":row.key,"limit":100});
+        if row
+            .sources
+            .iter()
+            .any(|source| source.path.as_path() == path.as_path())
+        {
+            changed_source_rows += 1;
+            let result = query.call_bound_selected_at(
+                "read_transcript",
+                &args,
+                1790812802000,
+                &query_store,
+                &retained_host,
+                None,
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!(
+                    "changed-source Current body unexpectedly succeeded key={}",
+                    row.key
+                ),
+            };
+            assert!(
+                error.code == "unavailable"
+                    && error.message == StorageError::ScopeChanged.to_string(),
+                "changed-source Current row must refuse with ScopeChanged key={} code={}",
+                row.key,
+                error.code
+            );
+        } else {
+            unchanged_source_rows += 1;
+            let body = query
+                .call_bound_selected_at(
+                    "read_transcript",
+                    &args,
+                    1790812802000,
+                    &query_store,
+                    &retained_host,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "unchanged-source Current body failed key={} code={}",
+                        row.key, error.code
+                    )
+                });
+            let fields = query
+                .call_bound_selected_at(
+                    "get_session",
+                    &serde_json::json!({"id":row.key}),
+                    1790812802000,
+                    &query_store,
+                    &retained_host,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "unchanged-source Current fields failed key={} code={}",
+                        row.key, error.code
+                    )
+                });
+            let actual = serde_json::json!({"body":body,"fields":fields});
+            assert!(
+                actual == expected_bodies[&row.key],
+                "unchanged-source Current body/fields differ from oracle key={}",
+                row.key
+            );
+        }
+    }
+    assert!(
+        changed_source_rows >= 1,
+        "append path must match an original Current source cohort"
+    );
+    assert!(
+        unchanged_source_rows >= 1,
+        "fixture must retain an unaffected Current source cohort"
     );
     assert_eq!(
         captured_bodies(&pool),
