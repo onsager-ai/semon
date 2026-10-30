@@ -24,7 +24,9 @@ fn recovery_catalog_row(
 
 fn recovery_catalog_metadata(db: &rusqlite::Connection, table: &str, key: &str) -> String {
     db.query_row(
-        &format!("SELECT metadata FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"),
+        &format!(
+            "SELECT metadata FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"
+        ),
         [key],
         |row| row.get(0),
     )
@@ -1194,7 +1196,9 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
     normalized_history.query = Some(repaired_query);
     normalized_history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let expected_history_digest = crate::storage::proof_codec::digest(
-        serde_json::to_string(&normalized_history).unwrap().as_bytes(),
+        serde_json::to_string(&normalized_history)
+            .unwrap()
+            .as_bytes(),
     );
     let history_grant_after = recovery_observation_grant(&db, "reused", "history").unwrap();
     assert_eq!(history_grant_after.0, expected_history_digest);
@@ -1218,14 +1222,19 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     .into_test_connection();
     let selected = recovery_catalog_row(&db, "session_catalog", "first");
     let proof_snapshot = recovery_proof_snapshot(&db, "first");
-    assert!(!proof_snapshot.is_empty(), "fixture must have immutable Stage proof");
+    assert!(
+        !proof_snapshot.is_empty(),
+        "fixture must have immutable Stage proof"
+    );
     let stage_grants_before = recovery_stage_observation_grants(&db);
     let preimage_stage_digest = crate::storage::proof_codec::digest(
         recovery_catalog_metadata(&db, "session_catalog", "first").as_bytes(),
     );
-    assert!(stage_grants_before
-        .iter()
-        .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest)));
+    assert!(
+        stage_grants_before
+            .iter()
+            .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest))
+    );
     let direct_grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
     db.execute(
         "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
@@ -1259,17 +1268,22 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     tx.rollback().unwrap();
     assert_eq!(recovery_observation_grant(&db, "first", "catalog"), None);
 
-    assert!(crate::repair_session_overview(
-        &home.options,
-        "local",
-        "first",
-        None,
-        crate::SessionSourceReadMode::LocalThenProvider,
-    )
-    .unwrap());
+    assert!(
+        crate::repair_session_overview(
+            &home.options,
+            "local",
+            "first",
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap()
+    );
 
     let repaired = recovery_catalog_row(&db, "session_catalog", "first");
-    assert_ne!(repaired.query, selected.query, "runtime evidence changed in the real producer");
+    assert_ne!(
+        repaired.query, selected.query,
+        "runtime evidence changed in the real producer"
+    );
     assert_eq!(
         repaired.query.as_ref().unwrap()["source_generation"],
         crate::retention::source_generation(&selected.sources).unwrap()
@@ -1277,9 +1291,7 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     let expected_direct_digest = {
         let mut normalized = repaired.clone();
         normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-        crate::storage::proof_codec::digest(
-            serde_json::to_string(&normalized).unwrap().as_bytes(),
-        )
+        crate::storage::proof_codec::digest(serde_json::to_string(&normalized).unwrap().as_bytes())
     };
     let direct_grant_after = recovery_observation_grant(&db, "first", "catalog").unwrap();
     assert_eq!(direct_grant_after.0, expected_direct_digest);
@@ -1304,10 +1316,7 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 #[test]
 fn recovery_query_row_and_grant_roll_back_when_grant_update_fails() {
     let home = Home::new("recovery-grant-rollback");
-    home.top(
-        "first",
-        &[human("first", ts(1, 0), "atomic query repair")],
-    );
+    home.top("first", &[human("first", ts(1, 0), "atomic query repair")]);
     publish_semantic(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
@@ -1320,9 +1329,7 @@ fn recovery_query_row_and_grant_roll_back_when_grant_update_fails() {
     let grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
     let proof_snapshot = recovery_proof_snapshot(&db, "first");
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
-    let tx = db
-        .unchecked_transaction()
-        .unwrap();
+    let tx = db.unchecked_transaction().unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();
     crate::storage::sqlite::proof_generations::observation_binding(
         &tx,
