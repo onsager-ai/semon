@@ -449,13 +449,24 @@ impl SourceJournal {
 impl SourceObservationStore for SourceJournal {
     fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
         let mut connection = self.writer()?;
-        let db = connection.transaction().map_err(failed)?;
+        let db = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         self.validate(&db)?;
         self.owner.as_ref().ok_or(StorageError::Unavailable)?;
-        // A retained connection is not a committed discovery witness. Run the
-        // bounded durable page until the current producer records completion.
-        drop(db);
-        Ok(false)
+        // EventCache reconciles durable intents before asking for this owner
+        // witness. The scoped marker is the durable cursor; its absence means
+        // there is no recovery page to capture. The immediate transaction also
+        // preserves busy refusal while an owner write is pending.
+        let pending: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        db.commit().map_err(failed)?;
+        Ok(!pending)
     }
 
     fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
@@ -1154,6 +1165,11 @@ mod tests {
     fn finish_operation(namespace: &str, generation: Option<&str>) -> SourceOperation {
         let payload = serde_json::to_vec(&generation).unwrap();
         SourceOperation::capture(namespace, "finish_backfill", &payload)
+    }
+
+    fn recovery_operation(namespace: &str, cursor: Option<&str>) -> SourceOperation {
+        let payload = serde_json::to_vec(&cursor).unwrap();
+        SourceOperation::capture(namespace, "recover", &payload)
     }
 
     fn batch_db() -> Connection {
@@ -2276,5 +2292,95 @@ mod tests {
         );
         let count:i64=db.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE namespace='A' AND source_path='new-epoch'",[],|r|r.get(0)).unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn recovery_marker_fast_path_skips_only_absent_scoped_work() {
+        let f = Fixture::new();
+        let source = crate::storage::HostSource::new(
+            f.config.namespace.clone(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let cache_path = f.root.join("index.json");
+        let options = crate::Options {
+            cache: cache_path.clone(),
+            source: source.clone(),
+            ..crate::Options::default()
+        };
+        let mut cache = EventCache::open_scoped(&cache_path, &source).unwrap();
+        let absent_cursor = recovery_operation("A", None);
+
+        assert!(cache.discover_recovery_sources().unwrap());
+        let db = f.db();
+        let absent_receipt: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND recovery_done IS NOT NULL)",
+                params!["A", absent_cursor.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let absent_intent: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2)",
+                params!["A", absent_cursor.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!absent_receipt);
+        assert!(!absent_intent);
+
+        // A pending owner writer still refuses this otherwise empty check.
+        let blocker = f.db();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(cache.discover_recovery_sources().is_err());
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert!(cache.discover_recovery_sources().unwrap());
+
+        crate::events::store::begin_catalog_recovery(&options, "source-journal-test").unwrap();
+        let present_cursor = recovery_operation("A", Some(""));
+        assert!(cache.discover_recovery_sources().unwrap());
+
+        let present_done: i64 = db
+            .query_row(
+                "SELECT recovery_done FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3",
+                params!["A", present_cursor.id, present_cursor.payload_digest],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let present_intent: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2)",
+                params!["A", present_cursor.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(present_done, 1);
+        assert!(!present_intent);
+
+        let marker_pending: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace='A' AND key='catalog_recovery_after')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!marker_pending);
+        let receipts_before: i64 = db
+            .query_row(
+                "SELECT count(*) FROM source_observation_receipts WHERE namespace='A' AND recovery_done IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cache.discover_recovery_sources().unwrap());
+        let receipts_after: i64 = db
+            .query_row(
+                "SELECT count(*) FROM source_observation_receipts WHERE namespace='A' AND recovery_done IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts_after, receipts_before);
     }
 }
