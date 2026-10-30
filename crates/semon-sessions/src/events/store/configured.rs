@@ -8647,26 +8647,11 @@ mod tests {
         }
 
         #[test]
-        fn configured_semantic_domain61_progressive_index_overflow_is_capacity_not_conflict() {
-            // Use the existing admitted primitive staging profile: unlike the
-            // Current-owner profile, its discovery is not stopped earlier by
-            // the distinct affected-owner source-union guard.
+        fn configured_semantic_domain61_affected_owner_source_capacity_is_not_conflict() {
             let (_home, _, options, _) = model_sources();
             let options = &options[0];
             let f = semantic_fixture("source-a");
-            let capability =
-                crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
-            let mut cache = EventCache::open_semantic(capability).unwrap();
-            assert!(matches!(
-                cache
-                    .store
-                    .as_mut()
-                    .unwrap()
-                    .select_reported_runs(&BTreeSet::new()),
-                Err(StoreError::Configured(
-                    StorageError::NamespaceUpgradePending
-                ))
-            ));
+            let mut cache = f.native_cache();
             let inputs = (0..65)
                 .map(|i| crate::Input {
                     root: crate::InputRoot::Codex,
@@ -8675,8 +8660,8 @@ mod tests {
                 .collect::<Vec<_>>();
             for (i, input) in inputs.iter().enumerate() {
                 // Real duplicate rollouts of one native identity exercise the
-                // header-id discovery index without an unqualified owner or
-                // a fabricated dependency/endpoint row.
+                // header-id discovery index without a fabricated
+                // dependency/endpoint row.
                 write(options, input, "overflow", None);
                 cache
                     .ingest(
@@ -8707,13 +8692,37 @@ mod tests {
                 let before = shared_state(&f);
                 match cache.semantic_batch(64) {
                     Err(error) => {
-                        assert_eq!(error.to_string(), "semantic_component_source_budget");
+                        assert_eq!(
+                            error.to_string(),
+                            "semantic_affected_owner_source_budget"
+                        );
                         assert_eq!(
                             shared_state(&f),
                             before,
-                            "capacity refusal has zero effects"
+                            "capacity refusal rolls back the current transaction"
                         );
-                        assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get::<_,i64>(0)).unwrap(),65);
+                        assert_eq!(
+                            f.db()
+                                .query_row(
+                                    "SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'",
+                                    [],
+                                    |r| r.get::<_, i64>(0),
+                                )
+                                .unwrap(),
+                            65,
+                            "all 65 real sources are enrolled before capacity refusal"
+                        );
+                        assert!(
+                            f.db()
+                                .query_row(
+                                    "SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",
+                                    [],
+                                    |r| r.get::<_, i64>(0),
+                                )
+                                .unwrap()
+                                < 65,
+                            "owner source capacity precedes the component index guard"
+                        );
                         reached = true;
                         break;
                     }
@@ -8746,7 +8755,7 @@ mod tests {
             }
             assert!(
                 reached,
-                "65 real indexed sources must reach typed capacity guard"
+                "65 real sources must reach the affected-owner capacity guard"
             );
             let after = namespace_state(&f, "source-a")
                 .into_iter()
@@ -8754,7 +8763,7 @@ mod tests {
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(
                 after, prior,
-                "exact prior publication survives progressive refusal"
+                "the prior publication survives capacity refusal"
             );
         }
 

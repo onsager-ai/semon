@@ -227,10 +227,10 @@ jobs:
       - name: Native ownership after source replacement
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture
-      - name: Progressive native source capacity refusal
+      - name: Affected-owner source capacity refusal
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls configured_semantic_domain61_progressive_index_overflow_is_capacity_not_conflict -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-capacity.log"
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls configured_semantic_domain61_affected_owner_source_capacity_is_not_conflict -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-capacity.log"
       - name: Retain early native capacity diagnostics
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
