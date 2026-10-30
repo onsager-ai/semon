@@ -44,6 +44,13 @@ namespace/admission/stream observation envelope. Native identities, names,
 reported runs, process evidence and source-CWD repository facts share one derived
 recipe on both engines. CWD metadata comes from an exact ledger in the qualified
 storage snapshot; shared derivation never opens an Options-derived SQLite file.
+Captured runtime observations distinguish the owner, exact source generation and
+canonical typed dependency set, including source-CWD repository dependencies.
+Final Query rows and queryless family endpoints can share an owner and sources
+while retaining distinct observations. Replay derives the same identity from
+the row and captured source-cohort CWDs, independently of saved Query runtime
+strings. Conflicting observations for one identity or CWDs for one source cohort
+refuse capture; the existing 260-observation bound still applies.
 The PostgreSQL producer prepares identity-and-activity-addressed dependency
 digests with its existing current Facts head, so ordinary reads use point keys
 without parsing whole Raw Facts. Immutable presentation manifests capture each

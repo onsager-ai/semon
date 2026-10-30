@@ -7762,11 +7762,13 @@ pub(crate) fn prepare_semantic_batch(
             )
             .take(128)
         {
-            let observed = cache
-                .runtime_source_cwds(&row.sources)
-                .and_then(|cwds| presentation.runtime_observation(row, &cwds));
-            if let Ok(runtime) = observed {
-                presentation.capture_runtime(row, runtime)?;
+            let observed = cache.runtime_source_cwds(&row.sources).and_then(|cwds| {
+                presentation
+                    .runtime_observation(row, &cwds)
+                    .map(|runtime| (runtime, cwds))
+            });
+            if let Ok((runtime, cwds)) = observed {
+                presentation.capture_runtime(row, &cwds, runtime)?;
             }
         }
         prepared.relationships.presentation = Some(presentation);

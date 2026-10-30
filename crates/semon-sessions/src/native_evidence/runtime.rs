@@ -257,6 +257,14 @@ pub(crate) fn dependencies(
     keys
 }
 
+pub(crate) fn dependency_identity(
+    row: &crate::model::summary::CatalogRow,
+    cwds: &BTreeSet<String>,
+) -> io::Result<String> {
+    let bytes = serde_json::to_vec(&dependencies(row, cwds)).map_err(io::Error::other)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 pub(crate) fn scope_parts(parts: &[(RuntimeDependency, Option<String>)]) -> io::Result<String> {
     if !parts
         .iter()
