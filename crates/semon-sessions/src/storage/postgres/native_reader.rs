@@ -262,9 +262,13 @@ pub(super) fn runtime_source_cwds(
         {
             return Err(StorageError::ScopeChanged);
         }
-        let values = rows(tx, "files", "cwd",
+        let values = rows(
+            tx,
+            "files",
+            "cwd",
             "namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)",
-            &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()])?;
+            &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()],
+        )?;
         let value = values.first().ok_or(StorageError::ScopeChanged)?;
         if let Some(cwd) = value.get::<Option<String>>(0).map_err(bad)? {
             cwds.insert(cwd);

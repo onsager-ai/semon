@@ -171,7 +171,11 @@ impl IndexStore for ConfiguredIndex {
         &self,
         sources: &[crate::model::summary::CatalogSource],
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
-        self.semantic.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?
+        self.semantic
+            .as_ref()
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
             .runtime_source_cwds(sources)
     }
     fn prepare_file(

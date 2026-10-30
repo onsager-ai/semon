@@ -984,8 +984,14 @@ impl IndexStore for NativeIndex {
         &self,
         sources: &[crate::model::summary::CatalogSource],
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
-        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control,
-            |tx| super::native_reader::runtime_source_cwds(tx, sources)).map_err(err)
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::native_reader::runtime_source_cwds(tx, sources),
+            )
+            .map_err(err)
     }
     fn query_runtime_binding(
         &self,
