@@ -24,6 +24,7 @@ impl Home {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join("settings.json"),
             codex_home: root.join("codex"),
@@ -49,7 +50,16 @@ impl Home {
     }
 
     fn cache(&self) -> events::EventCache {
-        events::EventCache::open_scoped(&self.options.cache).unwrap()
+        events::EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap()
+    }
+
+    fn writer(&self) -> rusqlite::Connection {
+        let config = self.options.source.config(&self.options.cache).unwrap();
+        let owner = events::store::configured::NativeOwnership::restore(&config).unwrap();
+        let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+        let db = journal.connection().unwrap();
+        journal.validate(&db).unwrap();
+        db
     }
 
     fn observe(
@@ -90,13 +100,13 @@ fn explicit_usage(id: u64, input: u64) -> Value {
 }
 
 #[test]
-fn native_usage_memory_only_reader_keeps_deduplication_until_a_durable_checkpoint() {
+fn native_usage_current_reader_keeps_deduplication_across_durable_checkpoints() {
     let home = Home::new();
     let text = line(json!({"type":"session_meta","payload":{"id":"native"}}))
         + &line(json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}))
         + &line(explicit_usage(1, 7));
     let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
-    let mut cache = events::EventCache::default();
+    let mut cache = home.cache();
     assert_eq!(
         events::scan_file(&path, "codex", &mut cache, &mut false)
             .unwrap()
@@ -115,13 +125,14 @@ fn native_usage_memory_only_reader_keeps_deduplication_until_a_durable_checkpoin
                 .as_bytes(),
         )
         .unwrap();
-    let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    drop(cache);
+    let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
     assert_eq!(index.tokens("codex").input, 18);
     assert_eq!(
         index.tree_summary.as_ref().unwrap().tokens("codex").input,
         18
     );
-    assert!(!events::EventCache::path(&home.options.cache).exists());
+    assert!(events::EventCache::path(&home.options.cache).exists());
 }
 
 #[test]
@@ -140,6 +151,11 @@ fn native_usage_append_work_depends_on_touched_rows_and_pricing_dimensions() {
             json!(index.codex_cost().finish())
         };
         let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        crate::storage::sqlite::catalog_namespace::register(
+            &db,
+            &home.options.source.namespace().unwrap(),
+        )
+        .unwrap();
         db.execute_batch("CREATE TRIGGER facts_immutable BEFORE UPDATE ON native_usage_facts BEGIN SELECT RAISE(ABORT,'old fact rewritten'); END;").unwrap();
         let restored =
             events::store::native_usage::RESTORED_DIMENSION_ROWS.with(std::cell::Cell::get);
@@ -195,7 +211,19 @@ fn native_usage_append_work_depends_on_touched_rows_and_pricing_dimensions() {
             assert!(changed <= previous + 4, "append writes grew with history");
         }
         writes = Some(changed);
-        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT native_offset FROM native_usage_identities WHERE source_id=?1 AND scope='model' AND identity=?2",rusqlite::params![1,"synthetic"],|r|r.get(3)).unwrap();
+        let plan = db
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                events::store::native_usage::SEEN_SQL
+            ))
+            .unwrap()
+            .query_map(rusqlite::params![1, "synthetic"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("; ");
         assert!(
             plan.contains("PRIMARY KEY"),
             "identity lookup scans history: {plan}"
@@ -369,15 +397,15 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     text += &line(json!({"type":"assistant","message":{"id":"m-0","usage":{"input_tokens":9}}}));
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
     collect(&home.options).unwrap();
-    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let db = home.writer();
     db.execute(
-        "DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key LIKE 'native_tree_summary:%'",
         [],
     )
     .unwrap();
-    let revision: String = db
+    let revision: i64 = db
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_source_revision'",
+            "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
             [],
             |r| r.get(0),
         )
@@ -390,15 +418,19 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         let pending = home.cache().advance_tree_repair(&home.options).unwrap();
         steps += 1;
         let cursor: i64 = db
-            .query_row("SELECT cursor FROM native_tree_repairs", [], |r| r.get(0))
+            .query_row(
+                "SELECT cursor FROM native_tree_repairs WHERE namespace=semon_namespace()",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(cursor - previous <= 1024 * 1024 + 32 * 1024 * 1024);
         previous = cursor;
         assert_eq!(
             db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                "SELECT revision FROM storage_source_journal WHERE namespace=semon_namespace()",
                 [],
-                |r| r.get::<_, String>(0)
+                |r| r.get::<_, i64>(0)
             )
             .unwrap(),
             revision
@@ -414,7 +446,7 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     assert!(nodes[0].open_tools.is_empty());
     let root: i64 = db
         .query_row(
-            "SELECT octet_length(value) FROM meta WHERE key=?1",
+            "SELECT octet_length(value) FROM meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{}", path.display())],
             |r| r.get(0),
         )
@@ -435,14 +467,17 @@ fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_gr
             .repeat(count);
         let path = home.write("claude/projects/repo/parent.jsonl", &text);
         let expected = serde_json::to_value(collect(&home.options).unwrap()).unwrap();
-        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        let db = home.writer();
         let rows: i64 = db
             .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, (count + 1) as i64);
         // A tree must not decode transcript rows, even an unsupported row tag.
-        db.execute("UPDATE events SET k='unsupported' WHERE seq=0", [])
-            .unwrap();
+        db.execute(
+            "UPDATE events SET k='unsupported' WHERE namespace=semon_namespace() AND seq=0",
+            [],
+        )
+        .unwrap();
         let reads = events::FILE_READS.with(std::cell::Cell::get);
         let parsed = events::PARSED.with(std::cell::Cell::get);
         for _ in 0..3 {
@@ -632,16 +667,15 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
     );
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
     assert_eq!(collect(&home.options).unwrap()[0].tokens.total, 3);
-    let connection =
-        rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let connection = home.writer();
     let key = format!("native_tree_summary:{}", path.display());
     let parsed = events::PARSED.with(std::cell::Cell::get);
     for change in [
-        "DELETE FROM meta WHERE key=?1",
-        "UPDATE meta SET value='{' WHERE key=?1",
-        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
-        "UPDATE meta SET value=json_set(value,'$.ledger','wrong') WHERE key=?1",
-        "UPDATE meta SET value=printf('%1048577s','x') WHERE key=?1",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value='{' WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=json_set(value,'$.ledger','wrong') WHERE namespace=semon_namespace() AND key=?1",
+        "UPDATE meta SET value=printf('%1048577s','x') WHERE namespace=semon_namespace() AND key=?1",
     ] {
         connection.execute(change, [&key]).unwrap();
         let nodes = collect(&home.options).unwrap();
@@ -650,7 +684,10 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
     }
     connection
-        .execute("DELETE FROM meta WHERE key=?1", [&key])
+        .execute(
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1",
+            [&key],
+        )
         .unwrap();
     fs::OpenOptions::new()
         .append(true)

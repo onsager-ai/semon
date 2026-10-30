@@ -110,6 +110,9 @@ export default async function liveCatalog(browser) {
           assert.equal(await overflow(page), 0);
           assert.deepEqual(retired, []);
           assert.deepEqual(page.errors, []);
+        } catch (error) {
+          console.error('Native fixture output:\n' + fixture.diagnostics());
+          throw error;
         } finally {
           await closePage(page);
         }

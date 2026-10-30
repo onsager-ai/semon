@@ -57,6 +57,18 @@ impl SelectedReadControl {
         Ok(())
     }
 
+    /// Run synchronous selected preparation on the calling thread under this
+    /// request. Hosts enter this scope inside their blocking worker, before
+    /// identity/proof lookup, and retain their cancellation guard until it exits.
+    /// Nested preparation shares the outer request's deadline and accounting.
+    pub fn scope<T>(&self, prepare: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let _scope = Scope::enter(self);
+        check()?;
+        let result = prepare()?;
+        check()?;
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_limits(mut self, rows: usize, bytes: usize) -> Self {
         self.rows = rows;
@@ -80,6 +92,17 @@ thread_local! {
 }
 
 pub(crate) struct Scope(Option<Rc<Budget>>);
+/// Owned request limits for synchronous backend I/O. Never lend the TLS budget
+/// to a driver or retain its row/byte accounting beyond the current call.
+#[cfg(feature = "postgres")]
+pub(crate) fn io_control() -> Option<(Arc<AtomicBool>, Instant)> {
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|budget| (budget.control.cancelled.clone(), budget.control.deadline))
+    })
+}
 impl Scope {
     pub(crate) fn enter(control: &SelectedReadControl) -> Self {
         Self(ACTIVE.with(|active| {

@@ -448,7 +448,9 @@ mod tests {
             home.record()["sidecar"]["metadata"]["label"],
             "After capture"
         );
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         let generation = cache.session_catalog_generation();
         let path = home.meta.clone();
         crate::model::AFTER_SCAN.with(|hook| {
@@ -544,7 +546,9 @@ mod tests {
         }
         let home = Home::new(Some(metadata()));
         arm(home.meta.clone(), 3);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -682,7 +686,9 @@ mod tests {
                 rusqlite::params![home.key(), record],
             )
             .unwrap();
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,

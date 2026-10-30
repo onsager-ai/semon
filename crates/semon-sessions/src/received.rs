@@ -190,6 +190,8 @@ impl ReceivedMachines {
         // Never created: a home that can't be read reads as empty.
         let nowhere = state.join("none");
         Options {
+            source: crate::storage::HostSource::load_or_create(&state.join("source.json"))
+                .expect("received machine Source configuration is unavailable or invalid"),
             claude_home: if seen.claude {
                 root.join("claude")
             } else {
@@ -293,9 +295,9 @@ impl ReceivedMachines {
         // acquire that mutex. Serialize publication under the same facts fence
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
-            let intent =
-                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), &facts)?;
-            crate::write_facts(&copy, &facts)?;
+            let options = self.options(name, seen);
+            let intent = crate::SessionFactsWrite::begin_observed(&options, &facts)?;
+            crate::write_facts(&copy, &facts, &options.source)?;
             intent.complete()
         };
         if let Err(error) = publish() {
@@ -381,7 +383,12 @@ mod tests {
         };
         let mut warned = BTreeSet::new();
         let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
-            crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
+            crate::write_facts(
+                &incoming.join("facts.json"),
+                facts,
+                &Options::default().source,
+            )
+            .unwrap();
             let listing = receiver.scan();
             let seen = listing["synthetic"].as_ref().unwrap();
             receiver.copy_facts("synthetic", seen, &[], warned);

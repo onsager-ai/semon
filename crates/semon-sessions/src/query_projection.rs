@@ -8,6 +8,48 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+/// Retained endpoints must own their field recipes before a later Current
+/// publication can withdraw the other endpoint's relationship observation.
+pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
+    let mut fields = std::collections::BTreeMap::<String, serde_json::Map<String, Value>>::new();
+    for row in rows.iter() {
+        for edge in row
+            .query
+            .as_ref()
+            .into_iter()
+            .flat_map(|query| query["selected"]["edges"].as_array().into_iter().flatten())
+        {
+            let saved = fields
+                .entry(edge["id"].as_str().expect("edge identity").into())
+                .or_default();
+            for (field, recipe) in edge["query_content"].as_object().into_iter().flatten() {
+                if recipe.is_null() {
+                    continue;
+                }
+                if let Some(prior) = saved.insert(field.clone(), recipe.clone())
+                    && prior != *recipe
+                {
+                    return Err(std::io::Error::other(
+                        "Native handoff source recipes disagree",
+                    ));
+                }
+            }
+        }
+    }
+    for row in rows {
+        if let Some(edges) = row
+            .query
+            .as_mut()
+            .and_then(|query| query["selected"]["edges"].as_array_mut())
+        {
+            for edge in edges {
+                edge["query_content"] = json!(fields[edge["id"].as_str().expect("edge identity")]);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     session: Value,
@@ -28,7 +70,7 @@ pub(crate) fn prefix(kind: &str, key: &str) -> String {
     format!("native_query_{kind}:{}:{key}:", key.len())
 }
 pub(crate) fn header(db: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1", [prefix("header",key)], |r|r.get(0)).optional().map(Option::flatten)
+    db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM main.meta WHERE namespace=semon_namespace() AND key=?1", [prefix("header",key)], |r|r.get(0)).optional().map(Option::flatten)
 }
 impl Projection {
     pub(crate) fn capture(session: &Session, turns: &[&Turn], edges: &[&Handoff]) -> Self {
@@ -70,6 +112,21 @@ impl Projection {
             }).collect(),
         }
     }
+    /// Content-free selected recipes, persisted with the same Catalog witness.
+    pub(crate) fn selected_recipe(&self, summary: &Summary) -> Value {
+        let edges: Vec<_> = self
+            .edges
+            .iter()
+            .map(|edge| {
+                let mut edge = edge.clone();
+                edge["query_content"] =
+                    summary.query_recipe(edge["id"].as_str().expect("edge identity"));
+                edge
+            })
+            .collect();
+        json!({"session":self.session,"turns":self.turns,"edges":edges})
+    }
+
     pub(crate) fn virtual_transcript(&mut self, key: &str, transcript: &crate::model::Transcript) {
         self.virtuals.insert(
             key.into(),
@@ -91,7 +148,6 @@ impl Projection {
         &self,
         tx: &Transaction<'_>,
         row: &CatalogRow,
-        summary: &Summary,
         trace: &str,
     ) -> rusqlite::Result<()> {
         let session = serde_json::to_string(&self.session).map_err(data)?;
@@ -101,15 +157,13 @@ impl Projection {
             .map(serde_json::to_string)
             .collect::<Result<_, _>>()
             .map_err(data)?;
-        let edges: Vec<_> = self
-            .edges
+        let edges: Vec<_> = row
+            .query
+            .as_ref()
+            .and_then(|query| query["selected"]["edges"].as_array())
+            .ok_or(rusqlite::Error::InvalidQuery)?
             .iter()
-            .map(|edge| {
-                let mut edge = edge.clone();
-                edge["query_content"] =
-                    summary.query_recipe(edge["id"].as_str().expect("edge identity"));
-                serde_json::to_string(&edge)
-            })
+            .map(serde_json::to_string)
             .collect::<Result<_, _>>()
             .map_err(data)?;
         let source = crate::retention::source_generation(&row.sources).map_err(data)?;
@@ -134,9 +188,11 @@ impl Projection {
         }
         for kind in ["turn", "edge", "virtual", "virtual-slot"] {
             let prefix = prefix(kind, &identity);
-            tx.execute("DELETE FROM meta WHERE key>=?1 AND key<?1||'~'", [prefix])?;
+            tx.execute("DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?1||'~'", [prefix])?;
         }
-        let mut put = tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)")?;
+        let mut put = tx.prepare_cached(
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",
+        )?;
         if complete {
             put.execute(params![prefix("session", &identity), session])?;
             for (order, text) in turns.iter().enumerate() {

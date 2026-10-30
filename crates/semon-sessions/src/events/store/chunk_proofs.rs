@@ -12,11 +12,11 @@ mod published;
 
 /// Own the selected read transaction until the last lazy proof reader drops.
 /// Connections are never returned to a pool with an unfinished transaction.
-pub(crate) struct Snapshot(Mutex<Connection>);
+pub(crate) struct Snapshot(Mutex<Connection>, crate::storage::NativeReaderBinding);
 
 impl Snapshot {
-    pub(crate) fn new(db: Connection) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(db)))
+    pub(crate) fn new(db: Connection, binding: crate::storage::NativeReaderBinding) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(db), binding))
     }
 
     fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
@@ -34,46 +34,7 @@ impl Drop for Snapshot {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Header {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    consumed_offset: Option<u64>,
-    fingerprint: [u8; 32],
-    pages_root: [u8; 32],
-    #[serde(default)]
-    resume: Option<crate::source_chunks::PrefixState>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Page {
-    version: u32,
-    index: usize,
-    hashes: Vec<[u8; 32]>,
-    sha256: String,
-}
-
-impl Page {
-    fn canonical(&self) -> rusqlite::Result<String> {
-        // The witness covers only the page payload, never its own digest.
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            version: u32,
-            index: usize,
-            hashes: &'a [[u8; 32]],
-        }
-        json(&Payload {
-            version: self.version,
-            index: self.index,
-            hashes: &self.hashes,
-        })
-    }
-}
+use crate::events::native_pages::chunks::{Header, Page};
 
 fn prefix(path: &str) -> String {
     // Fixed ASCII keys make exact namespace cleanup independent of path glob
@@ -226,8 +187,7 @@ pub(crate) fn log_header_rejection(
 }
 
 #[cfg(test)]
-pub(crate) fn legacy_change_token_for_test(cache: &Path, path: &str, ledger: &Ledger) {
-    let db = Connection::open(cache).unwrap();
+pub(crate) fn legacy_change_token_for_test(db: &Connection, path: &str, ledger: &Ledger) {
     let key = format!("{}header", prefix(path));
     let encoded: String = db
         .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
@@ -247,7 +207,7 @@ pub(crate) fn legacy_change_token_for_test(cache: &Path, path: &str, ledger: &Le
 pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let encoded: Option<Option<String>> = connection
         .query_row(
-            NATIVE_METADATA_VALUE,
+            native_metadata_value(connection)?,
             [format!("{}header", prefix(path))],
             |row| row.get(0),
         )
@@ -264,10 +224,14 @@ pub(super) fn read(
 ) -> rusqlite::Result<Option<Arc<Chunks>>> {
     let prefix = prefix(path);
     let header: Option<Option<String>> = connection
-        .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
-            crate::selected_read::row(row, 512)?;
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [format!("{prefix}header")],
+            |row| {
+                crate::selected_read::row(row, 512)?;
+                row.get(0)
+            },
+        )
         .optional()?;
     let Some(header) = header
         .flatten()
@@ -284,7 +248,7 @@ pub(super) fn read(
         return Ok(None);
     }
     let mut statement = connection.prepare(
-        "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key"
+        "SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key"
     )?;
     let mut rows = statement.query(params![
         &prefix,
@@ -313,7 +277,12 @@ pub(super) fn read(
             || part.index != page
             || part.hashes.len() != remaining.min(PAGE)
             || remaining == 0
-            || part.sha256 != page_witness(&part.canonical()?)
+            || part.sha256
+                != page_witness(
+                    &part.canonical().map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                )
         {
             return Ok(None);
         }
@@ -336,7 +305,7 @@ pub(super) fn read(
 pub(super) fn header_ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
     let encoded: Option<Option<String>> = c
         .query_row(
-            NATIVE_METADATA_VALUE,
+            native_metadata_value(c)?,
             [format!("{}header", prefix(path))],
             |r| {
                 crate::selected_read::row(r, 512)?;
@@ -391,10 +360,17 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 impl Focused {
     #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        Self::open_with_raw(cache, path, ledger, None)
+        Self::open_with_raw(
+            &super::fixture_reader_binding(cache)?,
+            cache,
+            path,
+            ledger,
+            None,
+        )
     }
 
     pub(crate) fn open_with_raw(
+        binding: &crate::storage::NativeReaderBinding,
         cache: &Path,
         path: &str,
         ledger: &Ledger,
@@ -402,11 +378,17 @@ impl Focused {
     ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
         let result = (|| {
-            let db = super::focused_connection(cache)
+            let db = super::focused_connection(binding)
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-            Self::with_db_inner(Snapshot::new(db), cache, path, ledger, &mut diagnostic)
+            Self::with_db_inner(
+                Snapshot::new(db, binding.clone()),
+                cache,
+                path,
+                ledger,
+                &mut diagnostic,
+            )
         })();
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
@@ -453,22 +435,17 @@ impl Focused {
                 .execute_batch("BEGIN DEFERRED")
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         }
-        if !super::current(&connection)
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
-        {
-            return Err(
-                FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
-            );
-        }
-        super::require_current(&connection)
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+        db.1.validate(&connection, &db.1.config().namespace)
+            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
             diagnostic.index_offset = Some(index.offset);
         }
+        let metadata_value = native_metadata_value(&connection)
+            .map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
         let mut prefix = prefix(path);
         let live: Option<String> = connection
-            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
+            .query_row(metadata_value, [format!("{prefix}header")], |row| {
                 row.get(0)
             })
             .optional()
@@ -486,11 +463,9 @@ impl Focused {
         });
         let retained = published::prefix(path, &crate::source_carrier::ledger_digest(ledger));
         let retained_header: Option<String> = connection
-            .query_row(
-                NATIVE_METADATA_VALUE,
-                [format!("{retained}header")],
-                |row| row.get(0),
-            )
+            .query_row(metadata_value, [format!("{retained}header")], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
             .flatten();
@@ -573,12 +548,12 @@ impl Focused {
             FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof reader unavailable"))
         })?;
         let tx = &*db;
+        let metadata_value = native_metadata_value(tx)
+            .map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
         let header: String = tx
-            .query_row(
-                NATIVE_METADATA_VALUE,
-                [format!("{}header", self.prefix)],
-                |row| row.get(0),
-            )
+            .query_row(metadata_value, [format!("{}header", self.prefix)], |row| {
+                row.get(0)
+            })
             .map_err(|error| proof_db_error(FailureStage::HeaderMissing, error))?;
         if header != self.header {
             return Err(FailureStage::ProofChanged
@@ -593,7 +568,7 @@ impl Focused {
         {
             let witness: Option<String> = tx
                 .query_row(
-                    "SELECT json_extract(value,'$.sha256') FROM meta WHERE key=?1",
+                    "SELECT json_extract(value,'$.sha256') FROM meta WHERE namespace=semon_namespace() AND key=?1",
                     [format!("{}{page:010}", self.prefix)],
                     |r| r.get(0),
                 )
@@ -610,7 +585,7 @@ impl Focused {
         }
         let encoded: String = tx
             .query_row(
-                NATIVE_METADATA_VALUE,
+                metadata_value,
                 [format!("{}{page:010}", self.prefix)],
                 |row| row.get(0),
             )
@@ -648,7 +623,7 @@ impl Focused {
                 } else {
                     let encoded: String = tx
                         .query_row(
-                            NATIVE_METADATA_VALUE,
+                            metadata_value,
                             [format!(
                                 "native_proof_tree:{}:{level:03}:{sibling_at:010}",
                                 self.prefix
@@ -752,16 +727,20 @@ fn page_witness(page: &str) -> String {
     format!("{:x}", Sha256::digest(page.as_bytes()))
 }
 
+pub(super) fn preserve(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
+    published::preserve(transaction, path)
+}
+
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
     transaction.execute(
-        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
     let namespace = format!("native_proof_tree:{prefix}:");
     transaction.execute(
-        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&namespace, format!("{namespace}~")],
     )?;
     Ok(())
@@ -803,101 +782,46 @@ pub(super) fn write_measured(
     published::preserve(transaction, path)?;
     measurements.record("chunks_prefix", started, 1);
     let started = measurements.start();
-    let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    let mut put = transaction.prepare_cached("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("chunks_prepare", started, 1);
-    let mut leaves = Vec::new();
-    for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
-        let started = measurements.start();
-        let key = format!("{prefix}{index:010}");
-        let mut value = Page {
-            version: 1,
-            index,
-            hashes: hashes.to_vec(),
-            sha256: String::new(),
-        };
-        let encoded = value.canonical()?;
-        measurements.record("chunks_page_serialization", started, 1);
+    let plan = crate::events::native_pages::chunks::plan(ledger, chunks)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    for (index, encoded) in plan.pages.iter().enumerate() {
         measurements.count("chunks_page_bytes", encoded.len());
-        measurements.count("chunks_hashes", hashes.len());
-        let started = measurements.start();
-        leaves.push(<[u8; 32]>::from(Sha256::digest(encoded.as_bytes())));
-        value.sha256 = page_witness(&encoded);
-        let encoded = json(&value)?;
-        put.execute(params![key, encoded])?;
-        measurements.record("chunks_page_sql", started, 1);
+        put.execute(params![format!("{prefix}{index:010}"), encoded])?;
     }
-    let mut nodes = leaves;
-    let mut level = 0;
-    let pages_root = loop {
+    for (level, nodes) in plan.tree.iter().enumerate() {
         for (at, node) in nodes.iter().enumerate() {
             put.execute(params![
                 format!("native_proof_tree:{prefix}:{level:03}:{at:010}"),
-                json(node)?
+                node
             ])?;
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
         transaction.execute(
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
             params![
                 format!("{namespace}{:010}", nodes.len()),
                 format!("{namespace}~")
             ],
         )?;
-        if nodes.len() <= 1 {
-            break nodes
-                .first()
-                .copied()
-                .unwrap_or_else(|| Sha256::digest([]).into());
-        }
-        nodes = nodes
-            .chunks(2)
-            .map(|pair| tree_parent(&pair[0], pair.get(1).unwrap_or(&pair[0])))
-            .collect();
-        level += 1;
-    };
+    }
     transaction.execute(
-        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![
-            format!("native_proof_tree:{prefix}:{:03}:", level + 1),
+            format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()),
             format!("native_proof_tree:{prefix}:~")
         ],
     )?;
-    let started = measurements.start();
     measurements.cleanup(
         transaction,
         &prefix,
-        || chunks.hashes.len().div_ceil(PAGE),
+        || plan.pages.len(),
         &crate::native_timing::CHUNKS_CLEANUP,
     )?;
-    measurements.record("chunks_cleanup_sql", started, 1);
-    let key = format!("{prefix}header");
-    let header = Header {
-        version: 1,
-        parser_version: CACHE_VERSION,
-        ledger: {
-            let started = measurements.start();
-            let value = header_ledger(ledger);
-            measurements.record("chunks_header_ledger", started, 1);
-            value
-        },
-        count: chunks.hashes.len(),
-        consumed_offset: Some(ledger.offset),
-        fingerprint: {
-            let started = measurements.start();
-            let value = chunks.fingerprint();
-            measurements.record("chunks_header_fingerprint", started, 1);
-            value
-        },
-        pages_root,
-        resume: chunks.resume.clone(),
-    };
-    let started = measurements.start();
-    let encoded = json(&header)?;
-    measurements.record("chunks_header_serialization", started, 1);
-    measurements.count("chunks_header_bytes", encoded.len());
-    let started = measurements.start();
-    put.execute(params![key, &encoded])?;
-    measurements.record("chunks_header_sql", started, 1);
+    measurements.count("chunks_header_bytes", plan.header.len());
+    put.execute(params![format!("{prefix}header"), plan.header])?;
     Ok(())
 }
 
@@ -951,6 +875,12 @@ mod tests {
             let root = cleanup_root();
             let path = root.join("index.sqlite3");
             let mut store = cleanup_store(&root, "index.sqlite3");
+            // Fixture writes target physical metadata through the existing
+            // owned writer; the scoped reader exposes a read-only view.
+            store.connection =
+                crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                    .connection()
+                    .unwrap();
             let bytes = vec![b'x'; crate::source_chunks::SIZE];
             let (ledger, mut index) = cleanup_proof(1, 0);
             index.source_chunks = Some(Arc::new(Chunks {
@@ -1252,7 +1182,9 @@ mod tests {
         // Low-level proof tests use an in-memory meta table. Keep the tables
         // queried by published::preserve present, as they are after a real
         // Index open/migration, while leaving the reference set empty.
-        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .execute_batch(super::COMPOSITE_CATALOG_SCHEMA)
+            .unwrap();
         connection
             .execute_batch(crate::history_projection::SCHEMA)
             .unwrap();
@@ -1434,13 +1366,18 @@ mod tests {
         let root = cleanup_root();
         let path = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         let (ledger, index) = cleanup_proof(1, 0);
         let retained =
             published::prefix("original", &crate::source_carrier::ledger_digest(&ledger));
         let tx = store.connection.transaction().unwrap();
         write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
         let live = format!("{}header", prefix("original"));
-        tx.execute("INSERT INTO meta(key,value) SELECT ?1,json_set(value,'$.parser_version',?2) FROM meta WHERE key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
+        tx.execute("INSERT INTO meta(namespace,key,value) SELECT semon_meta_scope(?1),?1,json_set(value,'$.parser_version',?2) FROM meta WHERE namespace=semon_namespace() AND key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
         tx.commit().unwrap();
         let reader = Focused::open(&path, "original", &ledger).unwrap();
         assert_eq!(reader.prefix, prefix("original"));
@@ -1450,10 +1387,10 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name)) {
-            Ok((store, _)) => store,
-            Err(error) => panic!("real Index schema: {error}"),
-        }
+        crate::events::store::current_test_store(
+            &root.join(name),
+            &crate::events::store::fixture_namespace(),
+        )
     }
 
     fn cleanup_proof(count: usize, byte: u8) -> (Ledger, FileIndex) {

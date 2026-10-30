@@ -165,7 +165,7 @@ impl FactsSource {
     pub fn new(options: &crate::Options) -> Self {
         Self {
             options: options.clone(),
-            cache: EventCache::open(&options.cache),
+            cache: EventCache::open(&options.cache, &options.source),
             dirty: false,
         }
     }
@@ -176,7 +176,7 @@ impl FactsSource {
             .cache
             .as_mut()
             .map_err(|error| io::Error::other(error.clone()))?;
-        cache.refresh_reported_runs(&self.options.claude_json, model::now_ms(), &mut self.dirty);
+        cache.refresh_reported_runs(&self.options.claude_json, model::now_ms(), &mut self.dirty)?;
         collect_facts(&self.options, cache, &mut self.dirty)
     }
 
@@ -589,6 +589,86 @@ fn run_of(environ: &[u8]) -> Option<BTreeMap<String, String>> {
     Some(run)
 }
 
+/// Pure selectors shared by physical Facts journal adapters.
+pub(crate) struct Changes {
+    pub(crate) global: bool,
+    pub(crate) native: std::collections::BTreeSet<(String, String)>,
+    pub(crate) pids: std::collections::BTreeSet<u32>,
+    pub(crate) repos: std::collections::BTreeSet<String>,
+}
+pub(crate) fn changes(before: &Facts, after: &Facts) -> Changes {
+    let mut native = std::collections::BTreeSet::new();
+    for id in before.codex_locks.keys().chain(after.codex_locks.keys()) {
+        if before.codex_locks.get(id) != after.codex_locks.get(id) {
+            native.insert(("codex".into(), id.clone()));
+        }
+    }
+    let names = |facts: &Facts| {
+        facts
+            .native_names
+            .iter()
+            .map(|n| {
+                (
+                    (n.harness.clone(), n.native_id.clone()),
+                    (
+                        n.name.clone(),
+                        n.source.clone(),
+                        n.updated_at.clone(),
+                        n.freshness.clone(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let old = names(before);
+    let new = names(after);
+    for key in old.keys().chain(new.keys()) {
+        if old.get(key) != new.get(key) {
+            native.insert(key.clone());
+        }
+    }
+    for run in before.reported_runs.iter().chain(&after.reported_runs) {
+        if before.reported_runs.contains(run) != after.reported_runs.contains(run) {
+            native.insert(("claude".into(), run.last_session_id.clone()));
+        }
+    }
+    let pids = before
+        .proc_starts
+        .keys()
+        .chain(after.proc_starts.keys())
+        .chain(before.runs.keys())
+        .chain(after.runs.keys())
+        .chain(before.process_ancestors.keys())
+        .chain(after.process_ancestors.keys())
+        .filter(|p| {
+            before.proc_starts.get(*p) != after.proc_starts.get(*p)
+                || before.runs.get(*p) != after.runs.get(*p)
+                || before.process_ancestors.get(*p) != after.process_ancestors.get(*p)
+        })
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for (id, pid) in before.codex_locks.iter().chain(&after.codex_locks) {
+        if pids.contains(pid) {
+            native.insert(("codex".into(), id.clone()));
+        }
+    }
+    let repos = before
+        .repos
+        .keys()
+        .chain(after.repos.keys())
+        .filter(|p| before.repos.get(*p) != after.repos.get(*p))
+        .cloned()
+        .collect();
+    Changes {
+        global: before.hostname != after.hostname
+            || before.home != after.home
+            || before.offline_since != after.offline_since,
+        native,
+        pids,
+        repos,
+    }
+}
+
 /// Reads a facts file written by [`write_facts`] (or received as JSON).
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
     let mut file = fs::File::open(path)?;
@@ -597,23 +677,34 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
     file.read_to_end(&mut bytes)?;
     let facts = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    // This legacy/full observation already reads all facts. It may repair a
-    // missing derived index; focused reads never use it as a fallback.
-    if let Some(identity) = before
-        && source_authority::Identity::of(&file.metadata()?)
-            .ok()
-            .as_ref()
-            == Some(&identity)
-        && source_authority::CurrentSources::open(path).is_err()
-    {
-        let _ = source_authority::publish(path, &facts, &identity);
+    // Reading canonical Facts is backend-neutral. Derived source authority is
+    // published explicitly by write_facts; a read must never repair SQLite.
+    if before.is_some() && source_authority::Identity::of(&file.metadata()?).ok() != before {
+        return Err(io::Error::other("Facts changed during observation"));
     }
     Ok(facts)
 }
 
-/// Writes facts as JSON, atomically.
-pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
+/// Writes canonical Facts atomically using the host's backend selection.
+/// PG preparation is journaled by SessionFactsWrite and
+/// consumed by its ordinary producer, without a SQLite projection side effect.
+pub fn write_facts(
+    path: &Path,
+    facts: &Facts,
+    source: &crate::storage::HostSource,
+) -> io::Result<()> {
     let file = crate::save_json_file(path, facts)?;
+    #[cfg(feature = "postgres")]
+    if source.selected_store().is_some_and(|config| {
+        matches!(
+            config.backend,
+            crate::storage::StoreBackend::Postgres { .. }
+        )
+    }) {
+        return Ok(());
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = source;
     if let Ok(metadata) = file.metadata()
         && let Ok(identity) = source_authority::Identity::of(&metadata)
     {
@@ -676,6 +767,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -711,6 +803,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -773,6 +866,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let options = crate::Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),

@@ -1,5 +1,7 @@
 # Native session source readers
 
+See the [native storage contract and partial port inventory](session-storage-contract.md)
+for the #478 backend boundary and explicit remaining work.
 Public addresses use [session identity and URLs](session-identity-and-urls.md).
 
 `SessionSourceReader` is a provider-neutral per-request callback for native
@@ -118,6 +120,43 @@ leaves the ordinary producer responsible for completing the upgrade.
 
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 
+Hosts prepare identity and captured proofs inside
+`request.scope(|| { /* synchronous preparation returning io::Result */ })`
+on their existing blocking worker. Create the request and its cancellation guard
+before spawning that worker and retain the guard until it exits. This enters
+the same thread-local budget used by selected reads; PostgreSQL identity and
+proof lookups bind its cancellation/deadline before metadata SQL. Nested scopes
+retain the outer request and accounting. The scope grants no source authority.
+
+`StoreConfig::call_captured_query_at(options, machine, generation, tool, args,
+now, request, provider)` enters that same request control before PostgreSQL
+metadata admission. The scope spans binding SQL, host factory admission, leased
+proof/body rendering and the final check. `machine` is the external host Machine
+key, independent of the Source namespace; the factory receives the admitted
+namespace and canonical selected key. Captured session Machine labels use the
+external key. Captured reads still require `all=true` and qualified history;
+they never revive an expired live runtime. Public Query arguments are validated
+before applying the host's typed Machine label; internal rendering fields are
+not accepted in caller-supplied JSON.
+
+Selected projection-upgrade requests dispatch through the configured store.
+Both engines persist the same namespace-owned `slot_upgrade_selected` point
+key: a sorted unique JSON array of at most 64 paths and 32 KiB. During draining,
+pending reads probe only these paths' existing invalidation claims, ordered by
+revision and path, before returning to the ordinary indexed queue. Scheduling
+validates selected archive witnesses and preserves existing claim revisions;
+the ordinary producer alone publishes and acknowledges completion. PostgreSQL
+fences the scheduling write against the observed Catalog head and source epoch.
+There is no native-meta prefix scan, Raw I/O under its SQL lock, or SQLite open
+on this PostgreSQL route. Complete pending-state transfer must preserve this
+marker unchanged; that transfer remains unqualified.
+
+Retained Query metadata keeps its original lifecycle observation. Whether a
+selected query requires a live runtime follows membership in the requested
+generation's Current Catalog, matching SQLite's current lifecycle check.
+Qualified retained-only bodies continue to require the leased native proofs
+and host Raw authority; an expired live Current context still refuses.
+
 The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent. The replay path charges raw body bytes eightfold before buffering and parsed line bytes eightfold again, plus fixed event/catalog costs, against that same 64 MiB budget. Its effective raw-body replay ceiling is therefore about 4 MiB before those other costs, often less; the separate 64 MiB raw I/O ceiling is not an availability promise for replay. A long selected owner can return unavailable during complete preparation even when its requested transcript page is small. Narrowing turns or page size, or a time window that still includes the same complete source, does not reduce complete Index preparation; excluding source files can. The normal generation-bound native paged transcript/tool path remains available for long sessions and does not become complete-history replay.
 
 The native-line oracle requests bounded chunks, pins generation and length,
@@ -137,6 +176,62 @@ selected FileIndex decode must not become the normal per-page fallback.
 This audit describes the pre-repair implementation. A confirmed diagnostic defect is distinct from a reachable publication interleaving, and neither establishes the live HP Code 1 failure without stage evidence. The sanitized 2026-10-21 05:21 UTC sample selected 27,751,814 consumed bytes and returned `size_grew`; it did not sample Raw length, Index ledger or proof header in a common snapshot.
 
 Raw owns physical bytes. Receiver `SessionSourceWrite` withdraws append trust before mutation and completes after fsync under its publication fence. The durable mutation/invalidation journals retain generation-bound evidence and monotonically increasing claims across restart. These mechanisms protect against acknowledged-but-unindexed writes; they do not make Raw, Index and Catalog one transaction. Unjournaled local writes retain conservative verification.
+
+The private PostgreSQL SourceWrite/FactsWrite ports preserve these same boundaries.
+Their completion `io::Result<()>` acknowledges the durable Raw/Facts observation and
+persisted catch-up work; it does not promise NativeReady or Catalog readiness.
+Native `EventReceipt` is returned only by the ordinary native-ingest transaction,
+which commits its rows, ledger and immutable byte proof atomically. Catalog's
+separate publication acknowledgement remains generation and claim fenced.
+
+An embedding host binds its existing `Options.source` with
+`HostSource::with_store(StoreConfig) -> Result<HostSource, StorageError>`.
+The supplied namespace and expected stream epoch must equal that Source's
+host-owned identity. Physical placement is not serialized into `source.json`.
+The bound Options are shared by `SessionSourceWrite::begin`,
+`SessionFactsWrite::begin`, `SessionSourceRelocation::begin`,
+`SessionCatalogObserver::{new,with_pool}`, and `SessionSources::with_machines`.
+`SessionSources::with_configured_machines` applies this same binding rather than
+creating a separate reader-only placement. A backend error is returned without
+opening a different engine. Hosts supply their existing authorized PG pool;
+construction grants no Raw custody or reader authorization.
+
+Canonical Facts producers call
+`write_facts(path: &Path, facts: &Facts, source: &HostSource)` with that same
+Options Source between `SessionFactsWrite::begin` and `complete`. The SQLite
+producer keeps its identity-qualified `.sources.sqlite` projection; PG writes
+only canonical Raw here, and the ordinary PG producer prepares its bounded
+header/member projection. A caller must not discard the host selection by
+substituting a standalone Source. Both CatalogSnapshot and IndexStore require
+an explicit Facts authority implementation; neither chooses SQLite by default.
+
+PG Catalog rendering borrows the Facts header/member authority from its leased
+snapshot, so it neither opens `.sources.sqlite` nor acquires another pool slot.
+Generic PG Query body calls without a host reader refuse. Hosts read bodies
+through `call_catalog` with their `CatalogReaderFactory`, or `call_selected`
+with the authorized Source reader. This wiring remains under qualification;
+it does not establish complete backend, migration or rollback readiness.
+
+An explicitly captured PG publication uses `StoreConfig::call_captured_query_at`.
+Before entering that body lease, a host can call `captured_source_proof_at` with
+the same publication, canonical owner key and exact `SessionSourceRef`. It
+qualifies the admitted immutable recipe, its persisted Native header and exact
+source metadata without reading Raw bytes or opening SQLite. It opens the
+configured physical path without following links and returns the current
+descriptor's device, inode, size and clocks, requiring the same inode and enough
+bytes to cover the captured prefix. Those current stats qualify the host's copy
+identity; the exact historical reference remains unchanged. Its `retained` freshness describes the
+captured observation, not current runtime or host custody. The body read qualifies
+the persisted Native proof and still requires independent host authorization and
+byte-generation checks. An expired live reader remains expired.
+
+PG namespace enrollment records its exact admission receipt under the host's
+stream epoch in the same transaction as admission or retirement.
+`StoreConfig::observe_namespace_admission` reads that receipt without changing
+admission, including after retirement and re-enrollment with another epoch.
+An unknown receipt returns `None`: callers retain their pending intent rather
+than minting a replacement witness or declaring an uncertain operation complete.
+Exact unenrollment replay is idempotent; stale generations and epochs still fail.
 
 The incremental parser owns the complete-record consumed boundary and prefix/tail digests in its ledger. Partial EOF records are outside that boundary; a cold checkpoint may consume approximately 4 MiB plus one complete long record. Persisted chunk continuation checks the old prefix before resuming. Index ledger CAS and physical rechecks protect parsing/commit races. Raw may lead Index without making its unconsumed suffix readable.
 
@@ -243,6 +338,14 @@ A host may explicitly advertise `global_union: true`, `source_key: ""` and
 transcript and control reads always require a concrete source. Existing focused
 Catalog contracts, filters and cursors remain unchanged.
 
+For admitted PG sources sharing the authorized pool, global selection uses one
+bounded metadata SQL page before source-specific presentation. Storage checks
+and SELECT-only RLS scope use each `StoreConfig.namespace`; the independent
+public `OverviewSource.key` remains the Machine label and ordering/cursor key.
+Machine IDs need not equal Source UUIDs. `no_repo=1` parses as the exact empty-repo
+predicate and is applied before SQL LIMIT. Workspace scope grants neither
+cross-Source writes nor Native proof/Raw reads.
+
 Workspace cursors bind the workspace, normalized metadata filters, source set
 and every Catalog generation. Ordering is descending recorded activity, then
 ascending session key and machine key. Source changes return `stale_cursor`,
@@ -331,39 +434,31 @@ claim and the native allowlist.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 34 with parser/cache version 29 in one
-transaction, including pricing fingerprints and native usage readiness default
-0. Schema 34 includes the scheduling indexes and fences the retired proof/tree/usage
-representations as one contract.
-Normal writable producer opens (complete and scoped/background) automatically
-clear a recognized obsolete Semon index and initialize the current empty schema;
-normal native collection then reindexes supported original sources. This is
-whole-index invalidation, with no old-schema reader, conversion or migration.
+The Event Index initializes namespace-owned schema 34 with parser/cache version
+29 in one transaction, including the namespace-prefixed NOCASE scheduling
+indexes, pricing fingerprints and native usage readiness default 0. Both the
+standalone host and configured hosts now use this same admitted Source contract.
+There is no separate unscoped derived-index initializer or obsolete-cache reset.
 
-Recognition requires Semon's existing canonical parser metadata, stable
-`files`/`events` columns and an exclusively Semon-owned table/trigger namespace.
-At least one recognized schema, parser, publication/search, semantic recipe or
-archive-marker version must be older, and none may be newer or unrecognized.
-The current DDL and the retired `native_usage_migrations`,
-`native_tree_copy_queue` and `session_search_postings` table names delimit the
-owned namespace; unknown tables/views/triggers make ownership ambiguous.
-Nonempty schema zero, missing/malformed metadata, ambiguous or foreign databases,
-and future contracts remain refused without reset. Selected/focused readers
-retain their existing read-only qualification and never trigger invalidation.
+Producer and selected-reader opens accept only the current contract. A fresh
+empty database initializes atomically; an existing unsupported schema, parser,
+publication or archive contract is refused before schema, journal or recovery
+writes. Current required tables, indexes and triggers, loader columns,
+application ID and WAL journal mode are qualified before admission. Selected
+readers inspect only the current contract and their selected archive marker,
+preserving bounded work under unrelated retained history.
 
-Reset and empty initialization share one SQLite immediate writer transaction,
-with reclassification under the lock. Concurrent producers cannot reset a newly
-rebuilt store again; existing WAL readers keep their prior snapshots. No index,
-WAL or SHM file is unlinked, and existing private-file handling remains in place.
-Only the exact configured SQLite derived index is cleared. Native logs, archive
-objects, credentials, unrelated files and retired JSON caches remain untouched.
+Refusal preserves native bytes, retained history, reported facts, archive
+custody and foreign state, including old schema 33 and its live WAL. It never
+turns unavailable originals into empty history. Removing the former private
+obsolete-index initializer does not authorize reset or deletion. Current-format
+cross-engine transfer, catch-up, fenced cutover and qualified rollback remain
+separate requirements of #477.
+
+Fresh initialization retains exclusion through its first WAL switch, then
+reopens with normal locking. Valid current stores reopen without repair DDL;
+existing WAL readers retain their snapshots during concurrent publication.
 Physical corruption retains its existing set-aside/recovery behavior.
-
-Reindexing cannot recover history, retained recipes or reported facts whose
-original supported native source bytes are gone or inaccessible. Archive bytes
-are preserved but old derived archive markers are not converted into new read
-authority; an authorized source/provider must supply supported original bytes.
-Unsupported stores still propagate errors rather than empty in-memory history.
 
 Current native usage writes persist the normalized source facts and dimensions
 with the ledger. Tree writes maintain copied-usage identities through the current

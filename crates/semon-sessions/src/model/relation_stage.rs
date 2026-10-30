@@ -15,20 +15,39 @@ pub(crate) struct Withdrawal {
     pub(crate) facts_path: PathBuf,
     pub(crate) facts_identity: crate::facts::source_authority::Identity,
     pub(crate) runtime: String,
+    #[serde(skip)]
+    pub(crate) authority:
+        Option<std::sync::Arc<std::sync::Mutex<crate::facts::source_authority::Sources>>>,
 }
 
 impl Withdrawal {
-    pub(crate) fn authority_current(&self) -> io::Result<bool> {
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
-        let identity =
-            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(&self.facts_path)?)?;
-        if identity != self.facts_identity || !authority.selection_known() {
-            return Ok(false);
+    fn with_authority<T>(
+        &self,
+        read: impl FnOnce(&crate::facts::source_authority::Sources) -> io::Result<T>,
+    ) -> io::Result<T> {
+        if let Some(source) = &self.authority {
+            let source = source
+                .lock()
+                .map_err(|_| io::Error::other("Facts authority unavailable"))?;
+            read(&source)
+        } else {
+            read(&crate::facts::source_authority::Sources::sqlite(
+                &self.facts_path,
+            )?)
         }
-        authority.validate()?;
-        Ok(true)
     }
-
+    pub(crate) fn authority_current(&self) -> io::Result<bool> {
+        self.with_authority(|authority| {
+            let identity = crate::facts::source_authority::Identity::of(&fs::symlink_metadata(
+                &self.facts_path,
+            )?)?;
+            if identity != self.facts_identity || !authority.selection_known() {
+                return Ok(false);
+            }
+            authority.validate()?;
+            Ok(true)
+        })
+    }
     pub(crate) fn current(&self) -> io::Result<bool> {
         if !crate::is_input_path("codex", &self.relative)
             || !self.relative.ends_with(".jsonl")
@@ -41,9 +60,11 @@ impl Withdrawal {
         if before != self.stat {
             return Ok(false);
         }
-        let authority = crate::facts::source_authority::CurrentSources::open(&self.facts_path)?;
-        let withdrawn = authority.codex_current(&self.relative)? == Some(false);
-        authority.validate()?;
+        let withdrawn = self.with_authority(|authority| {
+            let withdrawn = authority.codex_current(&self.relative)? == Some(false);
+            authority.validate()?;
+            Ok(withdrawn)
+        })?;
         let current_source = crate::open_input(Path::new(&self.path))?;
         Ok(withdrawn
             && crate::events::Stat::from_metadata(&source.metadata()?)? == before
@@ -76,6 +97,10 @@ pub(crate) struct Batch {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Context {
+    /// Private producer witness, carried once through record/publication. It is
+    /// not relationship protocol metadata or part of any public Catalog row.
+    #[serde(skip)]
+    pub(crate) presentation: Option<crate::storage::selected::PresentationObservations>,
     pub(crate) epoch: Option<i64>,
     pub(crate) endpoints: BTreeMap<String, Endpoint>,
     pub(crate) relations: BTreeMap<String, Relation>,
@@ -86,6 +111,146 @@ pub(crate) struct Context {
     pub(crate) matching_locations: Option<Vec<Location>>,
     /// Final replay reads incident relationships in bounded, read-only pages.
     pub(crate) replay_owners: Vec<String>,
+    /// Captured Current owners, not authority inferred from SQL absence.
+    pub(crate) prior_owners: BTreeMap<String, summary::CatalogRow>,
+    /// Exact outgoing observations included in the durable model witness.
+    pub(crate) retired_owners: Vec<summary::CatalogRow>,
+    pub(crate) lifecycle_authority: Option<LifecycleAuthority>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LifecycleAuthority {
+    pub(crate) facts: Option<(PathBuf, crate::facts::source_authority::Identity)>,
+    pub(crate) facts_activity: Option<String>,
+    pub(crate) source: crate::storage::HostSource,
+    pub(crate) claude_home: PathBuf,
+    pub(crate) claude_json: PathBuf,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) copilot_home: PathBuf,
+    pub(crate) proc_root: PathBuf,
+    pub(crate) runtime: String,
+}
+
+impl LifecycleAuthority {
+    pub(crate) fn capture(options: &Options, cache: &EventCache) -> io::Result<Self> {
+        let facts = options
+            .facts
+            .as_ref()
+            .map(|path| {
+                let source = cache.facts_authority(path)?;
+                if !source.facts_known() {
+                    return Err(io::Error::other("Facts authority unavailable"));
+                }
+                source.validate()?;
+                Ok::<_, io::Error>((
+                    path.clone(),
+                    crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?,
+                ))
+            })
+            .transpose()?;
+        let authority = Self {
+            facts_activity: options
+                .facts
+                .as_ref()
+                .map(|_| crate::native_evidence::recorded_activity_generation(options))
+                .transpose()?,
+            facts,
+            source: options.source.clone(),
+            claude_home: options.claude_home.clone(),
+            claude_json: options.claude_json.clone(),
+            codex_home: options.codex_home.clone(),
+            copilot_home: options.copilot_home.clone(),
+            proc_root: options.proc_root.clone(),
+            runtime: crate::native_evidence::query_runtime_generation(options)?,
+        };
+        if !authority.current()? {
+            return Err(io::Error::other(
+                "semantic_affected_owner_authority_changed",
+            ));
+        }
+        Ok(authority)
+    }
+    pub(crate) fn current(&self) -> io::Result<bool> {
+        if let Some((path, identity)) = &self.facts
+            && crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
+                != *identity
+        {
+            return Ok(false);
+        }
+        // Both modes recheck the same captured runtime inputs as the producer.
+        // No host configuration, EventCache or storage engine is opened here.
+        let options = Options {
+            source: self.source.clone(),
+            facts: self.facts.as_ref().map(|(path, _)| path.clone()),
+            claude_home: self.claude_home.clone(),
+            claude_json: self.claude_json.clone(),
+            codex_home: self.codex_home.clone(),
+            copilot_home: self.copilot_home.clone(),
+            proc_root: self.proc_root.clone(),
+            cache: PathBuf::new(),
+            all: true,
+            since: std::time::Duration::ZERO,
+            session: None,
+            scan_window: false,
+        };
+        // An unchanged exact canonical descriptor preserves all Facts fields,
+        // not just its version. Only the independent runtime files can change.
+        let runtime_current = if self.facts.is_some() {
+            self.facts_activity.as_ref()
+                == Some(&crate::native_evidence::recorded_activity_generation(
+                    &options,
+                )?)
+        } else {
+            crate::native_evidence::query_runtime_generation(&options)? == self.runtime
+        };
+        let mut current = runtime_current;
+        if let Some((path, identity)) = &self.facts {
+            current &= crate::facts::source_authority::Identity::of(&fs::symlink_metadata(path)?)?
+                == *identity;
+        }
+        Ok(current)
+    }
+}
+
+/// Physical lookup port for a bounded affected-owner closure. This traverses
+/// recorded ownership only; native identity and relationships are still reduced
+/// by the existing parser/matcher over the resulting complete Raw cohort.
+pub(crate) trait LifecycleStore {
+    fn path_owners(&self, path: &str) -> io::Result<Vec<String>>;
+    fn owner(&self, key: &str) -> io::Result<summary::CatalogRow>;
+    fn neighbors(&self, key: &str) -> io::Result<Vec<String>>;
+}
+
+pub(crate) fn affected_owners(
+    store: &impl LifecycleStore,
+    paths: &[String],
+) -> io::Result<BTreeMap<String, summary::CatalogRow>> {
+    let mut pending = BTreeSet::new();
+    for path in paths {
+        pending.extend(store.path_owners(path)?);
+    }
+    let mut owners = BTreeMap::new();
+    let mut bytes = 0usize;
+    while let Some(key) = pending.pop_first() {
+        if owners.contains_key(&key) {
+            continue;
+        }
+        if owners.len() == 64 {
+            return Err(io::Error::other("semantic_affected_owner_budget"));
+        }
+        let row = store.owner(&key)?;
+        if row.key != key || row.sources.is_empty() || row.sources.len() > 64 {
+            return Err(io::Error::other("semantic_affected_owner_invalid"));
+        }
+        bytes = bytes.saturating_add(serde_json::to_vec(&row)?.len());
+        if bytes > 1048576 {
+            return Err(io::Error::other("semantic_affected_owner_bytes"));
+        }
+        pending.extend(store.neighbors(&key)?);
+        owners.insert(key, row);
+    }
+    Ok(owners)
 }
 
 pub(crate) struct RelationOrigin {
@@ -131,6 +296,182 @@ pub(crate) struct Selection {
     pub(crate) endpoint: Option<Endpoint>,
     pub(crate) location: Option<Location>,
     pub(crate) key: Option<String>,
+}
+
+/// Bounded physical lookups only. Native matching and selection assembly live
+/// in `select_with`, shared by ordinary and admitted stores.
+pub(crate) trait SelectorLookup {
+    type Error;
+    fn invalid(&self, message: &'static str) -> Self::Error;
+    fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
+    fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
+    fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
+    fn event_metadata(&self, path: &str, key: &str) -> Result<Option<String>, Self::Error>;
+    fn event_owner(&self, path: &str) -> Result<String, Self::Error>;
+    fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, Self::Error>;
+    fn root_alive(&self, key: &str) -> Result<bool, Self::Error>;
+    fn name_candidates(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn name_hints(&self, name: &str) -> Result<Vec<String>, Self::Error>;
+    fn request_members_replay(&mut self, keys: Vec<String>) -> Result<(), Self::Error>;
+    fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_relay(&self, root: &str, target: &str) -> Result<Vec<String>, Self::Error>;
+    fn codex_wait(
+        &self,
+        root: &str,
+        target: &str,
+        exclude: &str,
+    ) -> Result<Vec<String>, Self::Error>;
+}
+
+/// Names only schedule native membership observation. They never supply an
+/// endpoint or establish a negative selection result.
+pub(crate) fn replay_members_with<E>(
+    keys: &[String],
+    invalid: impl Fn() -> E,
+    mut queue: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    if keys.len() > 64 || keys.iter().map(String::len).sum::<usize>() > 1048576 {
+        return Err(invalid());
+    }
+    for key in keys {
+        queue(key)?;
+    }
+    Ok(())
+}
+
+/// Persist native-derived name hints through the adapter's owned dependency
+/// family. The current Catalog membership qualifies their use at lookup time.
+pub(crate) fn native_name_hints_with<E>(
+    endpoint: &Endpoint,
+    invalid: impl Fn() -> E,
+    mut put: impl FnMut(&str, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    if endpoint.row.harness == "claude" {
+        if endpoint
+            .names
+            .len()
+            .saturating_mul(endpoint.row.sources.len())
+            > 64
+        {
+            return Err(invalid());
+        }
+        for source in &endpoint.row.sources {
+            for name in &endpoint.names {
+                put(source.path.to_string_lossy().as_ref(), name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
+
+pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
+    text: Option<String>,
+    used: &mut usize,
+) -> io::Result<T> {
+    let text = text.ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    *used = used
+        .checked_add(text.len())
+        .ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
+    if *used > 1048576 {
+        return Err(io::Error::other("semantic_selector_metadata_budget"));
+    }
+    serde_json::from_str(&text).map_err(io::Error::other)
+}
+
+pub(crate) fn selector_event<P: SelectorLookup>(
+    port: &P,
+    text: Option<String>,
+    used: &mut usize,
+) -> Result<NativeEvent, P::Error> {
+    let mut native: NativeEvent = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
+    Ok(native)
+}
+
+pub(crate) fn selector_endpoint<P: SelectorLookup>(
+    port: &P,
+    key: &str,
+    used: &mut usize,
+    require_root: bool,
+) -> Result<Endpoint, P::Error> {
+    let (text, parent, root) = port.endpoint_row(key)?;
+    if require_root && root.is_none() {
+        return Err(port.invalid("semantic_selector_root_missing"));
+    }
+    let mut endpoint: Endpoint = selector_metadata(text, used)
+        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+    endpoint.parent = parent.clone();
+    endpoint.row.parent = parent;
+    endpoint.root = root.unwrap_or_else(|| key.to_owned());
+    endpoint.root_alive = port.root_alive(&endpoint.root)?;
+    Ok(endpoint)
+}
+
+pub(crate) fn select_with<P: SelectorLookup>(
+    port: &mut P,
+    selector: &Selector,
+) -> Result<Selection, P::Error> {
+    let (keys, endpoint) = match selector {
+        Selector::NativeKey { native, harness } => return port.native_key(native, harness),
+        Selector::ClaudeReceipt { id } => {
+            let Some(text) = port.receipt_first(id)? else {
+                return Ok(Selection::default());
+            };
+            let native = selector_event(port, text, &mut 0)?;
+            return Ok(Selection {
+                count: 1,
+                location: Some(native.at),
+                ..Default::default()
+            });
+        }
+        Selector::ClaudeCall { id } => {
+            let keys = port.call_owners(id)?;
+            if keys.len() != 1 {
+                return Ok(Selection {
+                    count: keys.len(),
+                    ..Default::default()
+                });
+            }
+            let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
+            let mut used = 0;
+            let native = selector_event(port, text, &mut used)?;
+            let endpoint = selector_endpoint(port, &native.owner, &mut used, false)?;
+            return Ok(Selection {
+                count: 1,
+                endpoint: Some(endpoint),
+                location: Some(native.at),
+                ..Default::default()
+            });
+        }
+        Selector::ClaudeName { name } => {
+            let hints = port.name_hints(name)?;
+            if !hints.is_empty() {
+                port.request_members_replay(hints)?;
+                return Err(port.invalid("native name companion requires semantic replay"));
+            }
+            (port.name_candidates(name)?, true)
+        }
+        Selector::CodexSibling { parent, task } => (port.codex_sibling(parent, task)?, false),
+        Selector::CodexRelay { root, target } => (port.codex_relay(root, target)?, true),
+        Selector::CodexWait {
+            root,
+            target,
+            exclude,
+        } => (port.codex_wait(root, target, exclude)?, true),
+    };
+    let found = if endpoint && keys.len() == 1 {
+        Some(selector_endpoint(port, &keys[0], &mut 0, true)?)
+    } else {
+        None
+    };
+    Ok(Selection {
+        count: keys.len(),
+        endpoint: found,
+        ..Default::default()
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,6 +599,54 @@ pub(crate) struct Stub {
     pub(crate) last: i64,
 }
 
+/// Physical owner effects. The native model and its observations stay shared;
+/// an adapter receives typed values inside the caller's fenced transaction.
+pub(crate) trait OwnerStore {
+    type Error;
+    fn endpoint(&self, endpoint: &Endpoint) -> Result<(), Self::Error>;
+    fn relation(&self, relation: &Relation) -> Result<(), Self::Error>;
+    fn dependency(&self, path: &str, harness: &str, native: &str) -> Result<(), Self::Error>;
+    fn withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Self::Error>;
+    fn retire(&self, key: &str, withdrawal: bool) -> Result<(), Self::Error>;
+}
+
+impl Relation {
+    /// Same exact comparison and physical-sender witness merge for every store.
+    pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
+        let witness = prior
+            .source_turn
+            .merge(&self.source_turn)
+            .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+        let mut before = prior.clone();
+        let mut merged = self.clone();
+        before.source_turn = OriginTurn::default();
+        merged.source_turn = OriginTurn::default();
+        let before = serde_json::to_value(before)?;
+        let after = serde_json::to_value(&merged)?;
+        if before != after {
+            let before = before
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let after = after
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let fields = before
+                .keys()
+                .chain(after.keys())
+                .filter(|key| before.get(*key) != after.get(*key))
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            return Err(io::Error::other(format!(
+                "conflicting staged native relationship: kind={} fields={}",
+                self.kind,
+                fields.into_iter().collect::<Vec<_>>().join(",")
+            )));
+        }
+        merged.source_turn = witness;
+        Ok(merged)
+    }
+}
+
 fn static_state(value: &str) -> io::Result<&'static str> {
     match value {
         "new" => Ok("new"),
@@ -305,7 +694,7 @@ fn preview_kind(value: &str) -> io::Result<&'static str> {
 }
 
 #[derive(Debug)]
-struct SourceGenerationChanged;
+pub(super) struct SourceGenerationChanged;
 
 impl std::fmt::Display for SourceGenerationChanged {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -578,6 +967,26 @@ impl Context {
                         })
                         .collect(),
                     order: {
+                        let outgoing = builder.placed.iter().find_map(|(at, entries)| {
+                            entries
+                                .iter()
+                                .any(|(handoff, place)| *handoff == index && *place == Place::Out)
+                                .then_some(*at)
+                        });
+                        let receipt = builder.placed.iter().find_map(|(at, entries)| {
+                            (h.out.kind == "relay"
+                                && outgoing.is_none()
+                                && h.previews.as_ref().is_some_and(|previews| {
+                                    previews.values().any(|preview| {
+                                        matches!(preview.kind, "received_cross" | "received_agent")
+                                    })
+                                })
+                                && builder.files[at.0].harness() == "claude"
+                                && entries.iter().any(|(handoff, place)| {
+                                    *handoff == index && *place == Place::In
+                                }))
+                            .then_some(*at)
+                        });
                         let owner = if h.out.kind == "spawn" {
                             h.out.to.as_ref().unwrap_or(&h.out.from)
                         } else {
@@ -590,22 +999,25 @@ impl Context {
                         ) {
                             ("spawn", Some("claude")) => 0,
                             ("spawn", _) => 1,
+                            ("relay", _) if receipt.is_some() => 3,
                             ("relay", Some("claude")) => 2,
-                            _ => 3,
+                            _ => 4,
                         };
                         let first = endpoint
                             .and_then(|endpoint| endpoint.row.start)
                             .unwrap_or(i64::MAX);
-                        let path = endpoint
-                            .and_then(|endpoint| endpoint.row.sources.first())
-                            .map(|source| source.path.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let location = builder.placed.iter().find_map(|(at, entries)| {
-                            entries
-                                .iter()
-                                .any(|(handoff, place)| *handoff == index && *place == Place::Out)
-                                .then(|| event(builder.files, *at))
-                        });
+                        // Ordinary relays draw all orphan receipts after sends,
+                        // sorted by native receipt key, never by the hashed id.
+                        let path = receipt.map_or_else(
+                            || {
+                                endpoint
+                                    .and_then(|endpoint| endpoint.row.sources.first())
+                                    .map(|source| source.path.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            },
+                            |at| builder.orphan_relay_source(at),
+                        );
+                        let location = outgoing.map(|at| event(builder.files, at));
                         (
                             phase,
                             if h.out.kind == "spawn" { first } else { 0 },

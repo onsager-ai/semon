@@ -1,44 +1,20 @@
 //! Bounded paged native launch locations in the existing index metadata region.
 use super::*;
 use crate::native_handoff::{CallRef, Index};
-use crate::native_record::Record;
 use std::collections::VecDeque;
 
 const PAGE: usize = 256;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Header {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    complete: usize,
-    count: usize,
-    eof_record: Option<Record>,
-    complete_bytes: usize,
-    eof_bytes: usize,
-    fingerprint: [u8; 32],
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Page {
-    version: u32,
-    index: usize,
-    calls: Vec<CallRef>,
-}
+use crate::events::native_pages::launch::{Header, Page};
 
 fn prefix(path: &str) -> String {
     format!("native_launch_calls:{:x}:", Sha256::digest(path.as_bytes()))
-}
-fn fingerprint(index: &Index) -> rusqlite::Result<[u8; 32]> {
-    Ok(Sha256::digest(json(index)?.as_bytes()).into())
 }
 
 pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let text: Option<Option<String>> = connection
         .query_row(
-            NATIVE_METADATA_VALUE,
+            native_metadata_value(connection)?,
             [format!("{}header", prefix(path))],
             |row| row.get(0),
         )
@@ -51,7 +27,7 @@ pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Op
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let prefix = prefix(path);
     transaction.execute(
-        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
     Ok(())
@@ -64,10 +40,14 @@ pub(super) fn read(
 ) -> rusqlite::Result<Option<Index>> {
     let prefix = prefix(path);
     let text: Option<Option<String>> = connection
-        .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
-            crate::selected_read::row(row, 512)?;
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [format!("{prefix}header")],
+            |row| {
+                crate::selected_read::row(row, 512)?;
+                row.get(0)
+            },
+        )
         .optional()?;
     let Some(header) = text
         .flatten()
@@ -84,7 +64,7 @@ pub(super) fn read(
     {
         return Ok(None);
     }
-    let mut statement = connection.prepare("SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")?;
+    let mut statement = connection.prepare("SELECT key, CASE WHEN length(CAST(value AS BLOB))<=?3 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 ORDER BY key")?;
     let mut rows = statement.query(params![
         &prefix,
         format!("{prefix}~"),
@@ -121,18 +101,8 @@ pub(super) fn read(
     if calls.len() != header.count {
         return Ok(None);
     }
-    let eof = calls.split_off(header.complete);
-    let index = Index {
-        complete: calls,
-        eof,
-        eof_record: header.eof_record,
-        complete_bytes: header.complete_bytes,
-        eof_bytes: header.eof_bytes,
-    };
-    if !index.valid(ledger) || fingerprint(&index)? != header.fingerprint {
-        return Ok(None);
-    }
-    Ok(Some(index))
+    crate::events::native_pages::launch::restore(header, calls, ledger)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 pub(super) fn write(
@@ -170,67 +140,28 @@ pub(super) fn write_measured(
     let prefix = prefix(path);
     measurements.record("launch_prefix", started, 1);
     let started = measurements.start();
-    let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    let mut put = transaction.prepare_cached("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("launch_prepare", started, 1);
     let started = measurements.start();
-    let calls: Vec<_> = index.complete.iter().chain(&index.eof).cloned().collect();
-    measurements.record("launch_call_clone", started, 1);
-    measurements.count("launch_calls", calls.len());
-    for (page, calls) in calls.chunks(PAGE).enumerate() {
-        let started = measurements.start();
-        let encoded = json(&Page {
-            version: 1,
-            index: page,
-            calls: calls.to_vec(),
-        })?;
-        measurements.record("launch_page_serialization", started, 1);
+    let Some(plan) = crate::events::native_pages::launch::plan(ledger, index)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+    else {
+        return clear(transaction, path);
+    };
+    measurements.record("launch_page_serialization", started, plan.pages.len());
+    measurements.count("launch_calls", index.complete.len() + index.eof.len());
+    for (page, encoded) in plan.pages.iter().enumerate() {
         measurements.count("launch_page_bytes", encoded.len());
-        if encoded.len() > NATIVE_METADATA_MAX {
-            let started = measurements.start();
-            let result = clear(transaction, path);
-            measurements.record("launch_clear", started, 1);
-            return result;
-        }
-        let started = measurements.start();
         put.execute(params![format!("{prefix}{page:010}"), encoded])?;
-        measurements.record("launch_page_sql", started, 1);
     }
-    let started = measurements.start();
     measurements.cleanup(
         transaction,
         &prefix,
-        || calls.len().div_ceil(PAGE),
+        || plan.pages.len(),
         &crate::native_timing::LAUNCH_CLEANUP,
     )?;
-    measurements.record("launch_cleanup_sql", started, 1);
-    let header = Header {
-        version: 1,
-        parser_version: CACHE_VERSION,
-        ledger: {
-            let started = measurements.start();
-            let value = header_ledger(ledger);
-            measurements.record("launch_header_ledger", started, 1);
-            value
-        },
-        complete: index.complete.len(),
-        count: calls.len(),
-        eof_record: index.eof_record.clone(),
-        complete_bytes: index.complete_bytes,
-        eof_bytes: index.eof_bytes,
-        fingerprint: {
-            let started = measurements.start();
-            let value = fingerprint(index)?;
-            measurements.record("launch_header_fingerprint", started, 1);
-            value
-        },
-    };
-    let started = measurements.start();
-    let encoded = json(&header)?;
-    measurements.record("launch_header_serialization", started, 1);
-    measurements.count("launch_header_bytes", encoded.len());
-    let started = measurements.start();
-    put.execute(params![format!("{prefix}header"), encoded])?;
-    measurements.record("launch_header_sql", started, 1);
+    measurements.count("launch_header_bytes", plan.header.len());
+    put.execute(params![format!("{prefix}header"), plan.header])?;
     Ok(())
 }
 
@@ -253,10 +184,10 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name)) {
-            Ok((store, _)) => store,
-            Err(error) => panic!("real Index schema: {error}"),
-        }
+        crate::events::store::current_test_store(
+            &root.join(name),
+            &crate::events::store::fixture_namespace(),
+        )
     }
 
     fn cleanup_proof(count: usize, version: u8) -> (Ledger, FileIndex) {

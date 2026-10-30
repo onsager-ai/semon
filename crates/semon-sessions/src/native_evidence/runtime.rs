@@ -1,7 +1,7 @@
 //! Query observation fences for a row's runtime dependencies. This is a
 //! fingerprint, never runtime or control authority, and reads no transcripts.
 use super::*;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "scoped-v1:";
@@ -22,6 +22,22 @@ impl ScopedRuntimeObservations {
     }
 }
 impl RuntimeObservations {
+    /// Configured producers/readers use the captured aggregate runtime under a
+    /// validated logical fence. They never reopen an Options-derived database.
+    pub(crate) fn bound(
+        binding: &crate::storage::QueryRuntimeBinding,
+        runtime: &str,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            facts: None,
+            local: false,
+            pids: BTreeMap::new(),
+            names: BTreeMap::new(),
+            runs: BTreeMap::new(),
+            connection: None,
+            fallback: Some(binding.witness(runtime)?),
+        })
+    }
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }
@@ -98,11 +114,7 @@ impl RuntimeObservations {
         }
         measurements.record("runtime_ctor_indices", started, 1);
         let started = measurements.start();
-        let connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok();
+        let connection = crate::events::store::local_reader(options).ok();
         measurements.record("runtime_ctor_connection", started, 1);
         Self {
             facts,

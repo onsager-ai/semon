@@ -27,7 +27,6 @@ enum Command {
 
 /// The agent homes, `/proc`, cache and facts `semon sessions` reads, or
 /// several machines' homes.
-#[derive(Default)]
 struct HomeArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' native session homes.
@@ -38,6 +37,14 @@ struct HomeArgs {
 }
 
 impl HomeArgs {
+    fn from_host() -> Result<Self, String> {
+        Ok(Self {
+            options: semon_sessions::Options::from_host().map_err(|error| error.to_string())?,
+            machines: Vec::new(),
+            window: None,
+        })
+    }
+
     /// Takes one of the home options, `semon sessions`' names for them;
     /// `false` when `argument` isn't one.
     fn take(
@@ -70,15 +77,18 @@ impl HomeArgs {
 
     /// The read surface over these homes, within the window: `--since`,
     /// 30 days by default, or everything with `--all`.
-    fn query(&self) -> semon_sessions::Query {
+    fn query(&self) -> Result<semon_sessions::Query, String> {
         let options = semon_sessions::Options {
             since: self.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
             ..self.options.clone()
         };
         if self.machines.is_empty() {
-            semon_sessions::Query::new(options)
+            Ok(semon_sessions::Query::new(options))
         } else {
-            semon_sessions::Query::with_machines(machine_options(&options, &self.machines))
+            Ok(semon_sessions::Query::with_machines(machine_options(
+                &options,
+                &self.machines,
+            )?))
         }
     }
 }
@@ -137,7 +147,7 @@ fn parse_args() -> Result<Command, String> {
 fn parse_sessions_args(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<SessionsArgs, String> {
-    let mut options = semon_sessions::Options::default();
+    let mut options = semon_sessions::Options::from_host().map_err(|error| error.to_string())?;
     let mut json = false;
     let mut watch = false;
     let mut serve = false;
@@ -227,7 +237,7 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
     let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
         return Err(format!("unknown tool: {tool}\n{}", query_usage()));
     };
-    let mut home = HomeArgs::default();
+    let mut home = HomeArgs::from_host()?;
     let mut json = false;
     let mut values = serde_json::Map::new();
     while let Some(argument) = arguments.next() {
@@ -286,7 +296,7 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
 }
 
 fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArgs, String> {
-    let mut home = HomeArgs::default();
+    let mut home = HomeArgs::from_host()?;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -306,7 +316,7 @@ fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArg
 }
 
 fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushArgs, String> {
-    let mut sessions = semon_sessions::Options::default();
+    let mut sessions = semon_sessions::Options::from_host().map_err(|error| error.to_string())?;
     let mut url = None;
     let mut token_file = None;
     let mut state = None;
@@ -693,12 +703,16 @@ fn print_received(args: &SessionsArgs, dir: &Path) -> Result<(), String> {
 fn machine_options(
     options: &semon_sessions::Options,
     machines: &[PathBuf],
-) -> Vec<(String, semon_sessions::Options)> {
+) -> Result<Vec<(String, semon_sessions::Options)>, String> {
     machines
         .iter()
         .map(|dir| {
             let facts = dir.join("facts.json");
             let options = semon_sessions::Options {
+                source: semon_sessions::storage::HostSource::load_or_create(
+                    &dir.join(".semon/source.json"),
+                )
+                .map_err(|error| error.to_string())?,
                 claude_home: dir.join("claude"),
                 codex_home: dir.join("codex"),
                 copilot_home: dir.join("copilot"),
@@ -707,7 +721,7 @@ fn machine_options(
                 facts: facts.is_file().then_some(facts),
                 ..options.clone()
             };
-            (dir.display().to_string(), options)
+            Ok((dir.display().to_string(), options))
         })
         .collect()
 }
@@ -791,7 +805,7 @@ fn run_control(args: Vec<String>) -> Result<(), String> {
         copilot_home: home.join("absent-copilot"),
         cache: home.join("semon-index.json"),
         all: true,
-        ..Default::default()
+        ..semon_sessions::Options::from_host().map_err(|error| error.to_string())?
     };
     semon_sessions::serve_with_control(
         semon_sessions::ServeOptions {
@@ -821,7 +835,7 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     }
     if args.serve {
         return semon_sessions::serve(semon_sessions::ServeOptions {
-            machines: machine_options(&args.options, &args.machines),
+            machines: machine_options(&args.options, &args.machines)?,
             received: None,
             sessions: args.options,
             listen: args.listen,
@@ -832,7 +846,7 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
         let mut core = semon_sessions::ViewerCore::with_machines(machine_options(
             &args.options,
             &args.machines,
-        ));
+        )?);
         return print_route(&mut core, "/api/tree", "the tree of these machines");
     }
     loop {
@@ -857,7 +871,7 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
 /// A failure goes to stderr (and, with `--json`, as a JSON error on stdout)
 /// and exits nonzero.
 fn run_query(args: QueryArgs) -> Result<(), String> {
-    let mut query = args.home.query();
+    let mut query = args.home.query()?;
     match query.call(&args.tool, &args.arguments) {
         Ok(value) => {
             if args.json {
@@ -881,7 +895,7 @@ fn run_query(args: QueryArgs) -> Result<(), String> {
 
 /// The read surface as an MCP server on stdin and stdout, until stdin ends.
 fn run_mcp(home: &HomeArgs) -> Result<(), String> {
-    let mut query = home.query();
+    let mut query = home.query()?;
     semon_sessions::serve_mcp(&mut query, io::stdin().lock(), io::stdout().lock())
         .map_err(|error| error.to_string())
 }

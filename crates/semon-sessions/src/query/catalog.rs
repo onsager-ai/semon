@@ -1,8 +1,9 @@
 //! Exact summaries from the native Catalog publication. Source text is resolved
 //! only for returned open questions, using the existing native preview reader.
 use super::*;
-use crate::events::EventCache;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+#[cfg(test)]
+pub(super) use crate::storage::query::{WORK, Work};
+use crate::storage::{LogicalSourceNamespace, query::Part};
 
 pub(super) fn list_response(
     mut rows: Vec<Value>,
@@ -70,324 +71,8 @@ pub(super) fn stall_response(
     json!({"now":now,"idle_minutes":idle_minutes,"rule":STALL_RULE,"stalls":rows})
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Work {
-    pub metadata: usize,
-    pub edges: usize,
-    pub turns: usize,
-    pub vm_steps: i32,
-}
-#[cfg(test)]
-thread_local! { pub(super) static WORK: std::cell::Cell<Work> = const {std::cell::Cell::new(Work {metadata:0,edges:0,turns:0,vm_steps:0})}; }
-#[cfg(test)]
-fn measured(metadata: usize, edges: usize, turns: usize, vm_steps: i32) {
-    WORK.with(|work| {
-        let prior = work.get();
-        work.set(Work {
-            metadata: prior.metadata + metadata,
-            edges: prior.edges + edges,
-            turns: prior.turns + turns,
-            vm_steps: prior.vm_steps + vm_steps,
-        });
-    });
-}
-
-struct Part {
-    generation: String,
-    runtime: String,
-    rows: BTreeMap<String, Value>,
-    owners: BTreeMap<String, String>,
-    content: BTreeMap<String, String>,
-    witnesses: Vec<(String, String)>,
-    edges: BTreeSet<String>,
-    turns: BTreeSet<String>,
-}
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
-}
-fn generation(db: &Connection) -> Result<String, QueryError> {
-    db.query_row(
-        "SELECT value FROM meta WHERE key='catalog_generation'",
-        [],
-        |row| row.get(0),
-    )
-    .map_err(unavailable)
-}
-fn open(options: &Options) -> Result<Connection, QueryError> {
-    let db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(unavailable)?;
-    crate::events::store::require_current(&db).map_err(unavailable)?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(unavailable)?;
-    Ok(db)
-}
-fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
-    let db = open(options)?;
-    db.execute_batch("BEGIN").map_err(unavailable)?;
-    crate::events::store::require_current(&db).map_err(unavailable)?;
-    let generation = generation(&db)?;
-    let ready: bool = db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)",rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
-    if !ready {
-        return Err(unavailable("Native Catalog publication is incomplete"));
-    }
-    let runtime = crate::native_evidence::query_runtime_generation(options)
-        .map_err(|error| QueryError::io(&error))?;
-    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
-    let cutoff = (!options.all)
-        .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
-    let base_sql = if cutoff.is_some() {
-        "SELECT session_key FROM session_catalog WHERE last_ms>=?1 UNION SELECT session_key FROM session_catalog WHERE json_extract(metadata,'$.query.last')>=?1 UNION SELECT session_key FROM session_catalog WHERE lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait') UNION SELECT session_key FROM session_history_catalog WHERE json_extract(metadata,'$.query.last')>=?1"
-    } else {
-        "SELECT session_key FROM session_catalog"
-    };
-    let mut base = db.prepare(base_sql).map_err(unavailable)?;
-    let mut keep: BTreeSet<String> = base
-        .query_map(rusqlite::params_from_iter(cutoff), |row| row.get(0))
-        .map_err(unavailable)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(unavailable)?;
-    #[cfg(test)]
-    measured(0, 0, 0, base.get_status(rusqlite::StatementStatus::VmStep));
-    drop(base);
-    let mut needed = keep.clone();
-    let mut edges = BTreeSet::new();
-    let mut turns = BTreeSet::new();
-    let edge_select = "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges";
-    let edge_sql = if cutoff.is_some() {
-        format!(
-            "{edge_select} WHERE json_extract(metadata,'$.at')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.done')>=?1 UNION {edge_select} WHERE json_extract(metadata,'$.status') IN ('work','wait','new')"
-        )
-    } else {
-        edge_select.to_owned()
-    };
-    let mut edge = db.prepare(&edge_sql).map_err(unavailable)?;
-    for item in edge
-        .query_map(rusqlite::params_from_iter(cutoff), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })
-        .map_err(unavailable)?
-    {
-        let (owner, id, from, to) = item.map_err(unavailable)?;
-        #[cfg(test)]
-        measured(0, 1, 0, 0);
-        spend(
-            bytes_left,
-            owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len),
-        )?;
-        needed.insert(owner);
-        edges.insert(id);
-        keep.insert(from);
-        keep.extend(to.filter(|to| to != "you"));
-    }
-    #[cfg(test)]
-    measured(0, 0, 0, edge.get_status(rusqlite::StatementStatus::VmStep));
-    drop(edge);
-    let initially_kept = keep.clone();
-    let turn_select = "SELECT turn_id,CASE WHEN octet_length(metadata)<=65536 THEN json_object('start',json_extract(metadata,'$.start'),'sent',json_extract(metadata,'$.sent')) ELSE NULL END FROM session_trace_turns WHERE session_key=?1";
-    let turn_sql = if cutoff.is_some() {
-        format!(
-            "{turn_select} AND json_extract(metadata,'$.last')=1 UNION {turn_select} AND json_extract(metadata,'$.at')>=?2"
-        )
-    } else {
-        turn_select.to_owned()
-    };
-    let mut recent = db.prepare(&turn_sql).map_err(unavailable)?;
-    let mut endpoint = db.prepare("SELECT json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2").map_err(unavailable)?;
-    for owner in &initially_kept {
-        let params: Vec<rusqlite::types::Value> = std::iter::once(owner.clone().into())
-            .chain(cutoff.map(Into::into))
-            .collect();
-        for item in recent
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })
-            .map_err(unavailable)?
-        {
-            let (id, links) = item.map_err(unavailable)?;
-            #[cfg(test)]
-            measured(0, 0, 1, 0);
-            let links = links.ok_or_else(|| unavailable("Turn context exceeds its bound"))?;
-            spend(bytes_left, id.len() + links.len())?;
-            turns.insert(id);
-            let links: Value = serde_json::from_str(&links).map_err(unavailable)?;
-            for id in links["start"].as_str().into_iter().chain(
-                links["sent"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str),
-            ) {
-                if edges.insert(id.to_owned())
-                    && let Some((from, to)) = endpoint
-                        .query_row(rusqlite::params![owner, id], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                        })
-                        .optional()
-                        .map_err(unavailable)?
-                {
-                    keep.insert(from);
-                    keep.extend(to.filter(|to| to != "you"));
-                }
-            }
-        }
-    }
-    #[cfg(test)]
-    measured(
-        0,
-        0,
-        0,
-        recent.get_status(rusqlite::StatementStatus::VmStep)
-            + endpoint.get_status(rusqlite::StatementStatus::VmStep),
-    );
-    drop(recent);
-    drop(endpoint);
-    needed.extend(keep.iter().cloned());
-    let mut rows = BTreeMap::new();
-    let mut owners = BTreeMap::new();
-    let mut content = BTreeMap::new();
-    let mut witnesses = Vec::new();
-    let mut metadata = db.prepare("SELECT c.lifecycle,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),hc.session_key IS NOT NULL FROM session_catalog c LEFT JOIN session_history_catalog hc USING(session_key) LEFT JOIN session_trace_headers h USING(session_key) WHERE c.session_key=?1").map_err(unavailable)?;
-    for key in needed {
-        let record = metadata
-            .query_row([&key], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, bool>(4)?,
-                ))
-            })
-            .optional()
-            .map_err(unavailable)?;
-        let Some((lifecycle, current, history, version, has_history)) = record else {
-            continue;
-        };
-        #[cfg(test)]
-        measured(1, 0, 0, 0);
-        let text = if has_history { history } else { current };
-        let text = text.ok_or_else(|| unavailable("Catalog metadata exceeds its bound"))?;
-        spend(bytes_left, text.len())?;
-        let row: crate::model::summary::CatalogRow =
-            serde_json::from_str(&text).map_err(unavailable)?;
-        if row.key != key {
-            return Err(unavailable("Catalog metadata identity changed"));
-        }
-        if row.sources.is_empty()
-            || row.sources.len() > 64
-            || row.sources.iter().any(|source| {
-                crate::catalog::source_relative(options, &row.harness, source).is_none()
-            })
-        {
-            return Err(unavailable(
-                "Catalog sources are outside configured native authority",
-            ));
-        }
-        let row_runtime = runtime_observations.expected(&row);
-        let saved = row
-            .query
-            .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;
-        if !crate::model::summary::query_observation_matches(
-            &saved,
-            &row.sources,
-            lifecycle == "current",
-            row_runtime.as_deref(),
-        )
-        .map_err(unavailable)?
-        {
-            return Err(unavailable(
-                "Native Query observations changed; retry after publication",
-            ));
-        }
-        witnesses.push((key.clone(), saved.to_string()));
-        let summaries = saved["rows"]
-            .as_object()
-            .ok_or_else(|| unavailable("Invalid Catalog summaries"))?;
-        if !summaries.contains_key(&key) {
-            return Err(unavailable("Catalog summary ownership changed"));
-        }
-        for (id, saved) in summaries.iter().filter(|(id, _)| keep.contains(*id)) {
-            let mut saved = saved.clone();
-            if saved["summary"]["id"] != *id {
-                return Err(unavailable("Catalog summary identity changed"));
-            }
-            if lifecycle != "current" {
-                saved["summary"]["alive"] = Value::Null;
-                saved["summary"]["run"] = Value::Null;
-                if matches!(
-                    saved["summary"]["state"].as_str(),
-                    Some("working" | "waiting-question")
-                ) {
-                    saved["summary"]["state"] = json!("unknown");
-                    saved["summary"]["open_question"] = Value::Null;
-                }
-            }
-            if let Some(prior) = rows.get(id)
-                && prior != &saved
-            {
-                return Err(unavailable("Catalog relationship observations disagree"));
-            }
-            rows.insert(id.clone(), saved);
-            owners.entry(id.clone()).or_insert_with(|| key.clone());
-        }
-        if let Some(version) = version {
-            content.insert(key, version);
-        }
-    }
-    #[cfg(test)]
-    measured(
-        0,
-        0,
-        0,
-        metadata.get_status(rusqlite::StatementStatus::VmStep),
-    );
-    drop(metadata);
-    if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
-        return Err(unavailable("Catalog relationship context is unavailable"));
-    }
-    db.execute_batch("COMMIT").map_err(unavailable)?;
-    Ok(Part {
-        generation,
-        runtime,
-        rows,
-        owners,
-        content,
-        witnesses,
-        edges,
-        turns,
-    })
-}
-fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
-    *left = left
-        .checked_sub(bytes)
-        .ok_or_else(|| unavailable("Catalog query metadata exceeds the request budget"))?;
-    Ok(())
-}
-
-fn has_search_slots(options: &Options, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
-    let db = open(options)?;
-    let history: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1)",
-            [key],
-            |r| r.get(0),
-        )
-        .map_err(unavailable)?;
-    let table = if history {
-        "session_history_slots"
-    } else {
-        "session_slots"
-    };
-    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE session_key=?1 AND (?2 IS NULL OR json_extract(metadata,'$.t')>=?2))"),rusqlite::params![key,since],|r|r.get(0)).map_err(unavailable)
 }
 
 impl Query {
@@ -417,7 +102,12 @@ impl Query {
             // that slot would not match. Qualify that condition using recipes
             // before creating another archive reader or decoding its evidence.
             if search.at_capacity() {
-                if has_search_slots(&source.options, key, since)? {
+                let namespace = source.options.source.namespace().map_err(unavailable)?;
+                if source
+                    .query_catalog()
+                    .map_err(unavailable)?
+                    .has_search_slots(&namespace, key, since)?
+                {
                     search.stop();
                     break;
                 }
@@ -535,6 +225,144 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
+        if matches!(tool, "get_session" | "read_transcript") {
+            if self.sources.is_retired() {
+                return Err(unavailable("Native sources are closed"));
+            }
+            let id = args["id"].as_str().expect("validated focused id");
+            let mut selected = None;
+            for (source_key, source) in &self.sources.machines {
+                let key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                };
+                if let Some(target) = source
+                    .local_query_target(id, now)
+                    .map_err(|error| QueryError::io(&error))?
+                {
+                    if selected.is_some() {
+                        return Err(QueryError::new(
+                            "id_conflict",
+                            format!("two machines both have {id}"),
+                        ));
+                    }
+                    selected = Some((key.to_owned(), target));
+                }
+            }
+            let (source_key, target) = selected.ok_or_else(|| QueryError::unknown_session(id))?;
+            let reader = provider
+                .map(|factory| factory(&source_key, &target))
+                .transpose()
+                .map_err(|error| QueryError::io(&error))?;
+            return self.execute_selected_at(
+                &source_key,
+                &target,
+                tool,
+                args,
+                reader.as_deref(),
+                mode,
+                now,
+            );
+        }
+        self.execute_catalog_store_at(tool, args, provider, mode, now, None)
+    }
+
+    /// Private single-Source binding for the admitted producer qualification.
+    /// Rendering, filtering, windows and validation use the ordinary Query path.
+    #[allow(dead_code)]
+    pub(crate) fn call_bound_catalog_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+        store: &dyn crate::storage::query::QueryCatalogStore,
+    ) -> Result<Value, QueryError> {
+        validate_query_call(tool, args)?;
+        if self.sources.machines.len() != 1
+            || !matches!(tool, "list_sessions" | "read_transcript" | "get_session")
+        {
+            return Err(QueryError::new(
+                "namespace_upgrade_pending",
+                "Admitted Query selector is not qualified",
+            ));
+        }
+        if matches!(tool, "read_transcript" | "get_session") {
+            return Err(unavailable(
+                "Selected Query requires an authorized Raw reader",
+            ));
+        }
+        self.execute_catalog_store_at(
+            tool,
+            args,
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            now,
+            Some(store),
+        )
+    }
+
+    /// Host authorization is explicit and separate from Catalog admission.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_bound_selected_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+        store: &dyn crate::storage::query::QueryCatalogStore,
+        host: &dyn crate::SessionSourceReader,
+        machine: Option<&str>,
+    ) -> Result<Value, QueryError> {
+        validate_query_call(tool, args)?;
+        if self.sources.is_retired()
+            || self.sources.machines.len() != 1
+            || !matches!(tool, "read_transcript" | "get_session")
+        {
+            return Err(unavailable("Admitted selected Query tool unavailable"));
+        }
+        let mut selected_args = args.clone();
+        selected_args["_session"] = serde_json::Value::Bool(tool == "get_session");
+        if let Some(machine) = machine {
+            selected_args["_machine_alias"] = json!(machine);
+        }
+        let namespace = self.sources.machines[0]
+            .1
+            .options
+            .source
+            .namespace()
+            .map_err(unavailable)?;
+        let mut answer = store.selected_body(
+            &namespace,
+            args["id"].as_str().expect("validated selected id"),
+            &selected_args,
+            now,
+            host,
+        )?;
+        self.start = self
+            .sources
+            .machines
+            .iter()
+            .filter(|(_, source)| !source.options.all)
+            .map(|(_, source)| {
+                now.saturating_sub(
+                    i64::try_from(source.options.since.as_millis()).unwrap_or(i64::MAX),
+                )
+            })
+            .max();
+        answer["window_start"] = json!(self.start);
+        Ok(answer)
+    }
+
+    fn execute_catalog_store_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        provider: Option<&CatalogReaderFactory>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+        bound: Option<&dyn crate::storage::query::QueryCatalogStore>,
+    ) -> Result<Value, QueryError> {
         #[cfg(test)]
         WORK.with(|work| work.set(Work::default()));
         if !matches!(tool, "list_sessions" | "stalls" | "find") {
@@ -562,7 +390,8 @@ impl Query {
             .machines
             .iter()
             .map(|(_, source)| {
-                crate::native_evidence::query_runtime_generation(&source.options)
+                source
+                    .query_runtime()
                     .map_err(|error| QueryError::io(&error))
             })
             .collect::<Result<_, _>>()?;
@@ -579,7 +408,31 @@ impl Query {
                     "Catalog summaries require a complete native output window",
                 ));
             }
-            let part = read(&source.options, now, &mut bytes_left)?;
+            let namespace =
+                LogicalSourceNamespace::new(if self.sources.machines[index].0.is_empty() {
+                    "local"
+                } else {
+                    &self.sources.machines[index].0
+                })
+                .map_err(unavailable)?;
+            let namespace = if bound.is_none() {
+                source.options.source.namespace().map_err(unavailable)?
+            } else {
+                namespace
+            };
+            let local;
+            let store = if let Some(store) = bound {
+                store
+            } else {
+                local = source.query_catalog().map_err(unavailable)?;
+                &*local
+            };
+            let part = store
+                .read_cohort(&namespace, now, &mut bytes_left)
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("transfer_query_stage read_cohort_refused");
+                })?;
             if part.runtime != identity_observations[index] {
                 return Err(unavailable(
                     "Native machine identity changed during the query",
@@ -680,6 +533,12 @@ impl Query {
             let Some(question) = row["open_question"]["handoff"].as_str().map(str::to_owned) else {
                 continue;
             };
+            if bound.is_some() {
+                return Err(QueryError::new(
+                    "namespace_upgrade_pending",
+                    "Admitted selected question reader is not qualified",
+                ));
+            }
             let (index, id) = &owner[row["id"].as_str().expect("summary id")];
             let (key, source) = &self.sources.machines[*index];
             let key = if key.is_empty() { "local" } else { key };
@@ -714,21 +573,29 @@ impl Query {
         }
         // Remote preview I/O does not hold a collection transaction. Recheck the
         // published generation and process observations before returning it.
-        for ((_, source), part) in self.sources.machines.iter().zip(parts) {
-            let db = open(&source.options)?;
-            if generation(&db)? != part.generation
-                || crate::native_evidence::query_runtime_generation(&source.options)
-                    .map_err(|error| QueryError::io(&error))?
-                    != part.runtime
-            {
-                return Err(unavailable("Native Catalog changed during the query"));
-            }
-            for (key, expected) in part.witnesses {
-                let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[&key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
-                let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
-                if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
-                    return Err(unavailable("Native Query facts changed during the query"));
-                }
+        for ((source_key, source), part) in self.sources.machines.iter().zip(parts) {
+            let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
+                "local"
+            } else {
+                source_key
+            })
+            .map_err(unavailable)?;
+            let namespace = if bound.is_none() {
+                source.options.source.namespace().map_err(unavailable)?
+            } else {
+                namespace
+            };
+            if let Some(store) = bound {
+                store.validate(&namespace, &part)?;
+            } else {
+                source
+                    .query_catalog()
+                    .map_err(unavailable)?
+                    .validate(&namespace, &part)
+                    .inspect_err(|_| {
+                        #[cfg(test)]
+                        eprintln!("transfer_query_stage validation_refused");
+                    })?;
             }
         }
         if self.sources.is_retired() {

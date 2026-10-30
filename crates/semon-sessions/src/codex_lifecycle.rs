@@ -456,7 +456,8 @@ mod tests {
             } else {
                 facts.offline_since = Some(NOW);
             }
-            fs::write(&self.facts, serde_json::to_vec(&facts).unwrap()).unwrap();
+            crate::facts::write_facts(&self.facts, &facts, &crate::Options::default().source)
+                .unwrap();
         }
         fn append(&self, record: Value) {
             writeln!(
@@ -483,8 +484,11 @@ mod tests {
                 .clone()
         }
         fn db(&self) -> rusqlite::Connection {
-            rusqlite::Connection::open(crate::events::EventCache::path(&self.options.cache))
-                .unwrap()
+            crate::storage::sqlite::source_journal::SourceJournal(
+                self.options.source.config(&self.options.cache).unwrap(),
+            )
+            .connection()
+            .unwrap()
         }
     }
     impl Drop for Home {
@@ -567,12 +571,14 @@ mod tests {
         let expected = home.query()["turn_lifecycle"].clone();
         let db = home.db();
         db.execute(
-            "DELETE FROM meta WHERE key=?1",
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
             [format!("native_tree_summary:{}", home.path.display())],
         )
         .unwrap();
         let parsed = crate::events::PARSED.with(std::cell::Cell::get);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         let error =
             crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
@@ -603,24 +609,11 @@ mod tests {
     }
 
     #[test]
-    fn parser28_rebuild_and_source_replacement_cannot_retain_completed_turn() {
+    fn source_replacement_cannot_retain_completed_turn() {
         let home = Home::new();
         home.append(event("task_started", Some("a")));
         home.append(event("task_complete", Some("a")));
         assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
-        home.db()
-            .execute("UPDATE meta SET value='28' WHERE key='cache_version'", [])
-            .unwrap();
-        assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
-        let version: String = home
-            .db()
-            .query_row(
-                "SELECT value FROM meta WHERE key='cache_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, "29");
         let replacement = home.path.with_extension("replacement");
         fs::write(
             &replacement,
