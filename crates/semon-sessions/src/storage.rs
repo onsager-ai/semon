@@ -194,7 +194,8 @@ pub(crate) fn local_query_catalog(
 #[derive(Clone, Debug)]
 pub(crate) enum NativeReaderBinding {
     Admitted(StoreConfig),
-    /// Private producer custody; never constructed by public configuration.
+    /// Restored native custody for the ordinary local producer and its readers.
+    /// Explicit public StoreConfig factories retain sole-Source admission.
     Semantic(crate::events::store::configured::NativeOwnership),
 }
 
