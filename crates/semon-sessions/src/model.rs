@@ -1886,6 +1886,15 @@ struct Description {
     last: Option<i64>,
 }
 
+struct DescriptionWork {
+    index: usize,
+    key: String,
+    inputs: DescriptionInputs,
+    cached: Option<Description>,
+    fingerprint: Option<String>,
+    request_index: Option<usize>,
+}
+
 #[derive(Clone)]
 struct SessionDerived {
     out: Session,
@@ -2518,9 +2527,7 @@ impl<'a> Builder<'a> {
         }
         self.order_events();
         self.shared_usage = self.shared_claude_usage();
-        for index in 0..self.sessions.len() {
-            self.describe(index);
-        }
+        self.describe_all();
     }
 
     fn shared_claude_usage(&self) -> BTreeMap<String, crate::claude_usage::Shared> {
@@ -2547,7 +2554,7 @@ impl<'a> Builder<'a> {
         crate::claude_usage::shared(records.iter().map(|(key, records)| (*key, records)))
     }
 
-    fn describe(&mut self, index: usize) {
+    fn description_inputs(&self, index: usize) -> (String, DescriptionInputs) {
         let session = &self.sessions[index];
         let mut files = Vec::new();
         let mut metadata = Vec::new();
@@ -2594,62 +2601,101 @@ impl<'a> Builder<'a> {
                 .all(|position| self.files[*position].first.is_none())
                 .then_some(self.now),
         };
-        let key = session.key.clone();
-        let cached = self
-            .texts
-            .descriptions
-            .get(&key)
-            .filter(|(seen, _)| inputs.clock.is_none() && *seen == inputs)
-            .map(|(_, description)| description.clone());
-        if let Some(description) = cached {
-            let session = &mut self.sessions[index];
-            session.out = description.out;
-            session.names = description.names;
-            session.tokens = description.tokens;
-            session.first = description.first;
-            session.last = description.last;
-        } else {
-            let fingerprint = summary::fingerprint(&inputs);
-            let persisted = if inputs.clock.is_none() {
-                self.cache
-                    .session_description(&key, summary::VERSION, &fingerprint)
-                    .and_then(|json| serde_json::from_str::<summary::Summary>(&json).ok())
-            } else {
-                None
-            };
-            if let Some(persisted) = persisted {
-                persisted.apply(&mut self.sessions[index]);
-            } else {
-                self.describe_uncached(index);
-                // Persistence is optional: unsupported native path encodings
-                // must not turn a usable in-memory description into a panic.
-                if inputs.clock.is_none()
-                    && let Ok(json) =
-                        serde_json::to_string(&summary::Summary::of(&self.sessions[index], &inputs))
-                {
-                    self.cache.save_session_description(
-                        &key,
-                        summary::VERSION,
-                        &fingerprint,
-                        &json,
-                    );
-                }
-            }
-            let session = &self.sessions[index];
-            self.texts.descriptions.insert(
-                key,
-                (
+        (session.key.clone(), inputs)
+    }
+
+    fn describe_all(&mut self) {
+        let limit = events::SESSION_DESCRIPTION_BATCH_LIMIT;
+        for start in (0..self.sessions.len()).step_by(limit) {
+            let end = (start + limit).min(self.sessions.len());
+            let mut work = Vec::with_capacity(end - start);
+            let mut requests = Vec::with_capacity(end - start);
+            for index in start..end {
+                let (key, inputs) = self.description_inputs(index);
+                let cached = self
+                    .texts
+                    .descriptions
+                    .get(&key)
+                    .filter(|(seen, _)| inputs.clock.is_none() && *seen == inputs)
+                    .map(|(_, description)| description.clone());
+                let should_read_persisted = cached.is_none() && inputs.clock.is_none();
+                let (fingerprint, request_index) = if should_read_persisted {
+                    let fingerprint = summary::fingerprint(&inputs);
+                    let request_index = requests.len();
+                    requests.push(events::SessionDescriptionRequest {
+                        key: key.clone(),
+                        version: summary::VERSION,
+                        inputs: fingerprint.clone(),
+                    });
+                    (Some(fingerprint), Some(request_index))
+                } else {
+                    (None, None)
+                };
+                work.push(DescriptionWork {
+                    index,
+                    key,
                     inputs,
-                    Description {
-                        out: session.out.clone(),
-                        names: session.names.clone(),
-                        tokens: session.tokens.clone(),
-                        first: session.first,
-                        last: session.last,
-                    },
-                ),
-            );
+                    cached,
+                    fingerprint,
+                    request_index,
+                });
+            }
+            let persisted = self.cache.session_descriptions(&requests);
+            for item in work {
+                if let Some(description) = item.cached {
+                    self.apply_description(item.index, description);
+                    continue;
+                }
+                let persisted = item
+                    .request_index
+                    .and_then(|index| persisted.get(index))
+                    .and_then(Option::as_ref)
+                    .and_then(|json| serde_json::from_str::<summary::Summary>(json).ok());
+                if let Some(persisted) = persisted {
+                    persisted.apply(&mut self.sessions[item.index]);
+                } else {
+                    self.describe_uncached(item.index);
+                    // Persistence is optional: unsupported native path encodings
+                    // must not turn a usable in-memory description into a panic.
+                    if let Some(fingerprint) = &item.fingerprint
+                        && let Ok(json) = serde_json::to_string(&summary::Summary::of(
+                            &self.sessions[item.index],
+                            &item.inputs,
+                        ))
+                    {
+                        self.cache.save_session_description(
+                            &item.key,
+                            summary::VERSION,
+                            fingerprint,
+                            &json,
+                        );
+                    }
+                }
+                let session = &self.sessions[item.index];
+                self.texts.descriptions.insert(
+                    item.key,
+                    (
+                        item.inputs,
+                        Description {
+                            out: session.out.clone(),
+                            names: session.names.clone(),
+                            tokens: session.tokens.clone(),
+                            first: session.first,
+                            last: session.last,
+                        },
+                    ),
+                );
+            }
         }
+    }
+
+    fn apply_description(&mut self, index: usize, description: Description) {
+        let session = &mut self.sessions[index];
+        session.out = description.out;
+        session.names = description.names;
+        session.tokens = description.tokens;
+        session.first = description.first;
+        session.last = description.last;
     }
 
     /// Name, model, effort, tokens, repo, branch, start, last and busy.

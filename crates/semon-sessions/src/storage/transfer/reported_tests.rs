@@ -740,10 +740,16 @@ fn current_transfer225_occupied_description_refused_before_native_pages_commit()
         .connection()
         .unwrap();
     assert_eq!(
-        crate::events::store::read_session_description(&db, "existing", 1, "inputs")
-            .unwrap()
-            .as_deref(),
-        Some("owned destination")
+        crate::events::store::read_session_descriptions(
+            &db,
+            &[crate::events::SessionDescriptionRequest {
+                key: "existing".into(),
+                version: 1,
+                inputs: "inputs".into(),
+            }],
+        )
+        .unwrap(),
+        vec![Some("owned destination".into())]
     );
     assert_eq!(
         db.query_row(

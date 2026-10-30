@@ -989,6 +989,15 @@ pub(crate) enum StoreError {
     Failed(String),
 }
 
+pub(crate) const SESSION_DESCRIPTION_BATCH_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionDescriptionRequest {
+    pub(crate) key: String,
+    pub(crate) version: u32,
+    pub(crate) inputs: String,
+}
+
 impl std::fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1091,14 +1100,12 @@ pub(crate) trait IndexStore: Send {
         Ok(())
     }
 
-    /// A compatible metadata-only session description. Dependencies are checked
-    /// by the model after a successful source scan, before this lookup.
-    fn session_description(
+    /// At most 64 compatible metadata-only descriptions, in request order. The
+    /// model checks dependencies after a successful source scan, before lookup.
+    fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Result<Option<String>, StoreError>;
+        requests: &[SessionDescriptionRequest],
+    ) -> Result<Vec<Option<String>>, StoreError>;
 
     /// One complete description replaces its predecessor atomically.
     fn save_session_descriptions(
@@ -2723,17 +2730,17 @@ impl EventCache {
             })
     }
 
-    pub(crate) fn session_description(
+    pub(crate) fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Option<String> {
+        requests: &[SessionDescriptionRequest],
+    ) -> Vec<Option<String>> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
         self.store
-            .as_ref()?
-            .session_description(key, version, inputs)
-            .ok()
-            .flatten()
+            .as_ref()
+            .and_then(|store| store.session_descriptions(requests).ok())
+            .unwrap_or_else(|| vec![None; requests.len()])
     }
 
     pub(crate) fn save_session_description(
