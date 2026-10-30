@@ -6936,10 +6936,13 @@ fn scoped_runtime_metadata_refuses_an_uncommitted_source_ledger() {
     fixture.source("scoped-runtime-ledger");
     fixture.publish_existing();
     let db = fixture.db();
-    let metadata: String = db.query_row(
-        "SELECT metadata FROM session_catalog WHERE session_key='scoped-runtime-ledger'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='scoped-runtime-ledger'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let mut row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
     assert_eq!(
         crate::storage::sqlite::catalog::runtime_source_cwds(&db, &row.sources).unwrap(),

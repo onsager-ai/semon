@@ -318,13 +318,17 @@ pub(crate) fn runtime_source_cwds(
     for source in sources {
         let path = source.path.to_string_lossy();
         let ledger = crate::events::store::ledger_row(db, &path).map_err(io::Error::other)?;
-        if ledger.as_ref().map(|(_, ledger)| ledger) != Some(&crate::source_carrier::ledger(source)) {
+        if ledger.as_ref().map(|(_, ledger)| ledger) != Some(&crate::source_carrier::ledger(source))
+        {
             return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
         }
-        let cwd: Option<String> = db.query_row(
-            "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
-            [path.as_ref()], |row| row.get(0),
-        ).map_err(io::Error::other)?;
+        let cwd: Option<String> = db
+            .query_row(
+                "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
+                [path.as_ref()],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
         if let Some(cwd) = cwd {
             cwds.insert(cwd);
         }
@@ -358,7 +362,9 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     ) -> io::Result<Option<String>> {
         let binding = self.row_runtime_binding(row)?;
         let cwds = runtime_source_cwds(self.0, &row.sources)?;
-        let scoped = self.3.get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+        let scoped = self
+            .3
+            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
             .scope(row, &cwds)?;
         binding.map(|binding| binding.witness(&scoped)).transpose()
     }

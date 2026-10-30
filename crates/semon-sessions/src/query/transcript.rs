@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     model::summary::CatalogRow,
     slot_projection::{QueryObservation, SavedSlot, VERSION},
+    storage::catalog::CatalogSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Digest;
@@ -366,16 +367,11 @@ fn virtual_read(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unavailable(error)),
     };
-    let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
-    let admitted_binding = binding.runtime_binding_at(&tx).map_err(unavailable)?;
-    let imported_origin =
-        crate::storage::sqlite::proof_generations::imported_catalog(&tx, &admitted_binding)
-            .map_err(unavailable)?;
-    let runtime_observations = match binding.runtime_binding().map_err(unavailable)? {
-        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-            .map_err(unavailable)?,
-        None => crate::native_evidence::RuntimeObservations::new(options),
-    };
+    let runtime_snapshot =
+        crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).map_err(unavailable)?;
+    let runtime = runtime_snapshot
+        .runtime_generation(options)
+        .map_err(unavailable)?;
     let catalog_generation = generation(&tx)?;
     let cutoff = (!options.all && !options.scan_window)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
@@ -386,23 +382,9 @@ fn virtual_read(
         let Some(query) = &row.query else {
             return Ok(None);
         };
-        let row_runtime = if imported_origin
-            || query["runtime"]
-                .as_str()
-                .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
-        {
-            let binding = crate::storage::sqlite::proof_generations::observation_binding(
-                &tx,
-                &admitted_binding,
-                row,
-            )
+        let row_runtime = runtime_snapshot
+            .runtime_observation(options, row, &runtime)
             .map_err(unavailable)?;
-            crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-                .map_err(unavailable)?
-                .expected(row)
-        } else {
-            runtime_observations.expected(row)
-        };
         if !crate::model::summary::query_observation_matches(
             query,
             &row.sources,
@@ -480,6 +462,7 @@ fn virtual_read(
     }
     // Transfer the selection's WAL snapshot to the lazy byte-proof readers.
     // Later metadata reads retain their existing publication rechecks.
+    drop(runtime_snapshot);
     tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(tx);
     let sources = sources.into_values().collect::<Vec<_>>();
@@ -805,28 +788,15 @@ fn read_inner(
     if saved["transcript_observation"].is_null() {
         return Ok(None);
     }
-    let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
-    let current = binding.runtime_binding_at(&tx).map_err(unavailable)?;
-    let observation_binding =
-        if crate::storage::sqlite::proof_generations::imported_catalog(&tx, &current)
-            .map_err(unavailable)?
-            || saved["runtime"]
-                .as_str()
-                .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
-        {
-            Some(
-                crate::storage::sqlite::proof_generations::observation_binding(&tx, &current, &row)
-                    .map_err(unavailable)?,
-            )
-        } else {
-            binding.runtime_binding().map_err(unavailable)?
-        };
-    let row_runtime = match observation_binding {
-        Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-            .map_err(unavailable)?,
-        None => crate::native_evidence::RuntimeObservations::new(options),
-    }
-    .expected(&row);
+    let (runtime, row_runtime) = {
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)
+            .map_err(unavailable)?;
+        let runtime = snapshot.runtime_generation(options).map_err(unavailable)?;
+        let observed = snapshot
+            .runtime_observation(options, &row, &runtime)
+            .map_err(unavailable)?;
+        (runtime, observed)
+    };
     // Retention preserves byte custody, not a live process observation. Its
     // pending tools and backgrounds need the same runtime qualification.
     if !crate::model::summary::query_observation_matches(

@@ -551,14 +551,6 @@ pub(crate) fn session_causal_trace_with_gate(
             .map_err(|_| 503u16)?;
         snapshot.require_current().map_err(|_| 503u16)?;
         let runtime_generation = snapshot.runtime_generation(options).ok();
-        let runtime_binding = snapshot.runtime_binding();
-        let runtime_observations = match (runtime_binding.as_ref(), runtime_generation.as_deref()) {
-            (Some(binding), Some(runtime)) => {
-                crate::native_evidence::RuntimeObservations::bound(binding, runtime).ok()
-            }
-            (Some(_), None) => None,
-            (None, _) => Some(crate::native_evidence::RuntimeObservations::new(options)),
-        };
         let recorded = options
             .facts
             .as_ref()
@@ -756,32 +748,23 @@ pub(crate) fn session_causal_trace_with_gate(
             }
             versions.push(json!([sid, version]));
             if relay_peers.contains(&sid) {
-                let status = match snapshot.row_runtime_binding(&row) {
-                    Ok(Some(binding)) => runtime_generation
-                        .as_deref()
-                        .and_then(|runtime| {
-                            crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
-                                .ok()
-                        })
-                        .map(|observations| {
-                            crate::catalog::relative_status(
-                                options,
-                                &observations,
-                                recorded.as_deref(),
-                                &row,
-                            )
-                        }),
-                    Ok(None) => runtime_observations.as_ref().map(|observations| {
+                let status = runtime_generation
+                    .as_deref()
+                    .and_then(|runtime| {
+                        snapshot
+                            .runtime_observation(options, &row, runtime)
+                            .ok()
+                            .flatten()
+                    })
+                    .map(|runtime| {
                         crate::catalog::relative_status(
                             options,
-                            observations,
+                            Some(runtime.as_str()),
                             recorded.as_deref(),
                             &row,
                         )
-                    }),
-                    Err(_) => None,
-                }
-                .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
+                    })
+                    .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
                 missing.other |= status["observation"] == "unavailable";
                 let mut summary = trace_participant_summary(&row, status);
                 if summary.observed_extent.status["observation"] != "unavailable" {
