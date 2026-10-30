@@ -2312,8 +2312,8 @@ mod tests {
             .unwrap();
             let receipt = crate::events::store::header_ledger(&ledger);
             tx.execute(
-                "INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,1,?2,?3,0,1,1)",
-                params![namespace, path, receipt],
+                "INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,1,?2,?3,0,?4,1)",
+                params![namespace, path, receipt, CACHE_VERSION],
             )
             .unwrap();
             tx.execute(
@@ -2985,7 +2985,6 @@ mod tests {
             [path.as_ref()],
         )
         .unwrap();
-        drop(seed_as);
         drop(db);
         let foreign = |db: &Connection| -> Vec<(String, String)> {
             db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE namespace='foreign' AND key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
