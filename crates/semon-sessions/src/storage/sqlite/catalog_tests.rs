@@ -1254,7 +1254,6 @@ fn archived_event_index_requires_decodable_rows_and_supported_parser() {
     let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
         .unwrap()
         .unwrap();
-    let connection = fixture.db();
     let event_writer = crate::events::store::qualified_event_writer_connection_for_test(
         &fixture.options.cache,
         &fixture.options.source,
@@ -1270,20 +1269,36 @@ fn archived_event_index_requires_decodable_rows_and_supported_parser() {
     event_writer
         .execute("UPDATE files SET pending='{}'", [])
         .unwrap();
-    event_writer
+    drop(event_writer);
+
+    // Seed an unsupported physical version before ownership enrollment installs
+    // the production metadata guards. The store factory must refuse it without
+    // changing the seeded database.
+    let mut unsupported_options = fixture.options.clone();
+    unsupported_options.cache = fixture.root.join("unsupported-index.json");
+    let unsupported_config = unsupported_options
+        .source
+        .config(&unsupported_options.cache)
+        .unwrap();
+    unsupported_config.create_native_store().unwrap();
+    let unsupported_connection =
+        Connection::open(EventCache::path(&unsupported_options.cache)).unwrap();
+    unsupported_connection
         .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
         .unwrap();
-    let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+    let unsupported = crate::native_timing::cleanup_tests::snapshot(&unsupported_connection);
     assert_eq!(
-        crate::retain_source_event_index(&fixture.options, &proof, &ready),
+        crate::retain_source_event_index(&unsupported_options, &proof, &ready),
         Err(CatalogIdentityError::Unavailable)
     );
-    assert!(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).is_err());
+    assert!(
+        EventCache::open_scoped(&unsupported_options.cache, &unsupported_options.source).is_err()
+    );
     assert_eq!(
-        crate::native_timing::cleanup_tests::snapshot(&connection),
+        crate::native_timing::cleanup_tests::snapshot(&unsupported_connection),
         unsupported
     );
-    let count: i64 = connection
+    let count: i64 = unsupported_connection
         .query_row(
             "SELECT count(*) FROM meta WHERE key GLOB 'archive_event_index:*'",
             [],
