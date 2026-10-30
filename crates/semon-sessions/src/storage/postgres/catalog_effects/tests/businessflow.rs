@@ -59,6 +59,249 @@ fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::Prepare
     }
 }
 
+// Exercise the generic physical publisher with the real PG model capture. Each
+// successful case is rolled back so the staged businessflow below keeps its
+// original initial head and source claims.
+fn generic_runtime_publication_preflight(
+    pool: &PgPool,
+    namespace: &LogicalSourceNamespace,
+    control: &PgCancellation,
+    prepared: &crate::model::PreparedSources,
+) {
+    use super::super::publication;
+    let captured = prepared.presentation_observations().unwrap();
+    let scopes = prepared
+        .rows
+        .iter()
+        .map(|row| row.query.as_ref().unwrap()["runtime"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(scopes.len() > 1, "ordinary rows have distinct runtime scopes");
+    for fault in [
+        "missing",
+        "raw_global",
+        "bound_global",
+        "row_scope",
+        "source_generation",
+        "dependency",
+    ] {
+        let mut rows = prepared.rows.clone();
+        let mut observations = captured.clone();
+        match fault {
+            "missing" => {}
+            "raw_global" => observations.source_runtime = Some("changed raw global".into()),
+            "bound_global" => observations.runtime = Some("changed bound global".into()),
+            "row_scope" => {
+                let other = rows
+                    .iter()
+                    .find(|row| {
+                        row.query.as_ref().unwrap()["runtime"]
+                            != rows[0].query.as_ref().unwrap()["runtime"]
+                    })
+                    .unwrap()
+                    .query
+                    .as_ref()
+                    .unwrap()["runtime"]
+                    .clone();
+                rows[0].query.as_mut().unwrap()["runtime"] = other;
+            }
+            "source_generation" => rows[0].sources[0].offset += 1,
+            "dependency" => rows[0].native_ids.push("unobserved native dependency".into()),
+            _ => unreachable!(),
+        }
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: Some(&prepared.transcripts),
+            observations: (fault != "missing").then_some(&observations),
+        };
+        assert_eq!(
+            pool.transaction(namespace, TxnKind::Write, control, |tx| {
+                publication::publish(
+                    tx,
+                    &publication,
+                    prepared.base_generation.as_deref(),
+                    &prepared.claims,
+                    false,
+                    None,
+                )
+            }),
+            Err(StorageError::ScopeChanged),
+            "generic runtime qualification must refuse {fault}"
+        );
+    }
+    assert_eq!(
+        pool.transaction(namespace, TxnKind::Write, control, |tx| {
+            publication::publish(
+                tx,
+                &crate::slot_projection::Publication {
+                    rows: &[],
+                    transcripts: None,
+                    observations: None,
+                },
+                None,
+                &[],
+                false,
+                None,
+            )
+        }),
+        Err(StorageError::ScopeChanged),
+        "initial empty generic publication has no owner runtime"
+    );
+    for closed in [false, true] {
+        let result = pool.transaction(namespace, TxnKind::Write, control, |tx| {
+            let publication = crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+                observations: Some(captured),
+            };
+            let written = publication::publish(
+                tx,
+                &publication,
+                prepared.base_generation.as_deref(),
+                &prepared.claims,
+                closed,
+                None,
+            )?;
+            assert_eq!(written.0, Outcome::Written);
+            let generation = written.1.as_deref().unwrap();
+            let binding = super::super::super::model_cache::binding(tx)?;
+            let global = binding
+                .witness(captured.source_runtime.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(captured.runtime.as_deref(), Some(global.as_str()));
+            let expected = crate::storage::semantic_owner::bound_runtime(
+                namespace.as_str(),
+                &binding.admission,
+                &global,
+            )?;
+            let owner_runtime: Vec<u8> = tx.driver.query_one(
+                "SELECT runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton",
+                &[&namespace.as_str().as_bytes()],
+            ).map_err(sqlstate::error)?.get(0);
+            assert_eq!(owner_runtime, expected.as_bytes());
+            let empty = publication::publish(
+                tx,
+                &crate::slot_projection::Publication {
+                    rows: &[],
+                    transcripts: None,
+                    observations: None,
+                },
+                Some(generation),
+                &[],
+                closed,
+                None,
+            )?;
+            assert_eq!(empty.0, Outcome::Written);
+            assert_eq!(
+                publication::publish(
+                    tx,
+                    &publication,
+                    prepared.base_generation.as_deref(),
+                    &prepared.claims,
+                    closed,
+                    None,
+                )?,
+                written,
+                "exact replay returns its acknowledgement before the now-stale head"
+            );
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert_eq!(
+            result,
+            Err(StorageError::Conflict),
+            "rollback preflight writes"
+        );
+    }
+}
+
+fn generic_runtime_publication_facades(
+    pool: &PgPool,
+    control: &PgCancellation,
+    options: &Options,
+    inputs: &[crate::Input],
+) {
+    for mode in ["full", "partial", "closed"] {
+        let namespace = ns(&format!("generic-runtime-{mode}"));
+        let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
+        let config = source
+            .store_config(crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            })
+            .unwrap();
+        config.create_native_store().unwrap();
+        let mut options = options.clone();
+        options.source = source.with_store(config).unwrap();
+        let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        for (at, input) in inputs.iter().enumerate() {
+            cache
+                .ingest(
+                    &format!("{:064x}", at + 1),
+                    &input.full_path(&options),
+                    input.root.as_str(),
+                )
+                .unwrap();
+        }
+        let prepared =
+            crate::model::prepare_sources(&options, &mut cache, inputs, 1790812802000).unwrap();
+        let captured = prepared.presentation_observations().unwrap();
+        assert!(
+            prepared
+                .rows
+                .iter()
+                .map(|row| captured.runtime_for(row).unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        );
+        let publish = |cache: &mut EventCache| match mode {
+            "full" => cache
+                .publish_catalog_projection_fenced(
+                    &crate::slot_projection::Publication {
+                        rows: &prepared.rows,
+                        transcripts: Some(&prepared.transcripts),
+                        observations: Some(captured),
+                    },
+                    prepared.base_generation.as_deref(),
+                )
+                .unwrap(),
+            "partial" => {
+                let (outcome, generation) =
+                    cache.publish_partial_catalog_fenced(&prepared).unwrap();
+                assert_eq!(outcome, Outcome::Written);
+                generation
+            }
+            "closed" => {
+                let (outcome, generation) = cache
+                    .publish_closed_catalog_fenced(&prepared)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(outcome, Outcome::Written);
+                generation
+            }
+            _ => unreachable!(),
+        };
+        let generation = publish(&mut cache).expect("ordinary generic facade publication");
+        assert_eq!(publish(&mut cache).as_deref(), Some(generation.as_str()));
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, control, |tx| {
+            let binding = super::super::super::model_cache::binding(tx)?;
+            let global = binding
+                .witness(captured.source_runtime.as_deref().unwrap())
+                .unwrap();
+            let expected = crate::storage::semantic_owner::bound_runtime(
+                namespace.as_str(),
+                &binding.admission,
+                &global,
+            )?;
+            let runtime: Vec<u8> = tx.driver.query_one(
+                "SELECT runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton",
+                &[&namespace.as_str().as_bytes()],
+            ).map_err(sqlstate::error)?.get(0);
+            assert_eq!(runtime, expected.as_bytes());
+            Ok(())
+        }).unwrap();
+    }
+}
+
 fn withdrawal_preflight(
     pool: &PgPool,
     namespace: &LogicalSourceNamespace,
@@ -951,6 +1194,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             assert_eq!(query["runtime"].as_str(), Some(runtime.as_str()));
         }
     }
+    generic_runtime_publication_preflight(&pool, &namespace, &control, &prepared);
+    generic_runtime_publication_facades(&pool, &control, &options, &inputs);
     // Drive the SAME ordinary queued producer against durable PG staging.
     let paths = inputs
         .iter()

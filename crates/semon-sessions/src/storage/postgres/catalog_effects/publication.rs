@@ -246,18 +246,33 @@ pub(in crate::storage::postgres) fn publish(
         None
     } else {
         let observations = publication.observations.ok_or(StorageError::ScopeChanged)?;
-        let source_runtime = observations.source_runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
-        if semantic.as_ref().is_some_and(|semantic| semantic.runtime != source_runtime) {
+        let source_runtime = observations
+            .source_runtime
+            .as_deref()
+            .ok_or(StorageError::ScopeChanged)?;
+        if semantic
+            .as_ref()
+            .is_some_and(|semantic| semantic.runtime != source_runtime)
+        {
             return Err(StorageError::ScopeChanged);
         }
         let binding = super::super::model_cache::binding(tx)?;
-        let runtime = binding.witness(source_runtime).map_err(|_| StorageError::ScopeChanged)?;
+        let runtime = binding
+            .witness(source_runtime)
+            .map_err(|_| StorageError::ScopeChanged)?;
         if observations.runtime.as_deref() != Some(runtime.as_str()) {
             return Err(StorageError::ScopeChanged);
         }
         for row in publication.rows {
-            let observed = observations.runtime_for(row).ok_or(StorageError::ScopeChanged)?;
-            if row.query.as_ref().and_then(|query| query["runtime"].as_str()) != Some(observed.as_str()) {
+            let observed = observations
+                .runtime_for(row)
+                .ok_or(StorageError::ScopeChanged)?;
+            if row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
+                != Some(observed.as_str())
+            {
                 return Err(StorageError::ScopeChanged);
             }
         }

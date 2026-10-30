@@ -14,6 +14,10 @@ pub(crate) struct RuntimeObservations {
 /// Runtime dependencies captured for native publication.
 pub(crate) struct ScopedRuntimeObservations(RuntimeObservations);
 impl ScopedRuntimeObservations {
+    pub(crate) fn into_observations(self) -> RuntimeObservations {
+        self.0
+    }
+
     pub(crate) fn scope(
         &self,
         row: &crate::model::summary::CatalogRow,
