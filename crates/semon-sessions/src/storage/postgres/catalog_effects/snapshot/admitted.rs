@@ -34,7 +34,6 @@ impl Snapshot<'_, '_> {
         let current_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
         metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
-        let mut operation_binding = None;
         for original in [&current_metadata, &retained_metadata] {
             if row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                 && original == &retained_metadata
@@ -83,30 +82,18 @@ impl Snapshot<'_, '_> {
             let values = payload
                 .as_array()
                 .ok_or_else(|| failed(StorageError::ScopeChanged))?;
-            match values.len() {
-                9 => {
-                    let observations =
-                        serde_json::from_value(values[4].clone()).map_err(io::Error::other)?;
-                    return Ok(Some((current, observations)));
-                }
-                8 if values[7].is_object() => {
-                    // Semantic publications authenticate observations in the
-                    // selected-root manifest, not the generic request tuple.
-                    operation_binding = Some(current.clone());
-                }
-                8 if values[7].is_null() => {
-                    // This current generic request has no captured runtime
-                    // observations; do not substitute a semantic manifest.
-                    return Ok(Some((current, None)));
-                }
-                _ => return Err(failed(StorageError::ScopeChanged)),
+            // Generic and semantic publishers share the same current tuple;
+            // selected-root manifests below authenticate transferred rows.
+            if values.len() != 9 {
+                return Err(failed(StorageError::ScopeChanged));
             }
+            let observations =
+                serde_json::from_value(values[4].clone()).map_err(io::Error::other)?;
+            return Ok(Some((current, observations)));
         }
         let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),&current_metadata,&retained_metadata]).map_err(sqlstate::error).map_err(failed)?;
         let Some(value) = rows.into_iter().next() else {
-            return operation_binding
-                .map(|binding| Some((binding, None)))
-                .ok_or_else(|| failed(StorageError::ScopeChanged));
+            return Err(failed(StorageError::ScopeChanged));
         };
         let decode = |at: usize| -> io::Result<String> {
             text(
@@ -200,6 +187,8 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 Ok(Some(fresh))
             }
             None => {
+                // `runtime` is the live raw global input. The saved global
+                // witness is already qualified by this publication's binding.
                 let current_global = binding.witness(runtime)?;
                 if observations.runtime.as_deref() != Some(current_global.as_str()) {
                     return Err(failed(StorageError::ScopeChanged));
