@@ -4085,7 +4085,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         first_fifo_page.paths,
-        expected_fifo_after.iter().take(64).cloned().collect::<Vec<_>>()
+        expected_fifo_after
+            .iter()
+            .take(64)
+            .cloned()
+            .collect::<Vec<_>>()
     );
     assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
     assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
