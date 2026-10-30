@@ -285,6 +285,20 @@ selected-priority deferral retain them. Round robin applies to admitted live or
 unknown interests, rather than historical keystrokes. A peer-completed ticket
 retires when its next bounded pending-path probe observes no remaining claims.
 
+Every actual hinted attempt reserves one ordinary FIFO turn, including failed
+qualification, lookup failure, Deferred publication, concurrent-source requeue,
+and completion of the last ticket. Selected projection upgrades retain absolute
+precedence without consuming that reservation. The ordinary query excludes the
+bounded union of admitted waiting paths before its 64-source limit; if no other
+pending source exists, the same transaction falls through to the next hint.
+Bounded related components are remembered before derivation, so an unqualified
+parent and its pending child cannot poison an unrelated ordinary cohort. This
+additive registration follows renewed demand for the same attempted seed while
+old acknowledgements and resolution remain fenced by ticket ID and epoch.
+Components exceeding 64 sources enter the existing semantic epoch; ordinary
+publication does not interleave into an active epoch, and the reservation
+survives until that pipeline permits ordinary scheduling again.
+
 After successful publication and concurrent-source requeue, completed source
 claims acknowledge demand even when an empty, invalid, deleted or folded source
 produced no Catalog row. Deferred publication, byte checkpoints that remain
