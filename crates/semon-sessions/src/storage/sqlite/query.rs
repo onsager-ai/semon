@@ -322,13 +322,20 @@ fn read(
             ));
         }
         let cwds = super::catalog::runtime_source_cwds(db, &row.sources).map_err(unavailable)?;
-        let scoped = runtime_observations.scope(&row, &cwds).map_err(unavailable)?;
+        let scoped = runtime_observations
+            .scope(&row, &cwds)
+            .map_err(unavailable)?;
         let row_binding = if imported_origin
-            || row.query.as_ref().and_then(|query| query["runtime"].as_str())
+            || row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
                 .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
         {
-            Some(super::proof_generations::observation_binding(db, admitted_binding, &row)
-                .map_err(unavailable)?)
+            Some(
+                super::proof_generations::observation_binding(db, admitted_binding, &row)
+                    .map_err(unavailable)?,
+            )
         } else {
             runtime_binding.cloned()
         };

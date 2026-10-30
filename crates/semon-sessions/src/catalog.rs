@@ -752,14 +752,8 @@ pub(crate) fn relative_status(
             return unavailable();
         }
     }
-    recorded_status(
-        row,
-        runtime,
-        true,
-        facts_known,
-        retired_native,
-    )
-    .unwrap_or_else(|_| unavailable())
+    recorded_status(row, runtime, true, facts_known, retired_native)
+        .unwrap_or_else(|_| unavailable())
 }
 
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
@@ -1065,9 +1059,10 @@ pub(crate) fn read_page_snapshot_with_search(
             .first()
             .map(|row| {
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
-                    let expected = runtime.as_deref().map(|runtime| {
-                        transaction.runtime_observation(options, relative, runtime)
-                    }).transpose();
+                    let expected = runtime
+                        .as_deref()
+                        .map(|runtime| transaction.runtime_observation(options, relative, runtime))
+                        .transpose();
                     match expected {
                         Ok(expected) => relative_status(
                             options,
@@ -1210,9 +1205,14 @@ pub(crate) fn read_page_snapshot_with_search(
         // readers retry instead of retaining unknown dots until navigation.
         let runtime = pinned
             .and_then(|saved| saved.runtime_for(&row))
-            .or_else(|| runtime.as_deref().and_then(|runtime| {
-                transaction.runtime_observation(options, &row, runtime).ok().flatten()
-            }));
+            .or_else(|| {
+                runtime.as_deref().and_then(|runtime| {
+                    transaction
+                        .runtime_observation(options, &row, runtime)
+                        .ok()
+                        .flatten()
+                })
+            });
         let runtime_pending = current
             && facts_known
             && !retired_native

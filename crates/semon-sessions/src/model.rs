@@ -7751,8 +7751,20 @@ pub(crate) fn prepare_semantic_batch(
                     .transpose()?,
             );
         let observations = crate::native_evidence::RuntimeObservations::new(options);
-        for row in prepared.rows.iter().chain(batch.context.endpoints.values().map(|endpoint| &endpoint.row)).take(128) {
-            let observed = cache.runtime_source_cwds(&row.sources)
+        for row in prepared
+            .rows
+            .iter()
+            .chain(
+                batch
+                    .context
+                    .endpoints
+                    .values()
+                    .map(|endpoint| &endpoint.row),
+            )
+            .take(128)
+        {
+            let observed = cache
+                .runtime_source_cwds(&row.sources)
                 .and_then(|cwds| observations.scope(row, &cwds))
                 .and_then(|scoped| match &binding {
                     Some(binding) => binding.witness(&scoped),
@@ -8820,7 +8832,10 @@ fn build_sources_inner(
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
         measurements.record("projection_context", started, rows.len());
-        let runtime_cwds = builder.files.iter().map(|file| (&file.path, &file.summary.cwd))
+        let runtime_cwds = builder
+            .files
+            .iter()
+            .map(|file| (&file.path, &file.summary.cwd))
             .collect::<BTreeMap<_, _>>();
         for row in rows.iter_mut() {
             let selected_turns = turns_by_session
@@ -8900,20 +8915,22 @@ fn build_sources_inner(
                         "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
                 );
                 measurements.record("projection_query_rows", started, 1);
-                let runtime = measured!(
-                    "projection_runtime_scope",
-                    1,
-                    {
-                        let cwds = row.sources.iter().filter_map(|source| {
-                            runtime_cwds.get(&source.path).and_then(|cwd| cwd.as_ref().cloned())
-                        }).collect::<BTreeSet<_>>();
-                        let scoped = runtime_observations.scope(row, &cwds)?;
-                        match &runtime_binding {
-                            Some(binding) => binding.witness(&scoped)?,
-                            None => scoped,
-                        }
+                let runtime = measured!("projection_runtime_scope", 1, {
+                    let cwds = row
+                        .sources
+                        .iter()
+                        .filter_map(|source| {
+                            runtime_cwds
+                                .get(&source.path)
+                                .and_then(|cwd| cwd.as_ref().cloned())
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let scoped = runtime_observations.scope(row, &cwds)?;
+                    match &runtime_binding {
+                        Some(binding) => binding.witness(&scoped)?,
+                        None => scoped,
                     }
-                );
+                });
                 row.query.as_mut().expect("query captured")["runtime"] =
                     serde_json::Value::String(runtime);
                 let started = measurements.start();
