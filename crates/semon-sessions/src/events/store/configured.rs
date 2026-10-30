@@ -1,6 +1,7 @@
 //! Current namespace-owned native transactions. Public admission remains gated;
 //! the private owner authorizes ingest and Catalog publication.
 use super::*;
+use crate::events::{SESSION_DESCRIPTION_BATCH_LIMIT, SessionDescriptionRequest};
 use crate::storage::sqlite::source_journal::SourceJournal;
 use crate::storage::{StorageError, StoreConfig, native_events::EventReceipt};
 use rusqlite::functions::FunctionFlags;
@@ -1477,14 +1478,18 @@ impl Writer {
         super::read_append_evidence(&snapshot, path).map_err(failed)
     }
 
-    pub(crate) fn session_description(
+    pub(crate) fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Result<Option<String>, StorageError> {
+        requests: &[SessionDescriptionRequest],
+    ) -> Result<Vec<Option<String>>, StorageError> {
+        if requests.len() > SESSION_DESCRIPTION_BATCH_LIMIT {
+            return Err(StorageError::InvalidArguments);
+        }
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
         let db = self.snapshot()?;
-        super::read_session_description(&db, key, version, inputs).map_err(failed)
+        super::read_session_descriptions(&db, requests).map_err(failed)
     }
 
     pub(crate) fn save_session_descriptions(

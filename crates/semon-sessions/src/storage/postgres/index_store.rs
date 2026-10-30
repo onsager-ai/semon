@@ -5,7 +5,8 @@ use super::{
 };
 use crate::{
     events::{
-        DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
+        DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp,
+        SESSION_DESCRIPTION_BATCH_LIMIT, SessionDescriptionRequest, Stat, StoreError,
     },
     storage::{LogicalSourceNamespace, StorageError, native_events::EventReceipt},
 };
@@ -525,18 +526,22 @@ impl IndexStore for NativeIndex {
             })
             .map_err(err)
     }
-    fn session_description(
+    fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Result<Option<String>, StoreError> {
+        requests: &[SessionDescriptionRequest],
+    ) -> Result<Vec<Option<String>>, StoreError> {
+        if requests.len() > SESSION_DESCRIPTION_BATCH_LIMIT {
+            return Err(StoreError::Configured(StorageError::InvalidArguments));
+        }
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
         self.pool
             .transaction(
                 &self.namespace,
                 TxnKind::ReadSnapshot,
                 &self.control,
-                |tx| super::model_cache::description(tx, key, version, inputs),
+                |tx| super::model_cache::descriptions(tx, requests),
             )
             .map_err(err)
     }

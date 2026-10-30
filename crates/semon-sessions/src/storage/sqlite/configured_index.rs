@@ -4,7 +4,8 @@ use crate::events::store::{
     resume_runtime_input,
 };
 use crate::events::{
-    DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
+    DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp,
+    SESSION_DESCRIPTION_BATCH_LIMIT, SessionDescriptionRequest, Stat, StoreError,
 };
 use crate::sealed::LogFile;
 use crate::storage::{StorageError, StoreConfig};
@@ -194,14 +195,15 @@ impl IndexStore for ConfiguredIndex {
         self.native.receipt(path).map_err(StoreError::Configured)
     }
 
-    fn session_description(
+    fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Result<Option<String>, StoreError> {
+        requests: &[SessionDescriptionRequest],
+    ) -> Result<Vec<Option<String>>, StoreError> {
+        if requests.len() > SESSION_DESCRIPTION_BATCH_LIMIT {
+            return Err(StoreError::Configured(StorageError::InvalidArguments));
+        }
         self.native
-            .session_description(key, version, inputs)
+            .session_descriptions(requests)
             .map_err(StoreError::Configured)
     }
     fn save_session_descriptions(

@@ -54,7 +54,8 @@ use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerReco
 use super::{BillingUsage, Peer, Reply, Yield};
 use super::{
     CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded, MessageUsage,
-    ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
+    ModelTokens, Outcome, ReportedFileStamp, SESSION_DESCRIPTION_BATCH_LIMIT,
+    SessionDescriptionRequest, Signal, Stat, StoreError,
 };
 use crate::storage::StorageError;
 use crate::storage::sqlite::source_journal;
@@ -2072,13 +2073,24 @@ pub(crate) fn failure(error: rusqlite::Error) -> StoreError {
     }
 }
 
-pub(crate) fn read_session_description(
+pub(crate) fn read_session_descriptions(
     db: &Connection,
-    key: &str,
-    version: u32,
-    inputs: &str,
-) -> rusqlite::Result<Option<String>> {
-    db.query_row("SELECT description FROM main.session_descriptions WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND inputs=?3", params![key,version,inputs], |row| row.get(0)).optional()
+    requests: &[SessionDescriptionRequest],
+) -> rusqlite::Result<Vec<Option<String>>> {
+    let mut statement = db.prepare(
+        "SELECT description FROM main.session_descriptions WHERE namespace=semon_namespace() AND session_key=?1 AND version=?2 AND inputs=?3",
+    )?;
+    requests
+        .iter()
+        .map(|request| {
+            statement
+                .query_row(
+                    params![request.key.as_str(), request.version, request.inputs.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .collect()
 }
 
 pub(crate) fn write_session_descriptions(
@@ -2096,16 +2108,21 @@ impl IndexStore for SqliteStore {
     fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
         crate::facts::source_authority::Sources::sqlite(path)
     }
-    fn session_description(
+    fn session_descriptions(
         &self,
-        key: &str,
-        version: u32,
-        inputs: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if !current(&self.connection).map_err(failure)? {
-            return Ok(None);
+        requests: &[SessionDescriptionRequest],
+    ) -> Result<Vec<Option<String>>, StoreError> {
+        if requests.len() > SESSION_DESCRIPTION_BATCH_LIMIT {
+            return Err(StoreError::Configured(StorageError::InvalidArguments));
         }
-        read_session_description(&self.connection, key, version, inputs).map_err(failure)
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        if !current(&transaction).map_err(failure)? {
+            return Ok(vec![None; requests.len()]);
+        }
+        read_session_descriptions(&transaction, requests).map_err(failure)
     }
 
     fn save_session_descriptions(
@@ -11820,6 +11837,37 @@ mod summary_tests {
         let db = configured::connection(&config).unwrap();
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
+        let reads = vec![
+            SessionDescriptionRequest {
+                key: "first".into(),
+                version: 1,
+                inputs: "inputs".into(),
+            },
+            SessionDescriptionRequest {
+                key: "second".into(),
+                version: 1,
+                inputs: "inputs".into(),
+            },
+            SessionDescriptionRequest {
+                key: "first".into(),
+                version: 2,
+                inputs: "inputs".into(),
+            },
+            SessionDescriptionRequest {
+                key: "first".into(),
+                version: 1,
+                inputs: "other".into(),
+            },
+        ];
+        assert_eq!(
+            store.session_descriptions(&reads).unwrap(),
+            vec![Some("old".into()), None, None, None]
+        );
+        let oversized = vec![reads[0].clone(); SESSION_DESCRIPTION_BATCH_LIMIT + 1];
+        assert!(matches!(
+            store.session_descriptions(&oversized),
+            Err(StoreError::Configured(StorageError::InvalidArguments))
+        ));
         db.execute_batch("CREATE TRIGGER interrupt_summary BEFORE INSERT ON main.session_descriptions WHEN NEW.namespace=semon_namespace() AND NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
         assert_eq!(
             store.save_session_descriptions(&rows).unwrap(),
@@ -11831,15 +11879,8 @@ mod summary_tests {
         ];
         assert!(store.save_session_descriptions(&batch).is_err());
         assert_eq!(
-            store
-                .session_description("first", 1, "inputs")
-                .unwrap()
-                .as_deref(),
-            Some("old")
-        );
-        assert_eq!(
-            store.session_description("second", 1, "inputs").unwrap(),
-            None
+            store.session_descriptions(&reads).unwrap(),
+            vec![Some("old".into()), None, None, None]
         );
         drop(store);
         db.execute_batch("DROP TRIGGER interrupt_summary").unwrap();
@@ -11849,15 +11890,8 @@ mod summary_tests {
         )
         .unwrap();
         assert_eq!(
-            store
-                .session_description("first", 1, "inputs")
-                .unwrap()
-                .as_deref(),
-            Some("old")
-        );
-        assert_eq!(
-            store.session_description("second", 1, "inputs").unwrap(),
-            None
+            store.session_descriptions(&reads).unwrap(),
+            vec![Some("old".into()), None, None, None]
         );
         drop(store);
         fs::remove_file(path).unwrap();

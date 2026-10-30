@@ -1,6 +1,9 @@
 //! Private ordinary model producer metadata. This is not Catalog admission.
 use super::{sqlstate, txn::PgTxn};
-use crate::storage::{QueryRuntimeBinding, StorageError};
+use crate::{
+    events::{SESSION_DESCRIPTION_BATCH_LIMIT, SessionDescriptionRequest},
+    storage::{QueryRuntimeBinding, StorageError},
+};
 
 const MAX: usize = 1024 * 1024;
 
@@ -64,34 +67,49 @@ pub(super) fn generation(tx: &mut PgTxn<'_>) -> Result<Option<String>, StorageEr
     Ok(value)
 }
 
-pub(super) fn description(
+pub(super) fn descriptions(
     tx: &mut PgTxn<'_>,
-    key: &str,
-    version: u32,
-    inputs: &str,
-) -> Result<Option<String>, StorageError> {
-    if key.len().saturating_add(inputs.len()) > MAX {
-        return Err(StorageError::Busy);
+    requests: &[SessionDescriptionRequest],
+) -> Result<Vec<Option<String>>, StorageError> {
+    if requests.len() > SESSION_DESCRIPTION_BATCH_LIMIT {
+        return Err(StorageError::InvalidArguments);
     }
-    tx.check()?;
-    let rows = tx.driver.query(
-        "SELECT session_key=$2,version=$3 AND inputs=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_descriptions WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea)",
-        &[&tx.namespace.as_str().as_bytes(), &key.as_bytes(), &i64::from(version), &inputs.as_bytes()],
-    ).map_err(sqlstate::error)?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    if !row.get::<_, bool>(0) {
-        return Err(StorageError::ScopeChanged);
+    let mut descriptions = Vec::with_capacity(requests.len());
+    for request in requests {
+        if request.key.len().saturating_add(request.inputs.len()) > MAX {
+            return Err(StorageError::Busy);
+        }
+        tx.check()?;
+        let rows = tx
+            .driver
+            .query(
+                "SELECT session_key=$2,version=$3 AND inputs=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_descriptions WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea)",
+                &[
+                    &tx.namespace.as_str().as_bytes(),
+                    &request.key.as_bytes(),
+                    &i64::from(request.version),
+                    &request.inputs.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        let Some(row) = rows.first() else {
+            descriptions.push(None);
+            continue;
+        };
+        if !row.get::<_, bool>(0) {
+            return Err(StorageError::ScopeChanged);
+        }
+        if !row.get::<_, bool>(1) {
+            descriptions.push(None);
+            continue;
+        }
+        let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
+        crate::selected_read::charge(0, bytes.len()).map_err(|_| StorageError::Busy)?;
+        descriptions.push(Some(
+            String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged)?,
+        ));
     }
-    if !row.get::<_, bool>(1) {
-        return Ok(None);
-    }
-    let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
-    crate::selected_read::charge(0, bytes.len()).map_err(|_| StorageError::Busy)?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|_| StorageError::ScopeChanged)
+    Ok(descriptions)
 }
 
 pub(super) fn save_descriptions(
