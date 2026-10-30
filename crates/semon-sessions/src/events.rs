@@ -1717,7 +1717,7 @@ impl EventCache {
         paths: &[String],
         harness: Option<&str>,
         limit: usize,
-    ) -> io::Result<Vec<crate::Input>> {
+    ) -> Option<Vec<crate::Input>> {
         let inputs: Vec<_> = paths
             .iter()
             .filter_map(|path| {
@@ -1726,12 +1726,9 @@ impl EventCache {
             })
             .collect();
         if paths.len() == limit.min(CATALOG_SEARCH_LIMIT) && inputs.len() < paths.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Catalog search candidates exceed qualified source bounds",
-            ));
+            return None;
         }
-        Ok(inputs)
+        Some(inputs)
     }
 
     pub(crate) fn catalog_search_sources(
@@ -1753,7 +1750,13 @@ impl EventCache {
         let paths =
             store::catalog_search_paths(connection, &lookup, limit).map_err(io::Error::other)?;
         Ok(
-            Self::qualified_catalog_search_inputs(options, &paths, interest.harness, limit)?
+            Self::qualified_catalog_search_inputs(options, &paths, interest.harness, limit)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Catalog search candidates exceed qualified source bounds",
+                    )
+                })?
                 .into_iter()
                 .map(|input| input.full_path(options).to_string_lossy().into_owned())
                 .collect(),
@@ -1772,8 +1775,10 @@ impl EventCache {
                 &batch.paths,
                 interest.as_ref().and_then(|interest| interest.harness),
                 CATALOG_SEARCH_LIMIT,
-            )?;
-            if !inputs.is_empty() {
+            );
+            if let Some(inputs) = inputs
+                && !inputs.is_empty()
+            {
                 checked = Some(
                     inputs
                         .iter()
@@ -1786,6 +1791,13 @@ impl EventCache {
             // rejected hint must still allow the ordinary producer to drain.
             batch.paths = batch.fallback;
             batch.tier = CatalogPendingTier::Fifo;
+        }
+        if let Some(path) = batch.paths.iter().find(|path| path.ends_with(".json")) {
+            // The selected tier may have changed while qualifying its hint.
+            // Return a whole JSON intent for resolution before native mapping.
+            let input = crate::native_evidence::source_input(Path::new(path), options)
+                .ok_or_else(|| io::Error::other("input journal outside allowlist"))?;
+            return Ok((batch.tier, vec![input], checked));
         }
         let inputs = batch
             .paths
