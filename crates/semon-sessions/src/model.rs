@@ -8397,6 +8397,10 @@ fn build_sources_inner(
         BuildSelection::Identity { relationships, .. } => relationships.epoch,
         _ => None,
     };
+    let capture_publication_runtime = !matches!(
+        &selection,
+        BuildSelection::Identity { .. } | BuildSelection::Matching { .. }
+    );
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
@@ -8667,10 +8671,7 @@ fn build_sources_inner(
     // PG publication is bounded to 64 rows. Larger complete SQLite catalogs
     // retain their existing writer path without a truncated runtime capture.
     let mut presentation = (history_records.is_none()
-        && !matches!(
-            &selection,
-            BuildSelection::Identity { .. } | BuildSelection::Matching { .. }
-        )
+        && capture_publication_runtime
         && catalog.as_ref().is_some_and(|rows| rows.len() <= 64))
     .then(crate::storage::selected::PresentationObservations::default);
     let derive_query_facts = || {

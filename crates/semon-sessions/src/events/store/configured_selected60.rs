@@ -121,6 +121,7 @@ fn selected75_native(
     ordinary.publish_catalog_projection(&crate::slot_projection::Publication {
         rows: &prepared.rows,
         transcripts: Some(&prepared.transcripts),
+        observations: None,
     }, prepared.base_generation.as_deref()).unwrap();
     let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
     cache.finish_semantic_stage(batch.epoch).unwrap();
@@ -335,7 +336,7 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     oracle_options.cache = f.root.join("selected60-ordinary-oracle");
     let mut ordinary = EventCache::open_scoped(&oracle_options.cache, &oracle_options.source).unwrap();
     let prepared = crate::model::prepare_sources(&oracle_options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
-    ordinary.publish_catalog_projection(&crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) }, prepared.base_generation.as_deref()).unwrap();
+    ordinary.publish_catalog_projection(&crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts), observations: None }, prepared.base_generation.as_deref()).unwrap();
     let before = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
     assert_eq!(before["identity"]["machine_label"], facts.hostname);
 
@@ -417,7 +418,7 @@ fn configured_semantic_selected70_real_native_multi_window_range_oracle() {
     .unwrap();
     ordinary
         .publish_catalog_projection(
-            &crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts) },
+            &crate::slot_projection::Publication { rows: &prepared.rows, transcripts: Some(&prepared.transcripts), observations: None },
             prepared.base_generation.as_deref(),
         )
         .unwrap();

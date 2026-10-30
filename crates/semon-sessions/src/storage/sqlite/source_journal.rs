@@ -1769,6 +1769,7 @@ mod tests {
                 &crate::slot_projection::Publication {
                     rows: &[],
                     transcripts: None,
+                    observations: None,
                 },
                 None,
             )
@@ -2191,6 +2192,7 @@ mod tests {
         let publication = crate::slot_projection::Publication {
             rows: &[],
             transcripts: None,
+            observations: None,
         };
         assert!(matches!(
             index.publish_session_catalog_fenced(&publication, None),
