@@ -378,7 +378,8 @@ fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     .transpose()
 }
 fn same_catalog_metadata(left: &CatalogRow, right: &CatalogRow) -> io::Result<bool> {
-    Ok(serde_json::to_value(left).map_err(failure)? == serde_json::to_value(right).map_err(failure)?)
+    Ok(serde_json::to_value(left).map_err(failure)?
+        == serde_json::to_value(right).map_err(failure)?)
 }
 fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
@@ -966,8 +967,8 @@ pub fn repair_session_overview_with_control(
         .find(|row| row.key == key)
         .cloned()
         .ok_or_else(|| failure("Selected native migration owner unavailable"))?;
-    let reader_binding = crate::storage::local_navigation_binding(options, source_key)
-        .map_err(failure)?;
+    let reader_binding =
+        crate::storage::local_navigation_binding(options, source_key).map_err(failure)?;
     let preimage_binding = reader_binding.runtime_binding_at(&tx).map_err(failure)?;
     crate::storage::sqlite::proof_generations::observation_binding(
         &tx,
@@ -1083,9 +1084,7 @@ pub fn repair_session_overview_with_control(
         let Some(current) = catalog(&tx, &row.key)? else {
             return Err(publication_changed());
         };
-        if current.sources != row.sources
-            || !same_catalog_metadata(&current, &selected_preimage)?
-        {
+        if current.sources != row.sources || !same_catalog_metadata(&current, &selected_preimage)? {
             return Err(publication_changed());
         }
     }
