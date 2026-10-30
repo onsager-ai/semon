@@ -100,7 +100,7 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
         .repos
         .insert("/work/proj".into(), Some("recorded-repo".into()));
     let facts_path = home.root.join("scope-facts.json");
-    crate::write_facts(&facts_path, &facts).unwrap();
+    crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
     let options = Options {
         facts: Some(facts_path.clone()),
         ..home.options.clone()
@@ -123,14 +123,14 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
             }
             _ => unreachable!(),
         }
-        crate::write_facts(&facts_path, &changed).unwrap();
+        crate::write_facts(&facts_path, &changed, &crate::Options::default().source).unwrap();
         assert_ne!(
             scoped_runtime_reader_oracle(&options, &rows),
             recorded,
             "{change}"
         );
     }
-    crate::write_facts(&facts_path, &facts).unwrap();
+    crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
     home.live(42, "root", "waiting", json!({"waitingFor":"approval"}));
     assert_ne!(scoped_runtime_reader_oracle(&options, &rows), recorded);
 
@@ -197,20 +197,21 @@ fn scoped_publication_rejects_runtime_change_after_initial_observation() {
         home.top("root", &[human("root", ts(0, 0), "runtime fenced root")]);
         let facts_path = home.root.join("changing-facts.json");
         let facts = crate::local_runtime_facts(&home.options).unwrap();
-        crate::write_facts(&facts_path, &facts).unwrap();
+        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
         let options = Options {
             facts: Some(facts_path.clone()),
             ..home.options.clone()
         };
         home.build_at(&options, NOW);
-        let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let generation = cache.session_catalog_generation();
         let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
         AFTER_SCAN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let mut changed = facts;
                 changed.hostname = "new runtime observation".into();
-                crate::write_facts(&facts_path, &changed).unwrap();
+                crate::write_facts(&facts_path, &changed, &crate::Options::default().source)
+                    .unwrap();
             }));
         });
         let error = if selected {
@@ -271,6 +272,7 @@ impl Home {
         ));
         fs::create_dir_all(&root).unwrap();
         let options = Options {
+            source: crate::Options::default().source,
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
@@ -357,10 +359,12 @@ impl Home {
     /// Runs the production native Query producer over this synthetic home's
     /// persisted Event Index and checks shared identity/relationship invariants.
     fn build_at(&self, options: &Options, now: i64) -> QueryData {
-        let mut cache = EventCache::open(&options.cache).unwrap();
+        let mut cache = EventCache::open(&options.cache, &options.source).unwrap();
         let mut dirty = false;
         if options.facts.is_none() {
-            cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
+            cache
+                .refresh_reported_runs(&options.claude_json, now, &mut dirty)
+                .unwrap();
         }
         let built =
             build_query(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
@@ -3677,7 +3681,7 @@ fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry(
             .into_iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .collect::<Vec<_>>();
-        let mut cache = EventCache::open(&home.options.cache).unwrap();
+        let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
         let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
         let child = prepared.rows.iter().find(|row| row.key == "child").unwrap();
         assert_eq!(child.parent.as_deref(), Some(ROOT));
@@ -3726,7 +3730,7 @@ fn codex_native_spawn_calls_place_their_exact_task() {
 /// entries with placements. Compare the public persisted artifacts, including
 /// native preview recipes, rather than just checking parent headers.
 fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     let full = prepare_sources(&home.options, &mut cache, inputs, NOW).unwrap();
     let serialized = serde_json::to_vec(&full.relationships).unwrap();
     let mut staged: relation_stage::Context = serde_json::from_slice(&serialized).unwrap();
@@ -4315,15 +4319,21 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         .map(|input| input.full_path(options).to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
-    for page in paths.chunks(64) {
+    let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    // Seed one bounded operation. The ordinary producer discovers and drains
+    // the remaining history; appending every page to this same unfinished
+    // component would turn the per-operation source limit into a history cap.
+    if let Some(page) = paths.chunks(64).next() {
+        prepare_semantic_index_sources(options, &mut cache, &inputs[..page.len()], NOW).unwrap();
+        cache.end_scan();
+        cache.release_published_indexes();
         assert_eq!(
             cache.begin_semantic_stage(page, &runtime).unwrap(),
             crate::events::Outcome::Written
         );
     }
-    drop(cache);
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    crate::viewer::lock(&evidence.work).events = Some(cache);
     let mut complete = false;
     for _ in 0..512 {
         if evidence
@@ -4421,7 +4431,7 @@ fn companion_fixture_before_relations(home: &Home) -> (EventCache, relation_stag
         })
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for paths in paths.chunks(64) {
         assert_eq!(
             cache.begin_semantic_stage(paths, &runtime).unwrap(),
@@ -5350,7 +5360,7 @@ fn copy_with_facts(home: &Home) -> (Home, Options) {
     }
     let facts = crate::local_facts(&home.options).unwrap();
     let path = copy.root.join("facts.json");
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     options.facts = Some(path);
     (copy, options)
 }
@@ -5477,7 +5487,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         native_names: Vec::new(),
         process_ancestors: BTreeMap::new(),
     };
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     let mut options = home.options.clone();
     options.facts = Some(path.clone());
     let live = home.build_at(&options, NOW);
@@ -5485,7 +5495,12 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
     assert_eq!(live.sessions["reader"].state, "work");
     assert!(pages(&live).concat().contains("~/notes.md"));
     // Offline: the same machine, nothing running.
-    crate::write_facts(&path, &facts.offline(1_790_000_000_000)).unwrap();
+    crate::write_facts(
+        &path,
+        &facts.offline(1_790_000_000_000),
+        &crate::Options::default().source,
+    )
+    .unwrap();
     let offline = home.build_at(&options, NOW);
     assert_eq!(offline.machine_id, "laptop");
     assert_ne!(offline.sessions["reader"].state, "work");
@@ -5624,7 +5639,7 @@ fn recorded_codex_selection_distinguishes_absent_and_empty_without_pruning() {
     let path = home.root.join("facts.json");
     let mut facts = crate::local_facts(&home.options).unwrap();
     facts.codex_rollouts = None;
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     let mut options = home.options.clone();
     options.facts = Some(path.clone());
     assert!(
@@ -5633,7 +5648,7 @@ fn recorded_codex_selection_distinguishes_absent_and_empty_without_pruning() {
             .contains_key("retained")
     );
     facts.codex_rollouts = Some(BTreeSet::new());
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     assert!(
         !home
             .build_at(&options, NOW)
@@ -6118,7 +6133,7 @@ fn process_ancestry_links_every_harness_pair_and_survives_process_exit() {
             }
         }
         let path = home.root.join("facts.json");
-        crate::write_facts(&path, &facts).unwrap();
+        crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         let mut options = home.options.clone();
         options.facts = Some(path.clone());
         let built = home.build_at(&options, NOW);
@@ -6137,7 +6152,7 @@ fn process_ancestry_links_every_harness_pair_and_survives_process_exit() {
         facts.proc_starts.clear();
         facts.codex_locks.clear();
         facts.process_ancestors.clear();
-        crate::write_facts(&path, &facts).unwrap();
+        crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         assert_eq!(
             home.build_at(&options, NOW).sessions["child"]
                 .parent
@@ -6199,7 +6214,7 @@ fn a_general_marker_overrides_environment_and_native_parent_and_cycles_stay_unli
         ..Default::default()
     };
     let path = home.root.join("facts.json");
-    crate::write_facts(&path, &facts).unwrap();
+    crate::write_facts(&path, &facts, &crate::Options::default().source).unwrap();
     let mut options = home.options.clone();
     options.facts = Some(path);
     let built = home.build_at(&options, NOW);
@@ -6229,7 +6244,7 @@ fn a_general_marker_overrides_environment_and_native_parent_and_cycles_stay_unli
 fn native_marker_query(home: &Home) -> QueryData {
     build_query(
         &home.options,
-        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
         &mut false,
         &mut Texts::default(),
         NOW,
@@ -6312,7 +6327,8 @@ fn native_query_rewrites_refuse_selected_bodies_and_stale_catalog_publication() 
                 )],
             );
             home.build_query();
-            let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+            let mut cache =
+                EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
             let generation = cache.session_catalog_generation();
             let mutation: Box<dyn FnOnce()> = Box::new(move || {
                 let before = fs::metadata(&path).unwrap();
@@ -6582,7 +6598,7 @@ fn native_handoff_context_rewrite_with_identical_stat_refuses_catalog_publicatio
             )],
         );
         native_marker_query(&home);
-        let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
         let generation = cache.session_catalog_generation();
         AFTER_SCAN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
@@ -6701,7 +6717,7 @@ fn native_parent_marker_rewrite_with_identical_stat_refuses_catalog_publication_
             fs::write(&path, original).unwrap();
         }
         native_marker_query(&home);
-        let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
         let generation = cache.session_catalog_generation();
         AFTER_SCAN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
@@ -8471,7 +8487,7 @@ fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "root prompt")]);
     home.top("other", &[human("other", ts(0, 0), "other prompt")]);
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     SESSION_DERIVATIONS.with(|counts| counts.borrow_mut().clear());
@@ -8524,7 +8540,7 @@ fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
 fn rewritten_growing_logs_invalidate_cached_prompt_text() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "old prompt")]);
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     let first = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
@@ -9421,7 +9437,9 @@ fn build_with_cache(
     now: i64,
 ) -> QueryData {
     if options.facts.is_none() {
-        cache.refresh_reported_runs(&options.claude_json, now, dirty);
+        cache
+            .refresh_reported_runs(&options.claude_json, now, dirty)
+            .unwrap();
     }
     let built = build_query(options, cache, dirty, texts, now).unwrap();
     invariants(&built, options.all || options.scan_window);
@@ -9457,7 +9475,7 @@ fn replay(seed: u64) {
         hold_lock(&home, "lock");
     }
     let steps = generated_steps(seed);
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
 
@@ -9574,7 +9592,7 @@ fn resumed_process_start_invalidates_cached_background_liveness() {
         ],
     );
     home.live(30, "root", "busy", json!({"startedAt":at(1, 0)}));
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     let before = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
@@ -9848,7 +9866,7 @@ fn catalog_observation_preserves_native_query_projections() {
     let observe = || {
         let pids = observe_catalog(
             &home.options,
-            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
             &mut false,
             &mut Texts::default(),
             NOW,
@@ -9897,7 +9915,7 @@ fn catalog_observation_preserves_native_query_projections() {
     inputs.retain(|input| input.path.ends_with(".jsonl"));
     prepare_sources(
         &home.options,
-        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
         &inputs,
         NOW,
     )
@@ -9928,7 +9946,7 @@ fn unsupported_portable_path_preserves_native_tree_and_refuses_lossy_query_alias
     let query = || {
         build_query(
             &home.options,
-            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
             &mut false,
             &mut Texts::default(),
             NOW,
@@ -10062,7 +10080,8 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
             assistant("root", ts(0, 1), vec![text("new answer")]),
         ],
     );
-    let mut root_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut root_cache =
+        EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let prepared = prepare_sources(&home.options, &mut root_cache, &[input("root")], NOW).unwrap();
     let before = read_catalog(&home);
     home.top(
@@ -10072,7 +10091,8 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
             assistant("other", ts(0, 2), vec![text("other answer")]),
         ],
     );
-    let mut other_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut other_cache =
+        EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let other = prepare_sources(&home.options, &mut other_cache, &[input("other")], NOW).unwrap();
     assert_eq!(
         root_cache.publish_closed_catalog(&prepared).unwrap(),
@@ -10103,7 +10123,7 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
     );
     observe_catalog(
         &home.options,
-        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
         &mut false,
         &mut Texts::default(),
         NOW,
@@ -10166,7 +10186,7 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
     assert_eq!(pending, 2);
     let native = observe_catalog(
         &home.options,
-        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
         &mut false,
         &mut Texts::default(),
         NOW,
@@ -10180,7 +10200,7 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         .unwrap();
     observe_catalog(
         &home.options,
-        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
         &mut false,
         &mut Texts::default(),
         NOW,
@@ -10634,18 +10654,41 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
 #[test]
 fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     let home = Home::new();
+    let publish = || {
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let complete = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap()
+        });
+        evidence.retire();
+        assert!(complete, "the ordinary producer must finish this fixture");
+    };
     home.top("root", &[human("root", ts(0, 0), "current root prompt")]);
     let removed=home.top("cleared", &[json!({"type":"user","uuid":"old-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"unsupported old native prompt"}})]);
-    home.build_query();
-    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    publish();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     connection
         .execute(
-            "UPDATE session_slot_projections SET version=version+1 WHERE session_key='root'",
+            "UPDATE main.session_slot_projections SET version=version+1 WHERE namespace=semon_namespace() AND session_key='root'",
             [],
         )
         .unwrap();
     fs::remove_file(removed).unwrap();
-    home.build_query();
+    publish();
+    // Exercise the product page too so a failure records the existing
+    // adapter's sanitized metadata diagnostic before identity maps it.
+    let page = crate::session_catalog_page(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&limit=1",
+    );
+    assert_eq!(page.status, 200, "retained identity metadata page");
     let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
         .unwrap()
         .unwrap();
@@ -10743,7 +10786,7 @@ fn native_catalog_does_not_acknowledge_a_rejected_generation() {
             .unwrap();
             observe_catalog(
                 &options,
-                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut EventCache::open_scoped(&options.cache, &options.source).unwrap(),
                 &mut false,
                 &mut Texts::default(),
                 NOW,
@@ -10754,7 +10797,7 @@ fn native_catalog_does_not_acknowledge_a_rejected_generation() {
     assert!(
         observe_catalog(
             &home.options,
-            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
             &mut false,
             &mut Texts::default(),
             NOW,
@@ -10784,7 +10827,7 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
             .unwrap();
             observe_catalog(
                 &options,
-                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut EventCache::open_scoped(&options.cache, &options.source).unwrap(),
                 &mut false,
                 &mut Texts::default(),
                 NOW,
@@ -10832,7 +10875,7 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
             .unwrap();
             observe_catalog(
                 &options,
-                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut EventCache::open_scoped(&options.cache, &options.source).unwrap(),
                 &mut false,
                 &mut Texts::default(),
                 NOW,
@@ -10843,7 +10886,7 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
     assert!(
         build_query(
             &home.options,
-            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap(),
             &mut false,
             &mut Texts::default(),
             NOW
@@ -10893,7 +10936,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
             source.native_id = "ambiguous-native".into();
         }
     }
-    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
     cache.publish_session_catalog(&rows, Some(&generation));
     let owners: Vec<String> = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 ORDER BY session_key").unwrap()
         .query_map(["claude", "ambiguous-native"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
@@ -11052,10 +11095,15 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
     };
     home.options.facts = Some(home.root.join("facts.json"));
     let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+    crate::write_facts(
+        home.options.facts.as_ref().unwrap(),
+        &facts,
+        &home.options.source,
+    )
+    .unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for page in paths.chunks(64) {
         assert_eq!(
             cache.begin_semantic_stage(page, &runtime).unwrap(),
@@ -11104,7 +11152,12 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             facts.codex_locks.insert("ack-root".into(), 42);
             facts.proc_starts.insert(42, 100);
             let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-            crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+            crate::write_facts(
+                home.options.facts.as_ref().unwrap(),
+                &facts,
+                &crate::Options::default().source,
+            )
+            .unwrap();
             intent.complete().unwrap();
             injected = true;
         }
@@ -11170,10 +11223,15 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     };
     home.options.facts = Some(home.root.join("facts.json"));
     let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
-    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+    crate::write_facts(
+        home.options.facts.as_ref().unwrap(),
+        &facts,
+        &home.options.source,
+    )
+    .unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for page in paths.chunks(64) {
         assert_eq!(
             cache.begin_semantic_stage(page, &runtime).unwrap(),
@@ -11320,7 +11378,7 @@ fn semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch() {
     file.write_all(line.as_bytes()).unwrap();
     file.sync_all().unwrap();
     intent.complete(from + line.len() as u64).unwrap();
-    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     assert_ne!(
         cache.finish_semantic_stage(old_epoch).unwrap(),
         crate::events::Outcome::Written,
@@ -11840,7 +11898,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
         let mut facts = crate::local_runtime_facts(&home.options).unwrap();
         facts.codex_rollouts = Some(current);
         let facts_path = home.root.join("selected-facts.json");
-        crate::write_facts(&facts_path, &facts).unwrap();
+        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
         let mut options = home.options.clone();
         options.facts = Some(facts_path);
         let mut oracle_options = options.clone();
@@ -12077,7 +12135,12 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         .unwrap()
         .unwrap();
     crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
-    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let marker_key = format!(
         "archive_event_index:{}",
         home.options.codex_home.join(&relative).display()
@@ -12093,7 +12156,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     // certify a V5 source cohort. A new Current owner must retain this custody
     // without granting an empty or rebound historical observation.
     db.execute(
-        "UPDATE session_slot_projections SET version=4,source_generation=NULL WHERE session_key=?1",
+        "UPDATE main.session_slot_projections SET version=4,source_generation=NULL WHERE namespace=semon_namespace() AND session_key=?1",
         [native],
     )
     .unwrap();
@@ -12124,7 +12187,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     let mut facts = crate::local_runtime_facts(&home.options).unwrap();
     facts.codex_rollouts = Some(BTreeSet::new());
     let facts_path = home.root.join("custody-facts.json");
-    crate::write_facts(&facts_path, &facts).unwrap();
+    crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
     let mut options = home.options.clone();
     options.facts = Some(facts_path);
     drain(&options);

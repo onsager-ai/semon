@@ -150,7 +150,7 @@ impl Root {
             proc_root: self.0.join("proc"),
             cache: self.0.join("state/index.json"),
             all: true,
-            ..Default::default()
+            ..semon_sessions::Options::from_host().unwrap()
         };
         let received = semon_sessions::ReceivedMachines::new(self.0.join("received"), &options);
         let local = if local {

@@ -5,9 +5,10 @@ use crate::{
     events::EventCache,
     model::summary::CatalogSource,
     slot_projection::{SavedSlot, VERSION},
+    storage::catalog::CatalogSnapshot,
     viewer::{ViewerReply, decoded, query_value},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -173,18 +174,18 @@ pub(crate) fn session_turn_anchor_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let binding = crate::storage::local_navigation_binding(options, source_key)?;
+        let mut db = binding.connection()?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
+        crate::events::store::require_current(&tx)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)?;
         let identity = match catalog::catalog_selection_in_snapshot(
             options,
             source_key,
             &key,
             crate::CatalogReadScope::RetainedHistory,
-            &tx,
+            &snapshot,
         ) {
             Ok(Some((identity, _))) => identity,
             Ok(None) => {
@@ -199,7 +200,7 @@ pub(crate) fn session_turn_anchor_with_gate(
         };
         let generation: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -207,7 +208,7 @@ pub(crate) fn session_turn_anchor_with_gate(
         if generation.as_deref() != Some(identity.generation.as_str()) {
             return Ok(stale(ProjectionFence::CatalogPublication));
         }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let history = snapshot.history_catalog(&key)?.is_some();
         let (table, header) = if history {
             ("session_history_slots", "session_history_projections")
         } else {
@@ -215,7 +216,7 @@ pub(crate) fn session_turn_anchor_with_gate(
         };
         let projection: Option<(String, u32)> = tx
             .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                &format!("SELECT generation,version FROM main.{header} WHERE namespace=semon_namespace() AND session_key=?1"),
                 [&key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -224,7 +225,7 @@ pub(crate) fn session_turn_anchor_with_gate(
             return Ok(unavailable());
         };
         let projection = entry_generation(&projection);
-        let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
+        let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
         tx.commit()?;
         Ok(reply(
             200,
@@ -303,18 +304,18 @@ pub(crate) fn session_annotations_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let binding = crate::storage::local_navigation_binding(options, source_key)?;
+        let mut db = binding.connection()?;
         db.busy_timeout(Duration::from_millis(100))?;
         let tx = db.transaction()?;
+        crate::events::store::require_current(&tx)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)?;
         let (identity, session) = match catalog::catalog_selection_in_snapshot(
             options,
             source_key,
             &key,
             crate::CatalogReadScope::RetainedHistory,
-            &tx,
+            &snapshot,
         ) {
             Ok(Some(selected)) => selected,
             Ok(None) => {
@@ -329,7 +330,7 @@ pub(crate) fn session_annotations_with_gate(
         };
         let catalog_generation: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
                 [],
                 |row| row.get(0),
             )
@@ -337,7 +338,7 @@ pub(crate) fn session_annotations_with_gate(
         if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
             return Ok(stale(ProjectionFence::CatalogPublication));
         }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let history = snapshot.history_catalog(&key)?.is_some();
         let header = if history {
             "session_history_projections"
         } else {
@@ -350,7 +351,7 @@ pub(crate) fn session_annotations_with_gate(
         };
         let projection: Option<(String, u32)> = tx
             .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                &format!("SELECT generation,version FROM main.{header} WHERE namespace=semon_namespace() AND session_key=?1"),
                 [&key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -385,7 +386,7 @@ pub(crate) fn session_annotations_with_gate(
             }));
         }
         let total: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
+            &format!("SELECT count(*) FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1 AND {predicate}"),
             [&key],
             |row| row.get(0),
         )?;
@@ -393,7 +394,7 @@ pub(crate) fn session_annotations_with_gate(
         if after > total {
             return Ok(invalid_arguments());
         }
-        let mut statement = tx.prepare(&format!("SELECT slot FROM {slots} WHERE session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
+        let mut statement = tx.prepare(&format!("SELECT slot FROM main.{slots} WHERE namespace=semon_namespace() AND session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
         let entries: Vec<Value> = statement
             .query_map(
                 rusqlite::params![key, i64::try_from(limit)?, i64::try_from(after)?],
@@ -437,7 +438,7 @@ pub(crate) fn error_generation(projection: &str, session: &Value) -> String {
     )
 }
 
-fn entry_generation(stored: &str) -> String {
+pub(crate) fn entry_generation(stored: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "{:x}",
@@ -453,9 +454,13 @@ pub(crate) fn observation(
     catalog_generation: &str,
     history: bool,
 ) -> rusqlite::Result<Option<Value>> {
+    // An admitted reader sees only its own namespace's projections.
+    let scope = "namespace=semon_namespace() AND ";
     let published: Option<String> = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            &format!(
+                "SELECT value FROM main.meta WHERE {scope}key='slot_projection_catalog_generation'"
+            ),
             [],
             |row| row.get(0),
         )
@@ -463,7 +468,15 @@ pub(crate) fn observation(
     if published.as_deref() != Some(catalog_generation) {
         return Ok(None);
     }
-    let history = history && crate::history_projection::catalog(tx, key)?.is_some();
+    let history = if !history {
+        false
+    } else {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1)",
+            [key],
+            |row| row.get(0),
+        )?
+    };
     let table = if history {
         "session_history_projections"
     } else {
@@ -471,7 +484,9 @@ pub(crate) fn observation(
     };
     let projection: Option<(String, u32, i64)> = tx
         .query_row(
-            &format!("SELECT generation,version,total FROM {table} WHERE session_key=?1"),
+            &format!(
+                "SELECT generation,version,total FROM main.{table} WHERE {scope}session_key=?1"
+            ),
             [key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -480,7 +495,8 @@ pub(crate) fn observation(
 }
 
 struct Selection {
-    proof_db: Arc<crate::events::store::chunk_proofs::Snapshot>,
+    render_time: Option<i64>,
+    proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
     session: Value,
     generation: String,
@@ -502,12 +518,107 @@ enum SelectedPart {
     Attachment(usize),
 }
 
+fn parse_requested_part(query: &str) -> Result<(SelectedPart, Option<usize>), ViewerReply> {
+    let argument = |name| query_value(query, name).and_then(decoded);
+    let part = argument("part");
+    let attachment = if part.as_deref() == Some("attachment") {
+        match argument("image")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|index| *index < 64)
+        {
+            Some(index) => Some(index),
+            None => {
+                return Err(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "A recorded image ordinal is required.",
+                    false,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let requested_part = match part.as_deref() {
+        None => SelectedPart::Transcript,
+        Some("script" | "output" | "attachment")
+            if argument("generation").is_some()
+                && argument("after").is_some()
+                && argument("field_chunk").is_none() =>
+        {
+            match part.as_deref() {
+                Some("script") => SelectedPart::Script,
+                Some("output") => SelectedPart::Output,
+                Some("attachment") => SelectedPart::Attachment(
+                    attachment.expect("attachment ordinal validated before Catalog read"),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Err(catalog::error(
+                400,
+                "invalid_arguments",
+                "Selected part reads require generation, after and limit=1.",
+                false,
+            ));
+        }
+    };
+    let field_chunk = match argument("field_chunk") {
+        Some(chunk) => {
+            let Ok(chunk) = chunk.parse::<usize>() else {
+                return Err(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "Invalid field chunk.",
+                    false,
+                ));
+            };
+            if argument("generation").is_none() || argument("after").is_none() {
+                return Err(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "Field reads require generation, after and limit=1.",
+                    false,
+                ));
+            }
+            Some(chunk)
+        }
+        None => None,
+    };
+    Ok((requested_part, field_chunk))
+}
+
 pub(crate) fn read(
     options: &Options,
     source_key: &str,
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    read_inner(
+        options,
+        source_key,
+        query,
+        provider,
+        mode,
+        None,
+        before_read,
+    )
+}
+
+fn read_inner(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    bound: Option<(
+        &dyn crate::storage::selected::SelectedSnapshotStore,
+        &crate::storage::selected::HostSourceBinding,
+        &crate::SelectedReadControl,
+    )>,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     for name in [
@@ -582,82 +693,113 @@ pub(crate) fn read(
             false,
         ));
     }
-    let part = argument("part");
-    let attachment = if part.as_deref() == Some("attachment") {
-        match argument("image")
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|index| *index < 64)
-        {
-            Some(index) => Some(index),
-            None => {
-                return Ok(catalog::error(
-                    400,
-                    "invalid_arguments",
-                    "A recorded image ordinal is required.",
-                    false,
-                ));
-            }
-        }
-    } else {
-        None
-    };
-    let requested_part = match part.as_deref() {
-        None => SelectedPart::Transcript,
-        Some("script" | "output" | "attachment")
-            if argument("generation").is_some()
-                && argument("after").is_some()
-                && argument("field_chunk").is_none() =>
-        {
-            match part.as_deref() {
-                Some("script") => SelectedPart::Script,
-                Some("output") => SelectedPart::Output,
-                Some("attachment") => SelectedPart::Attachment(
-                    attachment.expect("attachment ordinal validated before Catalog read"),
-                ),
-                _ => unreachable!(),
-            }
-        }
-        _ => {
-            return Ok(catalog::error(
-                400,
-                "invalid_arguments",
-                "Selected part reads require generation, after and limit=1.",
-                false,
-            ));
-        }
-    };
-    let field_chunk = match argument("field_chunk") {
-        Some(chunk) => {
-            let Ok(chunk) = chunk.parse::<usize>() else {
-                return Ok(catalog::error(
-                    400,
-                    "invalid_arguments",
-                    "Invalid field chunk.",
-                    false,
-                ));
-            };
-            if argument("generation").is_none() || argument("after").is_none() {
-                return Ok(catalog::error(
-                    400,
-                    "invalid_arguments",
-                    "Field reads require generation, after and limit=1.",
-                    false,
-                ));
-            }
-            Some(chunk)
-        }
-        None => None,
+    let (requested_part, field_chunk) = match parse_requested_part(query) {
+        Ok(requested) => requested,
+        Err(reply) => return Ok(reply),
     };
     if let Err(reply) = before_read() {
         return Ok(reply);
     }
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    if let Some((lease, host, control)) = bound {
+        let selected = lease.open_selected(options, host, control)?;
+        if selected.row.key != key {
+            return Ok(unavailable());
+        }
+        let catalog = crate::storage::selected::ImmutableCatalog {
+            row: &selected.row,
+            witness: &selected.witness,
+            snapshot: &selected.snapshot,
+        };
+        let scope = if history {
+            crate::CatalogReadScope::RetainedHistory
+        } else {
+            crate::CatalogReadScope::Current
+        };
+        let Some((identity, session)) =
+            catalog::catalog_selection_in_snapshot(options, source_key, &key, scope, &catalog)
+                .map_err(|_| invalid())?
+        else {
+            return Ok(unavailable());
+        };
+        let generation = entry_generation(&selected.witness.header_generation);
+        if argument("generation").is_some_and(|expected| expected != generation) {
+            return Ok(stale(ProjectionFence::ProjectionGeneration));
+        }
+        if argument("errors_generation")
+            .is_some_and(|expected| expected != error_generation(&generation, &session))
+        {
+            return Ok(stale(ProjectionFence::ErrorsGeneration));
+        }
+        let total = selected.witness.total;
+        let first = after.unwrap_or_else(|| total.saturating_sub(limit));
+        if first > total {
+            return Ok(catalog::error(
+                400,
+                "invalid_range",
+                "The slot address exceeds this projection.",
+                false,
+            ));
+        }
+        let end = first.saturating_add(limit).min(total);
+        let start = first.saturating_sub(1);
+        let slots = selected.slots[start..end.saturating_add(1).min(total)].to_vec();
+        let context = crate::storage::selected::range_context(
+            &selected.witness.context,
+            &key,
+            &slots[first - start..end - start],
+            &selected.row.sources,
+        )?;
+        let sources = selected
+            .row
+            .sources
+            .iter()
+            .map(|source| (source.path.clone(), source.clone()))
+            .collect();
+        // A lease authenticates the presentation inputs, not a distinct clock.
+        // Keep active-call elapsed rendering on the same current clock as the
+        // ordinary range path below.
+        let render_time = None;
+        let selection = Selection {
+            render_time,
+            proof_db: None,
+            identity,
+            session,
+            generation,
+            total,
+            first,
+            end,
+            start,
+            slots,
+            sources,
+            history_incomplete: false,
+            context,
+        };
+        let records = selected.sources.reader_with_mode(provider, mode);
+        let controlled = crate::storage::selected::Controlled {
+            reader: &records,
+            control,
+        };
+        let result = present(
+            options,
+            selection,
+            requested_part,
+            field_chunk,
+            None,
+            mode,
+            Some(&controlled),
+        );
+        // Presentation can tolerate malformed records, but cannot hide a Raw
+        // revision failure, cancelled request, revoked admission or lease.
+        records.finish()?;
+        lease.finish_selected(control)?;
+        return result;
+    }
+    let binding = crate::storage::local_navigation_binding(options, source_key)?;
+    let mut connection = binding.connection()?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &transaction)?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "transcript_before_snapshot");
     let selected = catalog::catalog_selection_in_snapshot(
@@ -669,7 +811,7 @@ pub(crate) fn read(
         } else {
             crate::CatalogReadScope::Current
         },
-        &transaction,
+        &snapshot,
     );
     let (identity, session) = match selected {
         Ok(Some(selected)) => selected,
@@ -703,9 +845,10 @@ pub(crate) fn read(
     if let Some(hook) = AFTER_SELECTION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
+    // Every projection read below stays inside the admitted namespace.
     let catalog_generation: Option<String> = transaction
         .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation'",
             [],
             |row| row.get(0),
         )
@@ -716,11 +859,15 @@ pub(crate) fn read(
     if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
         return Ok(stale(ProjectionFence::CatalogPublication));
     }
-    let history_projection =
-        history && crate::history_projection::catalog(&transaction, &key)?.is_some();
+    let history_row = if history {
+        snapshot.history_catalog(&key)?
+    } else {
+        None
+    };
+    let history_projection = history_row.is_some();
     let history_incomplete = history_projection
         && transaction.query_row(
-            "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
+            "SELECT incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1",
             [&key],
             |row| row.get::<_, bool>(0),
         )?;
@@ -736,7 +883,7 @@ pub(crate) fn read(
     };
     let projection: Option<(String, u32, i64)> = transaction
         .query_row(
-            &format!("SELECT generation,version,total FROM {header_table} WHERE session_key=?1"),
+            &format!("SELECT generation,version,total FROM main.{header_table} WHERE namespace=semon_namespace() AND session_key=?1"),
             [&key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -771,7 +918,7 @@ pub(crate) fn read(
     let end = first.saturating_add(limit).min(total);
     let start = first.saturating_sub(1);
     let mut statement = transaction.prepare(
-        &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {slot_table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
+        &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{slot_table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
     let texts: Vec<String> = statement
         .query_map(
             rusqlite::params![
@@ -790,18 +937,17 @@ pub(crate) fn read(
     if slots.len() != end.saturating_add(1).min(total) - start {
         return Ok(unavailable());
     }
-    let row_text: String = if history_projection {
-        crate::history_projection::catalog(&transaction, &key)?.ok_or_else(invalid)?
-    } else {
-        transaction.query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+    let row_text: String = match history_row {
+        Some(metadata) => metadata,
+        None => transaction.query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
             [&key],
             |row| row.get(0),
-        )?
+        )?,
     };
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
-    let context = crate::causal_trace::range_context(
-        &transaction,
+    let context = crate::storage::selected::range_context(
+        &crate::storage::sqlite::selected::Context::owned(&transaction),
         &key,
         &slots[first - start..end - start],
         &row.sources,
@@ -816,7 +962,10 @@ pub(crate) fn read(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
-        proof_db: crate::events::store::chunk_proofs::Snapshot::new(connection),
+        render_time: None,
+        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(
+            connection, binding,
+        )),
         identity,
         session,
         generation,
@@ -829,6 +978,54 @@ pub(crate) fn read(
         history_incomplete,
         context,
     };
+    present(
+        options,
+        selection,
+        requested_part,
+        field_chunk,
+        provider,
+        mode,
+        None,
+    )
+}
+
+/// Private configured reader: exact durable proof identity accompanies the
+/// ordinary product reply without changing its serialized presentation.
+#[allow(dead_code)]
+pub(crate) fn read_bound(
+    lease: &dyn crate::storage::selected::SelectedSnapshotStore,
+    options: &Options,
+    host: &crate::storage::selected::HostSourceBinding,
+    query: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    control: &crate::SelectedReadControl,
+) -> io::Result<(crate::storage::proof_lifetime::ReaderSnapshot, ViewerReply)> {
+    control.check()?;
+    host.validate(lease.snapshot())?;
+    let reply = read_inner(
+        options,
+        &host.source_key,
+        query,
+        provider,
+        mode,
+        Some((lease, host, control)),
+        || Ok(()),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
+    lease.finish_selected(control)?;
+    Ok((lease.snapshot().clone(), reply))
+}
+
+fn present(
+    options: &Options,
+    selection: Selection,
+    requested_part: SelectedPart,
+    field_chunk: Option<usize>,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    reader: Option<&dyn SessionSourceReader>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     if !matches!(requested_part, SelectedPart::Transcript) && selection.end != selection.first + 1 {
         return Ok(catalog::error(
             400,
@@ -846,9 +1043,18 @@ pub(crate) fn read(
                 false,
             ));
         }
-        return Ok(render_field(options, selection, provider, chunk, mode));
+        return Ok(render_field_with_reader(
+            options, selection, provider, chunk, mode, reader,
+        ));
     }
-    Ok(render(options, selection, provider, mode, requested_part))
+    Ok(render_with_reader(
+        options,
+        selection,
+        provider,
+        mode,
+        requested_part,
+        reader,
+    ))
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
@@ -1116,7 +1322,6 @@ impl SessionSourceReader for Local<'_> {
             if matches!(
                 stage,
                 FailureStage::ProofOpenDb
-                    | FailureStage::HeaderStore
                     | FailureStage::HeaderMissing
                     | FailureStage::HeaderVersion
                     | FailureStage::HeaderParser
@@ -1135,7 +1340,6 @@ impl SessionSourceReader for Local<'_> {
             if !matches!(
                 stage,
                 FailureStage::ProofOpenDb
-                    | FailureStage::HeaderStore
                     | FailureStage::HeaderMissing
                     | FailureStage::HeaderVersion
                     | FailureStage::HeaderParser
@@ -1195,12 +1399,20 @@ impl SessionSourceReader for Local<'_> {
                         &ledger,
                     )
                 } else {
-                    crate::events::store::chunk_proofs::Focused::open_with_raw(
-                        &EventCache::path(&self.options.cache),
-                        path.to_str().ok_or_else(invalid)?,
-                        &ledger,
-                        Some(before.size),
-                    )
+                    crate::storage::local_navigation_binding(self.options, "")
+                        .map_err(|error| {
+                            crate::source_carrier::FailureStage::ProofOpenDb
+                                .wrap(io::Error::other(error))
+                        })
+                        .and_then(|binding| {
+                            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                                &binding,
+                                &EventCache::path(&self.options.cache),
+                                path.to_str().ok_or_else(invalid)?,
+                                &ledger,
+                                Some(before.size),
+                            )
+                        })
                 }
                 .map_err(|error| {
                     rejected(
@@ -1393,12 +1605,13 @@ fn invalid() -> io::Error {
     )
 }
 
-fn render(
+fn render_with_reader(
     options: &Options,
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
     part: SelectedPart,
+    verified: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
     let attachment = match part {
         SelectedPart::Attachment(index) => Some(index),
@@ -1420,7 +1633,7 @@ fn render(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -1440,7 +1653,7 @@ fn render(
         mode,
         routes: std::sync::Mutex::default(),
     };
-    let reader: &dyn SessionSourceReader = &composite;
+    let reader: &dyn SessionSourceReader = verified.unwrap_or(&composite);
     // Presentation deliberately tolerates malformed records and unavailable
     // archive bytes. A rejected source generation is different: never replace
     // accepted content with empty entries under the same projection proof.
@@ -1729,7 +1942,7 @@ fn render(
                 &slots,
                 slot,
                 index,
-                crate::model::now_ms(),
+                selection.render_time.unwrap_or_else(crate::model::now_ms),
             )
             .unwrap_or_else(|| json!({"k":"end"}))
         };
@@ -1979,12 +2192,13 @@ pub(crate) fn session_entry_field_with_gate(
     session_transcript_range_with_gate(options, source_key, query, reader, mode, before_read)
 }
 
-fn render_field(
+fn render_field_with_reader(
     options: &Options,
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     chunk: usize,
     mode: SessionSourceReadMode,
+    verified: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
     let saved = &selection.slots[selection.first - selection.start];
     let (Some(field), Some(file)) = (&saved.field, &saved.file) else {
@@ -2024,7 +2238,7 @@ fn render_field(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -2040,7 +2254,7 @@ fn render_field(
         mode,
         routes: std::sync::Mutex::default(),
     };
-    let reader: &dyn SessionSourceReader = &composite;
+    let reader: &dyn SessionSourceReader = verified.unwrap_or(&composite);
     let result = (|| -> io::Result<(String, bool, usize, Value)> {
         let reference = references.get(&file.path).ok_or_else(invalid)?;
         if field.checkpoints.first() != Some(&field.start)

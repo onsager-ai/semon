@@ -385,6 +385,11 @@ Physical output windows now select retained turns and handoffs from indexed
 metadata, preserving links needed by retained turns. Membership is resolved before
 turn anchors, so an excluded session still reports `unknown_session`. Detail reads
 resolve only returned prompt/handoff fields and finish only touched byte sources.
+The private PostgreSQL selected reader uses its qualified Catalog cohort for the
+same turn, edge and child window closure, and checks that cohort's generation
+and runtime against the selected read. The ordinary cross-backend scenario saves
+SQLite selected-field results and errors for each window before prohibiting
+SQLite access in the PostgreSQL phase. Complete backend qualification remains open.
 The private physical owner also publishes ordered virtual/unsent handoff recipes.
 Single-owner full-window virtual pages retain the NoActivity slot, absolute positions and union
 aliases without preparing the physical transcript. Virtual details keep the 8 MiB

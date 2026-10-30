@@ -43,7 +43,7 @@ impl Home {
         start: Option<i64>,
     ) -> Option<ToolCall> {
         let options = self.options();
-        let mut cache = events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut cache = events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let mut indexed = Vec::new();
         for path in paths {
             let index = events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
@@ -74,7 +74,8 @@ impl Home {
     }
 
     fn count(&self, path: &Path) -> usize {
-        let mut cache = events::EventCache::open_scoped(&self.options().cache).unwrap();
+        let mut cache =
+            events::EventCache::open_scoped(&self.options().cache, &self.options().source).unwrap();
         events::scan_file(path, "claude", &mut cache, &mut false)
             .unwrap()
             .handoff_index

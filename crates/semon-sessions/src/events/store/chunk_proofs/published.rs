@@ -14,43 +14,63 @@ fn namespaces(prefix: &str) -> [String; 2] {
     [prefix.to_owned(), format!("native_proof_tree:{prefix}:")]
 }
 
+// Every reference belongs to the current namespace-leading Catalog family.
+// Refuse an unsupported physical shape before decoding owners or collecting proofs.
+fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> {
+    for table in [
+        "session_catalog",
+        "session_catalog_sources",
+        "session_history_catalog",
+    ] {
+        let (namespace_key, session_key): (i64, i64) = db.query_row(
+            "SELECT coalesce(max(CASE WHEN name='namespace' AND [notnull]=1 THEN pk END),0),coalesce(max(CASE WHEN name='session_key' THEN pk END),0) FROM pragma_table_info(?1,'main')",
+            [table], |r| Ok((r.get(0)?,r.get(1)?)),
+        )?;
+        if (namespace_key, session_key) != (1, 2) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok([
+        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1",
+        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1",
+    ])
+}
+
 /// Run before replacing/deleting live proofs, in the same Index transaction.
 /// Preserve only generations referenced by Current or retained observations;
 /// collect superseded proofs on this source's next mutation. Request-owned WAL
 /// snapshots keep collected proofs available until their last reader closes.
 pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let mut referenced = BTreeSet::new();
-    let mut statement = tx.prepare(
-        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END
-         FROM session_catalog_sources s JOIN session_catalog c USING(session_key) WHERE s.source_path=?1
-         UNION ALL
-         SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END
-         FROM session_catalog_sources s JOIN session_history_catalog c USING(session_key) WHERE s.source_path=?1"
-    )?;
-    for text in statement.query_map([path], |r| r.get::<_, Option<String>>(0))? {
-        // An oversized owner cannot be silently excluded from the reference
-        // set: that could collect its still-published proof. Refuse the Index
-        // mutation before any retention/GC writes and preserve its old state.
-        let text = text?.ok_or(rusqlite::Error::InvalidQuery)?;
-        let row: crate::model::summary::CatalogRow =
-            serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        for source in row
-            .sources
-            .iter()
-            .filter(|source| source.path == Path::new(path))
-        {
-            referenced.insert(crate::source_carrier::ledger_digest(
-                &crate::source_carrier::ledger(source),
-            ));
+    referenced.extend(crate::storage::sqlite::proof_generations::referenced(
+        tx, path,
+    )?);
+    for sql in reference_statements(tx)? {
+        let mut statement = tx.prepare(sql)?;
+        for text in statement.query_map([path], |r| r.get::<_, Option<String>>(0))? {
+            // An oversized owner cannot be silently excluded from the reference
+            // set: that could collect its still-published proof. Refuse the Index
+            // mutation before any retention/GC writes and preserve its old state.
+            let text = text?.ok_or(rusqlite::Error::InvalidQuery)?;
+            let row: crate::model::summary::CatalogRow =
+                serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            for source in row
+                .sources
+                .iter()
+                .filter(|source| source.path == Path::new(path))
+            {
+                referenced.insert(crate::source_carrier::ledger_digest(
+                    &crate::source_carrier::ledger(source),
+                ));
+            }
         }
     }
-    drop(statement);
     let key = format!(
         "native_published_chunks_manifest:{}",
         crate::source_carrier::source_hash(path)
     );
     let prior: Option<String> = tx
-        .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
+        .query_row(native_metadata_value(tx)?, [&key], |r| r.get(0))
         .optional()?
         .flatten();
     let mut saved: BTreeSet<String> = prior
@@ -59,12 +79,15 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         .transpose()
         .map_err(|_| rusqlite::Error::InvalidQuery)?
         .unwrap_or_default();
+    let mut collected = 0;
     for digest in saved.clone() {
         let retained = prefix(path, &digest);
         let header: Option<String> = tx
-            .query_row(NATIVE_METADATA_VALUE, [format!("{retained}header")], |r| {
-                r.get(0)
-            })
+            .query_row(
+                native_metadata_value(tx)?,
+                [format!("{retained}header")],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
         let compatible = header.as_deref().is_some_and(|text| {
@@ -74,9 +97,13 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         if referenced.contains(&digest) && compatible {
             continue;
         }
+        if collected >= 16 {
+            continue;
+        }
+        collected += 1;
         for namespace in namespaces(&retained) {
             tx.execute(
-                "DELETE FROM meta WHERE key>=?1 AND key<?2",
+                "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
                 params![&namespace, format!("{namespace}~")],
             )?;
         }
@@ -84,7 +111,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     }
     let live = super::prefix(path);
     let header: Option<String> = tx
-        .query_row(NATIVE_METADATA_VALUE, [format!("{live}header")], |r| {
+        .query_row(native_metadata_value(tx)?, [format!("{live}header")], |r| {
             r.get(0)
         })
         .optional()?
@@ -97,19 +124,24 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
             && !saved.contains(&digest)
         {
             let retained = prefix(path, &digest);
+            let source: i64 = tx.query_row("SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.receipt=?2", params![path,header.ledger], |r|r.get(0))?;
             for (from, to) in namespaces(&live).iter().zip(namespaces(&retained)) {
                 tx.execute(
-                    "INSERT INTO meta(key,value) SELECT ?2 || substr(key,length(?1)+1),value FROM meta WHERE key>=?1 AND key<?3",
+                    "INSERT INTO main.meta(namespace,key,value) SELECT semon_namespace(),?2 || substr(key,length(?1)+1),value FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?3",
                     params![from, to, format!("{from}~")],
                 )?;
             }
+            tx.execute(
+                native_metadata_put(tx)?,
+                params![format!("{retained}source"), source.to_string()],
+            )?;
             saved.insert(digest);
         }
     }
     if !saved.is_empty() || prior.is_some() {
         let encoded = json(&saved)?;
         if prior.as_deref() != Some(&encoded) {
-            tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,encoded])?;
+            tx.execute(native_metadata_put(tx)?, params![key, encoded])?;
         }
     }
     Ok(())

@@ -114,7 +114,7 @@ pub(crate) struct Summary {
     #[serde(default)]
     pub(crate) usage_total: Option<Tokens>,
     #[serde(skip)]
-    pub(crate) stored: Option<events::store::tree_state::Snapshot>,
+    pub(crate) stored: Option<events::store::tree_state::TreeCheckpoint>,
     // Never persisted: a marker can carry a handoff prompt path, and the
     // on-disk cache must not retain session content (risk:secret).
     #[serde(skip)]
@@ -155,6 +155,10 @@ impl Summary {
     }
 
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        if let Some(stored @ events::store::tree_state::TreeCheckpoint::Pg(_)) = &self.stored {
+            return stored.tool_name(id);
+        }
         if let Some(name) = self.tools.get(id) {
             return Ok(Some(name.clone()));
         }
