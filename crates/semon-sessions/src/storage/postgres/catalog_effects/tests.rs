@@ -112,6 +112,7 @@ fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     let wrong = crate::slot_projection::Publication {
         rows: &bad,
         transcripts: Some(&data.projections),
+        observations: None,
     };
     assert_eq!(
         pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -358,6 +359,7 @@ impl Input {
         crate::slot_projection::Publication {
             rows: &self.rows,
             transcripts: Some(&self.projections),
+            observations: None,
         }
     }
 }
@@ -528,6 +530,7 @@ fn build_oracle_with_binding(
             &crate::slot_projection::Publication {
                 rows: &[],
                 transcripts: Some(&[]),
+                observations: None,
             },
             original_generation.as_deref(),
         )
@@ -540,6 +543,7 @@ fn build_oracle_with_binding(
             &crate::slot_projection::Publication {
                 rows: &missing,
                 transcripts: Some(&missing_recipes),
+                observations: None,
             },
             generation.as_deref(),
         )
@@ -561,6 +565,7 @@ fn build_oracle_with_binding(
             &crate::slot_projection::Publication {
                 rows: &restored.rows,
                 transcripts: Some(&restored.transcripts),
+                observations: None,
             },
             missing_generation.as_deref(),
         )
@@ -579,6 +584,7 @@ fn build_oracle_with_binding(
                 &crate::slot_projection::Publication {
                     rows: &restored_original.rows,
                     transcripts: Some(&restored_original.transcripts),
+                    observations: None,
                 },
                 withdrawn_generation.as_deref(),
             )
@@ -665,6 +671,7 @@ fn bind_custody_fixture(
                 &crate::slot_projection::Publication {
                     rows,
                     transcripts: Some(projections),
+                    observations: None,
                 },
                 None,
                 &[],
@@ -720,7 +727,8 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                     generation,
                     &crate::slot_projection::Publication {
                         rows: &missing,
-                        transcripts: Some(&recipes)
+                        transcripts: Some(&recipes),
+                        observations: None,
                     },
                     &[]
                 )?);

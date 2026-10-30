@@ -200,6 +200,7 @@ pub(super) fn request(
         publication.rows,
         derivations,
         recipes,
+        publication.observations,
         expected,
         claims,
         closed,
@@ -241,6 +242,27 @@ pub(in crate::storage::postgres) fn publish(
     if super::super::model_cache::generation(tx)?.as_deref() != expected {
         return Ok((Outcome::Conflict, None));
     }
+    let observation_runtime = if publication.rows.is_empty() {
+        None
+    } else {
+        let observations = publication.observations.ok_or(StorageError::ScopeChanged)?;
+        let source_runtime = observations.source_runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
+        if semantic.as_ref().is_some_and(|semantic| semantic.runtime != source_runtime) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let binding = super::super::model_cache::binding(tx)?;
+        let runtime = binding.witness(source_runtime).map_err(|_| StorageError::ScopeChanged)?;
+        if observations.runtime.as_deref() != Some(runtime.as_str()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        for row in publication.rows {
+            let observed = observations.runtime_for(row).ok_or(StorageError::ScopeChanged)?;
+            if row.query.as_ref().and_then(|query| query["runtime"].as_str()) != Some(observed.as_str()) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        Some((binding, runtime))
+    };
     let paths = publication
         .rows
         .iter()
@@ -289,11 +311,6 @@ pub(in crate::storage::postgres) fn publish(
             return Ok((Outcome::Conflict, None));
         }
     }
-    let runtime = publication
-        .rows
-        .iter()
-        .filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE owner_state");
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
@@ -311,7 +328,7 @@ pub(in crate::storage::postgres) fn publish(
         .map_err(|_| StorageError::ScopeChanged)?;
     // Semantic staging checks each row against its captured runtime scope.
     // Owner state keeps the global lifecycle runtime, including zero-row
-    // withdrawals. Generic publications retain their row/head binding.
+    // withdrawals. Generic publication uses the same explicit global capture.
     let bound = if let Some(semantic) = &semantic {
         let binding = super::super::model_cache::binding(tx)?;
         let witnessed = binding
@@ -319,12 +336,11 @@ pub(in crate::storage::postgres) fn publish(
             .map_err(|_| StorageError::ScopeChanged)?;
         semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, &witnessed)?
     } else {
-        match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
-            (Some(runtime), 1, _) => {
-                let binding = super::super::model_cache::binding(tx)?;
-                semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?
+        match (observation_runtime, publication.rows.is_empty()) {
+            (Some((binding, runtime)), false) => {
+                semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, &runtime)?
             }
-            (None, 0, true) if expected.is_some() => {
+            (None, true) if expected.is_some() => {
                 old_runtime.clone().ok_or(StorageError::ScopeChanged)?
             }
             _ => return Err(StorageError::ScopeChanged),
