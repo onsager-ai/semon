@@ -2313,6 +2313,15 @@ impl Stage {
                 .ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
         })
     }
+    pub(crate) fn runtime_source_cwds(
+        &self,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let tx = self.db.unchecked_transaction().map_err(error)?;
+        self.source.validate(&tx).map_err(StoreError::Configured)?;
+        super::catalog::runtime_source_cwds(&tx, sources)
+            .map_err(|error| StoreError::Data(error.to_string()))
+    }
 
     pub(crate) fn begin(&mut self, paths: &[String], runtime: &str) -> Result<Outcome, StoreError> {
         self.begin_with_journal(paths, runtime, false)

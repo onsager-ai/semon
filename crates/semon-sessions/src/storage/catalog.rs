@@ -506,6 +506,16 @@ pub(crate) trait CatalogSnapshot {
     fn runtime_binding(&self) -> Option<super::QueryRuntimeBinding> {
         None
     }
+    /// Current per-session Facts/PID dependencies under this snapshot's
+    /// namespace, exact source ledgers and qualified observation provenance.
+    fn runtime_observation(
+        &self,
+        _options: &crate::Options,
+        _row: &CatalogRow,
+        _runtime: &str,
+    ) -> io::Result<Option<String>> {
+        Err(io::Error::other(super::StorageError::Unavailable))
+    }
     /// Imported observations retain their producer's exact binding. Adapters
     /// must qualify that provenance under the current destination admission.
     fn row_runtime_binding(

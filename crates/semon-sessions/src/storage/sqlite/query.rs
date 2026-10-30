@@ -165,11 +165,7 @@ fn read(
     }
     let runtime = crate::native_evidence::query_runtime_generation(options)
         .map_err(|error| QueryError::io(&error))?;
-    let runtime_observations = match runtime_binding {
-        Some(binding) => crate::native_evidence::RuntimeObservations::bound(binding, &runtime)
-            .map_err(|error| QueryError::io(&error))?,
-        None => crate::native_evidence::RuntimeObservations::new(options),
-    };
+    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {
@@ -325,21 +321,21 @@ fn read(
                 "Catalog sources are outside configured native authority",
             ));
         }
-        let row_runtime = if imported_origin
-            || row
-                .query
-                .as_ref()
-                .and_then(|query| query["runtime"].as_str())
+        let cwds = super::catalog::runtime_source_cwds(db, &row.sources).map_err(unavailable)?;
+        let scoped = runtime_observations.scope(&row, &cwds).map_err(unavailable)?;
+        let row_binding = if imported_origin
+            || row.query.as_ref().and_then(|query| query["runtime"].as_str())
                 .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
         {
-            let binding = super::proof_generations::observation_binding(db, admitted_binding, &row)
-                .map_err(unavailable)?;
-            crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
-                .map_err(unavailable)?
-                .expected(&row)
+            Some(super::proof_generations::observation_binding(db, admitted_binding, &row)
+                .map_err(unavailable)?)
         } else {
-            runtime_observations.expected(&row)
+            runtime_binding.cloned()
         };
+        let row_runtime = Some(match row_binding {
+            Some(binding) => binding.witness(&scoped).map_err(unavailable)?,
+            None => scoped,
+        });
         let saved = row
             .query
             .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;

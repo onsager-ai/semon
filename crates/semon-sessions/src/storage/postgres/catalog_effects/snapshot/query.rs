@@ -170,11 +170,7 @@ impl QueryCatalogStore for QueryCatalog {
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
                 let expected = runtime.as_deref().map(|runtime| {
-                    let binding = snapshot.row_runtime_binding(&row)
-                        .map_err(|_| StorageError::ScopeChanged)?
-                        .ok_or(StorageError::ScopeChanged)?;
-                    crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
-                        .map(|observations| observations.expected(&row))
+                    snapshot.runtime_observation(&self.options, &row, runtime)
                         .map_err(|_| StorageError::ScopeChanged)
                 }).transpose()?.flatten();
                 if !crate::model::summary::query_observation_matches(
@@ -391,8 +387,8 @@ impl QueryCatalogStore for QueryCatalog {
             let mut content = BTreeMap::new();
             let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
-                let binding = snapshot.row_runtime_binding(&row).map_err(|_| cohort_scope_changed("query_runtime_binding_refused"))?.ok_or_else(|| cohort_scope_changed("query_runtime_binding_missing"))?;
-                let expected = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?.expected(&row);
+                let expected = snapshot.runtime_observation(&self.options, &row, &runtime)
+                    .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?;
                 let saved = row.query.as_ref().ok_or_else(|| cohort_scope_changed("query_observation_missing"))?;
                 let matches = crate::model::summary::query_observation_matches(saved, &row.sources, current, expected.as_deref()).map_err(|_| cohort_scope_changed("query_observation_invalid"))?;
                 if !matches { return Err(cohort_scope_changed("query_observation_mismatch")); }
