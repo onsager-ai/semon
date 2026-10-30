@@ -1069,6 +1069,65 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let saved = model.prepared();
+            let captured = saved
+                .presentation_observations()
+                .expect("authentic publication must carry presentation observations");
+            let expected_global = current_binding.witness(&batch.runtime).unwrap();
+            assert_eq!(
+                captured.runtime.as_deref(),
+                Some(expected_global.as_str()),
+                "authentic publication capture must bind the stage's global runtime"
+            );
+            for row in &saved.rows {
+                let cwds = pg.runtime_source_cwds(&row.sources).unwrap_or_else(|error| {
+                    panic!(
+                        "authentic capture CWD lookup failed: key={} error={error}",
+                        row.key
+                    )
+                });
+                let observed = captured
+                    .runtime_observation(row, &cwds)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "authentic capture authority failed: key={} error={error}",
+                            row.key
+                        )
+                    });
+                assert_eq!(
+                    row.query
+                        .as_ref()
+                        .and_then(|query| query["runtime"].as_str()),
+                    Some(observed.as_str()),
+                    "authentic Query must match capture authority: key={}",
+                    row.key
+                );
+                let saved_runtime = captured.runtime_for(row);
+                if saved_runtime.as_deref() != Some(observed.as_str()) {
+                    let source = crate::retention::source_generation(&row.sources).unwrap();
+                    for endpoint in batch.context.endpoints.values().filter(|endpoint| {
+                        endpoint.row.key == row.key
+                            && crate::retention::source_generation(&endpoint.row.sources)
+                                .ok()
+                                .as_ref()
+                                == Some(&source)
+                    }) {
+                        let endpoint_runtime = pg
+                            .runtime_source_cwds(&endpoint.row.sources)
+                            .and_then(|cwds| captured.runtime_observation(&endpoint.row, &cwds));
+                        eprintln!(
+                            "authentic capture overlap: key={} saved={saved_runtime:?} prepared={observed} endpoint={endpoint_runtime:?}",
+                            row.key
+                        );
+                    }
+                }
+                assert_eq!(
+                    saved_runtime.as_deref(),
+                    Some(observed.as_str()),
+                    "authentic capture must save the exact row/source scope: key={} sources={}",
+                    row.key,
+                    row.sources.len()
+                );
+            }
             let scopes = saved
                 .rows
                 .iter()
