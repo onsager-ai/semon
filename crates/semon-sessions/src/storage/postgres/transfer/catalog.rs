@@ -1223,6 +1223,15 @@ mod tests {
         .unwrap()
         .with_store(reverse.clone())
         .unwrap();
+        // The PG Facts writer intentionally left the SQLite source projection
+        // untouched. Publish the actual Facts through the destination binding
+        // before its first local SQLite producer uses that authority.
+        crate::write_facts(
+            native_options.facts.as_ref().unwrap(),
+            &original_facts,
+            &native_options.source,
+        )
+        .unwrap();
         let input = crate::Input {
             root: crate::InputRoot::Claude,
             path: "projects/sanitized/local-native.jsonl".into(),
