@@ -1,5 +1,79 @@
 # ASI/Jev event-classification benchmark
 
+The real-session follow-up uses [REAL_PROTOCOL.md](REAL_PROTOCOL.md) and the
+`real_*.py` tools. Its corpus and individual outputs are strictly local under
+gitignored `private/`; the fixture benchmark described below is separate.
+
+## Private real-session reproduction
+
+Use Python 3.10+ and the standard library. Restore the private frozen artifacts
+locally to reproduce the exact cohort; a fresh inventory changes as local logs
+age or new captures appear. Never copy private inputs to CI or a remote. The
+guarded helpers refresh actual kernel CPU telemetry before/after bounded reads
+and stop at 85°C or missing readings. Synthetic tests run in CI only.
+
+Before freezing, prepare one native file under 10 MB at a time. The inventory
+contains only this user's old local logs. Preparation preserves exact raw
+bytes and provenance locally, rejects open/unstable/unsupported captures, and
+redacts the reviewed allowlist. Candidate ranges are deliberately bounded:
+
+```sh
+python3 experiments/asi-jev/real_prepare.py --inventory
+python3 experiments/asi-jev/real_prepare.py --harness claude-code --start 0 --end 160
+python3 experiments/asi-jev/real_prepare.py --harness codex --start 0 --end 30
+python3 experiments/asi-jev/real_prepare.py --task-metadata
+python3 experiments/asi-jev/real_select.py
+python3 experiments/asi-jev/real_finalize.py
+```
+
+Selection keeps whole Manager/Worker captures from distinct tasks, enriched for
+error cues, with 7–60 eligible events per capture. This small-session cohort is
+not representative of all interactive sessions. Finalization makes fresh
+projections from stable selected snapshots. Do not rerun selection over a
+finalized bundle. Manually review every projected field for privacy before
+attesting to the freeze; exclude uncertain sessions before any provider call.
+
+```sh
+python3 experiments/asi-jev/real_run.py freeze-projection \
+  experiments/asi-jev/private/review-bundle.jsonl --reviewed
+python3 experiments/asi-jev/real_label.py next --annotator A
+# Each blind labeller submits one five-dimension JSON label on stdin;
+# submit saves it before returning the next causal prefix.
+python3 experiments/asi-jev/real_label.py submit --annotator A
+# Repeat independently for B. Offline access opens only after both causal
+# passes finish. Each offline submission requires the returned session ID.
+python3 experiments/asi-jev/real_label.py offline-next --annotator A
+python3 experiments/asi-jev/real_label.py offline-submit --annotator A \
+  --session-id OPAQUE_ID --reviewed
+```
+
+Labellers must not read rules, predictions, raw sources, future events during
+the causal pass, or each other's labels. A third blind adjudicator resolves
+disagreements before `freeze-reference`. Retain both original annotations;
+user spot-check review remains separate. Freeze files and hashes live locally.
+The reference input has `id` and `gold` containing `streaming` and `offline`
+five-dimension objects. Then run each named condition with the same freeze:
+
+```sh
+python3 experiments/asi-jev/real_run.py freeze-reference \
+  experiments/asi-jev/private/adjudicated-reference.jsonl
+ASI_API_BASE=https://magpie.onsager.ai \
+python3 experiments/asi-jev/real_run.py run --condition jev-triggered-prefix \
+  --max-requests 4096
+ASI_API_BASE=https://magpie.onsager.ai \
+python3 experiments/asi-jev/real_run.py run --condition llm-triggered-prefix \
+  --llm-model wokey/claude-haiku-5-5 --max-requests 4096
+```
+
+Use `run --help` for all nine conditions. Requests use existing environment
+credentials, three remote repetitions, four independent session workers, and
+no automatic retry. Individual outputs stay in `private/runs/`. Aggregate with
+`real_metrics.py --help`: supply the private event reference, all prediction
+and summary files, both independent annotations, `--adjudication-status frozen`,
+2,000 draws and seed 20261030. Its public output schema permits numeric metrics
+and fixed taxonomy labels only. Inspect that export before committing it.
+Private examples and the 50-event user review packet must remain local.
+
 This experiment compares a small deterministic rules baseline with TypeSafe Jev and, optionally, an OpenAI-compatible lightweight LLM. It reads only the reviewed sanitized fixture corpus at `data/events.jsonl`; it is not a reader for private native session files and does not change the production parser.
 
 ## Input and context

@@ -28,6 +28,17 @@ def _write_closed_log(path: Path, records: list[dict[str, object]]) -> bytes:
 
 
 class RealPipelineTests(unittest.TestCase):
+    def test_serialized_task_envelope_is_not_visible_user_text(self) -> None:
+        from collections import Counter
+        counts = Counter()
+        text = json.dumps({
+            "original_contract": {"objective": "synthetic private instruction"},
+            "user_messages": ["synthetic system and orchestration instructions"],
+        })
+        self.assertEqual(real_pipeline._sanitize_text(text, counts),
+                         "[task instructions redacted]")
+        self.assertEqual(counts["orchestration_context"], 1)
+
     def test_claude_projection_keeps_allowlisted_text_and_redacts_sensitive_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
