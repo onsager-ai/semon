@@ -541,6 +541,12 @@ fn reply(status: u16, body: Value) -> ViewerReply {
 }
 
 impl Request {
+    pub(crate) fn search_interest(&self) -> Option<(&str, Option<&str>)> {
+        self.q
+            .as_deref()
+            .map(|query| (query, self.harness.as_deref()))
+    }
+
     pub(crate) fn parse(query: &str) -> Result<Self, ViewerReply> {
         let invalid = || {
             error(
@@ -1629,6 +1635,156 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn cold_catalog_search_interest_prioritizes_exact_identity_and_finishes_fifo() {
+        let fixture = Fixture::new();
+        let selected = fixture.source("selected-interest");
+        fs::File::open(&selected)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+            .unwrap();
+        for index in 0..192 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        assert!(
+            fixture.body("q=selected-interest").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        let request = Request::parse("q=selected-interest&harness=claude").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        assert!(
+            !evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        );
+        let after = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        assert_eq!(
+            after - before,
+            1,
+            "selection must prepare its closure before unrelated cohorts"
+        );
+        let (status, selected) = fixture.body("q=selected-interest&harness=claude");
+        assert_eq!(status, 200, "{selected}");
+        assert_eq!(selected["items"][0]["key"], "selected-interest");
+        assert_eq!(selected["completeness"]["state"], "partial");
+
+        // A metadata value that is not a native identity keeps ordinary FIFO
+        // work. Search correctness never depends on an identity hint existing.
+        let request = Request::parse("q=project").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64
+        );
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
+        let (status, found) = fixture.body("q=project&limit=100");
+        assert_eq!(status, 200, "{found}");
+        assert_eq!(found["completeness"]["state"], "complete");
+        assert_eq!(found["search"]["index_complete"], true);
+        assert_eq!(found["items"].as_array().unwrap().len(), 100);
+        assert_eq!(
+            fixture.body("sid=selected-interest").1["items"][0]["key"],
+            "selected-interest"
+        );
+        evidence.retire();
+    }
+
+    #[test]
+    fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification() {
+        let fixture = Fixture::new();
+        let claude = fixture.source("identity-hint");
+        let codex = fixture
+            .options
+            .codex_home
+            .join("sessions/2026/10/01/identity-hint.jsonl");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!(
+                "{}\n",
+                json!({
+                    "type":"session_meta", "timestamp":"2026-10-01T00:00:00Z",
+                    "payload":{"id":"actual-codex", "cwd":"/synthetic/project"}
+                })
+            ),
+        )
+        .unwrap();
+        for path in [&claude, &codex] {
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+                .unwrap();
+        }
+        for index in 0..128 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        let request = Request::parse("q=identity-hint&harness=codex").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            1
+        );
+        // A same-basename file is a discovery hint, never the native identity.
+        assert!(
+            fixture.body("q=identity-hint&harness=codex").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.body("q=actual-codex&harness=codex").1["items"][0]["key"],
+            "actual-codex"
+        );
+        assert!(
+            fixture.body("q=identity-hint&harness=claude").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let request = Request::parse("q=identity-hint&harness=claude").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            fixture.body("q=identity-hint&harness=claude").1["items"][0]["key"],
+            "identity-hint"
+        );
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
+        evidence.retire();
     }
 
     #[test]

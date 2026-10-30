@@ -79,6 +79,7 @@ try {
       } finally {
         clearTimeout(timer);
       }
+      const completed = response.request().timing();
       if (url.pathname === '/api/session-entry' && response.status() === 200) {
         if (!body) throw Error('Native field response bytes are unavailable');
         const field = JSON.parse(body.toString('utf8'));
@@ -108,6 +109,14 @@ try {
           bytes,
           ...(unavailable ? { body_unavailable: unavailable } : {}),
           serverResponseMs: started.responseStart - started.requestStart,
+          responseBodyMs:
+            completed.responseEnd >= completed.responseStart
+              ? completed.responseEnd - completed.responseStart
+              : null,
+          requestCompleteMs:
+            completed.responseEnd >= completed.requestStart
+              ? completed.responseEnd - completed.requestStart
+              : null,
         });
     })().catch((error) => {
       if (errors.length < MAX_NETWORK_EVENTS)
@@ -259,7 +268,11 @@ try {
   await page.locator('#page [data-entry-key]:visible').first().waitFor({ timeout: 60000 });
   const selectedMs = performance.now() - started,
     selected = await sample();
-  Object.assign(measurements, { selectedMs });
+  Object.assign(measurements, {
+    selectedMs,
+    selectedTimingScope:
+      'Click-to-visible observation combines requests, client processing, DOM rendering and observer delay; it is an upper bound on rendering. Response timings measure request-to-headers and body completion separately.',
+  });
   const entry = await page.locator('#page [data-entry-key]:visible').first().elementHandle();
   const earlierButton = page.getByRole('button', { name: 'Load earlier records', exact: true });
   await earlierButton.first().waitFor();
@@ -325,6 +338,7 @@ try {
     searchMs,
     selectedCatalogReadyMs,
     selectedMs,
+    selectedTimingScope: measurements.selectedTimingScope,
     earlierMs,
     fieldMs,
     warmMs,

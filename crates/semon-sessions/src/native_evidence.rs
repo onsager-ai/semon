@@ -24,6 +24,7 @@ pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
+    catalog_search: Mutex<Option<(String, Option<String>)>>,
     query: RwLock<Option<Arc<QueryCache>>>,
     closed: AtomicBool,
     audit_request: AtomicU64,
@@ -270,6 +271,7 @@ impl NativeEvidence {
             options,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
+            catalog_search: Mutex::default(),
             query: RwLock::default(),
             closed: AtomicBool::new(false),
             audit_request: AtomicU64::new(0),
@@ -285,6 +287,13 @@ impl NativeEvidence {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+    }
+
+    /// Search interest only changes producer scheduling. HTTP readers neither
+    /// open native files nor acquire the producer's Work/publication fence.
+    pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
+        *lock(&self.catalog_search) =
+            interest.map(|(id, harness)| (id.to_owned(), harness.map(str::to_owned)));
     }
 
     fn finish_audit(
@@ -444,8 +453,23 @@ impl NativeEvidence {
             cache.resolve_catalog_input(&self.options, path)?;
             return Ok(CatalogPreparation::Pending);
         }
-        let inputs = if cache.session_catalog_generation().is_none() && !discovery.newest.is_empty()
-        {
+        let preferred = if cache.session_catalog_generation().is_some() {
+            let interest = lock(&self.catalog_search).take();
+            if let Some((id, harness)) = interest {
+                crate::events::store::pending_catalog_identity_sources(
+                    &self.options,
+                    &id,
+                    harness.as_deref(),
+                )?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        let inputs = if !preferred.is_empty() {
+            preferred
+        } else if cache.session_catalog_generation().is_none() && !discovery.newest.is_empty() {
             std::mem::take(&mut discovery.newest)
                 .into_iter()
                 .map(|(_, input)| input)
@@ -2046,6 +2070,46 @@ impl Snapshot {
 #[cfg(test)]
 mod catalog_owner_tests {
     use super::*;
+
+    #[test]
+    fn cold_catalog_search_interest_is_scoped_after_machine_authorization() {
+        let (first_root, first_options, _) = audit_fixture();
+        let (second_root, second_options, _) = audit_fixture();
+        let first = NativeEvidence::new(first_options);
+        let second = NativeEvidence::new(second_options);
+        drain_catalog(&first, &std::cell::Cell::new(0));
+        drain_catalog(&second, &std::cell::Cell::new(0));
+        let sources = Arc::new(SessionSources::from_evidence(vec![
+            ("first".into(), first.clone()),
+            ("second".into(), second.clone()),
+        ]));
+        let core = crate::ViewerCore::from_sources(sources);
+        assert_eq!(
+            core.respond("GET", "/api/sessions", "machine=missing&q=audit", None)
+                .status,
+            404
+        );
+        assert!(lock(&first.catalog_search).is_none());
+        assert!(lock(&second.catalog_search).is_none());
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/api/sessions",
+                "machine=second&q=audit&harness=codex",
+                None
+            )
+            .status,
+            200
+        );
+        assert!(lock(&first.catalog_search).is_none());
+        assert_eq!(
+            *lock(&second.catalog_search),
+            Some(("audit".into(), Some("codex".into())))
+        );
+        core.close();
+        fs::remove_dir_all(first_root).unwrap();
+        fs::remove_dir_all(second_root).unwrap();
+    }
 
     #[test]
     fn semantic_conflict_diagnostics_are_bounded_and_do_not_include_native_inputs() {
