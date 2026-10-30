@@ -113,7 +113,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
             for source in &row.sources {
                 let path = source.path.to_str().ok_or(StorageError::InvalidArguments)?.as_bytes();
                 let metadata = serde_json::to_vec(source).map_err(|_| StorageError::Unavailable)?;
-                tx.driver.execute("INSERT INTO semon_pg_native_catalog_sources(namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea))", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &path, &metadata, &source.native_id.as_bytes()]).map_err(sqlstate::error)?;
+                tx.driver.execute("INSERT INTO semon_pg_native_catalog_sources(namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest,folded_native_id) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea),$7)", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &path, &metadata, &source.native_id.as_bytes(), &native_keys::ascii_fold(&source.native_id)]).map_err(sqlstate::error)?;
             }
         }
         tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&namespace.as_str().as_bytes(), &generation]).map_err(sqlstate::error)?;
