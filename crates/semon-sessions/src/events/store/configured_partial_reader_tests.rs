@@ -151,11 +151,7 @@ mod partial_readers {
                 }
             }
             provider.calls.store(0, Ordering::Relaxed);
-            assert_ne!(
-                selected(options, &row.key, &provider).status,
-                200,
-                "{corruption}"
-            );
+            assert_eq!(selected(options, &row.key, &provider).status, 503, "{corruption}");
             assert_eq!(provider.calls.load(Ordering::Relaxed), 0, "{corruption}");
             db.execute(
                 "UPDATE main.session_catalog SET metadata=?3 WHERE namespace=?1 AND session_key=?2",
