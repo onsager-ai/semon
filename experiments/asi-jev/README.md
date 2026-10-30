@@ -82,6 +82,13 @@ and summary files, both independent annotations, `--adjudication-status frozen`,
 2,000 draws and seed 20261030. Its public output schema permits numeric metrics
 and fixed taxonomy labels only. Inspect that export before committing it.
 Private examples and the 50-event user review packet must remain local.
+After the reference freeze, `python3 experiments/asi-jev/real_sample.py`
+creates the local 50-event packet, readable `spot-check/REVIEW.md`, and a blank
+return template. It never treats that template as a submitted user review.
+After the runs, `real_cases.py --run-dir PRIVATE_RUN` (repeat per condition)
+creates a local packet of up to five unique events per condition with the most
+disagreement against the common offline reference. This post-hoc packet is
+for inspection, not an additional independent test set or proof of model error.
 `real_operations.py --run-dir PRIVATE_RUN --output AGGREGATE_JSON` separately
 exports pooled request P50/P95 and measured wall-time throughput; repeat
 `--run-dir` for each condition. Both remote model arms use the same gateway.

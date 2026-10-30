@@ -238,6 +238,21 @@ def prepare_sample(*, private_root: str | Path | None = None) -> dict[str, Any]:
         (json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         root,
     )
+    review = [
+        "# Local user spot-check (pending)",
+        "Review each marked target against the shown sanitized offline context.",
+        "The proposed labels are AI-adjudicated, not human ground truth. "
+        "Fill template.jsonl with your labels and save it as returned-review.jsonl. "
+        "Nothing is counted as agreement until you explicitly return a review. "
+        "Keep all these files local; do not upload or commit them.",
+    ]
+    for index, item in enumerate(packet, 1):
+        review.extend([
+            f"## Event {index} ({item['harness']})", f"Local key: {item['id']}",
+            "Proposed offline labels: " + json.dumps(item["gold"]),
+            "```text\n" + item["context"] + "\n```",
+        ])
+    _write_new(output_dir / "REVIEW.md", ("\n\n".join(review) + "\n").encode(), root)
     _checkpoint()
     return summary
 
