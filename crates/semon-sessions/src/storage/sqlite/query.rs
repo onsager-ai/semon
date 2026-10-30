@@ -120,7 +120,27 @@ fn read(
     let generation = generation(db)?;
     let imported_origin =
         super::proof_generations::imported_catalog(db, admitted_binding).map_err(unavailable)?;
-    let imported: bool = imported_origin && db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=?1 AND a.key IN ('native_transfer_v1:catalog-owner:'||?2,'catalog_native_publication:'||?2) AND a.value=?3)", rusqlite::params![admitted_binding.namespace.as_str(),generation,format!("{}:{}",admitted_binding.admission,admitted_binding.stream_epoch)], |row|row.get(0)).map_err(unavailable)?;
+    let admission =
+        i64::try_from(admitted_binding.admission).map_err(|_| unavailable("Invalid admission"))?;
+    let owner_grant = format!("{}:{}", admitted_binding.admission, admitted_binding.stream_epoch);
+    let publication_grant = format!(
+        "{generation}:{}:{}",
+        admitted_binding.admission, admitted_binding.stream_epoch
+    );
+    let imported: bool = imported_origin
+        && db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=?1 AND ((a.key='native_transfer_v1:catalog-owner:'||?2 AND a.value=?3) OR (a.key='catalog_native_publication' AND a.value=?4) OR (a.key='catalog_native_publication:'||?2 AND a.value=?3 AND EXISTS(SELECT 1 FROM storage_semantic_publications p WHERE p.namespace=a.namespace AND p.generation=?2 AND p.admission=?5))))",
+                rusqlite::params![
+                    admitted_binding.namespace.as_str(),
+                    generation,
+                    owner_grant,
+                    publication_grant,
+                    admission
+                ],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
     let ready_sql = if private_listing || imported {
         "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND ((SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' OR (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2) AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
     } else {

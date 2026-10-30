@@ -20,6 +20,10 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_root_immutable BEFORE UP
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_source_path ON storage_proof_sources(namespace,path,ledger,id);
 CREATE TABLE IF NOT EXISTS storage_proof_refs(namespace TEXT NOT NULL,session_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('current','history')),id TEXT NOT NULL,PRIMARY KEY(namespace,session_key,kind,id)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_catalog_native_observation_grants(namespace TEXT NOT NULL,session_key TEXT NOT NULL,owner_kind TEXT NOT NULL CHECK(owner_kind IN('catalog','history')),metadata_digest TEXT NOT NULL CHECK(length(metadata_digest)=64 AND metadata_digest NOT GLOB '*[^0-9a-f]*'),admission INTEGER NOT NULL CHECK(admission>0),stream TEXT NOT NULL CHECK(length(stream)=64 AND lower(stream) NOT GLOB '*[^0-9a-f]*'),PRIMARY KEY(namespace,session_key,owner_kind)) STRICT, WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_insert BEFORE INSERT ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
+CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_update BEFORE UPDATE ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
+CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_delete BEFORE DELETE ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
 CREATE TABLE IF NOT EXISTS storage_proof_leases(namespace TEXT NOT NULL,token TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,owner_epoch INTEGER NOT NULL,serial INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(namespace,token)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_reader_owners(namespace TEXT PRIMARY KEY,epoch INTEGER NOT NULL CHECK(epoch>0),next_lease INTEGER NOT NULL CHECK(next_lease>=0)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_lease_generation ON storage_proof_leases(namespace,id,session_key,expires);
@@ -511,24 +515,28 @@ pub(crate) fn observation_binding(
     let current_metadata =
         serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let retained_metadata =
-        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
-    for original in [&current_metadata, &retained_metadata] {
+    let retained_metadata = if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
+    {
+        current_metadata.clone()
+    } else {
+        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
+    };
+    let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
+    for (retained, original) in [(false, &current_metadata), (true, &retained_metadata)] {
         if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
-            && original == &retained_metadata
+            && retained
         {
             continue;
         }
         let native: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
+                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
                 params![
                     ns,
-                    format!(
-                        "catalog_native_observation:{}",
-                        proof_codec::digest(original.as_bytes())
-                    ),
-                    grant
+                    selected.key,
+                    proof_codec::digest(original.as_bytes()),
+                    admission,
+                    current.stream_epoch
                 ],
                 |row| row.get(0),
             )
@@ -537,10 +545,59 @@ pub(crate) fn observation_binding(
             return Ok(current.clone());
         }
     }
-    let mut statement = db.prepare("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=f.namespace AND m.key='native_transfer_v1:publication:'||g.publication AND a.value=?3) FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND g.metadata IN (?4,?5) ORDER BY g.id LIMIT 1").map_err(failed)?;
+    let current_digest = proof_codec::digest(current_metadata.as_bytes());
+    let retained_digest = proof_codec::digest(retained_metadata.as_bytes());
+    // Stage grants hash the exact metadata and bind its admission/stream. The
+    // joined immutable presentation root is checked below against g.metadata.
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,
+                CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,
+                CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,
+                g.prefix,r.base,
+                CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
+                CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
+                (EXISTS(
+                    SELECT 1 FROM main.meta m JOIN main.meta a
+                      ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
+                    WHERE m.namespace=f.namespace
+                      AND m.key='native_transfer_v1:publication:'||g.publication
+                      AND a.value=?3
+                ) OR (
+                    g.admission=?8 AND g.stream=?9 AND EXISTS(
+                        SELECT 1 FROM main.meta m
+                        WHERE m.namespace=f.namespace
+                          AND m.key='catalog_native_observation:'||(CASE WHEN g.metadata=?4 THEN ?6 ELSE ?7 END)
+                          AND m.value=?3
+                    ))
+                )
+             FROM storage_proof_refs f
+             JOIN storage_proof_generations g
+               ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key
+             JOIN storage_semantic_publications p
+               ON p.namespace=g.namespace AND p.generation=g.publication
+              AND p.proof_digest=g.proof AND p.admission=g.admission
+             JOIN storage_proof_presentation_roots r
+               ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest
+             JOIN storage_proof_presentations v
+               ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key
+             WHERE f.namespace=?1 AND f.session_key=?2 AND g.metadata IN (?4,?5)
+             ORDER BY g.id LIMIT 1",
+        )
+        .map_err(failed)?;
     let values = statement
         .query_map(
-            params![ns, selected.key, grant, current_metadata, retained_metadata],
+            params![
+                ns,
+                selected.key,
+                grant,
+                current_metadata,
+                retained_metadata,
+                current_digest,
+                retained_digest,
+                admission,
+                current.stream_epoch
+            ],
             |r| {
                 let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -595,8 +652,8 @@ pub(crate) fn observation_binding(
     proof_codec::observation_binding(record, current, selected)
 }
 
-/// Only actual publisher output receives local authority. Carry and transport
-/// preserve their original grants; neither can invoke this from copied rows.
+/// Semantic Stage retains exact-row meta grants beside its immutable
+/// publication receipts. Direct Catalog grants use owner slots below.
 pub(crate) fn native_observation_grant(
     db: &Connection,
     namespace: &str,
@@ -605,6 +662,144 @@ pub(crate) fn native_observation_grant(
     metadata: &str,
 ) -> Result<(), StorageError> {
     db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", params![namespace,format!("catalog_native_observation:{}",proof_codec::digest(metadata.as_bytes())),format!("{admission}:{stream}")]).map_err(failed)?;
+    Ok(())
+}
+
+/// The direct Catalog writer owns one producer grant for the latest
+/// `session_catalog` metadata of each session. Semantic Stage keeps its
+/// immutable receipt grants in `meta` through `native_observation_grant`.
+pub(crate) fn native_catalog_observation_grant(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+    metadata: &str,
+) -> Result<(), StorageError> {
+    let mut row: CatalogRow =
+        serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
+    if row.key != session_key {
+        return Err(StorageError::Unavailable);
+    }
+    // Catalog lifecycle is a display change. The publisher grant hashes the
+    // row in its producer form so either retained display tag selects it.
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    db.execute(
+        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'catalog',?3,?4,?5) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream",
+        params![
+            namespace,
+            session_key,
+            proof_codec::digest(metadata.as_bytes()),
+            admission,
+            stream
+        ],
+    )
+    .map_err(failed)?;
+    Ok(())
+}
+
+/// Reconcile both owner slots from the post-publication Catalog rows, keeping
+/// only exact producer evidence already attached to those rows. A changed or
+/// copied row cannot create local authority.
+pub(crate) fn reconcile_native_observation_owners(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<(), StorageError> {
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let catalog: Option<Option<String>> = db
+        .query_row(
+            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
+    let history: Option<Option<String>> = db
+        .query_row(
+            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
+    let normalize = |text: String| -> Result<String, StorageError> {
+        let mut row: CatalogRow =
+            serde_json::from_str(&text).map_err(|_| StorageError::Unavailable)?;
+        if row.key != session_key {
+            return Err(StorageError::Unavailable);
+        }
+        row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+        let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+        Ok(proof_codec::digest(metadata.as_bytes()))
+    };
+    let catalog_digest = match catalog {
+        None => None,
+        Some(None) => return Err(StorageError::HistoryRetentionBounds),
+        Some(Some(text)) => Some(normalize(text)?),
+    };
+    let history_digest = match history {
+        None => None,
+        Some(None) => return Err(StorageError::HistoryRetentionBounds),
+        Some(Some(text)) => Some(normalize(text)?),
+    };
+    let mut statement = db
+        .prepare(
+            "SELECT owner_kind,metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 LIMIT 3",
+        )
+        .map_err(failed)?;
+    let grants = statement
+        .query_map(params![namespace, session_key], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(failed)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failed)?;
+    if grants.len() > 2 {
+        return Err(StorageError::Unavailable);
+    }
+    let owned = |kind: &str, digest: Option<&String>| {
+        digest.is_some_and(|digest| {
+            grants.iter().any(|(owner, actual, actual_admission, actual_stream)| {
+                owner == kind
+                    && actual == digest
+                    && *actual_admission == admission
+                    && actual_stream == stream
+            })
+        })
+    };
+    if !owned("catalog", catalog_digest.as_ref()) {
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+            params![namespace, session_key],
+        )
+        .map_err(failed)?;
+    }
+    let history_owned = owned("history", history_digest.as_ref());
+    let history_from_catalog = owned("catalog", history_digest.as_ref());
+    if !history_owned && history_from_catalog {
+        let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'history',?3,?4,?5) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream",
+            params![namespace, session_key, digest, admission, stream],
+        )
+        .map_err(failed)?;
+    } else if !history_owned {
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+            params![namespace, session_key],
+        )
+        .map_err(failed)?;
+    }
     Ok(())
 }
 

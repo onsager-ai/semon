@@ -4773,11 +4773,53 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             );
         }
     }
-    let reference = crate::session_query_sources(&home.options, "child")
+    // Keep the full-index case above intact. A second admitted cache starts
+    // without the excluded parent, so its ledger is absent by construction
+    // rather than deleted from under indexed event rows and their proofs.
+    let parent_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/parent.jsonl");
+    let held_parent_path = home.root.join("held-parent.jsonl");
+    fs::rename(&parent_path, &held_parent_path).unwrap();
+    let missing_parent_observer_options = Options {
+        cache: home.root.join("missing-parent-index"),
+        ..home.options.clone()
+    };
+    let missing_parent_query_options = Options {
+        scan_window: true,
+        ..missing_parent_observer_options.clone()
+    };
+    let mut missing_parent_cache = crate::events::EventCache::open_scoped(
+        &missing_parent_observer_options.cache,
+        &missing_parent_observer_options.source,
+    )
+    .unwrap();
+    crate::model::observe_catalog(
+        &missing_parent_observer_options,
+        &mut missing_parent_cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(missing_parent_cache);
+
+    // Capture the whole-file answers before restoring the excluded raw parent.
+    // Query setup cannot discover that file and accidentally fill the missing
+    // ledger before the ProviderOnly assertion.
+    let expected: [Value; 2] = ["get_session", "read_transcript"].map(|tool| {
+        Query::from_sources(admitted(missing_parent_query_options.clone()))
+            .call_optional_at(tool, &json!({"id":"child"}), NOW)
+            .unwrap()
+    });
+    let reference = crate::session_query_sources(&missing_parent_query_options, "child")
         .unwrap()
         .into_iter()
         .find(|source| source.native_id == "child")
         .unwrap();
+    // This reader accepts only the child and panics if an excluded source is
+    // requested.
     let archive = SelectedArchive {
         bytes: Arc::from(fs::read(home.options.claude_home.join(&reference.path)).unwrap()),
         source: reference,
@@ -4785,31 +4827,35 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
         read_bytes: AtomicU64::new(0),
         fault: 0,
     };
-    // Missing excluded ledgers cannot force archive-body fallback. This reader
-    // accepts only the child and panics if any excluded source is requested.
-    let config = home.options.source.config(&home.options.cache).unwrap();
-    let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
-    let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
-        .connection()
+
+    let config = missing_parent_observer_options
+        .source
+        .config(&missing_parent_observer_options.cache)
         .unwrap();
-    db.execute(
-        "DELETE FROM main.files WHERE namespace=?1 AND path=?2",
-        rusqlite::params![
-            config.namespace.as_str(),
-            home.options
-                .claude_home
-                .join("projects/-work-proj/parent.jsonl")
-                .to_str()
-                .unwrap()
-        ],
+    let db = rusqlite::Connection::open_with_flags(
+        crate::events::EventCache::path(&missing_parent_observer_options.cache),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .unwrap();
-    for tool in ["get_session", "read_transcript"] {
+    let parent_path_text = parent_path.to_str().unwrap();
+    let assert_parent_ledger_absent = || {
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.files WHERE namespace=?1 AND path=?2",
+                rusqlite::params![config.namespace.as_str(), parent_path_text],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "excluded parent unexpectedly acquired a ledger");
+    };
+    assert_parent_ledger_absent();
+    fs::rename(&held_parent_path, &parent_path).unwrap();
+    assert_parent_ledger_absent();
+
+    for (tool, expected) in ["get_session", "read_transcript"].into_iter().zip(expected) {
         let args = json!({"id":"child"});
-        let expected =
-            Query::from_sources(admitted(options.clone())).call_optional_at(tool, &args, NOW);
         assert_eq!(
-            Query::from_sources(admitted(options.clone())).call_selected_at(
+            Query::from_sources(admitted(missing_parent_query_options.clone())).call_selected_at(
                 "local",
                 "child",
                 tool,
@@ -4818,11 +4864,12 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
                 crate::SessionSourceReadMode::ProviderOnly,
                 NOW
             ),
-            expected
+            Ok(expected)
         );
+        assert_parent_ledger_absent();
     }
     let before = archive.calls.load(Ordering::Relaxed);
-    let error = Query::from_sources(admitted(options))
+    let error = Query::from_sources(admitted(missing_parent_query_options))
         .call_selected_at(
             "local",
             "outside",

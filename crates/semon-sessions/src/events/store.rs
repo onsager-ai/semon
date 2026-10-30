@@ -3558,19 +3558,40 @@ impl SqliteStore {
                     .ok_or(StoreError::Configured(
                         crate::storage::StorageError::ScopeChanged,
                     ))?;
-            for output in &metadata {
-                crate::storage::sqlite::proof_generations::native_observation_grant(
+            let mut grant_owners = std::collections::BTreeSet::new();
+            grant_owners.extend(rows.iter().map(|row| row.key.clone()));
+            grant_owners.extend(affected.iter().cloned());
+            grant_owners.extend(withdrawn.iter().map(|row| row.key.clone()));
+            for key in grant_owners {
+                crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
                     &transaction,
                     owner.config().namespace.as_str(),
+                    &key,
+                    owner.admission(),
+                    stream,
+                )
+                .map_err(StoreError::Configured)?;
+            }
+            for (row, output) in rows.iter().zip(&metadata) {
+                crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    &row.key,
                     owner.admission(),
                     stream,
                     output,
                 )
                 .map_err(StoreError::Configured)?;
             }
-            if transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE meta.value=excluded.value", params![owner.config().namespace.as_str(),format!("catalog_native_publication:{generation}"),format!("{}:{stream}",owner.admission())]).map_err(failure)? != 1 {
-                return Err(StoreError::Configured(crate::storage::StorageError::ScopeChanged));
-            }
+            transaction
+                .execute(
+                    "INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_native_publication',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+                    params![
+                        owner.config().namespace.as_str(),
+                        format!("{generation}:{}:{stream}", owner.admission())
+                    ],
+                )
+                .map_err(failure)?;
             #[cfg(test)]
             let commit_before = search_observation
                 .as_ref()
@@ -7105,6 +7126,313 @@ mod tests {
             catalog_comparable_state(&batch.connection),
             catalog_comparable_state(&row_wise.connection)
         );
+    }
+
+    #[test]
+    fn direct_catalog_grants_are_bounded_and_wal_snapshots_keep_their_generation() {
+        let root = scratch("direct-catalog-grant-wal");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let first = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+            .unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        let first_generation = first.1.unwrap();
+        let original = rows[0].clone();
+        let namespace = store.owner.config().namespace.as_str().to_owned();
+        let admission = store.owner.admission();
+        let stream = store
+            .owner
+            .config()
+            .expected_stream_epoch
+            .as_deref()
+            .unwrap()
+            .to_owned();
+        let binding = crate::storage::QueryRuntimeBinding {
+            namespace: store.owner.config().namespace.clone(),
+            admission,
+            stream_epoch: stream.clone(),
+        };
+        let snapshot = Connection::open(&store.path).unwrap();
+        snapshot.execute_batch("BEGIN DEFERRED").unwrap();
+        let first_marker: String = snapshot
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            crate::storage::sqlite::proof_generations::observation_binding(
+                &snapshot, &binding, &original
+            )
+            .is_ok()
+        );
+
+        let mut generation = first_generation;
+        for version in 1..=3 {
+            rows[0].name = format!("direct grant replacement {version}");
+            let published =
+                catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                    .unwrap();
+            assert_eq!(published.0, Outcome::Written);
+            generation = published.1.unwrap();
+            let grants: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+                    params![namespace, rows[0].key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(grants, 1, "one current owner slot per session");
+            assert!(
+                crate::storage::sqlite::proof_generations::observation_binding(
+                    &store.connection,
+                    &binding,
+                    &rows[0]
+                )
+                .is_ok()
+            );
+            assert!(
+                crate::storage::sqlite::proof_generations::observation_binding(
+                    &store.connection,
+                    &binding,
+                    &original
+                )
+                .is_err(),
+                "a replaced version has no current or History owner"
+            );
+            let old_snapshot_marker: String = snapshot
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                    [&namespace],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(old_snapshot_marker, first_marker);
+            assert!(
+                crate::storage::sqlite::proof_generations::observation_binding(
+                    &snapshot,
+                    &binding,
+                    &original
+                )
+                .is_ok(),
+                "the pinned WAL snapshot retains its old owner grant"
+            );
+        }
+        let marker_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker_count, 1);
+        let generation_value: String = store
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation_value, format!("{generation}:{admission}:{stream}"));
+        let old_marker_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM main.meta WHERE namespace=?1 AND key LIKE 'catalog_native_publication:%'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_marker_count, 0, "direct writes use only the stable marker");
+        drop(snapshot);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_catalog_history_grants_preserve_only_existing_producer_metadata() {
+        let root = scratch("direct-catalog-history-grant");
+        let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        assert_eq!(
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let namespace = store.owner.config().namespace.as_str().to_owned();
+        let admission = store.owner.admission();
+        let stream = store
+            .owner
+            .config()
+            .expected_stream_epoch
+            .as_deref()
+            .unwrap()
+            .to_owned();
+        let ordinary = crate::storage::sqlite::source_journal::SourceJournal::owned(
+            store.owner.clone(),
+        )
+        .connection()
+        .unwrap();
+        assert!(ordinary
+            .execute(
+                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'history',?3,?4,?5)",
+                params![namespace, rows[0].key, "a".repeat(64), i64::try_from(admission).unwrap(), stream],
+            )
+            .is_err());
+        drop(ordinary);
+        let mut retained = rows[0].clone();
+        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        store
+            .connection
+            .execute(
+                "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
+                params![namespace, retained.key, serde_json::to_string(&retained).unwrap()],
+            )
+            .unwrap();
+        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+            &store.connection,
+            &namespace,
+            &retained.key,
+            admission,
+            &stream,
+        )
+        .unwrap();
+        let binding = crate::storage::QueryRuntimeBinding {
+            namespace: store.owner.config().namespace.clone(),
+            admission,
+            stream_epoch: stream.clone(),
+        };
+        assert!(
+            crate::storage::sqlite::proof_generations::observation_binding(
+                &store.connection,
+                &binding,
+                &retained
+            )
+            .is_ok(),
+            "the latest History row inherits an exact prior producer grant"
+        );
+
+        let mut copied = retained.clone();
+        copied.name.push_str(" copied without producer evidence");
+        store
+            .connection
+            .execute(
+                "UPDATE main.session_history_catalog SET metadata=?3 WHERE namespace=?1 AND session_key=?2",
+                params![namespace, copied.key, serde_json::to_string(&copied).unwrap()],
+            )
+            .unwrap();
+        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+            &store.connection,
+            &namespace,
+            &copied.key,
+            admission,
+            &stream,
+        )
+        .unwrap();
+        let copied_grants: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+                params![namespace, copied.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copied_grants, 0);
+        assert!(
+            crate::storage::sqlite::proof_generations::observation_binding(
+                &store.connection,
+                &binding,
+                &copied
+            )
+            .is_err(),
+            "copied History metadata cannot mint local authority"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_catalog_grant_replacement_rolls_back_with_the_catalog_marker() {
+        let root = scratch("direct-catalog-grant-rollback");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let first = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+            .unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        let first_generation = first.1.unwrap();
+        let namespace = store.owner.config().namespace.as_str().to_owned();
+        let key = rows[0].key.clone();
+        let before_row: String = store
+            .connection
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let before_grant: (String, i64, String) = store
+            .connection
+            .query_row(
+                "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                params![namespace, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let before_marker: String = store
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch("CREATE TRIGGER test_reject_catalog_native_marker BEFORE UPDATE ON main.meta WHEN OLD.key='catalog_native_publication' BEGIN SELECT RAISE(ABORT,'injected catalog marker failure'); END;")
+            .unwrap();
+        rows[0].name.push_str(" failed replacement");
+        assert!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).is_err());
+        let after_row: String = store
+            .connection
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let after_grant: (String, i64, String) = store
+            .connection
+            .query_row(
+                "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                params![namespace, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let after_marker: String = store
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                [&namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after_row, before_row);
+        assert_eq!(after_grant, before_grant);
+        assert_eq!(after_marker, before_marker);
+        assert_eq!(
+            after_marker,
+            format!("{first_generation}:{}:{}", store.owner.admission(), before_grant.2)
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER test_reject_catalog_native_marker;")
+            .unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

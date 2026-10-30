@@ -134,6 +134,9 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::tests::current_reopen_keeps_wal_reader_and_concurrent_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_initialization_holds_its_lock_through_the_first_wal_switch -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::storage_open_rechecks_a_concurrent_version_change_before_writes -- --exact --nocapture
+      - name: Direct Catalog grant retention and snapshot qualification
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: cargo test --locked -p semon-sessions --lib events::store::tests::direct_catalog_ -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |

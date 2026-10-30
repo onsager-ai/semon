@@ -236,13 +236,17 @@ receive no new observation grants. Imported immutable receipt epochs reserve the
 SQLite producer's next epoch above those receipts without fabricating a stage or
 ACK. Runtime changes preserve Catalog stale-status responses independently of
 provenance validation. Exact-revision CI qualification is pending.
-Native authority-record reclamation remains unqualified. Stage grants currently
-share the lifetime of immutable semantic receipts, and PostgreSQL observation
-pointers share retained native operation receipts. Direct SQLite publications
-have no equivalent receipt or cleanup boundary: their per-version observation
-and generation grants accumulate in `meta`. A retention policy covering Current,
-retained metadata and active readers is still required before storage-size or GC
-qualification can pass. These grants do not authorize rows absent from Catalog.
+Native authority-record reclamation remains subject to qualification. Stage
+grants share the lifetime of immutable semantic receipts, and PostgreSQL
+observation pointers share retained native operation receipts. Direct SQLite
+publication instead keeps one namespace generation marker and at most two
+observation grants per session key, owned by its latest Catalog and History
+metadata. Publication reconciles only touched owners in the same transaction;
+copied metadata cannot mint a local grant. Existing read snapshots retain their
+prior grant versions through SQLite WAL, while leased immutable proof bodies
+retain their separate references and leases. These local grants are not
+transported and do not authorize rows absent from Catalog. Exact-revision
+retention tests and the general bounded GC contract remain acceptance work.
 Source quiesce,
 unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
 final qualification and qualified reverse transfer remain undelivered. The

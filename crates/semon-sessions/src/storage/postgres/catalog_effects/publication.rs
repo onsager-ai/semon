@@ -192,13 +192,16 @@ pub(in crate::storage::postgres) fn publish(
     // Semantic lifecycle authority survives even when there are no row Query
     // summaries. Generic publications retain their existing row/head binding.
     let bound = if let Some(semantic) = &semantic {
+        let binding = super::super::model_cache::binding(tx)?;
+        let witnessed = binding
+            .witness(semantic.runtime)
+            .map_err(|_| StorageError::ScopeChanged)?;
         if !publication.rows.is_empty()
-            && (runtime.len() != 1 || runtime.first() != Some(&semantic.runtime))
+            && (runtime.len() != 1 || runtime.first().copied() != Some(witnessed.as_str()))
         {
             return Err(StorageError::ScopeChanged);
         }
-        let binding = super::super::model_cache::binding(tx)?;
-        semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, semantic.runtime)?
+        semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, &witnessed)?
     } else {
         match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
             (Some(runtime), 1, _) => {

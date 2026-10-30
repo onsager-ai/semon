@@ -68,6 +68,11 @@ jobs:
           SEMON_BUILD_TIMING: "1"
         run: cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
 
+      - name: Cold Catalog foreground and background gate
+        env:
+          SEMON_BUILD_TIMING: "0"
+        run: cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+
       - name: Session URL shared vectors (ordinary PR gate)
         run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture
 
@@ -175,7 +180,6 @@ jobs:
         run: |
           # Foreground and incremental budgets use normal execution. Keep the
           # existing instrumented full suite as separate regression evidence.
-          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
           SEMON_BUILD_TIMING=1 cargo test --locked

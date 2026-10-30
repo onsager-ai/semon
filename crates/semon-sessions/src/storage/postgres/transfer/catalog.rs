@@ -967,8 +967,8 @@ mod tests {
             }
             let references = pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
                 let ns = config.namespace.as_str().as_bytes();
-                let rows = tx.driver.query("SELECT kind,id FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
-                let references = rows.iter().map(|row| (row.get::<_,Vec<u8>>(0),row.get::<_,Vec<u8>>(1))).collect::<Vec<_>>();
+                let rows = tx.driver.query("SELECT namespace,key_digest,session_key,kind,id FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
+                let references = rows.iter().map(|row| (row.get::<_,Vec<u8>>(0),row.get::<_,Vec<u8>>(1),row.get::<_,Vec<u8>>(2),row.get::<_,Vec<u8>>(3),row.get::<_,Vec<u8>>(4))).collect::<Vec<_>>();
                 assert!(!references.is_empty());
                 tx.driver.execute("DELETE FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(references)
@@ -978,10 +978,12 @@ mod tests {
                 "missing original proof references must refuse"
             );
             pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
-                let ns = config.namespace.as_str().as_bytes();
-                for (kind,id) in &references {
-                    tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,session_key,kind,id) VALUES($1,$2,$3,$4)", &[&ns,&expected[0].key.as_bytes(),kind,id]).map_err(sqlstate::error)?;
+                // Restore the exact original row bytes after corruption injection;
+                // only the schema-generated namespace digest is recomputed.
+                for (namespace,key_digest,session_key,kind,id) in &references {
+                    tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,key_digest,session_key,kind,id) VALUES($1,$2,$3,$4,$5)", &[namespace,key_digest,session_key,kind,id]).map_err(sqlstate::error)?;
                 }
+                let ns = config.namespace.as_str().as_bytes();
                 tx.driver.execute("UPDATE semon_pg_native_selected_generations SET admission=admission+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(())
             }).unwrap();

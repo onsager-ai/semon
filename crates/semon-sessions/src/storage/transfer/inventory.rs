@@ -24,6 +24,11 @@ pub(crate) fn sqlite(name: &str) -> Option<Disposition> {
         | "native_usage_dimensions" => &[Usage],
         "reported_runs" => &[ReportedFacts],
         "storage_proof_generations" => &[Proofs, Recipes],
+        "storage_catalog_native_observation_grants" => {
+            return Some(Disposition::LocalOnly(
+                "Direct SQLite Catalog observation grants bind a destination-local admission and stream; they are minted only by its admitted publisher, never copied or inferred from transferred metadata.",
+            ));
+        }
         "storage_proof_presentations" => &[Metadata],
         "storage_proof_presentation_roots" | "storage_proof_refs" => &[ProofReferences],
         "storage_proof_sources" => &[Proofs],
