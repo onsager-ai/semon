@@ -2268,6 +2268,13 @@ mod tests {
         // fence. The already-open semantic writer must validate again.
         let names:Vec<String>=db.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name='meta' AND sql LIKE '%BEFORE UPDATE%'").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(names.len(), 1);
+        let guard: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1",
+                [&names[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
         db.execute_batch(&format!("DROP TRIGGER \"{}\"", names[0]))
             .unwrap();
         db.execute(
@@ -2275,6 +2282,7 @@ mod tests {
             ["f".repeat(64)],
         )
         .unwrap();
+        db.execute_batch(&guard).unwrap();
         let next_epoch = vec!["new-epoch".into()];
         assert_eq!(
             store.discover(
