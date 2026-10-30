@@ -42,17 +42,20 @@ pub(crate) fn read_local_catalog_page_with_search(
     let admit_search = on_search.is_some();
     let reply = match &binding.config().backend {
         #[cfg(feature = "postgres")]
-        StoreBackend::Postgres { pool, control } => postgres::catalog_page(
-            binding.config(),
-            pool,
-            control,
-            options,
-            source_key,
-            request,
-            admit_search,
-            &mut admission,
-        )
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?,
+        StoreBackend::Postgres { pool, control } => {
+            let (reply, search) = postgres::catalog_page(
+                binding.config(),
+                pool,
+                control,
+                options,
+                source_key,
+                request,
+                admit_search,
+            )
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            admission = search;
+            reply
+        }
         StoreBackend::Sqlite { .. } => sqlite::catalog::read_page(
             &binding,
             options,
@@ -301,8 +304,8 @@ impl NativeReaderBinding {
                 source,
                 &request,
                 false,
-                &mut None,
             )
+            .map(|(reply, _)| reply)
             .unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true));
         }
         sqlite::catalog::read_page(self, options, source, &request, false, &mut None).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
@@ -571,8 +574,8 @@ impl StoreConfig {
                 self.namespace.as_str(),
                 &request,
                 false,
-                &mut None,
-            );
+            )
+            .map(|(reply, _)| reply);
         }
         let binding = NativeReaderBinding::Admitted(self.clone());
         sqlite::catalog::read_page(

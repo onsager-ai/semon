@@ -233,8 +233,10 @@ pub(crate) fn catalog_page(
     source: &str,
     request: &crate::catalog::Request,
     admit_search: bool,
-    admission: &mut Option<crate::catalog::CatalogSearchAdmission>,
-) -> Result<crate::ViewerReply, super::StorageError> {
+) -> Result<
+    (crate::ViewerReply, Option<crate::catalog::CatalogSearchAdmission>),
+    super::StorageError,
+> {
     let control = &control.for_selected_read();
     let generation = configured_generation(config, pool, control)?;
     catalog_effects::snapshot::with_admitted_generation(
@@ -243,15 +245,17 @@ pub(crate) fn catalog_page(
         control,
         &generation,
         |snapshot| {
-            crate::catalog::read_page_snapshot_with_search(
+            let mut admission = None;
+            let reply = crate::catalog::read_page_snapshot_with_search(
                 options,
                 source,
                 request,
                 snapshot,
                 admit_search,
-                admission,
+                &mut admission,
             )
-            .map_err(|_| super::StorageError::Unavailable)
+            .map_err(|_| super::StorageError::Unavailable)?;
+            Ok((reply, admission))
         },
     )
 }
