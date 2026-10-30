@@ -316,6 +316,17 @@ def _sanitize_url(match: re.Match[str], counts: Counter[str]) -> str:
 def _sanitize_text(value: Any, counts: Counter[str]) -> str:
     if not isinstance(value, str):
         raise ExcludedRecord("unsafe_text_shape")
+    # Older standalone harness runs put orchestration/system instructions in a
+    # user-role JSON envelope. Omit that entire body, including nested prompts.
+    if value.lstrip().startswith("{"):
+        try:
+            envelope = json.loads(value)
+        except json.JSONDecodeError:
+            envelope = None
+        if (isinstance(envelope, dict) and "user_messages" in envelope
+                and "original_contract" in envelope):
+            counts["orchestration_context"] += 1
+            return "[task instructions redacted]"
     text = value
     for pattern, code in (
         (PROMPT_TAG_RE, "prompt_block"),

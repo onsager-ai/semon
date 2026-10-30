@@ -32,6 +32,15 @@ this evaluation's sessions, and logs that cannot be safely sanitized. A stable
 closed file is a complete captured log, not proof that the underlying task
 finished; do not invent a session-end event. Record exclusions as counts/codes.
 
+Pre-label availability clarification: the older eligible native CLI logs are
+predominantly standalone orchestrated runs. Select `manager` and `worker`
+roles, omit preflight/acceptance runs, and keep one physical capture per
+distinct original objective and project. Report role counts and the resulting
+harness/role confounding; this cohort is separate from interactive sessions.
+Do not generalize across them. Entire serialized orchestration
+envelopes are replaced with a task-instructions-redacted marker before egress.
+This clarification precedes all blind labels and model predictions.
+
 Before predictions, stratify candidates using native errors, repeated tool
 invocations, unusual record kinds, and ordinary work. Choose varied local work
 without reading classifier output. Preserve full selected session order and
