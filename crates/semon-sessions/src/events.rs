@@ -1021,6 +1021,8 @@ pub(crate) struct CatalogSearchLookup<'a> {
     pub(crate) ranges: &'a [(String, String); 3],
 }
 
+pub(crate) const CATALOG_SEARCH_LIMIT: usize = 64;
+
 pub(crate) struct CatalogPendingSearch<'a> {
     pub(crate) paths: &'a [String],
     pub(crate) retry: Option<CatalogSearchLookup<'a>>,
@@ -1710,12 +1712,26 @@ impl EventCache {
         })
     }
 
-    pub(crate) fn catalog_search_lookup<'a>(
-        interest: &CatalogSearchInterest<'a>,
-        ranges: &'a [(String, String); 3],
-    ) -> CatalogSearchLookup<'a> {
-        let query = interest.query;
-        CatalogSearchLookup { query, ranges }
+    fn qualified_catalog_search_inputs(
+        options: &crate::Options,
+        paths: &[String],
+        harness: Option<&str>,
+        limit: usize,
+    ) -> io::Result<Vec<crate::Input>> {
+        let inputs: Vec<_> = paths
+            .iter()
+            .filter_map(|path| {
+                crate::native_evidence::catalog_input(Path::new(path), options)
+                    .filter(|input| harness.is_none_or(|harness| input.root.as_str() == harness))
+            })
+            .collect();
+        if paths.len() == limit.min(CATALOG_SEARCH_LIMIT) && inputs.len() < paths.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog search candidates exceed qualified source bounds",
+            ));
+        }
+        Ok(inputs)
     }
 
     pub(crate) fn catalog_search_sources(
@@ -1730,30 +1746,18 @@ impl EventCache {
             return Ok(Vec::new());
         }
         let ranges = Self::catalog_search_ranges(options, interest.harness);
-        let lookup = Self::catalog_search_lookup(&interest, &ranges);
+        let lookup = CatalogSearchLookup {
+            query: interest.query,
+            ranges: &ranges,
+        };
         let paths =
             store::catalog_search_paths(connection, &lookup, limit).map_err(io::Error::other)?;
-        let bounded = paths.len() == limit.min(64);
-        let count = paths.len();
-        let qualified: Vec<_> = paths
-            .into_iter()
-            .filter(|path| {
-                crate::native_evidence::catalog_input(Path::new(path), options).is_some_and(
-                    |input| {
-                        interest
-                            .harness
-                            .is_none_or(|harness| input.root.as_str() == harness)
-                    },
-                )
-            })
-            .collect();
-        if bounded && qualified.len() < count {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Catalog search candidates exceed qualified source bounds",
-            ));
-        }
-        Ok(qualified)
+        Ok(
+            Self::qualified_catalog_search_inputs(options, &paths, interest.harness, limit)?
+                .into_iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect(),
+        )
     }
 
     pub(crate) fn catalog_pending_inputs(
@@ -1763,27 +1767,12 @@ impl EventCache {
     ) -> io::Result<(CatalogPendingTier, Vec<crate::Input>, Option<Vec<String>>)> {
         let mut checked = batch.search_checked.then(Vec::new);
         if batch.tier == CatalogPendingTier::SearchHint {
-            let inputs: Vec<_> = batch
-                .paths
-                .iter()
-                .filter_map(|path| {
-                    crate::native_evidence::catalog_input(Path::new(path), options).filter(
-                        |input| {
-                            interest.as_ref().is_none_or(|interest| {
-                                interest
-                                    .harness
-                                    .is_none_or(|harness| input.root.as_str() == harness)
-                            })
-                        },
-                    )
-                })
-                .collect();
-            if batch.paths.len() == 64 && inputs.len() < batch.paths.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "Catalog search candidates exceed qualified source bounds",
-                ));
-            }
+            let inputs = Self::qualified_catalog_search_inputs(
+                options,
+                &batch.paths,
+                interest.as_ref().and_then(|interest| interest.harness),
+                CATALOG_SEARCH_LIMIT,
+            )?;
             if !inputs.is_empty() {
                 checked = Some(
                     inputs
