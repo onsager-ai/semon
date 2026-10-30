@@ -3016,7 +3016,7 @@ mod tests {
         let before: i64 = db
             .query_row("SELECT total_changes()", [], |r| r.get(0))
             .unwrap();
-        assert!(semantic_stage::active(&db).is_err());
+        assert!(semantic_stage::active(&db).unwrap());
         assert_eq!(
             db.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -3025,6 +3025,21 @@ mod tests {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
+        tx.execute(
+            "DELETE FROM catalog_semantic_stage WHERE namespace='a'",
+            [],
+        )
+        .unwrap();
+        assert!(!semantic_stage::active(&tx).unwrap());
+        assert_eq!(
+            tx.query_row(
+                "SELECT count(*) FROM catalog_semantic_stage WHERE namespace='b'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         tx.execute(
             "DELETE FROM catalog_semantic_events WHERE namespace='a'",
             [],
@@ -3046,6 +3061,7 @@ mod tests {
                 .unwrap(),
             2
         );
+        assert!(semantic_stage::active(&db).unwrap());
         assert_eq!(
             db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
                 .get::<_, i64>(
@@ -5882,7 +5898,7 @@ mod tests {
         }
         semantic_stage::validate_support(&db).unwrap();
         let tx = db.transaction().unwrap();
-        tx.execute_batch("DROP TABLE session_source_mutations; CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;").unwrap();
+        tx.execute_batch("DROP TABLE session_source_mutations; CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence BLOB NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;").unwrap();
         assert!(semantic_stage::validate_support(&tx).is_err());
         tx.rollback().unwrap();
         semantic_stage::validate_support(&db).unwrap();
