@@ -9158,9 +9158,9 @@ mod tests {
                 let selected = inputs
                     .iter()
                     .filter(|input| {
-                        batch.paths.contains(
-                            &input.full_path(options).to_string_lossy().into_owned(),
-                        )
+                        batch
+                            .paths
+                            .contains(&input.full_path(options).to_string_lossy().into_owned())
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -9195,35 +9195,30 @@ mod tests {
                     1_790_000_000_000,
                 )
                 .unwrap();
-                let candidate = prepared
-                    .relationships
-                    .relations
-                    .iter()
-                    .find_map(|(id, relation)| {
-                        let real = |key: &String| {
-                            prepared.relationships.endpoints.contains_key(key)
-                        };
-                        let stub = |key: &String| {
-                            relation.stubs.iter().any(|entry| &entry.key == key)
-                        };
-                        if !(real(&relation.from)
-                            || relation.to.as_ref().is_some_and(real))
-                        {
-                            return None;
-                        }
-                        if !real(&relation.from)
-                            && !stub(&relation.from)
-                            && batch.context.endpoints.contains_key(&relation.from)
-                        {
-                            return Some((id.clone(), relation.from.clone(), true));
-                        }
-                        relation.to.as_ref().and_then(|to| {
-                            (!real(to)
-                                && !stub(to)
-                                && batch.context.endpoints.contains_key(to))
-                            .then(|| (id.clone(), to.clone(), false))
-                        })
-                    });
+                let candidate =
+                    prepared
+                        .relationships
+                        .relations
+                        .iter()
+                        .find_map(|(id, relation)| {
+                            let real =
+                                |key: &String| prepared.relationships.endpoints.contains_key(key);
+                            let stub =
+                                |key: &String| relation.stubs.iter().any(|entry| &entry.key == key);
+                            if !(real(&relation.from) || relation.to.as_ref().is_some_and(real)) {
+                                return None;
+                            }
+                            if !real(&relation.from)
+                                && !stub(&relation.from)
+                                && batch.context.endpoints.contains_key(&relation.from)
+                            {
+                                return Some((id.clone(), relation.from.clone(), true));
+                            }
+                            relation.to.as_ref().and_then(|to| {
+                                (!real(to) && !stub(to) && batch.context.endpoints.contains_key(to))
+                                    .then(|| (id.clone(), to.clone(), false))
+                            })
+                        });
                 let Some(candidate) = candidate else {
                     assert_eq!(
                         cache.record_semantic_batch(&batch, &prepared).unwrap(),
@@ -9254,10 +9249,12 @@ mod tests {
                 }
                 assert!(!batch.context.endpoints.contains_key(absent));
                 assert!(!prepared.relationships.endpoints.contains_key(absent));
-                assert!(prepared.relationships.relations[&candidate.0]
-                    .stubs
-                    .iter()
-                    .all(|stub| stub.key.as_str() != absent));
+                assert!(
+                    prepared.relationships.relations[&candidate.0]
+                        .stubs
+                        .iter()
+                        .all(|stub| stub.key.as_str() != absent)
+                );
                 assert!(!f
                     .db()
                     .query_row(
@@ -9295,7 +9292,10 @@ mod tests {
                 rejected = true;
                 break;
             }
-            assert!(rejected, "relation stage must contain a cross-page endpoint");
+            assert!(
+                rejected,
+                "relation stage must contain a cross-page endpoint"
+            );
         }
 
         #[test]
@@ -10222,9 +10222,9 @@ mod tests {
                 let mut selected = inputs
                     .iter()
                     .filter(|input| {
-                        batch.paths.contains(
-                            &input.full_path(options).to_string_lossy().into_owned(),
-                        )
+                        batch
+                            .paths
+                            .contains(&input.full_path(options).to_string_lossy().into_owned())
                     })
                     .cloned()
                     .collect::<Vec<_>>();
