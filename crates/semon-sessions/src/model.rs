@@ -1388,7 +1388,23 @@ fn scan_selected(
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
             }
-            Err(_) => continue,
+            Err(error) => {
+                #[cfg(test)]
+                if selected.is_some() {
+                    let source_path = path.to_string_lossy();
+                    let detail = error
+                        .to_string()
+                        .replace(source_path.as_ref(), "<source>")
+                        .chars()
+                        .take(240)
+                        .collect::<String>();
+                    eprintln!(
+                        "native selected scan failed harness=claude kind={:?} error={detail}",
+                        error.kind()
+                    );
+                }
+                continue;
+            }
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         if let Role::Agent(agent) = &mut role {
@@ -1447,7 +1463,23 @@ fn scan_selected(
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
             }
-            Err(_) => continue,
+            Err(error) => {
+                #[cfg(test)]
+                if selected.is_some() {
+                    let source_path = path.to_string_lossy();
+                    let detail = error
+                        .to_string()
+                        .replace(source_path.as_ref(), "<source>")
+                        .chars()
+                        .take(240)
+                        .collect::<String>();
+                    eprintln!(
+                        "native selected scan failed harness=codex kind={:?} error={detail}",
+                        error.kind()
+                    );
+                }
+                continue;
+            }
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         let Some(header) = summary.codex_header.as_ref() else {
