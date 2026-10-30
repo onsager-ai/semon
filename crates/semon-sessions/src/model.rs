@@ -8275,10 +8275,9 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if let Some(binding) = archive_read_diagnostic!(
-            "query_runtime_binding",
-            cache.query_runtime_binding()
-        )? {
+        if let Some(binding) =
+            archive_read_diagnostic!("query_runtime_binding", cache.query_runtime_binding())?
+        {
             crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
                 .into_scoped()
         } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
