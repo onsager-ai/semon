@@ -388,38 +388,38 @@ impl SourceObservationStore for PgSourceJournal {
                 "SELECT EXISTS(SELECT 1 FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND backfill_state='draining')",
                 &[&namespace],
             ).map_err(sqlstate::error)?.get(0);
-            if draining {
-                if let Some(marker) = super::native_keys::read_meta(
+            if draining
+                && let Some(marker) = super::native_keys::read_meta(
                     tx,
                     SELECTED_PROJECTION_KEY.as_bytes(),
                     SELECTED_PROJECTION_BYTES,
-                )? {
-                    let paths = selected_projection_paths(&marker)?;
-                    let encoded = paths
-                        .iter()
-                        .map(|path| path.as_bytes().to_vec())
-                        .collect::<Vec<_>>();
-                    let rows = tx
-                        .driver
-                        .query(
-                            "SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=ANY($2::bytea[]) ORDER BY revision,source_path LIMIT $3",
-                            &[&namespace, &encoded, &limit],
-                        )
-                        .map_err(sqlstate::error)?;
-                    if !rows.is_empty() {
-                        return Ok(CatalogPendingBatch {
-                            tier: CatalogPendingTier::SelectedUpgrade,
-                            paths: rows
-                                .into_iter()
-                                .map(|row| {
-                                    String::from_utf8(row.get(0))
-                                        .map_err(|_| StorageError::ScopeChanged)
-                                })
-                                .collect::<Result<_, _>>()?,
-                            fallback: Vec::new(),
-                            search_checked: false,
-                        });
-                    }
+                )?
+            {
+                let paths = selected_projection_paths(&marker)?;
+                let encoded = paths
+                    .iter()
+                    .map(|path| path.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                let rows = tx
+                    .driver
+                    .query(
+                        "SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=ANY($2::bytea[]) ORDER BY revision,source_path LIMIT $3",
+                        &[&namespace, &encoded, &limit],
+                    )
+                    .map_err(sqlstate::error)?;
+                if !rows.is_empty() {
+                    return Ok(CatalogPendingBatch {
+                        tier: CatalogPendingTier::SelectedUpgrade,
+                        paths: rows
+                            .into_iter()
+                            .map(|row| {
+                                String::from_utf8(row.get(0))
+                                    .map_err(|_| StorageError::ScopeChanged)
+                            })
+                            .collect::<Result<_, _>>()?,
+                        fallback: Vec::new(),
+                        search_checked: false,
+                    });
                 }
             }
 
