@@ -5,6 +5,39 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Physical selector values; native roots and harness authority are supplied
+/// and checked by the cache facade, never inferred by a storage adapter.
+#[derive(Debug)]
+pub struct CatalogSearchLookup<'a> {
+    pub query: &'a str,
+    pub ranges: &'a [(String, String); 3],
+}
+
+pub const CATALOG_SEARCH_LIMIT: usize = 64;
+
+#[derive(Debug)]
+pub struct CatalogPendingSearch<'a> {
+    pub paths: &'a [String],
+    pub retry: Option<CatalogSearchLookup<'a>>,
+    pub yield_to_fifo: bool,
+    pub excluded: &'a [String],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogPendingTier {
+    SelectedUpgrade,
+    SearchHint,
+    Fifo,
+}
+
+#[derive(Debug)]
+pub struct CatalogPendingBatch {
+    pub tier: CatalogPendingTier,
+    pub paths: Vec<String>,
+    pub fallback: Vec<String>,
+    pub search_checked: bool,
+}
+
 pub type SourceClaims = Vec<(String, Option<i64>)>;
 
 /// Stable identity for one typed source-observation mutation. The namespace is
@@ -183,7 +216,11 @@ pub trait SourceObservationStore: Send {
     ) -> Result<SourceMutationReceipt, StorageError>;
     /// Revisions are durable CAS witnesses, not worker leases.
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError>;
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError>;
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError>;
     fn backfill_state(&self) -> Result<Option<String>, StorageError>;
     /// Finish a source backfill only at the captured catalog generation.
     fn finish_backfill(

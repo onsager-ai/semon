@@ -1,6 +1,7 @@
 //! Typed Source observation family only. There is deliberately no StoreConfig
 //! selector or public constructor: native ledger/publication TX ports are not PG
 //! yet. Tests inject this exact port into the normal EventCache producer.
+use crate::storage::source_observations::{CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier, CATALOG_SEARCH_LIMIT};
 use super::{
     PgCancellation, PgPool, sqlstate,
     txn::{PgTxn, TxnKind},
@@ -234,17 +235,33 @@ impl SourceObservationStore for PgSourceJournal {
         validate_paths(paths)?;
         self.read(|tx| claims(tx, paths))
     }
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        if limit == 0 || limit > 256 {
-            return Err(StorageError::InvalidArguments);
-        }
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
+        if limit == 0 || limit > 256 { return Err(StorageError::InvalidArguments); }
         self.read(|tx| {
-            let rows = tx.driver.query("SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) ORDER BY revision,source_path LIMIT $2", &[&tx.namespace.as_str().as_bytes(), &(limit as i64)]).map_err(sqlstate::error)?;
-            rows.iter().map(|row| {
-                String::from_utf8(row.try_get(0).map_err(|_| StorageError::Unavailable)?).map_err(|_| StorageError::Unavailable)
-            }).collect()
+            let excluded: Vec<Vec<u8>> = search.map_or(&[][..], |search| search.excluded)
+                .iter().map(|path| path.as_bytes().to_vec()).collect();
+            let rows = tx.driver.query("SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND NOT(source_path=ANY($3::bytea[])) ORDER BY revision,source_path LIMIT $2", &[&tx.namespace.as_str().as_bytes(), &(limit as i64), &excluded]).map_err(sqlstate::error)?;
+            let fallback = rows.iter().map(|row| String::from_utf8(row.try_get(0).map_err(|_| StorageError::Unavailable)?).map_err(|_| StorageError::Unavailable)).collect::<Result<Vec<_>,_>>()?;
+            if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+                return Ok(CatalogPendingBatch { tier: CatalogPendingTier::Fifo, paths: fallback, fallback: Vec::new(), search_checked: false });
+            }
+            let paths = if let Some(search) = search {
+                if search.retry.is_some() { return Err(StorageError::NamespaceUpgradePending); }
+                let mut paths = claims(tx, search.paths)?.into_iter().filter_map(|(path, revision)| revision.map(|_| path)).collect::<Vec<_>>();
+                paths.sort(); paths.truncate(limit.min(CATALOG_SEARCH_LIMIT)); paths
+            } else { Vec::new() };
+            if paths.is_empty() {
+                Ok(CatalogPendingBatch { tier: CatalogPendingTier::Fifo, paths: fallback, fallback: Vec::new(), search_checked: search.is_some() })
+            } else {
+                Ok(CatalogPendingBatch { tier: CatalogPendingTier::SearchHint, paths, fallback, search_checked: true })
+            }
         })
     }
+
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
         self.read(|tx| {
             let rows = tx.driver.query("SELECT backfill_state FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea)", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;

@@ -21,6 +21,15 @@ pub(crate) fn read_local_catalog_page(
     source_key: &str,
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
+    read_local_catalog_page_with_search(options, source_key, request, None)
+}
+
+pub(crate) fn read_local_catalog_page_with_search(
+    options: &crate::Options,
+    source_key: &str,
+    request: &crate::catalog::Request,
+    on_search: Option<&mut dyn FnMut(crate::catalog::CatalogSearchAdmission) -> bool>,
+) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
     let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
         "local"
     } else {
@@ -29,7 +38,16 @@ pub(crate) fn read_local_catalog_page(
     let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
         options, namespace,
     ));
-    sqlite::catalog::read_page(&binding, options, source_key, request)
+    let mut admission = None;
+    let reply = sqlite::catalog::read_page(
+        &binding, options, source_key, request, on_search.is_some(), &mut admission,
+    )?;
+    if reply.status == 200
+        && let (Some(on_search), Some(admission)) = (on_search, admission)
+    {
+        let _ = on_search(admission);
+    }
+    Ok(reply)
 }
 
 pub(crate) fn source_proof_observation(

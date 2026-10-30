@@ -331,6 +331,22 @@ paths remains unknown at read admission. Producer retry refuses that scheduling
 hint and continues with its ordinary fallback, preserving every durable source
 claim and the native allowlist.
 
+The typed `SourceObservationStore::pending_catalog_sources` port returns the
+selected tier, admitted paths, FIFO fallback and whether a search was checked.
+Its standalone SQLite producer retains the existing selected-upgrade precedence,
+root-bounded identity lookup, FIFO reservations and publication acknowledgements.
+Catalog admission resolves hints inside the already authorized metadata snapshot;
+the callback runs after that snapshot closes.
+
+This #485 checkpoint retains its explicit enrolled-namespace qualification gates.
+SQLite and PostgreSQL journals can filter admitted path claims and reserve FIFO
+before its limit. Native metadata identity retry for an enrolled namespace remains
+`NamespaceUpgradePending`, matching the unqualified Catalog search helpers; it
+never opens the standalone index or reports an unsupported lookup as no matches.
+The standalone derived-index initializer remains present in this checkpoint, with
+its current whole-index rebuild rules. Configured namespace custody retains its
+independent refusal and publication fences.
+
 ## Current Semon storage contract
 
 The Event Index initializes schema 34 with parser/cache version 29 in one

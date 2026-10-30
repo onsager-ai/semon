@@ -178,15 +178,19 @@ pub(crate) fn read_page(
     options: &Options,
     machine: &str,
     request: &Request,
+    admit_search: bool,
+    admission: &mut Option<crate::catalog::CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
     let qualified = binding.validate(&transaction, &binding.config().namespace)?;
-    let reply = crate::catalog::read_page_snapshot(
+    let reply = crate::catalog::read_page_snapshot_with_search(
         options,
         machine,
         request,
         &AdmittedSnapshot(&transaction, qualified),
+        admit_search,
+        admission,
     )?;
     transaction.commit()?;
     Ok(reply)
@@ -305,6 +309,13 @@ impl CatalogSnapshot for Transaction<'_> {
         .optional()
         .map_err(io::Error::other)
     }
+    fn catalog_search_paths(
+        &self,
+        lookup: &crate::events::CatalogSearchLookup<'_>,
+        limit: usize,
+    ) -> io::Result<Vec<String>> {
+        crate::events::store::catalog_search_paths(self, lookup, limit).map_err(io::Error::other)
+    }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         rows(self, request, false).map_err(io::Error::other)
     }
@@ -364,6 +375,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         self.0.publication_value(key)
+    }
+    fn catalog_search_paths(
+        &self,
+        lookup: &crate::events::CatalogSearchLookup<'_>,
+        limit: usize,
+    ) -> io::Result<Vec<String>> {
+        require_ported_helper(self.1)?;
+        self.0.catalog_search_paths(lookup, limit)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         rows(self.0, request, self.1).map_err(io::Error::other)

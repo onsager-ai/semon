@@ -1,3 +1,4 @@
+use crate::storage::source_observations::{CatalogPendingBatch, CatalogPendingSearch};
 use super::*;
 use crate::events::EventCache;
 use crate::storage::postgres::tests::{LOSE_ACK, fixture, ns};
@@ -125,7 +126,7 @@ fn pg_source_queue_bound_capture_order_and_foreign_zero_effects() {
             .unwrap()
             .is_empty()
     );
-    assert!(store.pending(256).unwrap().is_empty());
+    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
     intents[0].apply(&mut store).unwrap();
     store.acknowledge_intent(intents[0].operation()).unwrap();
     let last = discover("queue", &["after-slot".into()], true);
@@ -141,8 +142,8 @@ fn pg_source_forced_rls_namespace_token_injection_and_no_unscoped_rows() {
     let a = "A\0'; RESET ROLE; --";
     let intent = discover(a, &["path\0bytes".into()], true);
     intent.apply(&mut journal(&pool, a)).unwrap();
-    assert_eq!(journal(&pool, a).pending(1).unwrap(), vec!["path\0bytes"]);
-    assert!(journal(&pool, "B").pending(1).unwrap().is_empty());
+    assert_eq!(journal(&pool, a).pending_catalog_sources(1, None).unwrap().paths, vec!["path\0bytes"]);
+    assert!(journal(&pool, "B").pending_catalog_sources(1, None).unwrap().paths.is_empty());
     for table in [
         "semon_pg_source_state",
         "semon_pg_source_members",
@@ -317,8 +318,12 @@ impl SourceObservationStore for LoseEffectAck {
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
         self.inner.claims(paths)
     }
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        self.inner.pending(limit)
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
+        self.inner.pending_catalog_sources(limit, search)
     }
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
         self.inner.backfill_state()
@@ -475,7 +480,7 @@ fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() 
     drop(store);
     let mut store = journal(&pool, namespace);
     assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-    assert!(store.pending(256).unwrap().is_empty());
+    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
     assert_eq!(
         store.claims(&["first".into(), "fault".into()]).unwrap(),
         vec![("first".into(), None), ("fault".into(), None)]
