@@ -1291,6 +1291,10 @@ pub(crate) trait IndexStore: Send {
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
+    /// Reads up to 64 requested ledgers from one validated backend snapshot.
+    /// The returned entries align with `paths`, including `None` for absent rows.
+    fn ledger_batch(&self, paths: &[String]) -> Result<Vec<Option<Ledger>>, StoreError>;
+
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
 
@@ -3168,6 +3172,45 @@ impl EventCache {
         Ok(self.files.get(path).map(|entry| entry.ledger.clone()))
     }
 
+    fn recorded_batch(&self, paths: &[String]) -> io::Result<Vec<Option<Ledger>>> {
+        if paths.len() > 64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native ledger batch exceeds 64 paths",
+            ));
+        }
+        let Some(store) = &self.store else {
+            return Ok(paths
+                .iter()
+                .map(|path| self.files.get(path).map(|entry| entry.ledger.clone()))
+                .collect());
+        };
+        let ledgers = store
+            .ledger_batch(paths)
+            .map_err(|error| io::Error::other(configured_error(error)))?;
+        if ledgers.len() != paths.len() {
+            return Err(io::Error::other("native ledger batch result size changed"));
+        }
+        Ok(ledgers)
+    }
+
+    /// Selected source preparation may replace this snapshot with per-source
+    /// `prepare_file` CAS checks before parsing. Explicit ingest keeps its own
+    /// caller supplied operation and continues to read each ledger directly.
+    pub(crate) fn host_scan_ledger_batch(
+        &self,
+        paths: &[String],
+    ) -> io::Result<Option<Vec<Option<Ledger>>>> {
+        if self.store.is_none() || self.host_source.is_none() || self.event_operation.is_some() {
+            return Ok(None);
+        }
+        let mut ledgers = Vec::with_capacity(paths.len());
+        for batch in paths.chunks(64) {
+            ledgers.extend(self.recorded_batch(batch)?);
+        }
+        Ok(Some(ledgers))
+    }
+
     /// The index `ledger` recorded for `path`: this process's when it is at
     /// that ledger, else the store's.
     fn base(&mut self, path: &str, ledger: &Ledger) -> io::Result<Base> {
@@ -3413,7 +3456,17 @@ pub(crate) fn scan_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
-    scan_file_with_mode(path, harness, cache, dirty, false)
+    scan_file_with_mode(path, harness, cache, dirty, false, None)
+}
+
+pub(crate) fn scan_file_with_ledger_hint(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    ledger_hint: Option<Ledger>,
+) -> io::Result<Arc<FileIndex>> {
+    scan_file_with_mode(path, harness, cache, dirty, false, Some(ledger_hint))
 }
 
 /// Semantic derivation consumes a committed Index generation even when its
@@ -3424,7 +3477,7 @@ pub(crate) fn scan_committed_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
-    scan_file_with_mode(path, harness, cache, dirty, true)
+    scan_file_with_mode(path, harness, cache, dirty, true, None)
 }
 
 #[derive(Debug)]
@@ -3468,6 +3521,7 @@ fn scan_file_with_mode(
     cache: &mut EventCache,
     dirty: &mut bool,
     committed_only: bool,
+    initial_recorded: Option<Option<Ledger>>,
 ) -> io::Result<Arc<FileIndex>> {
     cache.require_current_store()?;
     // Host-owned ordinary producers capture their own request identity. The
@@ -3487,6 +3541,7 @@ fn scan_file_with_mode(
             None
         };
     let key = path.to_string_lossy().into_owned();
+    let mut initial_recorded = host_operation.as_ref().and(initial_recorded);
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
     }
@@ -3561,7 +3616,10 @@ fn scan_file_with_mode(
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
-        let mut recorded = cache.recorded(&key)?;
+        let mut recorded = match initial_recorded.take() {
+            Some(recorded) => recorded,
+            None => cache.recorded(&key)?,
+        };
         let started = cache.scan_measurements.start();
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;

@@ -1301,11 +1301,6 @@ fn scan_selected(
         ScanSelection::Semantic(selected) => (Some(selected), false, false),
         ScanSelection::Committed(selected) => (Some(selected), false, true),
     };
-    let scan_file = if committed_only {
-        events::scan_committed_file
-    } else {
-        events::scan_file
-    };
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
             !crate::is_input_path(input.root.as_str(), &input.path)
@@ -1321,6 +1316,41 @@ fn scan_selected(
     if selected.is_none() {
         cache.begin_full_scan()?;
     }
+    let ledger_hints = if !committed_only && let Some(inputs) = selected {
+        let paths = inputs
+            .iter()
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        cache.host_scan_ledger_batch(&paths)?.map(|ledgers| {
+            inputs
+                .iter()
+                .zip(ledgers)
+                .map(|(input, ledger)| {
+                    (
+                        input.full_path(options).to_string_lossy().into_owned(),
+                        ledger,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+    } else {
+        None
+    };
+    let scan_file = |path: &Path,
+                     harness: &str,
+                     cache: &mut EventCache,
+                     dirty: &mut bool| {
+        if committed_only {
+            events::scan_committed_file(path, harness, cache, dirty)
+        } else if let Some(hint) = ledger_hints
+            .as_ref()
+            .and_then(|hints| hints.get(path.to_string_lossy().as_ref()))
+        {
+            events::scan_file_with_ledger_hint(path, harness, cache, dirty, hint.clone())
+        } else {
+            events::scan_file(path, harness, cache, dirty)
+        }
+    };
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
