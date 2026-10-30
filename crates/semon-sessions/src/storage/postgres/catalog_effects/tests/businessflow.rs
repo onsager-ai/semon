@@ -195,6 +195,79 @@ fn generic_runtime_publication_preflight(
             "generic runtime qualification must refuse {fault}"
         );
     }
+    let mut all_queryless_rows = prepared.rows.clone();
+    for row in &mut all_queryless_rows {
+        row.query = None;
+    }
+    assert_eq!(
+        pool.transaction(namespace, TxnKind::Write, control, |tx| {
+            publication::publish(
+                tx,
+                &crate::slot_projection::Publication {
+                    rows: &all_queryless_rows,
+                    transcripts: Some(&prepared.transcripts),
+                    observations: Some(captured),
+                },
+                prepared.base_generation.as_deref(),
+                &prepared.claims,
+                false,
+                None,
+            )
+        }),
+        Err(StorageError::ScopeChanged),
+        "nonempty all-queryless generic publication still requires a Query row"
+    );
+    pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
+        assert!(
+            super::super::super::model_cache::generation(tx)?.is_none(),
+            "all-queryless refusal must leave the catalog head untouched"
+        );
+        let owner = tx
+            .driver
+            .query(
+                "SELECT runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton",
+                &[&namespace.as_str().as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        assert!(
+            owner.is_empty(),
+            "all-queryless refusal must not set owner runtime"
+        );
+        Ok(())
+    })
+    .unwrap();
+    let mut mixed_rows = prepared.rows.clone();
+    mixed_rows
+        .iter_mut()
+        .find(|row| row.query.is_some())
+        .expect("captured fixture has a Query row")
+        .query = None;
+    let mixed_result = pool.transaction(namespace, TxnKind::Write, control, |tx| {
+        let result = publication::publish(
+            tx,
+            &crate::slot_projection::Publication {
+                rows: &mixed_rows,
+                transcripts: Some(&prepared.transcripts),
+                observations: Some(captured),
+            },
+            prepared.base_generation.as_deref(),
+            &prepared.claims,
+            false,
+            None,
+        )?;
+        assert_eq!(result.0, Outcome::Written);
+        let binding = super::super::super::model_cache::binding(tx)?;
+        let global = binding
+            .witness(captured.source_runtime.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(captured.runtime.as_deref(), Some(global.as_str()));
+        Err::<(), _>(StorageError::Conflict)
+    });
+    assert_eq!(
+        mixed_result,
+        Err(StorageError::Conflict),
+        "rollback mixed preflight writes"
+    );
     assert_eq!(
         pool.transaction(namespace, TxnKind::Write, control, |tx| {
             publication::publish(
@@ -299,6 +372,24 @@ fn generic_runtime_publication_facades(
         config.create_native_store().unwrap();
         let mut options = options.clone();
         options.source = source.with_store(config).unwrap();
+        if mode == "full" {
+            // Generic PG runtime capture needs the canonical Facts file, but
+            // does not depend on a separately prepared source-selection head.
+            let facts_path = options
+                .cache
+                .with_file_name(format!("{}-facts.json", namespace.as_str()));
+            crate::write_facts(
+                &facts_path,
+                &crate::Facts {
+                    version: 2,
+                    hostname: "generic-runtime-facts".into(),
+                    ..Default::default()
+                },
+                &options.source,
+            )
+            .unwrap();
+            options.facts = Some(facts_path);
+        }
         let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
         for (at, input) in inputs.iter().enumerate() {
             cache
