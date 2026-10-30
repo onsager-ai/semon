@@ -52,7 +52,7 @@ fn configured_semantic_selected57_real_two_source_native_range_and_field_oracle(
         // Independently run the normal native producer and public selected API.
         let mut ordinary=EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
         let original=crate::model::prepare_sources(&options[i],&mut ordinary,std::slice::from_ref(&inputs[i]),1_790_000_000_000).unwrap();
-        ordinary.publish_catalog_projection(&crate::slot_projection::Publication{rows:&original.rows,transcripts:Some(&original.transcripts)},original.base_generation.as_deref()).unwrap();
+        ordinary.publish_catalog_projection(&crate::slot_projection::Publication{rows:&original.rows,transcripts:Some(&original.transcripts),observations:None},original.base_generation.as_deref()).unwrap();
         let query=format!("sid={key}&after=0&limit=1");
         let actual=read(&lease,&options[i],&host,&query);
         let mut expected=body(crate::session_transcript_range_with_mode(&options[i],&host.source_key,&query,None,SessionSourceReadMode::LocalOrPinnedProvider));
