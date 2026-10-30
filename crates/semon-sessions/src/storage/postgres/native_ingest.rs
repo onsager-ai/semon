@@ -82,6 +82,8 @@ pub(super) fn begin(
         };
         if let Some(prior) = stored(tx, id)? {
             if prior != intent {
+                #[cfg(test)]
+                eprintln!("PG_INGEST_REFUSED intent_reuse");
                 return Err(StorageError::Conflict);
             }
         } else {
@@ -193,11 +195,15 @@ fn validate_input(
     index: &FileIndex,
 ) -> Result<(), StorageError> {
     if path != intent.path || intent.base != expected.map(header_ledger).unwrap_or_default() {
+        #[cfg(test)]
+        eprintln!("PG_INGEST_REFUSED input_binding");
         return Err(StorageError::Conflict);
     }
     // The shared scanner qualified the open descriptor, parsed prefix and proof
     // on that same handle. Recheck the named witness before reserving SQL.
     if Stat::of(std::path::Path::new(path)).ok().as_ref() != Some(&ledger.stat) {
+        #[cfg(test)]
+        eprintln!("PG_INGEST_REFUSED input_stat");
         return Err(StorageError::Conflict);
     }
     if !index
@@ -225,6 +231,8 @@ fn qualify_intent(
 ) -> Result<(), StorageError> {
     super::native_core::qualify(tx, path, expected)?;
     if stored(tx, &intent.id)?.as_ref() != Some(intent) || claim(tx, path)? != intent.revision {
+        #[cfg(test)]
+        eprintln!("PG_INGEST_REFUSED intent_claim");
         return Err(StorageError::Conflict);
     }
     let ns = tx.namespace.as_str().as_bytes().to_vec();

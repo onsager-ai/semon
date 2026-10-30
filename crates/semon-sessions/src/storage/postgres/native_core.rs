@@ -144,6 +144,8 @@ pub(super) fn qualify(
         )?
         .is_some()
     {
+        #[cfg(test)]
+        eprintln!("PG_INGEST_REFUSED raw_or_facts_inflight");
         return Err(StorageError::Conflict);
     }
     let ns = tx.namespace.as_str().as_bytes().to_vec();
@@ -171,11 +173,17 @@ pub(super) fn qualify(
         (Some(old), Some(current)) => {
             let valid = tx.driver.query("SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2) AND dev=$3::text::numeric AND ino=$4::text::numeric AND size=$5::text::numeric AND mtime_ns=$6 AND ctime_ns IS NOT DISTINCT FROM $7::bytea AND resume_at=$8::text::numeric AND head_sha256=$9 AND tail_sha256=$10", &[&ns,&path.as_bytes(),&old.stat.dev.to_string(),&old.stat.ino.to_string(),&old.stat.size.to_string(),&old.stat.modified_ns.to_be_bytes().as_slice(),&old.stat.changed_ns.map(|v|v.to_be_bytes().to_vec()),&old.offset.to_string(),&old.prefix.as_slice(),&old.tail.as_slice()]).map_err(sqlstate::error)?;
             if valid.len() != 1 {
+                #[cfg(test)]
+                eprintln!("PG_INGEST_REFUSED core_ledger");
                 return Err(StorageError::Conflict);
             }
             current.get(0)
         }
-        _ => return Err(StorageError::Conflict),
+        _ => {
+            #[cfg(test)]
+            eprintln!("PG_INGEST_REFUSED core_membership");
+            return Err(StorageError::Conflict);
+        }
     };
     Ok((id, !current.is_empty()))
 }

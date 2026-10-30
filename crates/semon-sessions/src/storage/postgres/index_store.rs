@@ -148,6 +148,8 @@ impl IndexStore for NativeIndex {
         batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<Outcome, StoreError> {
+        #[cfg(test)]
+        eprintln!("PG_SEMANTIC_RECORD phase={:?}", batch.phase);
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::semantic_stage::record(tx, batch, prepared)
@@ -258,6 +260,10 @@ impl IndexStore for NativeIndex {
             operation_id,
             expected,
         )
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("PG_INDEX_REFUSED prepare_file error={_error:?}");
+        })
         .map_err(err)?;
         self.intents.insert(path.to_owned(), intent);
         Ok(())
@@ -315,6 +321,10 @@ impl IndexStore for NativeIndex {
                 &self.control,
                 |tx| native_reader::file(tx, path),
             )
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("PG_INDEX_REFUSED load_file error={_error:?}");
+            })
             .map_err(err)?;
         let Some((ledger, mut index)) = loaded else {
             return Ok(None);
@@ -392,6 +402,10 @@ impl IndexStore for NativeIndex {
             ledger,
             index,
         )
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("PG_INDEX_REFUSED commit_file error={_error:?}");
+        })
         .map_err(err)?;
         Ok(Outcome::Written)
     }
