@@ -104,7 +104,7 @@ These `ui/tests/*.mjs` browser-script rows are canonical in [ui-served-scripts.m
 
 ## Capability gaps
 
-> Duhem review update (Task A, relayed by the Semon Manager): in the gap list below, the earlier gap wording that names filesystem facts, mocked-web items (route hold/fulfill/abort/patch, synthetic 409/503, clock or visibility override, init-script hooks) is superseded by the README "Capability gaps" buckets: filesystem is a pilot via cli/invoke facts, mocked-web items are retained native (Duhem does not mock the web). Remaining interaction, observation-output and visual gaps are M3 candidates (#580, observation outputs, #581); metrics are M4 #582; owned background processes are #579 (M2 blocker).
+> Duhem review update (Task A, relayed by the Semon Manager): in the gap list below, the earlier gap wording that names filesystem facts, mocked-web items (route hold/fulfill/abort/patch, synthetic 409/503, clock or visibility override, init-script hooks) is superseded by the README "Capability gaps" buckets: filesystem is a pilot via cli/invoke facts, mocked-web items are retained native (Duhem does not mock the web). Remaining interaction, observation-output and visual gaps are M3 candidates (#580, observation outputs, #581); metrics are M4 #582; owned background processes are #579 (merged at Duhem main aff6eaf, unreleased).
 
 | Capability gap | Rows | Evidence |
 |---|---:|---|
