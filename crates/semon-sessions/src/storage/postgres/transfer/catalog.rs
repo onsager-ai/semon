@@ -955,6 +955,11 @@ mod tests {
             eprintln!("transfer_query_direction forward_pg");
             ordinary(&config).unwrap()
         };
+        let listed = forward_ordinary.0["sessions"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        for key in [&initial[0].key, &expected[0].key] {
+            assert!(listed.iter().any(|row| row["id"].as_str() == Some(key.as_str())), "all-time Query must retain both original and current owners: {key}");
+        }
         {
             let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
             let grant_key = format!("native_transfer_v1:catalog-owner:{admitted}");
@@ -984,24 +989,30 @@ mod tests {
                 })
                 .unwrap();
             }
-            let references = pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
-                let ns = config.namespace.as_str().as_bytes();
-                let rows = tx.driver.query("SELECT namespace,key_digest,session_key,kind,id FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
-                let references = rows.iter().map(|row| (row.get::<_,Vec<u8>>(0),row.get::<_,Vec<u8>>(1),row.get::<_,Vec<u8>>(2),row.get::<_,Vec<u8>>(3),row.get::<_,Vec<u8>>(4))).collect::<Vec<_>>();
-                assert!(!references.is_empty());
-                tx.driver.execute("DELETE FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
-                Ok(references)
-            }).unwrap();
-            assert!(
-                ordinary(&config).is_err(),
-                "missing original proof references must refuse"
-            );
+            for key in [&expected[0].key, &initial[0].key] {
+                let references = pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                    let ns = config.namespace.as_str().as_bytes();
+                    let rows = tx.driver.query("SELECT namespace,key_digest,session_key,kind,id FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&key.as_bytes()]).map_err(sqlstate::error)?;
+                    let references = rows.iter().map(|row| (row.get::<_,Vec<u8>>(0),row.get::<_,Vec<u8>>(1),row.get::<_,Vec<u8>>(2),row.get::<_,Vec<u8>>(3),row.get::<_,Vec<u8>>(4))).collect::<Vec<_>>();
+                    assert!(!references.is_empty());
+                    tx.driver.execute("DELETE FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&key.as_bytes()]).map_err(sqlstate::error)?;
+                    Ok(references)
+                }).unwrap();
+                assert!(
+                    ordinary(&config).is_err(),
+                    "missing original proof references must refuse for current or retained-only owners: {key}"
+                );
+                pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                    // Restore the exact original row bytes after corruption injection;
+                    // only the schema-generated namespace digest is recomputed.
+                    for (namespace,key_digest,session_key,kind,id) in &references {
+                        tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,key_digest,session_key,kind,id) VALUES($1,$2,$3,$4,$5)", &[namespace,key_digest,session_key,kind,id]).map_err(sqlstate::error)?;
+                    }
+                    Ok(())
+                }).unwrap();
+                assert_eq!(ordinary(&config).unwrap(), forward_ordinary);
+            }
             pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
-                // Restore the exact original row bytes after corruption injection;
-                // only the schema-generated namespace digest is recomputed.
-                for (namespace,key_digest,session_key,kind,id) in &references {
-                    tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,key_digest,session_key,kind,id) VALUES($1,$2,$3,$4,$5)", &[namespace,key_digest,session_key,kind,id]).map_err(sqlstate::error)?;
-                }
                 let ns = config.namespace.as_str().as_bytes();
                 tx.driver.execute("UPDATE semon_pg_native_selected_generations SET admission=admission+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
                 Ok(())
@@ -1130,6 +1141,42 @@ mod tests {
         drop(reverse_db);
         eprintln!("transfer_query_direction reverse_sqlite");
         assert_eq!(ordinary(&reverse).unwrap(), forward_ordinary);
+        // Window membership still follows Current headers, while a wide
+        // window includes the original retained-only owner's own last time.
+        for (seconds, total) in [(30, 1), (120, 2)] {
+            let recent = |config: &StoreConfig| {
+                let mut recent_options = options.clone();
+                recent_options.all = false;
+                recent_options.since = std::time::Duration::from_secs(seconds);
+                recent_options.source = crate::storage::HostSource::new(
+                    config.namespace.clone(),
+                    config.expected_stream_epoch.clone().unwrap(),
+                )
+                .unwrap()
+                .with_store(config.clone())
+                .unwrap();
+                let mut query = crate::Query::from_sources(std::sync::Arc::new(
+                    crate::SessionSources::with_machines(vec![(String::new(), recent_options)]),
+                ));
+                let originals = host.clone();
+                let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+                    Ok(Box::new(originals.clone()))
+                };
+                query.call_catalog_at(
+                    "list_sessions",
+                    &serde_json::json!({"limit":60}),
+                    Some(&readers),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    1_790_812_860_001,
+                ).unwrap()
+            };
+            let forward = {
+                let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+                recent(&config)
+            };
+            assert_eq!(forward["total"], total, "recent window {seconds}s");
+            assert_eq!(recent(&reverse), forward, "recent window {seconds}s");
+        }
         assert_eq!(
             crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),
             original_facts
