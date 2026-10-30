@@ -5100,7 +5100,7 @@ fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them(
     let baseline = SQL_STEPS.with(|steps| steps.get());
     assert_eq!(before["items"].as_array().unwrap().len(), 1);
     assert_eq!(before["items"][0]["key"], "session-00000");
-    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT namespace,'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(json_remove(metadata,'$.query','$.native_ids'),'$.key','retained-'||printf('%05d',x),'$.lifecycle','retained','$.sources',json('[]')) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
+    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT namespace,'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(json_remove(metadata,'$.query'),'$.key','retained-'||printf('%05d',x),'$.native_ids',json_array('retained-'||printf('%05d',x)),'$.lifecycle','retained','$.sources',json('[]')) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
     SQL_STEPS.with(|steps| steps.set(0));
     let (status, after) = fixture.body("limit=1");
     assert_eq!(status, 200);
