@@ -445,7 +445,14 @@ impl IndexStore for ConfiguredIndex {
         let files = files
             .iter()
             .map(|(path, ledger, index)| {
-                (path.as_str(), None, None, ledger, &ledger.stat, index.as_ref())
+                (
+                    path.as_str(),
+                    None,
+                    None,
+                    ledger,
+                    &ledger.stat,
+                    index.as_ref(),
+                )
             })
             .collect::<Vec<_>>();
         self.native.commit(&files).map_err(StoreError::Configured)
