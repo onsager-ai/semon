@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -408,14 +409,16 @@ def _freeze_hashes() -> dict[str, str]:
     protocol_hash = _hash_source(PROTOCOL_PATH)
     pipeline_hash = _hash_source(PIPELINE_PATH)
     runner_hash = _hash_source(RUNNER_PATH)
+    privacy_hash = _hash_source(Path(__file__).with_name("real_privacy.py"))
     combined = hashlib.sha256(
-        f"{pipeline_hash}\0{runner_hash}".encode("ascii")
+        f"{pipeline_hash}\0{runner_hash}\0{privacy_hash}".encode("ascii")
     ).hexdigest()
     return {
         "protocol_sha256": protocol_hash,
         "benchmark_sha256": _hash_source(Path(benchmark.__file__)),
         "projection_pipeline_sha256": pipeline_hash,
         "projection_adapter_sha256": runner_hash,
+        "privacy_transform_sha256": privacy_hash,
         "projection_implementation_sha256": combined,
     }
 
@@ -863,6 +866,7 @@ def run_condition(
         llm_model=llm_model,
     )
     _thermal_checkpoint()
+    execution_started = time.perf_counter()
     if strategy == "rules":
         try:
             rows, session_summary, calls, failures = benchmark.run_benchmark(
@@ -879,6 +883,7 @@ def run_condition(
         rows, calls, failures, session_summaries = _run_remote_sessions(
             benchmark_args, events, projection_manifest["projection_sha256"],
         )
+    execution_wall_seconds = time.perf_counter() - execution_started
     _thermal_checkpoint()
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -908,6 +913,8 @@ def run_condition(
         "failure_record_count": len(failures),
         "session_concurrency": 1 if strategy == "rules" else MAX_SESSION_WORKERS,
         "remote_repetitions": 1 if strategy == "rules" else REMOTE_REPETITIONS,
+        "execution_wall_seconds": execution_wall_seconds,
+        "scored_event_rows_per_second": len(rows) / execution_wall_seconds,
         "projection_sha256": projection_manifest["projection_sha256"],
         "reference_sha256": reference_manifest["reference_sha256"],
         "projection_implementation_sha256": projection_manifest["projection_implementation_sha256"],

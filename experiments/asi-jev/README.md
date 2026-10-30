@@ -32,6 +32,11 @@ not representative of all interactive sessions. Finalization makes fresh
 projections from stable selected snapshots. Do not rerun selection over a
 finalized bundle. Manually review every projected field for privacy before
 attesting to the freeze; exclude uncertain sessions before any provider call.
+For fixable findings, create a local plan with a `redactions` array containing
+`packet` basenames, `event_order`, and text `field`, then run
+`real_privacy.py --plan experiments/asi-jev/private/privacy-plan.json` from the
+repository root. It preserves the original bundle and replaces entire fields.
+Re-review the changed packets before freezing. The plan and audit stay local.
 
 ```sh
 python3 experiments/asi-jev/real_run.py freeze-projection \
