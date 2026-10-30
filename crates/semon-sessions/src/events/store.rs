@@ -3221,15 +3221,28 @@ impl SqliteStore {
                         )
                         .map_err(StoreError::Configured)?;
                     metadata_measurements.record("statements", statements_started, 1);
+                    if batch_bytes.is_some() && producer.is_some() {
+                        metadata_sample = Some(crate::native_timing::WriteActivity::new(
+                            true,
+                            &self.path,
+                            "catalog_metadata_cohort",
+                            &transaction,
+                        ));
+                    }
+                    let trace_store = if rows.iter().any(|row| row.trace.is_some()) {
+                        let store = crate::storage::sqlite::trace::TraceWriter::owned(
+                            &transaction,
+                            owner,
+                        )
+                        .map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })
+                        .map_err(failure)?;
+                        Some(store)
+                    } else {
+                        None
+                    };
                     let bulk_changed = if batch_bytes.is_some() {
-                        if producer.is_some() {
-                            metadata_sample = Some(crate::native_timing::WriteActivity::new(
-                                true,
-                                &self.path,
-                                "catalog_metadata_cohort",
-                                &transaction,
-                            ));
-                        }
                         // UNIQUE keys were certified before reordering. These
                         // helpers read their own History/Overview, never another
                         // row's newly written Current/source membership.
@@ -3239,7 +3252,7 @@ impl SqliteStore {
                                 &transaction,
                                 row,
                                 &mut overview_measurements,
-                                owner,
+                                trace_store.as_ref(),
                             )
                             .map_err(failure)?;
                             metadata_measurements.record("overview", started, 1);
@@ -3291,7 +3304,7 @@ impl SqliteStore {
                                 &transaction,
                                 row,
                                 &mut overview_measurements,
-                                owner,
+                                trace_store.as_ref(),
                             )
                             .map_err(failure)?;
                             metadata_measurements.record("overview", started, 1);
