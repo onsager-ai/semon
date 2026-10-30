@@ -1320,7 +1320,14 @@ impl Writer {
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
+        #[cfg(test)]
+        let timing = crate::native_timing::enabled();
+        #[cfg(test)]
+        let connection_started = timing.then(std::time::Instant::now);
         let connection = connection(&self.config).map_err(std::io::Error::other)?;
+        #[cfg(test)]
+        let connection_setup_us =
+            connection_started.map_or(0, |started| started.elapsed().as_micros());
         let database = self
             .config
             .backend
@@ -1335,7 +1342,14 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
+        #[cfg(test)]
+        let advance_started = timing.then(std::time::Instant::now);
         let (pending, changed) = native_usage::advance(&mut store, options, Some(owner))?;
+        #[cfg(test)]
+        let native_usage_advance_us =
+            advance_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        let cleanup_started = timing.then(std::time::Instant::now);
         let tx = store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1344,6 +1358,14 @@ impl Writer {
         let cleanup = tree_state::cleanup_work_tx(&tx).map_err(std::io::Error::other)?;
         tx.commit()
             .map_err(|_| std::io::Error::other(StorageError::CommitUncertain))?;
+        #[cfg(test)]
+        if timing {
+            let cleanup_us = cleanup_started.map_or(0, |started| started.elapsed().as_micros());
+            let producer = crate::native_timing::id(&database);
+            eprintln!(
+                "semon sessions native: producer={producer} phase=configured_tree_repair connection_setup_us={connection_setup_us} native_usage_advance_us={native_usage_advance_us} cleanup_us={cleanup_us}"
+            );
+        }
         Ok((pending || cleanup, changed))
     }
 

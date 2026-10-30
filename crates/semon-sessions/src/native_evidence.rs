@@ -1069,6 +1069,10 @@ impl NativeEvidence {
         now: i64,
         mut before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        #[cfg(test)]
+        let cold_diagnostic = work.cold_catalog.is_some() || work.catalog_snapshot.is_none();
+        #[cfg(test)]
+        let timing = crate::native_timing::enabled();
         // Keep the existing receiver facts fence through derivation and the
         // Catalog commit. A newly indexed source has no published owner yet;
         // otherwise a facts writer could miss that dependency in the gap after
@@ -1081,10 +1085,17 @@ impl NativeEvidence {
             .transpose()?;
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
+        #[cfg(test)]
+        let prepare_events_started = timing.then(std::time::Instant::now);
         self.prepare_events(work, now).inspect_err(|_| {
             #[cfg(test)]
             eprintln!("native catalog phase=prepare_events");
         })?;
+        #[cfg(test)]
+        let prepare_events_us =
+            prepare_events_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        let tree_repair_started = timing.then(std::time::Instant::now);
         work.tree_repair_pending = work
             .events
             .as_mut()
@@ -1094,13 +1105,30 @@ impl NativeEvidence {
                 #[cfg(test)]
                 eprintln!("native catalog phase=tree_repair");
             })?;
-        if self
+        #[cfg(test)]
+        let tree_repair_us =
+            tree_repair_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        let semantic_stage_started = timing.then(std::time::Instant::now);
+        let semantic_stage_pending = self
             .advance_semantic_stage(work, now, &mut before_build)
             .inspect_err(|_| {
                 #[cfg(test)]
                 eprintln!("native catalog phase=stage_resume");
-            })?
-        {
+            })?;
+        #[cfg(test)]
+        let semantic_stage_us =
+            semantic_stage_started.map_or(0, |started| started.elapsed().as_micros());
+        #[cfg(test)]
+        if timing && cold_diagnostic {
+            let producer = crate::native_timing::id(&crate::events::EventCache::path(
+                &self.options.cache,
+            ));
+            eprintln!(
+                "semon sessions native: producer={producer} phase=cold_refresh_wrapper prepare_events_us={prepare_events_us} tree_repair_us={tree_repair_us} advance_semantic_stage_us={semantic_stage_us}"
+            );
+        }
+        if semantic_stage_pending {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
                 if let Some(discovery) = work.cold_catalog.take() {
@@ -1497,7 +1525,13 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.tree_repair_pending
+        #[cfg(test)]
+        let cold_diagnostic = work.cold_catalog.is_some();
+        #[cfg(test)]
+        let timing = crate::native_timing::enabled();
+        #[cfg(test)]
+        let started = timing.then(std::time::Instant::now);
+        let pending = work.tree_repair_pending
             || work
                 .events
                 .as_ref()
@@ -1505,7 +1539,18 @@ impl NativeEvidence {
             || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
-            || self.audit_request.load(Ordering::Acquire) != work.audit_revision
+            || self.audit_request.load(Ordering::Acquire) != work.audit_revision;
+        #[cfg(test)]
+        if timing && cold_diagnostic {
+            let elapsed_us = started.map_or(0, |started| started.elapsed().as_micros());
+            let producer = crate::native_timing::id(&crate::events::EventCache::path(
+                &self.options.cache,
+            ));
+            eprintln!(
+                "semon sessions native: producer={producer} phase=cold_catalog_pending elapsed_us={elapsed_us}"
+            );
+        }
+        pending
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
