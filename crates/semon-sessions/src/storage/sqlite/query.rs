@@ -321,10 +321,6 @@ fn read(
                 "Catalog sources are outside configured native authority",
             ));
         }
-        let cwds = super::catalog::runtime_source_cwds(db, &row.sources).map_err(unavailable)?;
-        let scoped = runtime_observations
-            .scope(&row, &cwds)
-            .map_err(unavailable)?;
         let row_binding = if imported_origin
             || row
                 .query
@@ -339,10 +335,20 @@ fn read(
         } else {
             runtime_binding.cloned()
         };
-        let row_runtime = Some(match row_binding {
-            Some(binding) => binding.witness(&scoped).map_err(unavailable)?,
-            None => scoped,
-        });
+        // Retained Query rows keep their provenance checks above, but their
+        // recorded summaries do not require a live runtime or source ledger.
+        let row_runtime = if lifecycle == "current" {
+            let cwds = super::catalog::runtime_source_cwds(db, &row.sources).map_err(unavailable)?;
+            let scoped = runtime_observations
+                .scope(&row, &cwds)
+                .map_err(unavailable)?;
+            Some(match row_binding {
+                Some(binding) => binding.witness(&scoped).map_err(unavailable)?,
+                None => scoped,
+            })
+        } else {
+            None
+        };
         let saved = row
             .query
             .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;
