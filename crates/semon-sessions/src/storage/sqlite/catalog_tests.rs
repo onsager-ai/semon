@@ -5234,9 +5234,11 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
     assert!(original["query"].is_object());
     assert_eq!(original_lifecycle, "current");
     assert_eq!(original["lifecycle"], original_lifecycle);
-    assert!(original["query"]["runtime"]
-        .as_str()
-        .is_some_and(|runtime| runtime.starts_with("source-runtime-v1:")));
+    assert!(
+        original["query"]["runtime"]
+            .as_str()
+            .is_some_and(|runtime| runtime.starts_with("source-runtime-v1:"))
+    );
     let write_corrupt = |lifecycle: &str, row: &Value| {
         connection.execute(
             "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00000'",
@@ -5321,7 +5323,10 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
     changed_runtime["query"]["runtime"] = json!("old-runtime");
     write_corrupt(&original_lifecycle, &changed_runtime);
     let (code, body) = page("");
-    assert_eq!(code, 200, "runtime mismatch keeps the page readable: {body}");
+    assert_eq!(
+        code, 200,
+        "runtime mismatch keeps the page readable: {body}"
+    );
     assert_eq!(body["capabilities"]["runtime_status"], true);
     assert_eq!(
         body["items"][0]["status"],
@@ -5451,25 +5456,16 @@ fn list_status_tracks_produced_codex_current_stale_and_retained_states() {
         row["status"].clone()
     };
     crate::events::CACHE_READS.with(|reads| reads.set(0));
-    assert_eq!(
-        status(),
-        json!({"state":"work","observation":"current"})
-    );
+    assert_eq!(status(), json!({"state":"work","observation":"current"}));
 
     facts.codex_rollouts = Some(BTreeSet::new());
     let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
     facts_write.complete().unwrap();
-    assert_eq!(
-        status(),
-        json!({"state":null,"observation":"unavailable"})
-    );
+    assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
 
     fixture.publish_existing();
-    assert_eq!(
-        status(),
-        json!({"state":"off","observation":"retained"})
-    );
+    assert_eq!(status(), json!({"state":"off","observation":"retained"}));
 }
 
 #[test]
