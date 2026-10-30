@@ -1947,7 +1947,7 @@ mod tests {
         let plan: Vec<String> = plan_db
             .prepare(&format!("EXPLAIN QUERY PLAN {PENDING_SQL}"))
             .unwrap()
-            .query_map(params!["A", 1], |r| r.get(3))
+            .query_map(params!["A", 1, "[]"], |r| r.get(3))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
