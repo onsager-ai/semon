@@ -251,6 +251,13 @@ pub(super) fn runtime_source_cwds(
     tx: &mut PgTxn<'_>,
     sources: &[crate::model::summary::CatalogSource],
 ) -> Result<std::collections::BTreeSet<String>, StorageError> {
+    runtime_source_cwds_if_current(tx, sources)?.ok_or(StorageError::ScopeChanged)
+}
+
+pub(super) fn runtime_source_cwds_if_current(
+    tx: &mut PgTxn<'_>,
+    sources: &[crate::model::summary::CatalogSource],
+) -> Result<Option<std::collections::BTreeSet<String>>, StorageError> {
     if sources.is_empty() || sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
@@ -260,7 +267,7 @@ pub(super) fn runtime_source_cwds(
         if ledger(tx, &path)?.as_ref().map(|(_, ledger)| ledger)
             != Some(&crate::source_carrier::ledger(source))
         {
-            return Err(StorageError::ScopeChanged);
+            return Ok(None);
         }
         let values = rows(
             tx,
@@ -274,7 +281,7 @@ pub(super) fn runtime_source_cwds(
             cwds.insert(cwd);
         }
     }
-    Ok(cwds)
+    Ok(Some(cwds))
 }
 
 pub(super) fn file(

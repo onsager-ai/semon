@@ -23,6 +23,29 @@ pub(crate) fn verify_presentation_entry(
     text: &str,
     manifest: &str,
 ) -> Result<(), StorageError> {
+    verify_presentation_manifest_entry(key, metadata, slots, text, manifest).map(|_| ())
+}
+
+pub(crate) fn verify_presentation_observations(
+    key: &str,
+    metadata: &str,
+    slots: &str,
+    text: &str,
+    base: &str,
+    manifest: &str,
+    expected_digest: &str,
+) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+    verify_presentation_digest(base, manifest, expected_digest)?;
+    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, manifest)?.observations)
+}
+
+fn verify_presentation_manifest_entry(
+    key: &str,
+    metadata: &str,
+    slots: &str,
+    text: &str,
+    manifest: &str,
+) -> Result<PresentationManifest, StorageError> {
     let manifest: PresentationManifest =
         serde_json::from_str(manifest).map_err(|_| StorageError::Unavailable)?;
     let entry = presentation_entry(metadata, slots, text)?;
@@ -34,7 +57,7 @@ pub(crate) fn verify_presentation_entry(
     {
         return Err(StorageError::ScopeChanged);
     }
-    Ok(())
+    Ok(manifest)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
