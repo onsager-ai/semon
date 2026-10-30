@@ -309,7 +309,11 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
     if !binding.validate(transaction, &binding.config().namespace)? {
         return Err(crate::storage::StorageError::NamespaceUpgradePending);
     }
-    Ok(AdmittedSnapshot(transaction, binding.runtime_binding()?, binding.runtime_binding_at(transaction)?))
+    Ok(AdmittedSnapshot(
+        transaction,
+        binding.runtime_binding()?,
+        binding.runtime_binding_at(transaction)?,
+    ))
 }
 
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
@@ -321,11 +325,15 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         row: &CatalogRow,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
         if super::proof_generations::imported_catalog(self.0, &self.2).map_err(io::Error::other)?
-            || row.query.as_ref().and_then(|query| query["runtime"].as_str())
-            .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
+            || row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
+                .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
         {
             return super::proof_generations::observation_binding(self.0, &self.2, row)
-                .map(Some).map_err(io::Error::other);
+                .map(Some)
+                .map_err(io::Error::other);
         }
         Ok(self.runtime_binding())
     }

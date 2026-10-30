@@ -365,6 +365,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
 | `storage/transfer/reported_tests.rs` | direct | Test-only admitted SQLite context for authoritative Facts round trips; production SQL stays in adapters. Full transfer qualification remains incomplete. |
 | `storage/postgres/transfer.rs` | direct | Test-only admitted SQLite seed for the exact selected pending marker; journal/claims are read and resumed through ordinary Source observation ports in both directions. Full pending-state transfer remains incomplete. |
+| `storage/postgres/transfer/catalog.rs` | direct | Test-only real SQLite ingest/publication oracle and scoped connection for carried imported-row grant corruption injection and restoration; no public PostgreSQL factory or full transfer qualification. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |

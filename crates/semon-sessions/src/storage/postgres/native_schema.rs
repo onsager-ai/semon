@@ -380,8 +380,18 @@ const FOUNDATION: &[Table] = &[
 
 // Indexes are part of the same authoritative manifest, including key order.
 const INDEXES: &[(&str, &str, &str, bool)] = &[
-    ("catalog_operation_generation", "catalog_operations", "generation", false),
-    ("semantic_publication_generation", "semantic_publications", "generation,proof_digest,admission", false),
+    (
+        "catalog_operation_generation",
+        "catalog_operations",
+        "generation",
+        false,
+    ),
+    (
+        "semantic_publication_generation",
+        "semantic_publications",
+        "generation,proof_digest,admission",
+        false,
+    ),
     (
         "catalog_order",
         "catalog_rows",

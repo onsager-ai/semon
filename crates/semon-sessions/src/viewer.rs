@@ -6971,6 +6971,11 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                     .unwrap();
                 assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
+                assert!(
+                    start.elapsed() <= AT_ONCE,
+                    "bounded initial page took {:?}",
+                    start.elapsed()
+                );
                 eprintln!(
                     "production-first-page unrelated={unrelated} latency_us={} response_bytes={} native_sources={observed}",
                     start.elapsed().as_micros(),
@@ -6980,11 +6985,8 @@ mod tests {
                 let _ = lock(&released).recv();
             }));
             view.note_catalog_read().unwrap();
-            // Detect a hung producer at the existing stall boundary. Latency
-            // is diagnostic; row/work bounds and progressive ordering above
-            // establish this test's functional contract.
             first_page
-                .recv_timeout(STALLED_AFTER)
+                .recv_timeout(HUNG_AFTER)
                 .expect("bounded cold page was not published");
             let reading = view.clone();
             let page = at_once(

@@ -491,7 +491,10 @@ pub(crate) fn imported_catalog(
     db: &Connection,
     binding: &crate::storage::QueryRuntimeBinding,
 ) -> Result<bool, StorageError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta p WHERE p.namespace=?1 AND p.key='native_transfer_v1:catalog-admission' AND CASE WHEN octet_length(p.value)<=?4 THEN json_extract(p.value,'$[0]')='catalog-import-v1' AND json_extract(p.value,'$[1].namespace')=?1 AND json_extract(p.value,'$[1].stream_epoch')=?2 AND json_extract(p.value,'$[3]')=?3 AND EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=p.namespace AND a.key='native_transfer_v1:catalog-owner:'||json_extract(p.value,'$[2]') AND a.value=?5) ELSE 0 END)", params![binding.namespace.as_str(), binding.stream_epoch, binding.admission, crate::storage::transfer::MAX_PAGE_BYTES, format!("{}:{}",binding.admission,binding.stream_epoch)], |r| r.get(0)).map_err(failed)
+    let admission = i64::try_from(binding.admission).map_err(|_| StorageError::ScopeChanged)?;
+    let max_bytes = i64::try_from(crate::storage::transfer::MAX_PAGE_BYTES)
+        .map_err(|_| StorageError::ScopeChanged)?;
+    db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta p WHERE p.namespace=?1 AND p.key='native_transfer_v1:catalog-admission' AND CASE WHEN octet_length(p.value)<=?4 THEN json_extract(p.value,'$[0]')='catalog-import-v1' AND json_extract(p.value,'$[1].namespace')=?1 AND json_extract(p.value,'$[1].stream_epoch')=?2 AND json_extract(p.value,'$[3]')=?3 AND EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=p.namespace AND a.key='native_transfer_v1:catalog-owner:'||json_extract(p.value,'$[2]') AND a.value=?5) ELSE 0 END)", params![binding.namespace.as_str(), binding.stream_epoch, admission, max_bytes, format!("{}:{}",binding.admission,binding.stream_epoch)], |r| r.get(0)).map_err(failed)
 }
 
 /// Query observations use original producer coordinates only after the same
@@ -505,34 +508,90 @@ pub(crate) fn observation_binding(
     let grant = format!("{}:{}", current.admission, current.stream_epoch);
     let mut metadata = selected.clone();
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let current_metadata = serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
+    let current_metadata =
+        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let retained_metadata = serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
+    let retained_metadata =
+        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
     for original in [&current_metadata, &retained_metadata] {
-        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current && original == &retained_metadata {
+        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
+            && original == &retained_metadata
+        {
             continue;
         }
-        let native: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)", params![ns,format!("catalog_native_observation:{}", proof_codec::digest(original.as_bytes())),grant], |row|row.get(0)).map_err(failed)?;
+        let native: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
+                params![
+                    ns,
+                    format!(
+                        "catalog_native_observation:{}",
+                        proof_codec::digest(original.as_bytes())
+                    ),
+                    grant
+                ],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
         if native {
             return Ok(current.clone());
         }
     }
     let mut statement = db.prepare("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=f.namespace AND m.key='native_transfer_v1:publication:'||g.publication AND a.value=?3) FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND g.metadata IN (?4,?5) ORDER BY g.id LIMIT 1").map_err(failed)?;
-    let values = statement.query_map(params![ns, selected.key, grant, current_metadata, retained_metadata], |r| {
-        Ok((proof_codec::GenerationRecord {
-            namespace: ns.to_owned(), id: ProofGenerationId(r.get(0)?),
-            session_key: selected.key.clone(), publication: r.get(1)?, proof: r.get(2)?,
-            admission: r.get(3)?, stream: r.get(4)?, metadata: r.get(5)?,
-            slots: r.get(6)?, prefix: r.get(7)?,
-        }, r.get::<_, String>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?, r.get::<_, bool>(11)?))
-    }).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-    let (record, base, manifest, presentation, granted) = values.into_iter().next().ok_or(StorageError::ScopeChanged)?;
+    let values = statement
+        .query_map(
+            params![ns, selected.key, grant, current_metadata, retained_metadata],
+            |r| {
+                let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((
+                    proof_codec::GenerationRecord {
+                        namespace: ns.to_owned(),
+                        id: ProofGenerationId(r.get(0)?),
+                        session_key: selected.key.clone(),
+                        publication: r.get(1)?,
+                        proof: r.get(2)?,
+                        admission,
+                        stream: r.get(4)?,
+                        metadata: r.get(5)?,
+                        slots: r.get(6)?,
+                        prefix: r.get(7)?,
+                    },
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, bool>(11)?,
+                ))
+            },
+        )
+        .map_err(failed)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failed)?;
+    let (record, base, manifest, presentation, granted) = values
+        .into_iter()
+        .next()
+        .ok_or(StorageError::ScopeChanged)?;
     if !granted {
         return Err(StorageError::ScopeChanged);
     }
-    crate::selected_read::charge(64, record.metadata.len() + record.slots.len() + manifest.len() + presentation.len()).map_err(|_| StorageError::Busy)?;
+    crate::selected_read::charge(
+        64,
+        record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
+    )
+    .map_err(|_| StorageError::Busy)?;
     proof_codec::verify_presentation_digest(&base, &manifest, &record.proof)?;
-    proof_codec::verify_presentation_entry(&selected.key, &record.metadata, &record.slots, &presentation, &manifest)?;
+    proof_codec::verify_presentation_entry(
+        &selected.key,
+        &record.metadata,
+        &record.slots,
+        &presentation,
+        &manifest,
+    )?;
     proof_codec::observation_binding(record, current, selected)
 }
 

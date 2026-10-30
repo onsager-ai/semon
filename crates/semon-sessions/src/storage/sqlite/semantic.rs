@@ -1919,7 +1919,18 @@ impl Stage {
         )
         .map_err(StoreError::Configured)?;
         for metadata in &metadata {
-            super::proof_generations::native_observation_grant(&tx, ns, self.source.admission, self.source.config.expected_stream_epoch.as_deref().ok_or_else(|| refuse("semantic_stream_epoch"))?, metadata).map_err(StoreError::Configured)?;
+            super::proof_generations::native_observation_grant(
+                &tx,
+                ns,
+                self.source.admission,
+                self.source
+                    .config
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+                metadata,
+            )
+            .map_err(StoreError::Configured)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_generation_refs")

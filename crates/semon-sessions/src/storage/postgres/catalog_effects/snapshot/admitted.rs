@@ -29,7 +29,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         row: &CatalogRow,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
         self.require_current()?;
-        let mut tx = self.tx.lock().map_err(|_| failed(StorageError::Unavailable))?;
+        let mut tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
         let current = super::super::super::model_cache::binding(&mut tx).map_err(failed)?;
         let ns = current.namespace.as_str().as_bytes();
         let grant = format!("{}:{}", current.admission, current.stream_epoch);
@@ -39,14 +42,20 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
         for original in [&current_metadata, &retained_metadata] {
-            if row.lifecycle == crate::model::summary::CatalogLifecycle::Current && original == &retained_metadata {
+            if row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                && original == &retained_metadata
+            {
                 continue;
             }
             let key = format!("catalog-native-observation:{:x}", Sha256::digest(original));
-            let Some(native) = super::super::super::native_keys::read_meta(&mut tx, key.as_bytes(), 256).map_err(failed)? else {
+            let Some(native) =
+                super::super::super::native_keys::read_meta(&mut tx, key.as_bytes(), 256)
+                    .map_err(failed)?
+            else {
                 continue;
             };
-            let (admission, stream, generation): (u64,String,String) = serde_json::from_slice(&native).map_err(io::Error::other)?;
+            let (admission, stream, generation): (u64, String, String) =
+                serde_json::from_slice(&native).map_err(io::Error::other)?;
             if admission != current.admission || stream != current.stream_epoch {
                 return Err(failed(StorageError::ScopeChanged));
             }
@@ -54,39 +63,77 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             if operations.len() != 1 {
                 return Err(failed(StorageError::ScopeChanged));
             }
-            let payload = operations[0].get::<_,Option<Vec<u8>>>(0).ok_or_else(|| failed(StorageError::Busy))?;
+            let payload = operations[0]
+                .get::<_, Option<Vec<u8>>>(0)
+                .ok_or_else(|| failed(StorageError::Busy))?;
             crate::selected_read::charge(64, payload.len())?;
-            let payload: serde_json::Value = serde_json::from_slice(&payload).map_err(io::Error::other)?;
-            let original: serde_json::Value = serde_json::from_slice(original).map_err(io::Error::other)?;
-            if payload[0] != "catalog-publication-v1" || !payload[1].as_array().is_some_and(|rows| rows.contains(&original)) {
+            let payload: serde_json::Value =
+                serde_json::from_slice(&payload).map_err(io::Error::other)?;
+            let original: serde_json::Value =
+                serde_json::from_slice(original).map_err(io::Error::other)?;
+            if payload[0] != "catalog-publication-v1"
+                || !payload[1]
+                    .as_array()
+                    .is_some_and(|rows| rows.contains(&original))
+            {
                 return Err(failed(StorageError::ScopeChanged));
             }
             return Ok(Some(current));
         }
         let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),&current_metadata,&retained_metadata]).map_err(sqlstate::error).map_err(failed)?;
-        let value = rows.into_iter().next().ok_or_else(|| failed(StorageError::ScopeChanged))?;
+        let value = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| failed(StorageError::ScopeChanged))?;
         let decode = |at: usize| -> io::Result<String> {
-            text(value.get::<_, Option<Vec<u8>>>(at).ok_or_else(|| failed(StorageError::Busy))?).map_err(failed)
+            text(
+                value
+                    .get::<_, Option<Vec<u8>>>(at)
+                    .ok_or_else(|| failed(StorageError::Busy))?,
+            )
+            .map_err(failed)
         };
         let record = crate::storage::proof_codec::GenerationRecord {
             namespace: current.namespace.as_str().to_owned(),
-            id: crate::storage::proof_lifetime::ProofGenerationId(text(value.get(0)).map_err(failed)?),
+            id: crate::storage::proof_lifetime::ProofGenerationId(
+                text(value.get(0)).map_err(failed)?,
+            ),
             session_key: row.key.clone(),
             publication: text(value.get(1)).map_err(failed)?,
             proof: text(value.get(2)).map_err(failed)?,
-            admission: u64::try_from(value.get::<_, i64>(3)).map_err(|_| failed(StorageError::ScopeChanged))?,
+            admission: u64::try_from(value.get::<_, i64>(3))
+                .map_err(|_| failed(StorageError::ScopeChanged))?,
             stream: text(value.get(4)).map_err(failed)?,
-            metadata: decode(5)?, slots: decode(6)?, prefix: text(value.get(7)).map_err(failed)?,
+            metadata: decode(5)?,
+            slots: decode(6)?,
+            prefix: text(value.get(7)).map_err(failed)?,
         };
         if !value.get::<_, bool>(11) {
             return Err(failed(StorageError::ScopeChanged));
         }
         let manifest = decode(9)?;
         let presentation = decode(10)?;
-        crate::selected_read::charge(64, record.metadata.len() + record.slots.len() + manifest.len() + presentation.len())?;
-        crate::storage::proof_codec::verify_presentation_digest(&text(value.get(8)).map_err(failed)?, &manifest, &record.proof).map_err(failed)?;
-        crate::storage::proof_codec::verify_presentation_entry(&row.key, &record.metadata, &record.slots, &presentation, &manifest).map_err(failed)?;
-        crate::storage::proof_codec::observation_binding(record, &current, row).map(Some).map_err(failed)
+        crate::selected_read::charge(
+            64,
+            record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
+        )?;
+        crate::storage::proof_codec::verify_presentation_digest(
+            &text(value.get(8)).map_err(failed)?,
+            &manifest,
+            &record.proof,
+        )
+        .map_err(failed)?;
+        crate::storage::proof_codec::verify_presentation_entry(
+            &row.key,
+            &record.metadata,
+            &record.slots,
+            &presentation,
+            &manifest,
+        )
+        .map_err(failed)?;
+        crate::storage::proof_codec::observation_binding(record, &current, row)
+            .map(Some)
+            .map_err(failed)
     }
 
     fn require_current(&self) -> io::Result<()> {

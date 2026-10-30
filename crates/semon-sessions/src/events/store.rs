@@ -3550,9 +3550,23 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let stream = owner.config().expected_stream_epoch.as_deref().ok_or(StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            let stream =
+                owner
+                    .config()
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or(StoreError::Configured(
+                        crate::storage::StorageError::ScopeChanged,
+                    ))?;
             for output in &metadata {
-                crate::storage::sqlite::proof_generations::native_observation_grant(&transaction, owner.config().namespace.as_str(), owner.admission(), stream, output).map_err(StoreError::Configured)?;
+                crate::storage::sqlite::proof_generations::native_observation_grant(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    owner.admission(),
+                    stream,
+                    output,
+                )
+                .map_err(StoreError::Configured)?;
             }
             if transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE meta.value=excluded.value", params![owner.config().namespace.as_str(),format!("catalog_native_publication:{generation}"),format!("{}:{stream}",owner.admission())]).map_err(failure)? != 1 {
                 return Err(StoreError::Configured(crate::storage::StorageError::ScopeChanged));

@@ -26,7 +26,10 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .listing_snapshot(namespace)
             .map_err(storage_error)?;
         let runtime_binding = self.binding.runtime_binding().map_err(storage_error)?;
-        let admitted_binding = self.binding.runtime_binding_at(&db).map_err(storage_error)?;
+        let admitted_binding = self
+            .binding
+            .runtime_binding_at(&db)
+            .map_err(storage_error)?;
         read(
             &db,
             &self.options,
@@ -115,7 +118,8 @@ fn read(
     admitted_binding: &crate::storage::QueryRuntimeBinding,
 ) -> Result<Part, QueryError> {
     let generation = generation(db)?;
-    let imported_origin = super::proof_generations::imported_catalog(db, admitted_binding).map_err(unavailable)?;
+    let imported_origin =
+        super::proof_generations::imported_catalog(db, admitted_binding).map_err(unavailable)?;
     let imported: bool = imported_origin && db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=?1 AND a.key IN ('native_transfer_v1:catalog-owner:'||?2,'catalog_native_publication:'||?2) AND a.value=?3)", rusqlite::params![admitted_binding.namespace.as_str(),generation,format!("{}:{}",admitted_binding.admission,admitted_binding.stream_epoch)], |row|row.get(0)).map_err(unavailable)?;
     let ready_sql = if private_listing || imported {
         "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND ((SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' OR (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2) AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
@@ -298,9 +302,18 @@ fn read(
                 "Catalog sources are outside configured native authority",
             ));
         }
-        let row_runtime = if imported_origin || row.query.as_ref().and_then(|query| query["runtime"].as_str()).is_some_and(|saved| saved.starts_with("source-runtime-v1:")) {
-            let binding = super::proof_generations::observation_binding(db, admitted_binding, &row).map_err(unavailable)?;
-            crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(unavailable)?.expected(&row)
+        let row_runtime = if imported_origin
+            || row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
+                .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
+        {
+            let binding = super::proof_generations::observation_binding(db, admitted_binding, &row)
+                .map_err(unavailable)?;
+            crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
+                .map_err(unavailable)?
+                .expected(&row)
         } else {
             runtime_observations.expected(&row)
         };

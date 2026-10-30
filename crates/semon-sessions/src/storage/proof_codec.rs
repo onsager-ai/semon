@@ -233,7 +233,12 @@ mod tests {
             admission: 2,
             stream_epoch: "stream".into(),
         };
-        assert_eq!(observation_binding(record.clone(), &current, &row).unwrap().admission, 1);
+        assert_eq!(
+            observation_binding(record.clone(), &current, &row)
+                .unwrap()
+                .admission,
+            1
+        );
         let mut retained = row.clone();
         retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         assert!(observation_binding(record.clone(), &current, &retained).is_ok());
