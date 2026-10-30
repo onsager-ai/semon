@@ -6719,7 +6719,9 @@ mod tests {
     fn cold_catalog_search_survives_deferred_original_custody_publication() {
         use std::io::Write;
         let root = scratch("catalog-search-deferred-original");
-        let (options, _, _) = catalog_native_fixture(&root, 2, true);
+        // Build the large original before its first Catalog publication. An
+        // append after publication would already retain the initial revision.
+        let (options, _, _) = catalog_native_fixture(&root, 2, false);
         let key = "native-cx-01";
         let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
         let original = options.codex_home.join(relative);
@@ -6753,6 +6755,9 @@ mod tests {
         )
         .unwrap()
         .into_test_connection();
+        let original_recipes = catalog_recipes(&db, "session_slots", key);
+        assert_eq!(original_recipes.len(), 130);
+        assert!(catalog_recipes(&db, "session_history_slots", key).is_empty());
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         let tx = db.unchecked_transaction().unwrap();
         let ordinary = options
@@ -6774,6 +6779,20 @@ mod tests {
             catalog_recipes(&db, "session_history_slots", key).len(),
             64,
             "the first qualified replacement defers after the custody page"
+        );
+        assert_eq!(
+            catalog_recipes(&db, "session_slots", key),
+            original_recipes,
+            "Deferred custody preserves every Current recipe"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT harness FROM session_catalog WHERE session_key=?1",
+                [key],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "codex"
         );
         evidence
             .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
@@ -6810,6 +6829,19 @@ mod tests {
             published,
             "the original search survives each Deferred without reposting"
         );
+        assert_eq!(
+            catalog_recipes(&db, "session_history_slots", key),
+            original_recipes,
+            "completed custody retains the exact original recipes"
+        );
+        let history: crate::model::summary::CatalogRow = serde_json::from_str(
+            &crate::history_projection::catalog(&db, key)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(history.harness, "codex");
+        assert!(crate::history_projection::qualified(&db, &history).unwrap());
         drop(work);
         drop(evidence);
         drop(db);

@@ -2674,6 +2674,15 @@ mod catalog_owner_tests {
         .into_test_connection()
     }
 
+    fn cold_search_claim(db: &rusqlite::Connection, path: &str, revision: i64) {
+        let tx = db.unchecked_transaction().unwrap();
+        // Preserve the test's explicit FIFO order while keeping the namespace
+        // journal at least as new as every claim, as real invalidation does.
+        tx.execute("UPDATE storage_source_journal SET revision=max(revision,?1) WHERE namespace=semon_namespace()", [revision]).unwrap();
+        tx.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,?2,'changed',0) ON CONFLICT(namespace,source_path) DO UPDATE SET revision=excluded.revision", rusqlite::params![path, revision]).unwrap();
+        tx.commit().unwrap();
+    }
+
     fn cold_search_reader() -> (
         PathBuf,
         Arc<NativeEvidence>,
@@ -2720,7 +2729,7 @@ mod catalog_owner_tests {
             .join(format!("sessions/2026/10/01/{id}.jsonl"));
         fs::write(&path, format!("{{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{{\"id\":\"{id}\"}}}}\n")).unwrap();
         let path = path.to_string_lossy().into_owned();
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [&path]).unwrap();
+        cold_search_claim(db, &path, 100);
         path
     }
 
@@ -2729,7 +2738,7 @@ mod catalog_owner_tests {
         for exact_first in [false, true] {
             let (root, evidence, core, db) = cold_search_reader();
             let selected = pending_search_source(&evidence, &db, "selected");
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),'/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+            cold_search_claim(&db, "/unrelated/first.jsonl", 1);
             let mut work = lock(&evidence.work);
             if exact_first {
                 assert_eq!(
@@ -2849,7 +2858,7 @@ mod catalog_owner_tests {
                     .to_string_lossy()
                     .into_owned(),
             ] {
-                db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,1,'changed',0)", [path]).unwrap();
+                cold_search_claim(&db, &path, 1);
             }
         }
         let mut work = lock(&evidence.work);
@@ -2888,7 +2897,7 @@ mod catalog_owner_tests {
             .join("projects/project/selected.jsonl");
         fs::create_dir_all(selected.parent().unwrap()).unwrap();
         fs::write(&selected, serde_json::json!({"type":"user","uuid":"selected-message","sessionId":"selected","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"selected"}}).to_string()+"\n").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [selected.to_string_lossy().as_ref()]).unwrap();
+        cold_search_claim(&db, selected.to_string_lossy().as_ref(), 100);
         let ordinary = pending_search_source(&evidence, &db, "ordinary");
         let runtime = crate::Input {
             root: crate::InputRoot::Claude,
@@ -2974,7 +2983,7 @@ mod catalog_owner_tests {
             .join("projects/project/selected.jsonl");
         fs::create_dir_all(claude.parent().unwrap()).unwrap();
         fs::write(&claude, serde_json::json!({"type":"user","uuid":"selected-message","sessionId":"selected","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"selected"}}).to_string()+"\n").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [claude.to_string_lossy().as_ref()]).unwrap();
+        cold_search_claim(&db, claude.to_string_lossy().as_ref(), 100);
         for index in 0..63 {
             let path = evidence
                 .options
@@ -2982,7 +2991,7 @@ mod catalog_owner_tests {
                 .join(format!("sessions/native-{index:03}/selected.jsonl"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":format!("selected-native-{index:03}")}}).to_string()+"\n").unwrap();
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
         for index in 0..2 {
             pending_search_source(&evidence, &db, &format!("ordinary-{index}"));
@@ -3050,7 +3059,7 @@ mod catalog_owner_tests {
                 .options
                 .codex_home
                 .join(format!("aaa/{index}/selected.jsonl"));
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,1,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 1);
         }
         let mut work = lock(&evidence.work);
         assert_eq!(
@@ -3166,7 +3175,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_discarded_fifo_json_does_not_displace_hint() {
         let (root, evidence, core, db) = cold_search_reader();
         let selected = pending_search_source(&evidence, &db, "selected");
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),'/unrelated/first.json',1,'changed',0)", []).unwrap();
+        cold_search_claim(&db, "/unrelated/first.json", 1);
         let mut work = lock(&evidence.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
@@ -3294,7 +3303,7 @@ mod catalog_owner_tests {
             .unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id IN ('selected-parent','related-child')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         for path in [&parent, &child] {
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,1,'changed',0)", [path]).unwrap();
+            cold_search_claim(&db, path, 1);
         }
         let ordinary = pending_search_source(&evidence, &db, "ordinary-independent");
         fs::write(&parent, "{invalid}\n").unwrap();
@@ -3351,7 +3360,7 @@ mod catalog_owner_tests {
             .prepare_catalog(&mut work, model::now_ms())
             .unwrap();
         for path in [&parent, &child] {
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,1,'changed',0)", [path]).unwrap();
+            cold_search_claim(&db, path, 1);
         }
         let ordinary = pending_search_source(&evidence, &db, "ordinary-independent");
         let mut renewed_paths = vec![parent.clone()];
@@ -3510,7 +3519,7 @@ mod catalog_owner_tests {
     #[test]
     fn cold_catalog_search_deleted_source_rowless_publication_acknowledges_claim() {
         let (root, evidence, core, db) = cold_search_reader();
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),'/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+        cold_search_claim(&db, "/unrelated/first.jsonl", 1);
         let mut work = lock(&evidence.work);
         let path = pending_search_source(&evidence, &db, "deleted");
         assert_eq!(
@@ -3571,7 +3580,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_unqualified_empty_and_invalid_sources_keep_pending_demand() {
         for (id, bytes) in [("empty", ""), ("invalid", "{invalid}\n")] {
             let (root, evidence, core, db) = cold_search_reader();
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),'/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+            cold_search_claim(&db, "/unrelated/first.jsonl", 1);
             let mut work = lock(&evidence.work);
             let path = pending_search_source(&evidence, &db, id);
             fs::write(&path, bytes).unwrap();
@@ -3712,7 +3721,8 @@ mod catalog_owner_tests {
         let mut work = lock(&evidence.work);
         evidence.prepare_events(&mut work, model::now_ms()).unwrap();
         let db = cold_search_connection(&options);
-        db.execute_batch("UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace(); INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),'/outside/allowlist.jsonl',1,'changed',0);").unwrap();
+        db.execute_batch("UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
+        cold_search_claim(&db, "/outside/allowlist.jsonl", 1);
         work.cold_catalog = Some(ColdCatalog {
             newest: BTreeSet::from([(std::cmp::Reverse(None), input.clone())]),
             ..Default::default()
@@ -3820,14 +3830,14 @@ mod catalog_owner_tests {
         let db = cold_search_connection(&options);
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         for (path, revision) in [(&ordinary_path, 100), (&selected_path, 101)] {
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,?2,'changed',0)", rusqlite::params![path, revision]).unwrap();
+            cold_search_claim(&db, path, revision);
         }
         for index in 0..63 {
             let path = options
                 .codex_home
                 .join(format!("sessions/2026/10/01/ordinary-{index:03}.jsonl"));
             fs::write(&path, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":format!("ordinary-{index:03}")}}).to_string()+"\n").unwrap();
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
         let lookup_fault = crate::storage::sqlite::source_journal::CatalogSearchFault::new();
         let evidence = NativeEvidence::new(options.clone());
@@ -3941,7 +3951,7 @@ mod catalog_owner_tests {
         let db = cold_search_connection(&options);
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         for (pending, revision) in [("/unrelated/first.jsonl", 100), (path.as_str(), 101)] {
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,?2,'changed',0)", rusqlite::params![pending, revision]).unwrap();
+            cold_search_claim(&db, pending, revision);
         }
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("selected", Some("claude"))));
@@ -3999,17 +4009,13 @@ mod catalog_owner_tests {
         let path = input.full_path(&options).to_string_lossy().into_owned();
         let db = cold_search_connection(&options);
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
-        db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [&path]).unwrap();
+        cold_search_claim(&db, &path, 100);
         let captured_options = options.clone();
         let changed = path.clone();
         crate::events::BEFORE_CATALOG_PUBLICATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let db = cold_search_connection(&captured_options);
-                db.execute(
-                    "UPDATE session_catalog_invalidations SET revision=101 WHERE source_path=?1",
-                    [changed],
-                )
-                .unwrap();
+                cold_search_claim(&db, &changed, 101);
             }));
         });
         let evidence = NativeEvidence::new(options.clone());
@@ -4053,7 +4059,7 @@ mod catalog_owner_tests {
                 .options
                 .codex_home
                 .join("sessions/2026/10/01/rollout-audit.jsonl");
-            db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,100,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
+            cold_search_claim(&db, path.to_string_lossy().as_ref(), 100);
         }
         let sources = Arc::new(SessionSources::from_evidence(vec![
             ("first".into(), first.clone()),
