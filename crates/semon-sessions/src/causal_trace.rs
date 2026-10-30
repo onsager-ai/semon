@@ -1131,6 +1131,7 @@ mod generation_tests {
         let publication = crate::slot_projection::Publication {
             rows: &rows,
             transcripts: None,
+            observations: None,
         };
         let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
         let (outcome, generation) = writer

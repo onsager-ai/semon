@@ -16,7 +16,7 @@ mod current_history_custody {
     fn fixture(recipes: usize, padding: usize) -> (Connection, crate::model::summary::CatalogRow, Vec<(i64, String)>, AdmittedSource) {
         let root = scratch("history-custody-current");
         let (mut store, _) = opened(&root.join("index.sqlite3"));
-        store.publish_catalog_with_generation(&Publication { rows: &[], transcripts: None }, None, None, false, None).unwrap();
+        store.publish_catalog_with_generation(&Publication { rows: &[], transcripts: None, observations: None }, None, None, false, None).unwrap();
         let source = AdmittedSource::native(store.owner.clone());
         let db = store.connection;
         let old: crate::model::summary::CatalogRow = serde_json::from_value(serde_json::json!({"key":"old","name":"original","harness":"codex","kind":"session","native_ids":["old"],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":"","effort":null,"start":null,"last":null,"tokens":[0,0,0],"cost":serde_json::to_value(crate::pricing::Cost::default()).unwrap(),"sources":[]})).unwrap();
@@ -146,6 +146,7 @@ mod current_history_custody {
                     slots: Vec::new(),
                     repair: false,
                 }]),
+                observations: None,
             },
             &source,
         )
