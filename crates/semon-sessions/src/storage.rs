@@ -149,7 +149,7 @@ impl NativeReaderBinding {
             Ok(request) => request,
             Err(reply) => return reply,
         };
-        sqlite::catalog::read_page(self, options, source, &request).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
+        sqlite::catalog::read_page(self, options, source, &request, false, &mut None).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
     }
     pub(crate) fn bookmark_identity(
         &self,
@@ -287,13 +287,19 @@ impl StoreConfig {
         let request =
             crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
         let binding = NativeReaderBinding::Admitted(self.clone());
-        sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(
-            |error| {
-                error
-                    .downcast::<StorageError>()
-                    .map_or(StorageError::Unavailable, |error| *error)
-            },
+        sqlite::catalog::read_page(
+            &binding,
+            options,
+            self.namespace.as_str(),
+            &request,
+            false,
+            &mut None,
         )
+        .map_err(|error| {
+            error
+                .downcast::<StorageError>()
+                .map_or(StorageError::Unavailable, |error| *error)
+        })
     }
 
     /// Resolve metadata-only native navigation under this admitted namespace.
