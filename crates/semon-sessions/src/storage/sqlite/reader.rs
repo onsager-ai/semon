@@ -130,8 +130,9 @@ impl NativeReaderBinding {
         Ok(ReadSnapshot(db))
     }
 
-    /// Only the private Query listing adapter can consume producer custody.
-    /// General Catalog, navigation, selected and proof factories still refuse.
+    /// Query listing uses the same native profile as default local metadata
+    /// readers. Selected bodies separately qualify their row and byte proofs;
+    /// listing eligibility never establishes complete source membership.
     pub(super) fn listing_snapshot(
         &self,
         requested: &LogicalSourceNamespace,
