@@ -510,7 +510,8 @@ pub(super) fn relocation_removed(
         tx,
         format!("native_catalog_relocation:{old}").as_bytes(),
         16384,
-    )? else {
+    )?
+    else {
         return Ok(false);
     };
     let proof: CatalogRelocation =
@@ -519,8 +520,9 @@ pub(super) fn relocation_removed(
         || &proof.prior != expected
         || old == proof.new_path
         || !relocation_namespace(old).is_some_and(|(root, archived)| {
-            relocation_namespace(&proof.new_path)
-                .is_some_and(|(new_root, new_archived)| root == new_root && archived != new_archived)
+            relocation_namespace(&proof.new_path).is_some_and(|(new_root, new_archived)| {
+                root == new_root && archived != new_archived
+            })
         })
         || super::native_reader::ledger(tx, old)?
             .map(|(_, ledger)| ledger)
@@ -548,7 +550,8 @@ pub(super) fn relocation_removed(
         tx,
         format!("native-relocation-receipt:{old}").as_bytes(),
         16384,
-    )? else {
+    )?
+    else {
         return Ok(false);
     };
     let (kind, from, to, id, stat, prior): (
@@ -584,7 +587,8 @@ pub(super) fn relocation_removed(
             tx,
             format!("native_codex_header:{path}").as_bytes(),
             1048576,
-        )? else {
+        )?
+        else {
             return Ok(false);
         };
         let header: crate::events::native_aux::CodexHeaderRecord =

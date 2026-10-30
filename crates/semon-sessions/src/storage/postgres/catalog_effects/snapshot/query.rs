@@ -82,9 +82,8 @@ fn cohort_page(
     for row in page {
         let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
         crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
-        let metadata: crate::model::summary::CatalogRow =
-            serde_json::from_slice(&bytes)
-                .map_err(|_| cohort_scope_changed("page_metadata_invalid"))?;
+        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&bytes)
+            .map_err(|_| cohort_scope_changed("page_metadata_invalid"))?;
         if metadata.key.as_bytes() != row.get::<_, Vec<u8>>(0)
             || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)
             || metadata.sources.len() > 64
