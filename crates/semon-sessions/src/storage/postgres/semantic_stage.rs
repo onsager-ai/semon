@@ -489,6 +489,32 @@ pub(super) fn publish(
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE semantic_claims");
     claims(tx, batch, prepared)?;
+    if !prepared.rows.is_empty() {
+        // The stage owns one global lifecycle runtime; each Query row owns
+        // its independently captured scope for this exact source generation.
+        let observations = prepared
+            .presentation_observations()
+            .ok_or(StorageError::ScopeChanged)?;
+        let runtime = model_cache::binding(tx)?
+            .witness(&batch.runtime)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if observations.runtime.as_deref() != Some(runtime.as_str()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        for row in &prepared.rows {
+            let expected = observations
+                .runtime_for(row)
+                .ok_or(StorageError::ScopeChanged)?;
+            if row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
+                != Some(expected.as_str())
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+    }
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE publication_call");
     let result = publication::publish(
