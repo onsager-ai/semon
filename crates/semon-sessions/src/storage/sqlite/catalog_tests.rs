@@ -5223,75 +5223,139 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
     fixture.publish(1);
     native_refresh(&fixture);
     let connection = fixture.db();
-    let metadata: String = connection
+    let (original_lifecycle, original_metadata): (String, String) = connection
         .query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key='session-00000'",
+            "SELECT lifecycle,metadata FROM session_catalog WHERE session_key='session-00000'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let original: Value = serde_json::from_str(&metadata).unwrap();
+    let original: Value = serde_json::from_str(&original_metadata).unwrap();
     assert!(original["query"].is_object());
-    let save = |row: &Value| {
+    assert_eq!(original_lifecycle, "current");
+    assert_eq!(original["lifecycle"], original_lifecycle);
+    assert!(original["query"]["runtime"]
+        .as_str()
+        .is_some_and(|runtime| runtime.starts_with("source-runtime-v1:")));
+    let write_corrupt = |lifecycle: &str, row: &Value| {
         connection.execute(
-                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00000'",
-                rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
-            ).unwrap();
+            "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00000'",
+            rusqlite::params![lifecycle, row.to_string()],
+        )
+        .unwrap();
     };
-    let status = |scope: &str| {
+    let restore_exact = || {
+        connection
+            .execute(
+                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00000'",
+                rusqlite::params![original_lifecycle, original_metadata],
+            )
+            .unwrap();
+    };
+    let page = |scope: &str| {
         let before = crate::events::CACHE_READS.with(|reads| reads.get());
         let (code, body) = fixture.body(scope);
+        assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), before);
+        assert!(!body.to_string().contains("synthetic prompt"));
+        (code, body)
+    };
+    let status = |scope: &str| {
+        let (code, body) = page(scope);
         assert_eq!(code, 200);
         assert_eq!(body["capabilities"]["runtime_status"], true);
         let row = &body["items"][0];
         assert!(row.get("query").is_none());
         assert!(row.get("details").is_none());
         assert!(row.get("transcript").is_none());
-        assert!(!body.to_string().contains("synthetic prompt"));
-        assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), before);
         row["status"].clone()
     };
-    crate::events::CACHE_READS.with(|reads| reads.set(0));
-    for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
-        let mut row = original.clone();
-        row["query"]["state"] = json!(state);
-        save(&row);
-        assert_eq!(status(""), json!({"state":state,"observation":"current"}));
-        row["lifecycle"] = json!("retained");
-        save(&row);
-        let expected = if matches!(state, "work" | "wait") {
-            "off"
-        } else {
-            state
-        };
+    let refuse_corrupt = |scope: &str, case: &str| {
+        let (code, body) = page(scope);
         assert_eq!(
-            status("scope=retained_history"),
-            json!({"state":expected,"observation":"retained"})
+            code, 503,
+            "exact published row witness refused {case}: {body}"
         );
+        assert!(body.get("items").is_none());
+    };
+
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    let authentic_state = original["query"]["state"].as_str().unwrap();
+    assert_eq!(
+        status(""),
+        json!({"state":authentic_state,"observation":"current"}),
+        "the exact published row remains authoritative"
+    );
+    for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
+        if original["query"]["state"] == json!(state) {
+            restore_exact();
+            assert_eq!(
+                status(""),
+                json!({"state":state,"observation":"current"}),
+                "the authentic original state is a positive read"
+            );
+        } else {
+            restore_exact();
+            let mut changed = original.clone();
+            changed["query"]["state"] = json!(state);
+            write_corrupt(&original_lifecycle, &changed);
+            refuse_corrupt("", &format!("query.state={state}"));
+            restore_exact();
+        }
     }
     for (field, value) in [
-        ("runtime", json!("old-runtime")),
         ("source_generation", json!("old-source")),
         ("version", json!(0)),
     ] {
-        let mut row = original.clone();
-        row["query"][field] = value;
-        save(&row);
-        assert_eq!(
-            status(""),
-            json!({"state":null,"observation":"unavailable"})
-        );
-        let (_, body) = fixture.body("");
-        assert_eq!(
-            body["items"][0]["facts_observation"]["state"],
-            if field == "runtime" {
-                "stale"
-            } else {
-                "cached"
-            }
-        );
+        restore_exact();
+        let mut changed = original.clone();
+        changed["query"][field] = value;
+        write_corrupt(&original_lifecycle, &changed);
+        refuse_corrupt("", &format!("query.{field}"));
+        restore_exact();
     }
-    save(&original);
+
+    // A runtime value outside the source-runtime proof path is still rendered
+    // unavailable in a 200 page; it does not authorize a changed status.
+    restore_exact();
+    let mut changed_runtime = original.clone();
+    changed_runtime["query"]["runtime"] = json!("old-runtime");
+    write_corrupt(&original_lifecycle, &changed_runtime);
+    let (code, body) = page("");
+    assert_eq!(code, 200, "runtime mismatch keeps the page readable: {body}");
+    assert_eq!(body["capabilities"]["runtime_status"], true);
+    assert_eq!(
+        body["items"][0]["status"],
+        json!({"state":null,"observation":"unavailable"})
+    );
+    assert_eq!(body["items"][0]["facts_observation"]["state"], "stale");
+    for private in ["query", "details", "transcript"] {
+        assert!(body["items"][0].get(private).is_none());
+    }
+    restore_exact();
+
+    // Lifecycle is normalized against the exact current/retained producer
+    // witness, so the current publication may be read in retained scope.
+    let mut changed_lifecycle = original.clone();
+    changed_lifecycle["lifecycle"] = json!("retained");
+    write_corrupt("retained", &changed_lifecycle);
+    let original_retained_state = match authentic_state {
+        "work" | "wait" => "off",
+        state => state,
+    };
+    assert_eq!(
+        status("scope=retained_history"),
+        json!({"state":original_retained_state,"observation":"retained"}),
+        "the lifecycle normalization preserves the original query witness"
+    );
+    restore_exact();
+
+    // Restore the exact producer bytes before checking real Facts and source
+    // invalidations; the SQL edits above are refusal/normalization probes only.
+    restore_exact();
+    assert_eq!(
+        status(""),
+        json!({"state":authentic_state,"observation":"current"})
+    );
     let facts = fixture.options.facts.as_ref().unwrap();
     let mut changed: Value = serde_json::from_slice(&fs::read(facts).unwrap()).unwrap();
     changed["hostname"] = json!("changed-runtime-input");
@@ -5300,7 +5364,8 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         status(""),
         json!({"state":null,"observation":"unavailable"})
     );
-    let (_, unavailable) = fixture.body("");
+    let (code, unavailable) = page("");
+    assert_eq!(code, 200);
     assert_eq!(
         unavailable["items"][0]["facts_observation"]["state"],
         "unavailable"
@@ -5313,13 +5378,15 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         &crate::Options::default().source,
     )
     .unwrap();
-    let (_, pending) = fixture.body("");
+    let (code, pending) = page("");
+    assert_eq!(code, 200);
     assert_eq!(pending["completeness"]["state"], "complete");
     assert_eq!(pending["freshness"], "stale");
     assert_eq!(pending["items"][0]["facts_observation"]["state"], "stale");
     fixture.publish_existing();
     assert_ne!(status("")["state"], Value::Null);
-    let (_, refreshed) = fixture.body("");
+    let (code, refreshed) = page("");
+    assert_eq!(code, 200);
     assert_eq!(refreshed["freshness"], "cached");
     assert_eq!(
         refreshed["items"][0]["facts_observation"]["state"],
@@ -5340,6 +5407,69 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         json!({"state":null,"observation":"unavailable"})
     );
     // Each status read above checks that it loads no Event Index rows.
+}
+
+#[test]
+fn list_status_tracks_produced_codex_current_stale_and_retained_states() {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+
+    let fixture = Fixture::new();
+    let session = "list-status-session";
+    let relative = fixture.codex_source(session, None, 1);
+    let path = fixture.options.codex_home.join(&relative);
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{}\n{}",
+        json!({"type":"response_item","timestamp":"2026-10-01T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}),
+        json!({"type":"event_msg","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"task_started","turn_id":"list-status-turn"}})
+    )
+    .unwrap();
+
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.codex_rollouts = Some(BTreeSet::from([relative.clone()]));
+    facts.codex_locks.insert(session.into(), 77);
+    facts.proc_starts.insert(77, 777);
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    facts_write.complete().unwrap();
+    fixture.publish_existing();
+
+    let status = || {
+        let before = crate::events::CACHE_READS.with(|reads| reads.get());
+        let (code, body) = fixture.body("scope=retained_history");
+        assert_eq!(code, 200, "{}", body);
+        assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), before);
+        assert_eq!(body["capabilities"]["runtime_status"], true);
+        assert!(!body.to_string().contains("synthetic prompt"));
+        let row = &body["items"][0];
+        assert_eq!(row["key"], session);
+        assert!(row.get("query").is_none());
+        assert!(row.get("details").is_none());
+        assert!(row.get("transcript").is_none());
+        row["status"].clone()
+    };
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    assert_eq!(
+        status(),
+        json!({"state":"work","observation":"current"})
+    );
+
+    facts.codex_rollouts = Some(BTreeSet::new());
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    facts_write.complete().unwrap();
+    assert_eq!(
+        status(),
+        json!({"state":null,"observation":"unavailable"})
+    );
+
+    fixture.publish_existing();
+    assert_eq!(
+        status(),
+        json!({"state":"off","observation":"retained"})
+    );
 }
 
 #[test]
