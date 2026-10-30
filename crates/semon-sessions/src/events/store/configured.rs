@@ -5739,28 +5739,6 @@ mod tests {
             .unwrap()
             .ingest(&"a".repeat(64), &f.raw, "codex")
             .unwrap();
-        let db = f.db();
-        // Schema-only private fixture preparation; native rows came from the
-        // real configured parser. No staged/source/claim payload is fabricated.
-        for table in semantic_stage::STAGE_TABLES {
-            assert_eq!(
-                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                0
-            );
-            db.execute_batch(&format!("DROP TABLE {table};")).unwrap();
-        }
-        for index in [
-            "semantic_catalog_parent_key",
-            "semantic_catalog_native_paths",
-            "semantic_copilot_pending_id",
-            "semantic_pending_filename",
-        ] {
-            db.execute_batch(&format!("DROP INDEX {index};")).unwrap();
-        }
-        db.execute_batch(semantic_stage::schema()).unwrap();
-        drop(db);
         f
     }
 
