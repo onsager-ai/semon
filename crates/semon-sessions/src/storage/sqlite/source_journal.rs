@@ -2294,11 +2294,8 @@ mod tests {
     #[test]
     fn recovery_marker_fast_path_skips_only_absent_scoped_work() {
         let f = Fixture::new();
-        let source = crate::storage::HostSource::new(
-            f.config.namespace.clone(),
-            "a".repeat(64),
-        )
-        .unwrap();
+        let source =
+            crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap();
         let cache_path = f.root.join("index.json");
         let options = crate::Options {
             cache: cache_path.clone(),
