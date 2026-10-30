@@ -1664,6 +1664,7 @@ mod tests {
         let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
         let request = Request::parse("q=selected-interest&harness=claude").unwrap();
         evidence.note_catalog_search(request.search_interest());
+        evidence.note_catalog_search(Request::parse("").unwrap().search_interest());
         assert!(
             !evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
@@ -1711,11 +1712,11 @@ mod tests {
     #[test]
     fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification() {
         let fixture = Fixture::new();
-        let claude = fixture.source("identity-hint");
+        let claude = fixture.source("Identity-Hint");
         let codex = fixture
             .options
             .codex_home
-            .join("sessions/2026/10/01/identity-hint.jsonl");
+            .join("sessions/2026/10/01/Identity-Hint.jsonl");
         fs::create_dir_all(codex.parent().unwrap()).unwrap();
         fs::write(
             &codex,
@@ -1744,7 +1745,7 @@ mod tests {
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
         }
-        let request = Request::parse("q=identity-hint&harness=codex").unwrap();
+        let request = Request::parse("q=IDENTITY-HINT&harness=codex").unwrap();
         evidence.note_catalog_search(request.search_interest());
         let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
         evidence
@@ -1771,14 +1772,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let request = Request::parse("q=identity-hint&harness=claude").unwrap();
+        let request = Request::parse("q=IDENTITY-HINT&harness=claude").unwrap();
         evidence.note_catalog_search(request.search_interest());
         evidence
             .refresh_catalog(&mut work, crate::model::now_ms())
             .unwrap();
         assert_eq!(
             fixture.body("q=identity-hint&harness=claude").1["items"][0]["key"],
-            "identity-hint"
+            "Identity-Hint"
         );
         while !evidence
             .refresh_catalog(&mut work, crate::model::now_ms())

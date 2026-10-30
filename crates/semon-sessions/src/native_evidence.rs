@@ -292,8 +292,10 @@ impl NativeEvidence {
     /// Search interest only changes producer scheduling. HTTP readers neither
     /// open native files nor acquire the producer's Work/publication fence.
     pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
-        *lock(&self.catalog_search) =
-            interest.map(|(id, harness)| (id.to_owned(), harness.map(str::to_owned)));
+        if let Some((id, harness)) = interest {
+            // An ordinary read in another tab must not cancel pending demand.
+            *lock(&self.catalog_search) = Some((id.to_owned(), harness.map(str::to_owned)));
+        }
     }
 
     fn finish_audit(
@@ -2102,6 +2104,15 @@ mod catalog_owner_tests {
             200
         );
         assert!(lock(&first.catalog_search).is_none());
+        assert_eq!(
+            *lock(&second.catalog_search),
+            Some(("audit".into(), Some("codex".into())))
+        );
+        assert_eq!(
+            core.respond("GET", "/api/sessions", "machine=second", None)
+                .status,
+            200
+        );
         assert_eq!(
             *lock(&second.catalog_search),
             Some(("audit".into(), Some("codex".into())))
