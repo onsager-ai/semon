@@ -495,12 +495,13 @@ impl NativeEvidence {
                 &self.options.cache,
             ))
             .map_err(|_| ())?;
-            let draining: bool = connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
+            let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+            let draining: bool = transaction.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
             if !draining {
                 return Ok(Vec::new());
             }
             EventCache::catalog_search_sources(
-                &connection,
+                &transaction,
                 &self.options,
                 crate::events::CatalogSearchInterest { query, harness },
                 CATALOG_SEARCH_CAPACITY,

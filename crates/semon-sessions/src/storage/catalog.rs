@@ -430,6 +430,11 @@ pub(crate) trait CatalogSnapshot {
     }
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;
+    fn catalog_search_paths(
+        &self,
+        lookup: &crate::events::CatalogSearchLookup<'_>,
+        limit: usize,
+    ) -> io::Result<Vec<String>>;
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>>;
     fn search(
         &self,

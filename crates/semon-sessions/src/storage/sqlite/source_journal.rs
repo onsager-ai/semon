@@ -5,6 +5,7 @@ use crate::storage::{
     NativeReaderBinding, StorageError, StoreBackend, StoreConfig,
     source_observations::{
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier, CATALOG_SEARCH_LIMIT,
         operation_replay, validate_intent, validate_paths,
     },
 };
@@ -554,20 +555,42 @@ impl SourceObservationStore for SourceJournal {
         claims(&db, Some(self.config.namespace.as_str()), paths).map_err(failed)
     }
 
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
         if limit == 0 || limit > MAX_PATHS {
             return Err(StorageError::InvalidArguments);
         }
         let db = self.snapshot()?;
-        let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
-        let paths = statement
-            .query_map(params![self.config.namespace.as_str(), limit as i64], |r| {
-                r.get(0)
-            })
-            .map_err(failed)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(failed)?;
-        Ok(paths)
+        let excluded = serde_json::to_string(search.map_or(&[][..], |search| search.excluded))
+            .map_err(|_| StorageError::InvalidArguments)?;
+        let fifo_sql = PENDING_SQL.replace(
+            " ORDER BY", " AND source_path NOT IN (SELECT value FROM json_each(?3)) ORDER BY",
+        );
+        let fallback = db.prepare(&fifo_sql).map_err(failed)?
+            .query_map(params![self.config.namespace.as_str(), limit as i64, excluded], |row| row.get(0)).map_err(failed)?
+            .collect::<rusqlite::Result<Vec<String>>>().map_err(failed)?;
+        if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+            return Ok(CatalogPendingBatch { tier: CatalogPendingTier::Fifo, paths: fallback, fallback: Vec::new(), search_checked: false });
+        }
+        let paths = if let Some(search) = search {
+            if search.retry.is_some() {
+                // This checkpoint has not qualified native Catalog identity
+                // lookup for an enrolled namespace. Never probe unbound data.
+                return Err(StorageError::NamespaceUpgradePending);
+            }
+            let encoded = serde_json::to_string(search.paths).map_err(|_| StorageError::InvalidArguments)?;
+            db.prepare("SELECT i.source_path FROM json_each(?1) p JOIN main.session_catalog_invalidations i ON i.namespace=?2 AND i.source_path=p.value ORDER BY i.source_path LIMIT ?3").map_err(failed)?
+                .query_map(params![encoded,self.config.namespace.as_str(),limit.min(CATALOG_SEARCH_LIMIT) as i64], |row| row.get(0)).map_err(failed)?
+                .collect::<rusqlite::Result<Vec<String>>>().map_err(failed)?
+        } else { Vec::new() };
+        if paths.is_empty() {
+            Ok(CatalogPendingBatch { tier: CatalogPendingTier::Fifo, paths: fallback, fallback: Vec::new(), search_checked: search.is_some() })
+        } else {
+            Ok(CatalogPendingBatch { tier: CatalogPendingTier::SearchHint, paths, fallback, search_checked: true })
+        }
     }
 
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
@@ -813,31 +836,81 @@ pub(crate) fn local_claims(
 pub(crate) fn local_pending(
     connection: &Connection,
     limit: usize,
-) -> Result<Vec<String>, StorageError> {
+    search: Option<&CatalogPendingSearch<'_>>,
+) -> Result<CatalogPendingBatch, StorageError> {
     if limit == 0 || limit > MAX_PATHS {
         return Err(StorageError::InvalidArguments);
     }
-    let db = connection;
-    let tx = db.unchecked_transaction().map_err(failed)?;
-    refuse_bound(&tx, None, &mut JournalWork::default()).map_err(failed)?;
-    crate::events::store::require_current_sql(&tx).map_err(failed)?;
-    let selected: Vec<String> = tx.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failed)?
-        .query_map([limit as i64], |row| row.get(0)).map_err(failed)?
-        .collect::<rusqlite::Result<_>>().map_err(failed)?;
-    if !selected.is_empty() {
-        tx.commit().map_err(failed)?;
-        return Ok(selected);
+    let transaction = connection.unchecked_transaction().map_err(failed)?;
+    refuse_bound(&transaction, None, &mut JournalWork::default()).map_err(failed)?;
+    crate::events::store::require_current_sql(&transaction).map_err(failed)?;
+    let paths = {
+        let mut selected = transaction.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failed)?;
+        selected
+            .query_map([limit as i64], |row| row.get(0))
+            .map_err(failed)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(failed)?
+    };
+    if !paths.is_empty() {
+        transaction.commit().map_err(failed)?;
+        return Ok(CatalogPendingBatch {
+            tier: CatalogPendingTier::SelectedUpgrade,
+            paths,
+            fallback: Vec::new(),
+            search_checked: false,
+        });
     }
-    let mut statement = tx.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failed)?;
-    let paths = statement
-        .query_map([limit as i64], |row| row.get(0))
-        .map_err(failed)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(failed)?;
-    drop(statement);
-    tx.commit().map_err(failed)?;
-    Ok(paths)
+    let fallback = {
+        let excluded = serde_json::to_string(search.map_or(&[][..], |search| search.excluded))
+            .map_err(|_| StorageError::Unavailable)?;
+        let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations WHERE source_path NOT IN (SELECT value FROM json_each(?2)) ORDER BY revision,source_path LIMIT ?1").map_err(failed)?;
+        statement
+            .query_map(params![limit as i64, excluded], |row| row.get(0))
+            .map_err(failed)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failed)?
+    };
+    if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+        transaction.commit().map_err(failed)?;
+        return Ok(CatalogPendingBatch {
+            tier: CatalogPendingTier::Fifo,
+            paths: fallback,
+            fallback: Vec::new(),
+            search_checked: false,
+        });
+    }
+    let paths = if let Some(search) = search {
+        if let Some(retry) = &search.retry {
+            crate::events::store::catalog_search_paths(&transaction, retry, limit).map_err(failed)?
+        } else {
+            let encoded = serde_json::to_string(search.paths)
+                .map_err(|_| StorageError::Unavailable)?;
+            transaction.prepare("SELECT i.source_path FROM json_each(?1) p JOIN session_catalog_invalidations i ON i.source_path=p.value ORDER BY i.source_path LIMIT ?2").map_err(failed)?
+                .query_map(params![encoded, limit.min(CATALOG_SEARCH_LIMIT) as i64], |row| row.get(0)).map_err(failed)?
+                .collect::<Result<Vec<String>, _>>().map_err(failed)?
+        }
+    } else {
+        Vec::new()
+    };
+    transaction.commit().map_err(failed)?;
+    if paths.is_empty() {
+        Ok(CatalogPendingBatch {
+            tier: CatalogPendingTier::Fifo,
+            paths: fallback,
+            fallback: Vec::new(),
+            search_checked: search.is_some(),
+        })
+    } else {
+        Ok(CatalogPendingBatch {
+            tier: CatalogPendingTier::SearchHint,
+            paths,
+            fallback,
+            search_checked: true,
+        })
+    }
 }
+
 
 pub(crate) fn local_backfill_state(
     connection: &Connection,
@@ -931,8 +1004,12 @@ impl SourceObservationStore for LegacySourceJournal {
         local_claims(&self.connection()?, paths)
     }
 
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        local_pending(&self.connection()?, limit)
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
+        local_pending(&self.connection()?, limit, search)
     }
 
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
@@ -1689,8 +1766,12 @@ mod tests {
         ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
             self.inner.claims(paths)
         }
-        fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-            self.inner.pending(limit)
+        fn pending_catalog_sources(
+            &self,
+            limit: usize,
+            search: Option<&CatalogPendingSearch<'_>>,
+        ) -> Result<CatalogPendingBatch, StorageError> {
+            self.inner.pending_catalog_sources(limit, search)
         }
         fn backfill_state(&self) -> Result<Option<String>, StorageError> {
             self.inner.backfill_state()
@@ -2149,7 +2230,7 @@ mod tests {
             SourceMutationReceipt::AlreadyApplied
         );
         assert_eq!(store.claims(&paths).unwrap(), captured);
-        assert_eq!(store.pending(1).unwrap(), vec!["seed".to_owned()]);
+        assert_eq!(store.pending_catalog_sources(1, None).unwrap().paths, vec!["seed".to_owned()]);
         let mut concurrent = f.config.source_observations().unwrap();
         let concurrent_cas = invalidate_operation("A", &captured[1..]);
         assert_eq!(
@@ -2205,7 +2286,7 @@ mod tests {
             store.claims(&paths).unwrap(),
             vec![("first".into(), None), ("fault".into(), None)]
         );
-        assert_eq!(store.pending(256).unwrap(), vec!["seed".to_owned()]);
+        assert_eq!(store.pending_catalog_sources(256, None).unwrap().paths, vec!["seed".to_owned()]);
         let revision: i64 = db
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace='A'",
@@ -2289,8 +2370,8 @@ mod tests {
             store.claims(&vec!["x".into(); 257]),
             Err(StorageError::InvalidArguments)
         );
-        assert_eq!(store.pending(0), Err(StorageError::InvalidArguments));
-        assert_eq!(store.pending(257), Err(StorageError::InvalidArguments));
+        assert!(matches!(store.pending_catalog_sources(0, None), Err(StorageError::InvalidArguments)));
+        assert!(matches!(store.pending_catalog_sources(257, None), Err(StorageError::InvalidArguments)));
         let duplicate_claim = vec![("seed".into(), Some(1)), ("seed".into(), Some(1))];
         assert_eq!(
             store.invalidate(
