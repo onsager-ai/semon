@@ -98,6 +98,14 @@ its completion witness is the native-publication success message in the CI log.
   fingerprint updates. The exact adopted patch changes only candidate runtime
   fingerprints; all 36 image/DOM digests and reference pins remain unchanged.
   This is binding maintenance only and creates no new appearance approval.
+- CI run 41008626716 for Source `a9caf26b` (merge preview `628e4cbe`)
+  supplies visual artifact 12956718608 and transport artifact 12955919017.
+  The supported audit and sole proposal generator qualified all 161 existing
+  records as fingerprint-only, with zero refusals. Independent Manager review
+  confirmed all 966 image/evidence digests unchanged before adopting the two
+  generated patches. Only candidate fingerprints change to
+  `b0cb52003b6b1964827d8236e1fbebd11a63255fdf0cac825334f3f54a17a434`;
+  prior decisions, review provenance, rationale and reference pins remain intact.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
