@@ -134,6 +134,11 @@ const TABLES: &[Table] = &[
         key: "generation,scope,gram",
     },
     Table {
+        name: "catalog_search_headers",
+        columns: "source_path bytea,folded_id bytea",
+        key: "source_path_digest",
+    },
+    Table {
         name: "catalog_trace_headers",
         columns: "generation bytea,key_digest bytea,session_key bytea,trace_generation bytea,source_generation bytea,metadata bytea",
         key: "generation,key_digest",
@@ -429,6 +434,18 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     (
+        "catalog_search_native",
+        "catalog_sources",
+        "generation,search_native_digest",
+        false,
+    ),
+    (
+        "catalog_search_header",
+        "catalog_search_headers",
+        "folded_id_digest,source_path_digest",
+        false,
+    ),
+    (
         "catalog_history_source_native",
         "catalog_history_sources",
         "native_digest,generation,key_digest",
@@ -517,6 +534,19 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
     ),
 ];
 
+const FOUNDATION_INDEXES: &[(&str, &str, bool)] = &[
+    (
+        "source_search_filename",
+        "search_filename_digest,search_path_digest",
+        false,
+    ),
+    (
+        "source_search_copilot",
+        "search_copilot_digest,search_path_digest",
+        false,
+    ),
+];
+
 const POLICY: &str = "semon_pg_namespace_matches(namespace, namespace_digest, decode(current_setting('semon.namespace'::text, true), 'hex'::text))";
 
 // SELECT-only scope for one host-authorized workspace metadata request. The
@@ -534,7 +564,7 @@ const WORKSPACE_TABLES: &[&str] = &[
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v8");
+    hash.update(b"semon-private-native-v9");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());
@@ -543,6 +573,9 @@ fn contract_hash() -> Vec<u8> {
         hash.update(format!("{:?}", native_keys::generated(table.name)));
     }
     for index in INDEXES {
+        hash.update(format!("{index:?}"));
+    }
+    for index in FOUNDATION_INDEXES {
         hash.update(format!("{index:?}"));
     }
     hash.update(POLICY);
@@ -601,6 +634,10 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
     for (name, table, columns, unique) in INDEXES {
         let unique = if *unique { "UNIQUE" } else { "" };
         ddl.push_str(&format!("CREATE {unique} INDEX semon_pg_native_{name} ON semon_pg_native_{table}(namespace_digest,{columns});"));
+    }
+    for (name, columns, unique) in FOUNDATION_INDEXES {
+        let unique = if *unique { "UNIQUE" } else { "" };
+        ddl.push_str(&format!("CREATE {unique} INDEX semon_pg_{name} ON semon_pg_source_invalidations(namespace_digest,{columns});"));
     }
     tx.driver.batch_execute(&ddl).map_err(sqlstate::error)?;
     super::super::native_usage_identity::install(tx)
@@ -722,6 +759,11 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
                 "semon_pg_source_pending:false:true:true:namespace_digest,revision,source_path:"
                     .to_owned(),
             );
+            for (index, keys, unique) in FOUNDATION_INDEXES {
+                indexes.push(format!(
+                    "semon_pg_{index}:{unique}:true:true:namespace_digest,{keys}:"
+                ));
+            }
         }
         if !native && table.name == "source_intents" {
             indexes.push(

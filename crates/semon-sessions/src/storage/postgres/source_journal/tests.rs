@@ -320,6 +320,13 @@ impl SourceObservationStore for LoseEffectAck {
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
         self.inner.pending(limit)
     }
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&CatalogPendingSearch<'_>>,
+    ) -> Result<CatalogPendingBatch, StorageError> {
+        self.inner.pending_catalog_sources(limit, search)
+    }
     fn backfill_state(&self) -> Result<Option<String>, StorageError> {
         self.inner.backfill_state()
     }
@@ -330,6 +337,341 @@ impl SourceObservationStore for LoseEffectAck {
     ) -> Result<SourceMutationReceipt, StorageError> {
         self.inner.finish_backfill(op, generation)
     }
+}
+
+fn search_roots() -> [(String, String); 3] {
+    [
+        ("/claude/".into(), "/claude0".into()),
+        ("/codex/".into(), "/codex0".into()),
+        ("/copilot/".into(), "/copilot0".into()),
+    ]
+}
+
+fn catalog_search(
+    pool: &PgPool,
+    namespace: &str,
+    query: &str,
+    ranges: &[(String, String); 3],
+    limit: usize,
+) -> Vec<String> {
+    let lookup = CatalogSearchLookup { query, ranges };
+    pool.transaction(&ns(namespace), TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+        crate::storage::postgres::catalog_effects::snapshot::catalog_search_paths(
+            tx, &lookup, limit,
+        )
+    })
+    .unwrap()
+}
+
+#[test]
+fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_limit() {
+    let (pool, _) = fixture(|_| {});
+    let mut selected = journal(&pool, "selector-selected");
+    discover(
+        "selector-selected",
+        &["selected.jsonl".into(), "search.jsonl".into()],
+        false,
+    )
+    .apply(&mut selected)
+    .unwrap();
+    pool.transaction(
+        &ns("selector-selected"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            super::super::native_keys::put_meta(
+                tx,
+                SELECTED_PROJECTION_KEY.as_bytes(),
+                &serde_json::to_vec(&vec!["selected.jsonl"]).unwrap(),
+            )
+        },
+    )
+    .unwrap();
+    let roots = search_roots();
+    let lookup = CatalogSearchLookup {
+        query: "search",
+        ranges: &roots,
+    };
+    let selected_search = CatalogPendingSearch {
+        paths: &[],
+        retry: Some(lookup),
+        yield_to_fifo: false,
+        excluded: &[],
+    };
+    let batch = selected
+        .pending_catalog_sources(1, Some(&selected_search))
+        .unwrap();
+    assert_eq!(batch.tier, CatalogPendingTier::SelectedUpgrade);
+    assert_eq!(batch.paths, vec!["selected.jsonl"]);
+    assert!(!batch.search_checked);
+
+    let mut fifo = journal(&pool, "selector-fifo");
+    let fifo_paths = ["first", "second", "kept", "hint"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    discover("selector-fifo", &fifo_paths, false)
+        .apply(&mut fifo)
+        .unwrap();
+    let hint = ["hint".to_owned()];
+    let excluded = ["first".to_owned(), "second".to_owned()];
+    let yield_search = CatalogPendingSearch {
+        paths: &hint,
+        retry: None,
+        yield_to_fifo: true,
+        excluded: &excluded,
+    };
+    let batch = fifo
+        .pending_catalog_sources(1, Some(&yield_search))
+        .unwrap();
+    assert_eq!(batch.tier, CatalogPendingTier::Fifo);
+    assert_eq!(batch.paths, vec!["kept"]);
+    assert!(batch.fallback.is_empty());
+    assert!(!batch.search_checked);
+
+    let search = CatalogPendingSearch {
+        yield_to_fifo: false,
+        ..yield_search
+    };
+    let batch = fifo.pending_catalog_sources(1, Some(&search)).unwrap();
+    assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
+    assert_eq!(batch.paths, vec!["hint"]);
+    assert_eq!(batch.fallback, vec!["kept"]);
+    assert!(batch.search_checked);
+}
+
+#[test]
+fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "selector-search";
+    let mut store = journal(&pool, namespace);
+    let current_path = "/claude/current/data.jsonl";
+    let filename_path = "/claude/name/IDENTITY.JSONL";
+    let copilot_path = "/copilot/session-state/Identity/events.jsonl";
+    let header_path = "/codex/header/entry.jsonl";
+    discover(
+        namespace,
+        &[
+            current_path.into(),
+            filename_path.into(),
+            copilot_path.into(),
+            header_path.into(),
+        ],
+        false,
+    )
+    .apply(&mut store)
+    .unwrap();
+    let header_key = format!("native_codex_header:{header_path}");
+    let header_value = br#"{"version":1,"parser_version":29,"ledger":"fixture","header":{"id":"IdEnTiTy","metadata":{"subagent":false,"guardian_review":false}}}"#;
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| super::super::native_keys::put_meta(tx, header_key.as_bytes(), header_value),
+    )
+    .unwrap();
+
+    let generation = "a".repeat(64);
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            let ns = tx.namespace.as_str().as_bytes();
+            let key = b"current-session";
+            let path = current_path.as_bytes();
+            let metadata = br#"{"native_id":"Native-ID"}"#;
+            tx.driver.execute(
+                "UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                &[&ns, &generation],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,0)",
+                &[&ns, &b"current-operation".as_slice(), &b"fixture-payload".as_slice(), &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,1,$5,$6,$7)",
+                &[&ns, &generation.as_bytes(), &key.as_slice(), &b"{}".as_slice(), &b"claude".as_slice(), &b"repo".as_slice(), &b"model".as_slice()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_sources(namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea))",
+                &[&ns, &generation.as_bytes(), &key.as_slice(), &path, &metadata.as_slice(), &b"Native-ID".as_slice()],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let roots = search_roots();
+    assert_eq!(
+        catalog_search(&pool, namespace, "iDeNtItY", &roots, 64),
+        vec![filename_path, header_path, copilot_path]
+    );
+    assert_eq!(
+        catalog_search(&pool, namespace, "nAtIvE-iD", &roots, 64),
+        vec![current_path]
+    );
+}
+
+#[test]
+fn pg_catalog_search_filters_roots_before_capping_each_branch() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "selector-root-limit";
+    let mut store = journal(&pool, namespace);
+    let mut paths = vec!["/outside/IDENTITY.JSONL".to_owned()];
+    paths.extend((0..65).map(|index| format!("/claude/{index:03}/IDENTITY.JSONL")));
+    discover(namespace, &paths, false)
+        .apply(&mut store)
+        .unwrap();
+    let roots = search_roots();
+    let found = catalog_search(&pool, namespace, "identity", &roots, usize::MAX);
+    assert_eq!(found.len(), CATALOG_SEARCH_LIMIT);
+    assert!(found.iter().all(|path| path.starts_with("/claude/")));
+    assert_eq!(found.first().map(String::as_str), Some("/claude/000/IDENTITY.JSONL"));
+}
+
+#[test]
+fn pg_codex_header_search_projection_tracks_metadata_commit_and_delete() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "selector-header-atomic";
+    let mut store = journal(&pool, namespace);
+    let path = "/codex/header/atomic.jsonl";
+    discover(namespace, &[path.into()], false)
+        .apply(&mut store)
+        .unwrap();
+    let key = format!("native_codex_header:{path}");
+    let value = br#"{"version":1,"parser_version":29,"ledger":"fixture","header":{"id":"MiXeD","metadata":{"subagent":false,"guardian_review":false}}}"#;
+    let roots = search_roots();
+    let rolled_back: Result<(), StorageError> = pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            super::super::native_keys::put_meta(tx, key.as_bytes(), value)?;
+            let found = super::super::catalog_effects::snapshot::catalog_search_paths(
+                tx,
+                &CatalogSearchLookup {
+                    query: "mixed",
+                    ranges: &roots,
+                },
+                64,
+            )?;
+            assert_eq!(found, vec![path]);
+            Err(StorageError::Conflict)
+        },
+    );
+    assert_eq!(rolled_back, Err(StorageError::Conflict));
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            assert!(super::super::native_keys::read_meta(tx, key.as_bytes(), 4096)?.is_none());
+            assert!(super::super::catalog_effects::snapshot::catalog_search_paths(
+                tx,
+                &CatalogSearchLookup {
+                    query: "mixed",
+                    ranges: &roots,
+                },
+                64,
+            )?
+            .is_empty());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| super::super::native_keys::put_meta(tx, key.as_bytes(), value),
+    )
+    .unwrap();
+    assert_eq!(catalog_search(&pool, namespace, "MIXED", &roots, 64), vec![path]);
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| super::super::native_keys::delete_meta(tx, key.as_bytes()),
+    )
+    .unwrap();
+    assert!(catalog_search(&pool, namespace, "mixed", &roots, 64).is_empty());
+}
+
+#[test]
+fn pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "resolve-sibling";
+    let json_path = "/codex/session.json";
+    let log_path = "/codex/session-log.jsonl";
+    let mut store = journal(&pool, namespace);
+    discover(namespace, &[json_path.into()], false)
+        .apply(&mut store)
+        .unwrap();
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_native_dependencies(namespace,source_path,harness,native_id) VALUES($1,$2,$3,$4)",
+                &[&tx.namespace.as_str().as_bytes(), &log_path.as_bytes(), &b"codex".as_slice(), &b"session-id".as_slice()],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let json_revision = store.claims(&[json_path.into()]).unwrap()[0]
+        .1
+        .unwrap();
+
+    let rolled_back: Result<(), StorageError> = pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            assert_eq!(
+                super::super::source_lifecycle::resolve(
+                    tx,
+                    json_path,
+                    json_revision,
+                    Some(("codex", "session-id")),
+                    Some(log_path),
+                )?,
+                crate::events::Outcome::Written,
+            );
+            Err(StorageError::Conflict)
+        },
+    );
+    assert_eq!(rolled_back, Err(StorageError::Conflict));
+    assert_eq!(
+        store.claims(&[json_path.into(), log_path.into()]).unwrap(),
+        vec![(json_path.into(), Some(json_revision)), (log_path.into(), None)]
+    );
+
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            assert_eq!(
+                super::super::source_lifecycle::resolve(
+                    tx,
+                    json_path,
+                    json_revision,
+                    Some(("codex", "session-id")),
+                    Some(log_path),
+                )?,
+                crate::events::Outcome::Written,
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    let claims = store.claims(&[json_path.into(), log_path.into()]).unwrap();
+    assert_eq!(claims[0], (json_path.into(), None));
+    assert!(claims[1].1.is_some_and(|revision| revision > json_revision));
 }
 
 #[test]

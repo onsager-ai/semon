@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::{
     LogicalSourceNamespace,
     postgres::{PgCancellation, PgPool, txn::TxnKind},
+    source_observations::{CATALOG_SEARCH_LIMIT, CatalogSearchLookup},
 };
 
 mod admitted;
@@ -58,6 +59,111 @@ pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
 pub(in crate::storage::postgres) struct Snapshot<'a, 'tx> {
     pub(in crate::storage::postgres) tx: std::sync::Mutex<&'a mut PgTxn<'tx>>,
     generation: String,
+}
+
+/// Select pending native paths for one ASCII Catalog identity. The fixed-size
+/// digest keys keep long native ids out of B-tree entries; each branch checks
+/// its full folded value after the indexed digest match.
+pub(in crate::storage::postgres) fn catalog_search_paths(
+    tx: &mut PgTxn<'_>,
+    lookup: &CatalogSearchLookup<'_>,
+    limit: usize,
+) -> Result<Vec<String>, StorageError> {
+    if limit == 0 || !lookup.query.is_ascii() {
+        return Ok(Vec::new());
+    }
+    tx.check()?;
+    let namespace = tx.namespace.as_str().as_bytes();
+    let generation = tx
+        .driver
+        .query(
+            "SELECT catalog_generation FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+            &[&namespace],
+        )
+        .map_err(sqlstate::error)?
+        .first()
+        .map(|row| row.try_get::<_, Option<String>>(0).map_err(|_| StorageError::ScopeChanged))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    if !generation.is_empty()
+        && (generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let folded_query = lookup
+        .query
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let folded_filename = format!("{}.jsonl", lookup.query)
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let query_json = serde_json::to_string(lookup.query).map_err(|_| StorageError::InvalidArguments)?;
+    let roots = lookup
+        .ranges
+        .iter()
+        .map(|(start, end)| (start.as_bytes().to_vec(), end.as_bytes().to_vec()))
+        .collect::<Vec<_>>();
+    let cap = i64::try_from(limit.min(CATALOG_SEARCH_LIMIT))
+        .map_err(|_| StorageError::InvalidArguments)?;
+    const SQL: &str = "SELECT source_path FROM (
+        (SELECT DISTINCT i.source_path
+         FROM semon_pg_native_catalog_sources s
+         JOIN semon_pg_native_catalog_rows r ON r.namespace_digest=s.namespace_digest AND r.namespace=s.namespace AND r.generation=s.generation AND r.key_digest=s.key_digest AND r.session_key=s.session_key
+         JOIN semon_pg_native_catalog_operations o ON o.namespace_digest=s.namespace_digest AND o.namespace=s.namespace AND o.generation=s.generation
+         JOIN semon_pg_source_invalidations i ON i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.source_path=s.source_path
+         WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2
+           AND s.search_native_digest=semon_pg_native_digest($1,convert_to(translate(($3::jsonb)::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'UTF8'),'catalog.search.native'::text)
+           AND translate((convert_from(s.metadata,'UTF8')::jsonb->'native_id')::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')=translate(($3::jsonb)::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')
+           AND ((i.source_path >= $7 AND i.source_path < $8) OR (i.source_path >= $9 AND i.source_path < $10) OR (i.source_path >= $11 AND i.source_path < $12))
+         ORDER BY i.source_path LIMIT $13)
+        UNION
+        (SELECT i.source_path FROM semon_pg_source_invalidations i
+         WHERE i.namespace_digest=sha256($1::bytea) AND i.namespace=$1
+           AND i.search_filename_digest=sha256($5::bytea)
+           AND decode(translate(substring(encode(i.source_path,'escape') from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape')=$5
+           AND ((i.source_path >= $7 AND i.source_path < $8) OR (i.source_path >= $9 AND i.source_path < $10) OR (i.source_path >= $11 AND i.source_path < $12))
+         ORDER BY i.source_path LIMIT $13)
+        UNION
+        (SELECT i.source_path FROM semon_pg_source_invalidations i
+         WHERE i.namespace_digest=sha256($1::bytea) AND i.namespace=$1
+           AND i.search_copilot_digest=sha256($6::bytea)
+           AND encode(i.source_path,'escape') LIKE '%/session-state/%/events.jsonl'
+           AND decode(translate(substring(substring(encode(i.source_path,'escape') from 1 for length(encode(i.source_path,'escape'))-13) from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape')=$6
+           AND ((i.source_path >= $7 AND i.source_path < $8) OR (i.source_path >= $9 AND i.source_path < $10) OR (i.source_path >= $11 AND i.source_path < $12))
+         ORDER BY i.source_path LIMIT $13)
+        UNION
+        (SELECT i.source_path FROM semon_pg_native_catalog_search_headers h
+         JOIN semon_pg_source_invalidations i ON i.namespace_digest=h.namespace_digest AND i.namespace=h.namespace AND i.source_path=h.source_path
+         WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1
+           AND h.folded_id_digest=semon_pg_native_digest($1,$4,'catalog.search.header'::text) AND h.folded_id=$4
+           AND ((i.source_path >= $7 AND i.source_path < $8) OR (i.source_path >= $9 AND i.source_path < $10) OR (i.source_path >= $11 AND i.source_path < $12))
+         ORDER BY i.source_path LIMIT $13)
+    ) candidates ORDER BY source_path LIMIT $13";
+    let parameters: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
+        &namespace,
+        &generation.as_bytes(),
+        &query_json,
+        &folded_query,
+        &folded_filename,
+        &folded_query,
+        &roots[0].0,
+        &roots[0].1,
+        &roots[1].0,
+        &roots[1].1,
+        &roots[2].0,
+        &roots[2].1,
+        &cap,
+    ];
+    let rows = tx.driver.query(SQL, parameters).map_err(sqlstate::error)?;
+    tx.check()?;
+    rows.into_iter()
+        .map(|row| {
+            String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+        })
+        .collect()
 }
 
 fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
