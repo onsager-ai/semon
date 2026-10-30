@@ -2254,6 +2254,14 @@ impl Stage {
         })
     }
 
+    /// Follow this owner's successful direct publication while no stage is held.
+    /// A peer's head or an active epoch cannot be adopted through this seam.
+    pub(crate) fn acknowledge_publication(&mut self, expected: Option<&str>, generation: &str) {
+        if self.epoch.is_none() && self.source.generation.as_deref() == expected {
+            self.source.generation = Some(generation.to_owned());
+        }
+    }
+
     pub(crate) fn runtime_binding(
         &self,
     ) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {

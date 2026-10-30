@@ -3694,6 +3694,7 @@ mod tests {
             path: relative.to_owned(),
         };
         let mut cache = EventCache::open_scoped(&options.cache, &source).unwrap();
+        let mut peer = EventCache::open_scoped(&options.cache, &source).unwrap();
         let prepared = crate::model::prepare_sources(
             &options,
             &mut cache,
@@ -3749,9 +3750,29 @@ mod tests {
                 .0,
             Outcome::Conflict
         );
+        let paths = vec![raw.to_string_lossy().into_owned()];
+        let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+        let before = shared_state(&f);
+        assert_eq!(
+            peer.begin_semantic_stage(&paths, &runtime).unwrap(),
+            Outcome::Conflict,
+            "a peer opened before these publications cannot adopt their head"
+        );
+        assert_eq!(shared_state(&f), before);
+        // The same owner can switch from partial/full/closed direct CAS writes
+        // to bounded semantic work without reopening its admitted source.
+        let (batch, model) = model_ready(&f, &mut cache, &options, &input, &runtime);
+        let (outcome, staged) = cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        assert_eq!(outcome, Outcome::Written);
+        assert_eq!(
+            cache.finish_semantic_stage(batch.epoch).unwrap(),
+            Outcome::Written
+        );
         drop(cache);
         let restored = EventCache::open_scoped(&options.cache, &source).unwrap();
-        assert_eq!(restored.session_catalog_generation(), closed.1);
+        assert_eq!(restored.session_catalog_generation(), staged);
         assert_eq!(
             restored
                 .store

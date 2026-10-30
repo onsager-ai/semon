@@ -36,8 +36,9 @@ export async function nativeFixture({ prepare } = {}) {
     { env: { ...process.env, SEMON_TEST_NOW: String(now) }, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let output = '';
-  proc.stdout.on('data', (value) => (output += value));
-  proc.stderr.on('data', (value) => (output += value));
+  const capture = (value) => (output = (output + value).slice(-16384));
+  proc.stdout.on('data', capture);
+  proc.stderr.on('data', capture);
   let address;
   for (let n = 0; n < 200; n++) {
     address = output.match(/(http:\/\/127\.0\.0\.1:\d+)\/\?t=([a-f0-9]+)/);
@@ -81,6 +82,7 @@ export async function nativeFixture({ prepare } = {}) {
     base,
     request,
     prepared,
+    diagnostics: () => output.replaceAll(address[2], '[redacted]'),
     append(sid, text, at = now - 1000) {
       fs.appendFileSync(
         fileFor(sid),

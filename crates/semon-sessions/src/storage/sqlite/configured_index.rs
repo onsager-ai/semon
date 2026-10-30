@@ -18,6 +18,20 @@ pub(super) struct ConfiguredIndex {
     journal: super::source_journal::SourceJournal,
 }
 
+impl ConfiguredIndex {
+    fn acknowledge_publication(
+        &mut self,
+        expected: Option<&str>,
+        result: Option<&(Outcome, Option<String>)>,
+    ) {
+        if let Some((Outcome::Written, Some(generation))) = result
+            && let Some(stage) = &mut self.semantic
+        {
+            stage.acknowledge_publication(expected, generation);
+        }
+    }
+}
+
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
     crate::events::store::configured::validate_semantic_schema(config)?;
     let journal = super::source_journal::SourceJournal(config.clone());
@@ -217,9 +231,12 @@ impl IndexStore for ConfiguredIndex {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.native
+        let result = self
+            .native
             .publish_catalog(publication, expected_generation, None, false)
-            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))
+            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
+        self.acknowledge_publication(expected_generation, Some(&result));
+        Ok(result)
     }
     fn publish_partial_catalog(
         &mut self,
@@ -227,9 +244,12 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.native
+        let result = self
+            .native
             .publish_catalog(publication, expected_generation, Some(claims), false)
-            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))
+            .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
+        self.acknowledge_publication(expected_generation, Some(&result));
+        Ok(result)
     }
     fn publish_closed_catalog_fenced(
         &mut self,
@@ -237,8 +257,11 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        self.native
-            .publish_catalog(publication, expected_generation, Some(claims), true)
+        let result = self
+            .native
+            .publish_catalog(publication, expected_generation, Some(claims), true)?;
+        self.acknowledge_publication(expected_generation, result.as_ref());
+        Ok(result)
     }
     fn resolve_catalog_input(
         &mut self,
