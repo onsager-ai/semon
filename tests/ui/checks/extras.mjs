@@ -19,7 +19,7 @@
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - spawn cards: the name and the state share one row (phone and desktop, light and dark, also with a long name, and never sideways), a
 //     card names its kind once (in its meta line, after the harness mark, #146) and never uses the person icon or a delegation glyph, and the top bar names the kind as a plain label.
-//   - a held selected read from the old document fails on reload, while the new document's transcript read settles.
+//   - the settlement guard identifies a held old-document read after reload while the new document's read settles.
 //   - no page errors.
 import path from 'node:path';
 import {
@@ -122,6 +122,11 @@ function trackChildRequests(page, routeStages = new WeakMap()) {
     }
   };
 }
+async function navigateToHarbor(page) {
+  const harbor = new URL(page.url());
+  harbor.pathname = '/session/local/harbor';
+  await page.goto(harbor.toString(), { waitUntil: 'load' });
+}
 export default async function (browser) {
   const r = reporter('extras');
   const R = r.results;
@@ -130,7 +135,7 @@ export default async function (browser) {
   // ---- Command descriptions title Bash steps while the command stays in its details -----------------------------
   {
     const titleText = 'DescriptionOnlySearchWord ' + 'x'.repeat(120);
-    const page = await served(browser, { extras: true, path: '/session/local/harbor' });
+    const page = await served(browser, { extras: true, path: '/sessions' });
     let titled;
     let untitled;
     let commandOverride = null;
@@ -154,7 +159,7 @@ export default async function (browser) {
       untitled = { arg: plain.arg };
       return route.fulfill({ response, json: tx });
     });
-    await page.reload({ waitUntil: 'load' });
+    await navigateToHarbor(page);
     await page.waitForFunction(
       (value) =>
         [...document.querySelectorAll('.step .sa.st')].some((title) => title.textContent === value),
@@ -347,7 +352,7 @@ export default async function (browser) {
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
       const shot = await served(browser, {
         extras: true,
-        path: '/session/local/harbor',
+        path: '/sessions',
         size,
         dark,
       });
@@ -382,7 +387,7 @@ export default async function (browser) {
         await route.fulfill({ response, json: tx });
         recordRouteStage(request, 'route.fulfill:done', response.status());
       });
-      await shot.reload({ waitUntil: 'load' });
+      await navigateToHarbor(shot);
       await shot.waitForFunction(
         (value) =>
           [...document.querySelectorAll('.step .sa.st')].some(
@@ -578,9 +583,9 @@ export default async function (browser) {
     await page.context().close();
   }
 
-  // A selected read from the old document must settle after navigation while the new read completes.
+  // A held selected read stays visible to the settlement guard after reload, while the new read settles.
   {
-    const lifecycle = await served(browser, { extras: true, path: '/session/local/harbor' });
+    const lifecycle = await served(browser, { extras: true, path: '/sessions' });
     const childRequestsSettled = trackChildRequests(lifecycle);
     let releaseHeldRoute;
     const heldRoute = new Promise((resolve) => (releaseHeldRoute = resolve));
@@ -601,9 +606,19 @@ export default async function (browser) {
       newDocument = false,
       newRequest = null,
       newRequestFinished = false;
+    let documentEpoch = 0;
+    let nextSelectedReadId = 1;
+    const selectedReads = new Map();
     const selected = (request) => new URL(request.url()).pathname === '/api/session-transcript';
     lifecycle.on('request', (request) => {
-      if (newDocument && selected(request) && !newRequest) newRequest = request;
+      if (!selected(request)) return;
+      const url = new URL(request.url());
+      selectedReads.set(request, {
+        id: nextSelectedReadId++,
+        path: url.pathname + url.search,
+        documentEpoch,
+      });
+      if (newDocument && !newRequest) newRequest = request;
     });
     lifecycle.on('requestfailed', (request) => {
       if (request === oldRequest) oldOutcome = 'failed';
@@ -613,7 +628,9 @@ export default async function (browser) {
       if (request === newRequest) newRequestFinished = true;
     });
     lifecycle.on('framenavigated', (frame) => {
-      if (frame === lifecycle.mainFrame() && reloading) newDocument = true;
+      if (frame !== lifecycle.mainFrame()) return;
+      documentEpoch++;
+      if (reloading) newDocument = true;
     });
     await lifecycle.route('**/api/session-transcript?**', async (route) => {
       const request = route.request();
@@ -627,26 +644,76 @@ export default async function (browser) {
       await route.continue();
     });
     try {
-      await lifecycle.evaluate(() => {
-        void fetch(
-          '/api/session-transcript?machine=local&scope=retained_history&sid=harbor&limit=60',
-        ).catch(() => {});
-      });
+      await navigateToHarbor(lifecycle);
       await heldRequestStarted;
       reloading = true;
       await lifecycle.reload({ waitUntil: 'load' });
       releaseHeldRoute();
       await lifecycle.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
-      await childRequestsSettled();
-      const evidence = { oldOutcome, newRequestFinished };
+      let settlementError = null;
+      try {
+        await childRequestsSettled();
+      } catch (error) {
+        settlementError = error;
+      }
+      const settlementPrefix = 'Selected requests did not settle: ';
+      const settlementDetails = settlementError?.message.startsWith(settlementPrefix)
+        ? JSON.parse(settlementError.message.slice(settlementPrefix.length))
+        : null;
+      const oldRead = oldRequest ? selectedReads.get(oldRequest) : null;
+      const newRead = newRequest ? selectedReads.get(newRequest) : null;
+      const oldPending = settlementDetails?.pending?.find((request) => request.id === oldRead?.id);
+      const newRecent = settlementDetails?.recent?.find((request) => request.id === newRead?.id);
+      const evidence = {
+        old: {
+          id: oldRead?.id ?? null,
+          path: oldRead?.path ?? null,
+          documentEpoch: oldRead?.documentEpoch ?? null,
+          outcome: oldOutcome,
+          guardPending: !!oldPending,
+        },
+        new: {
+          id: newRead?.id ?? null,
+          path: newRead?.path ?? null,
+          documentEpoch: newRead?.documentEpoch ?? null,
+          finished: newRequestFinished,
+          responseStatus: newRecent?.response?.status ?? null,
+          guardFinished: !!newRecent?.finished,
+        },
+        guardRejected: !!settlementDetails,
+        pendingCount: settlementDetails?.pendingCount ?? null,
+      };
       R.transcriptLifecycle = evidence;
       r.expect(
-        oldOutcome === 'failed',
-        'old-document selected request naturally failed during reload: ' + JSON.stringify(evidence),
+        !!settlementDetails,
+        'the existing settlement guard rejects the intentionally held old-document read: ' +
+          JSON.stringify(evidence),
       );
       r.expect(
-        newRequestFinished,
-        'new-document selected transcript request finished: ' + JSON.stringify(evidence),
+        settlementDetails?.pendingCount === 1 &&
+          Array.isArray(settlementDetails.pending) &&
+          settlementDetails.pending.length === 1 &&
+          oldPending?.path === oldRead?.path &&
+          oldPending?.documentEpoch === oldRead?.documentEpoch &&
+          oldPending?.response === null &&
+          oldPending?.finished === null &&
+          oldPending?.failed === null &&
+          typeof oldRead?.documentEpoch === 'number' &&
+          oldOutcome === null,
+        'the settlement guard identifies only the held old request in its original document epoch: ' +
+          JSON.stringify(evidence),
+      );
+      r.expect(
+        !!oldRequest &&
+          !!newRequest &&
+          oldRequest !== newRequest &&
+          newRead?.documentEpoch !== oldRead?.documentEpoch &&
+          newRequestFinished &&
+          newRecent?.finished &&
+          newRecent.documentEpoch === newRead.documentEpoch &&
+          newRecent?.response?.status === 200,
+        'the distinct new-document transcript request finishes in its own document epoch: ' +
+          JSON.stringify(evidence),
       );
     } finally {
       releaseHeldRoute();
